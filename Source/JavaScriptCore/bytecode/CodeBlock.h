@@ -672,6 +672,16 @@ public:
 
     unsigned optimizationDelayCounter() const { return m_optimizationDelayCounter; }
 
+    // JITCache: seeds the baseline tier-up history of a CodeBlock that has no JIT type yet.
+    void seedBaselineTierUpHistory(uint16_t optimizationDelayCounter, uint16_t reoptimizationRetryCounter)
+    {
+        ASSERT(jitType() == JITType::None);
+        ASSERT(optimizationDelayCounter <= Options::maximumOptimizationDelay());
+        ASSERT(reoptimizationRetryCounter <= Options::reoptimizationRetryCounterMax());
+        m_optimizationDelayCounter = optimizationDelayCounter;
+        m_reoptimizationRetryCounter = reoptimizationRetryCounter;
+    }
+
     // Check if the optimization threshold has been reached, and if not,
     // adjust the heuristics accordingly. Returns true if the threshold has
     // been reached.
@@ -931,6 +941,10 @@ public:
     static Seconds timeToLive(JITType);
     // Start the execution-count aging lease from the counter's current value (call when a tier's code is installed).
     void snapshotExecutionCounterForAging(float count) { m_previousCounter = count; }
+#if ENABLE(JITCACHE_TWINS)
+    // JITCache twins: the aging sample snapshotExecutionCounterForAging() wrote last.
+    float previousCounterForAging() const { return m_previousCounter; }
+#endif
 #if USE(BUN_JSC_ADDITIONS)
     // Optimizing code with no execution counter to read liveness off (FTL; DFG without tier-up checks): it ages once the mutator goes quiet instead.
     bool agesByMutatorQuietness();

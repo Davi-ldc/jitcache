@@ -27,7 +27,9 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <wtf/Assertions.h>
 #include <wtf/FastMalloc.h>
 #include <wtf/HashFunctions.h>
@@ -36,6 +38,7 @@
 #include <wtf/MathExtras.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/Vector.h>
 
 namespace WTF {
 
@@ -477,6 +480,120 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
         m_capacity = capacity;
         m_storage.hashedData.entries = allocateAndInitializeStorage(capacity);
         m_storage.hashedData.deletedCount = 0;
+    }
+
+    // Exact-layout transport, for a serializer that must reproduce a map's iteration order exactly. Inline storage
+    // iterates in insertion order, which re-adding the entries reproduces. Hashed storage iterates in bucket order, which
+    // no sequence of additions reproduces in general, since growth rehashes and removals leave deleted markers, so the
+    // serializer records the layout with forEachOccupiedBucket() and rebuilds it with restoreHashedLayout().
+
+    bool usesHashedStorage() const { return !isInline(); }
+
+    unsigned hashedCapacity() const
+    {
+        ASSERT(usesHashedStorage());
+        return m_capacity;
+    }
+
+    // Calls functor(unsigned index, bool isDeleted, const Entry* entry) for each occupied bucket in index order; entry is
+    // null when isDeleted. Inline storage has no buckets, so the functor is never called for it.
+    template<typename Functor>
+    void forEachOccupiedBucket(const Functor& functor) const
+    {
+        if (isInline())
+            return;
+
+        const Entry* buckets = m_storage.hashedData.entries;
+        for (unsigned index = 0; index < m_capacity; ++index) {
+            const Entry& bucket = buckets[index];
+            if (isEmptyEntry(bucket))
+                continue;
+            bool isDeleted = isDeletedEntry(bucket);
+            functor(index, isDeleted, isDeleted ? nullptr : &bucket);
+        }
+    }
+
+    // Rebuilds hashed storage of `capacity` buckets. Each element of `slots` is (index << 1) | isDeleted for one occupied
+    // bucket, as a serializer writes them from forEachOccupiedBucket(); `entries` go, in order, to the buckets of the
+    // non-deleted slots, and deleted markers to the others.
+    //
+    // Precondition: the map is empty and inline. Returns false and leaves the map empty and inline unless:
+    // - capacity is a power of two greater than InlineCapacity;
+    // - the slot indices are strictly increasing and below capacity;
+    // - the non-deleted slots number entries.size();
+    // - at least one bucket stays empty and (entries.size() + deleted - 1) * loadFactorDenominator < capacity * loadFactorNumerator,
+    //   the most a map built by add() holds;
+    // - no key is the empty or the deleted value, which no bucket can hold;
+    // - the keys are distinct, and each key's probe sequence from HashArg::hash(key), as findKeyOrEmptyOrDeleted() walks it,
+    //   meets only occupied buckets before its own.
+    //
+    // The probe check costs one walk per key and makes every lookup of the restored map find its key; the empty bucket
+    // makes every miss terminate. A restored map then behaves, for lookups, additions and removals, exactly as the map the
+    // layout was taken from, because a hashed map's behavior depends only on its capacity, its buckets and its deleted count.
+    bool restoreHashedLayout(unsigned capacity, std::span<const uint32_t> slots, Vector<Entry>&& entries)
+    {
+        RELEASE_ASSERT(isEmpty() && isInline()); // expecting a brand new map
+
+        if (capacity <= InlineCapacity || !isPowerOfTwo(capacity))
+            return false;
+
+        unsigned nextIndex = 0; // the lowest index the next slot may take
+        unsigned deletedSlots = 0;
+        for (uint32_t slot : slots) {
+            unsigned index = slot >> 1;
+            if (index < nextIndex || index >= capacity)
+                return false;
+            nextIndex = index + 1;
+            deletedSlots += slot & 1;
+        }
+        if (slots.size() - deletedSlots != entries.size())
+            return false;
+
+        // The indices are distinct and below capacity, so occupied <= capacity, and 64 bits hold every product below.
+        uint64_t occupied = slots.size();
+        if (occupied >= capacity)
+            return false;
+        if (occupied && (occupied - 1) * loadFactorDenominator >= static_cast<uint64_t>(capacity) * loadFactorNumerator)
+            return false;
+
+        // Checked before anything hashes a key, since a hash function may dereference it; a bucket holding the empty or the
+        // deleted value would read as empty or deleted.
+        for (const auto& entry : entries) {
+            if (isEmptyKey(entry.key) || KeyTraits::isDeletedValue(entry.key))
+                return false;
+        }
+
+        m_capacity = capacity;
+        m_storage.hashedData.entries = allocateAndInitializeStorage(capacity);
+        m_storage.hashedData.deletedCount = deletedSlots;
+        m_size = static_cast<unsigned>(entries.size());
+
+        Entry* buckets = m_storage.hashedData.entries;
+        size_t nextEntry = 0;
+        for (uint32_t slot : slots) {
+            Entry& bucket = buckets[slot >> 1];
+            if constexpr (!EntryTraits::emptyValueIsZero)
+                std::destroy_at(&bucket);
+            if (slot & 1)
+                constructDeletedEntry(bucket);
+            else
+                std::construct_at(&bucket, WTF::move(entries[nextEntry++]));
+        }
+
+        // The walk reaches the key's own bucket within capacity steps, since triangular probing over a power-of-two table
+        // visits every bucket, and it stops there because the key equals itself. It returns another bucket exactly when it
+        // meets an empty bucket first, or an equal key first; equal keys hash alike and so share one probe sequence, which
+        // makes this one check cover distinctness too.
+        for (uint32_t slot : slots) {
+            if (slot & 1)
+                continue;
+            Entry* bucket = &buckets[slot >> 1];
+            if (findKeyOrEmptyOrDeleted(bucket->key) != bucket) {
+                clear();
+                return false;
+            }
+        }
+        return true;
     }
 
 private:

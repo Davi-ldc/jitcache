@@ -9,11 +9,15 @@ const JOBS = 5;
 // Each target selects a Bun profile and a ninja target; without one, Bun builds its
 // default targets, the executable and its smoke test. Targets of one profile pass
 // identical config flags, so they share build.ninja, the build directory and its WebKit.
+// The twins profile is debug-local with JITCache's test builds on (ENABLE_JITCACHE_TWINS):
+// its WebKit target builds jsc and testjitcache.
 const TARGETS = new Map<string, { profile: string; ninja?: string }>([
   ["debug", { profile: "debug-local", ninja: "WebKit" }],
   ["release", { profile: "release-local", ninja: "WebKit" }],
   ["ci-release", { profile: "ci-release", ninja: "WebKit" }],
   ["bun-debug", { profile: "debug-local" }],
+  ["twins", { profile: "debug-local-twins", ninja: "WebKit" }],
+  ["bun-twins", { profile: "debug-local-twins" }],
 ]);
 
 function fail(message: string, code = 125): never {
@@ -26,9 +30,11 @@ const archOption = args.find(arg => arg.startsWith("--arch="));
 const positional = args.filter(arg => arg !== archOption);
 const requested = positional[0] || "debug";
 if (requested === "-h" || requested === "--help") {
-  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug] [--arch=aarch64]");
+  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|twins|bun-twins] [--arch=aarch64]");
   console.log("Build WebKit/JSC with Bun's build system, from a Bun checkout based on the pin. Default: debug.");
   console.log("bun-debug builds the Bun executable against local WebKit in the debug build directory.");
+  console.log("twins builds jsc and testjitcache with JITCache's test builds on (ENABLE_JITCACHE_TWINS);");
+  console.log("bun-twins builds the Bun executable against that WebKit, in the same build directory.");
   console.log("--arch=aarch64 cross-compiles on an x86_64 host against the sysroot in JITCACHE_AARCH64_SYSROOT.");
   process.exit(0);
 }

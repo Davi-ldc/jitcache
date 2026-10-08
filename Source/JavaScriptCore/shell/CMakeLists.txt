@@ -81,6 +81,37 @@ if (USE_BUN_JSC_ADDITIONS)
     WEBKIT_EXECUTABLE_DECLARE(testFFI)
 endif ()
 
+# JITCache's C++ unit tests (SPEC-integrator.harness.md section 8), built only with ENABLE_JITCACHE_TWINS:
+#     ninja testjitcache && ./bin/testjitcache --list
+if (ENABLE_JITCACHE_TWINS)
+    set(testjitcache_SOURCES
+        ../jitcache/tests/testjitcache.cpp
+        ../jitcache/tests/IntegratorTests.cpp
+        ../jitcache/tests/ContainerTests.cpp
+        ../jitcache/tests/StoreTests.cpp
+        ../jitcache/tests/WriterTests.cpp
+        ../jitcache/tests/MaintenanceTests.cpp
+        ../jitcache/tests/ImageSectionTests.cpp
+        ../jitcache/tests/ImageRecordingTests.cpp
+        ../jitcache/tests/JITCacheCBAccessorTests.cpp
+        ../jitcache/tests/JITCacheCBFormatTests.cpp
+        ../jitcache/tests/JITCacheCBCaptureTests.cpp
+        ../jitcache/tests/JITCacheCBSummaryTests.cpp
+        ../jitcache/tests/JITCacheCBImportTests.cpp
+        ../jitcache/tests/JITCacheCBTwinsTests.cpp
+        ../jitcache/tests/ICSectionTests.cpp
+        ../jitcache/tests/ICLiveTests.cpp
+    )
+    set(testjitcache_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+    set(testjitcache_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES} "${JAVASCRIPTCORE_DIR}/jitcache/tests")
+    set(testjitcache_FRAMEWORKS ${jsc_FRAMEWORKS})
+    set(testjitcache_LIBRARIES ${CMAKE_DL_LIBS})
+    if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testjitcache_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
+    endif ()
+    WEBKIT_EXECUTABLE_DECLARE(testjitcache)
+endif ()
+
 if (APPLE)
     WEBKIT_EXECUTABLE_DECLARE(mya)
 endif ()
@@ -218,6 +249,10 @@ set_target_properties(jsc PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if (USE_BUN_JSC_ADDITIONS)
     WEBKIT_EXECUTABLE(testFFI)
+endif ()
+
+if (ENABLE_JITCACHE_TWINS)
+    WEBKIT_EXECUTABLE(testjitcache)
 endif ()
 
 if (SHOULD_INSTALL_JS_SHELL)

@@ -41,6 +41,8 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <wtf/text/TextPosition.h>
 #include <wtf/text/WTFString.h>
 #include <JavaScriptCore/ArgList.h>
+#include <array>
+#include <optional>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
@@ -85,6 +87,9 @@ public:
     JS_EXPORT_PRIVATE virtual size_t memoryCost() const { return 0; }
     JS_EXPORT_PRIVATE virtual void didGenerateUnlinkedCodeBlock(VM&, const SourceCodeKey&, UnlinkedCodeBlock*) const { }
 #endif
+    // JITCache: SHA-256 of source() in the encoding SPEC-ucb.md section 3.5 defines, recorded where the text was produced,
+    // or nullopt. A provider that returns one vouches for it as it vouches for hash().
+    virtual std::optional<std::array<uint8_t, 32>> jitCacheSourceDigest() const { return std::nullopt; }
 
     StringView getRange(int start, int end) const LIFETIME_BOUND
     {

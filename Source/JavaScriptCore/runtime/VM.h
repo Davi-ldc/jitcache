@@ -189,6 +189,9 @@ class Database;
 namespace DOMJIT {
 class Signature;
 }
+namespace JITCache {
+class VMState;
+}
 
 #if ENABLE(WEBASSEMBLY)
 class JSWebAssemblyInstance;
@@ -1095,6 +1098,11 @@ public:
     void setShouldBuildPCToCodeOriginMapping() { m_shouldBuildPCToCodeOriginMapping = true; }
     bool shouldBuilderPCToCodeOriginMapping() const { return m_shouldBuildPCToCodeOriginMapping; }
 
+    // JITCache's per-VM state, null for a VM that JITCache::start never configured. start publishes it once; JIT
+    // workers read it with this acquire load, so they see a fully constructed state.
+    JITCache::VMState* jitCacheState() const { return m_jitCacheState.load(std::memory_order_acquire); }
+    void setJITCacheState(JITCache::VMState* state) { m_jitCacheState.store(state, std::memory_order_release); }
+
     BytecodeIntrinsicRegistry& bytecodeIntrinsicRegistry() { return *m_bytecodeIntrinsicRegistry; }
     
     ShadowChicken* shadowChicken() { return m_shadowChicken.getIfExists(); }
@@ -1415,6 +1423,9 @@ private:
 #endif
 
     DoublyLinkedList<Debugger> m_debuggers;
+
+    // The last data member, so that adding it moves no field offset that emitted code bakes.
+    std::atomic<JITCache::VMState*> m_jitCacheState { nullptr };
 
     friend class Heap;
     friend class ExceptionScope; // Friend for exception checking purpose only.
