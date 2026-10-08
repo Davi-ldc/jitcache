@@ -781,6 +781,18 @@ for (const id of LANDED) if (!byId.has(id)) graph.problems.push(`args.landed nam
 if (graph.problems.length) return report('stopped', { where: 'Plan', reason: 'the task graph is invalid', problems: graph.problems })
 log(`Plan: ${order.length} tasks (${PARTS.map(p => `${p} ${order.filter(t => t.part === p).length}`).join(', ')}), ${order.reduce((n, t) => n + t.deps.length, 0)} dependencies, ${LANDED.length} landed in earlier runs`)
 
+// The tasks each task unblocks, directly or through others. A wave admits the tasks that unblock
+// the most first, so a task the graph hangs on is never pushed back a wave by a sibling that
+// shares one of its files; ties keep dependency order.
+const unblocks = new Map(order.map(t => [t.id, new Set()]))
+for (const t of [...order].reverse())
+  for (const d of t.deps) {
+    const set = unblocks.get(d.id)
+    set.add(t.id)
+    for (const x of unblocks.get(t.id)) set.add(x)
+  }
+const weight = t => unblocks.get(t.id).size
+
 // ---------------------------------------------------------------------------
 // Implement: DAG waves, parallel write-only tasks with pairwise-disjoint files
 // ---------------------------------------------------------------------------
@@ -795,8 +807,10 @@ while (!capReached) {
     const by = t.deps.map(d => d.id).filter(id => state.has(id) && !isPassed(id))
     if (by.length) state.set(t.id, { status: 'blocked', by })
   }
-  // Ready = deps passed; admit greedily with pairwise-disjoint file sets. A fileless task runs alone.
+  // Ready = deps passed; admit greedily with pairwise-disjoint file sets, the tasks that unblock the
+  // most first. A fileless task runs alone.
   const ready = order.filter(t => !state.has(t.id) && t.deps.every(d => isPassed(d.id)))
+    .sort((a, b) => weight(b) - weight(a))
   if (!ready.length) break
   const batch = []
   for (const t of ready) {
