@@ -28,19 +28,23 @@
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "BytecodeStructs.h"
+#include "ICRestore.h"
 #include "ICSection.h"
 #include "JITCacheTest.h"
 #include "PropertyInlineCache.h"
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <optional>
+#include <utility>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
 
-// T7 of SPEC-ics.md: the ICsBaseline format, its structural checks, the derivation of section 6.1 and its round trip.
-// None of these tests needs a VM.
+// T7 of SPEC-ics.md: the ICsBaseline format, its structural checks (A1 to A6 in parseSection; A7, A8 and S1, which
+// prepare composes, on plain molds and site counts), the derivation of section 6.1 and its round trip. None of these
+// tests needs a VM.
 
 namespace JSC::JITCache::Tests {
 
@@ -261,6 +265,60 @@ static void expectChangeInvalid(TestContext& context, ASCIILiteral what, ICs::Ch
 {
     Vector<uint8_t> bytes = encodeValidSectionWith(change);
     expectInvalid(context, what, parseStrict(bytes.span()), check, siteIndex);
+}
+
+// Records that one of prepare's check functions (A7, A8, S1) failed exactly the given check at the given site.
+static void expectCheckFails(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& result, ICs::Check check, uint32_t siteIndex)
+{
+    if (!result) {
+        JITCACHE_FAIL(makeString(what, ": passed, expected "_s, checkName(check), " at site "_s, siteIndex));
+        return;
+    }
+    if (result->check != check || result->siteIndex != siteIndex) {
+        JITCACHE_FAIL(makeString(what, ": failed "_s, checkName(result->check), " at site "_s, result->siteIndex,
+            ", expected "_s, checkName(check), " at site "_s, siteIndex));
+    }
+}
+
+static void expectCheckPasses(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& result)
+{
+    if (result)
+        JITCACHE_FAIL(makeString(what, ": failed "_s, checkName(result->check), " at site "_s, result->siteIndex));
+}
+
+// A mold as baseline emission leaves it for these checks: only its access type and fold bit matter to A7 and S1.
+static BaselineUnlinkedPropertyInlineCache mold(AccessType accessType, bool canBeMegamorphic = false)
+{
+    BaselineUnlinkedPropertyInlineCache result;
+    result.accessType = accessType;
+    result.canBeMegamorphic = canBeMegamorphic;
+    return result;
+}
+
+// The molds the valid section's three property-IC records stand for, in mold order.
+static Vector<BaselineUnlinkedPropertyInlineCache> validSectionMolds()
+{
+    Vector<BaselineUnlinkedPropertyInlineCache> molds;
+    molds.append(mold(AccessType::GetById));
+    molds.append(mold(AccessType::PutByIdStrict));
+    molds.append(mold(AccessType::InstanceOf));
+    return molds;
+}
+
+static unsigned callLinkPosition(OpcodeID opcodeID)
+{
+    auto position = ICs::canonicalCallLinkPosition(opcodeID);
+    RELEASE_ASSERT(position);
+    return *position;
+}
+
+// The call-link site counts of a CB whose metadata layout matches the valid section: two call sites, one construct.
+static ICs::CallLinkSiteCounts validSectionSiteCounts()
+{
+    ICs::CallLinkSiteCounts counts { };
+    counts[callLinkPosition(OpCall::opcodeID)] = 2;
+    counts[callLinkPosition(OpConstruct::opcodeID)] = 1;
+    return counts;
 }
 
 // The table of SPEC-ics.md section 6.1 for a property-IC record, restated from the SPEC's text.
@@ -938,6 +996,208 @@ JITCACHE_TEST(icsCallLinkRoundTrip, No)
         }
         return true;
     });
+}
+
+// A7. The valid section pairs with its own molds. Each mold list below fails A7 and only A7: the section passes A1 to
+// A6, its layout matches the site counts (A8) and no mold carries the fold bit (S1).
+JITCACHE_TEST(icsRestoreCheckMoldPairing, No)
+{
+    Vector<uint8_t> bytes = encode(validSection());
+    auto view = parseStrict(bytes.span());
+    if (!view) {
+        JITCACHE_FAIL(makeString("the valid section failed "_s, checkName(view.error().check)));
+        return;
+    }
+    Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
+    expectCheckPasses(context, "the valid section with its molds"_s, ICs::checkMoldPairing(*view, molds.span()));
+    expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));
+
+    auto expectOnlyMoldPairingFails = [&](ASCIILiteral what, const Vector<BaselineUnlinkedPropertyInlineCache>& changed, uint32_t siteIndex) {
+        expectCheckFails(context, what, ICs::checkMoldPairing(*view, changed.span()), ICs::Check::MoldPairing, siteIndex);
+        expectCheckPasses(context, what, ICs::checkMolds(changed.span()));
+    };
+
+    Vector<BaselineUnlinkedPropertyInlineCache> fewer = molds;
+    fewer.removeLast();
+    expectOnlyMoldPairingFails("one mold fewer than records"_s, fewer, 0);
+
+    Vector<BaselineUnlinkedPropertyInlineCache> more = molds;
+    more.append(mold(AccessType::GetById));
+    expectOnlyMoldPairingFails("one mold more than records"_s, more, 0);
+
+    expectOnlyMoldPairingFails("no mold for three records"_s, { }, 0);
+
+    // A record stands for the access type of its own mold, so a mold list in another order fails at the first index
+    // whose access type differs.
+    Vector<BaselineUnlinkedPropertyInlineCache> sloppy = molds;
+    sloppy[1].accessType = AccessType::PutByIdSloppy;
+    expectOnlyMoldPairingFails("the second mold of the sloppy put"_s, sloppy, 1);
+
+    Vector<BaselineUnlinkedPropertyInlineCache> lastDiffers = molds;
+    lastDiffers[2].accessType = AccessType::InById;
+    expectOnlyMoldPairingFails("the third mold of another access type"_s, lastDiffers, 2);
+
+    Vector<BaselineUnlinkedPropertyInlineCache> rotated;
+    rotated.append(mold(AccessType::PutByIdStrict));
+    rotated.append(mold(AccessType::InstanceOf));
+    rotated.append(mold(AccessType::GetById));
+    expectOnlyMoldPairingFails("the molds rotated by one"_s, rotated, 0);
+
+    // A section without property ICs pairs only with code without molds.
+    Vector<uint8_t> emptyBytes = encode(TestSection { });
+    auto emptyView = parseStrict(emptyBytes.span());
+    if (!emptyView) {
+        JITCACHE_FAIL(makeString("the empty section failed "_s, checkName(emptyView.error().check)));
+        return;
+    }
+    expectCheckPasses(context, "no record and no mold"_s, ICs::checkMoldPairing(*emptyView, { }));
+    Vector<BaselineUnlinkedPropertyInlineCache> oneMold;
+    oneMold.append(mold(AccessType::InById));
+    expectCheckFails(context, "no record and one mold"_s, ICs::checkMoldPairing(*emptyView, oneMold.span()), ICs::Check::MoldPairing, 0);
+
+    // Both ends of the access-type range pair with themselves.
+    TestSection extremes;
+    extremes.propertyICs.append(propertyIC(static_cast<AccessType>(0), 0, 0, 0, 0, 0));
+    extremes.propertyICs.append(propertyIC(static_cast<AccessType>(numberOfAccessTypes - 1), 0, 0, 0, 0, 0));
+    extremes.propertyICCount = 2;
+    Vector<uint8_t> extremesBytes = encode(extremes);
+    auto extremesView = parseStrict(extremesBytes.span());
+    if (!extremesView) {
+        JITCACHE_FAIL(makeString("the extreme access types failed "_s, checkName(extremesView.error().check)));
+        return;
+    }
+    Vector<BaselineUnlinkedPropertyInlineCache> extremeMolds;
+    extremeMolds.append(mold(static_cast<AccessType>(0)));
+    extremeMolds.append(mold(static_cast<AccessType>(numberOfAccessTypes - 1)));
+    expectCheckPasses(context, "the extreme access types"_s, ICs::checkMoldPairing(*extremesView, extremeMolds.span()));
+    std::swap(extremeMolds[0], extremeMolds[1]);
+    expectCheckFails(context, "the extreme access types swapped"_s, ICs::checkMoldPairing(*extremesView, extremeMolds.span()), ICs::Check::MoldPairing, 0);
+}
+
+// A8. The valid section matches a CB with two call sites and one construct site. Each count list below fails A8 and
+// only A8: the section passes A1 to A6 and pairs with its molds (A7), which carry no fold bit (S1).
+JITCACHE_TEST(icsRestoreCheckMetadataLayout, No)
+{
+    Vector<uint8_t> bytes = encode(validSection());
+    auto view = parseStrict(bytes.span());
+    if (!view) {
+        JITCACHE_FAIL(makeString("the valid section failed "_s, checkName(view.error().check)));
+        return;
+    }
+    Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
+    expectCheckPasses(context, "the valid section with its molds"_s, ICs::checkMoldPairing(*view, molds.span()));
+    expectCheckPasses(context, "the valid section's molds"_s, ICs::checkMolds(molds.span()));
+    expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));
+
+    const unsigned callPosition = callLinkPosition(OpCall::opcodeID);
+    const unsigned constructPosition = callLinkPosition(OpConstruct::opcodeID);
+    auto expectLayoutFails = [&](ASCIILiteral what, const auto& change) {
+        ICs::CallLinkSiteCounts counts = validSectionSiteCounts();
+        change(counts);
+        expectCheckFails(context, what, ICs::checkMetadataLayout(*view, counts), ICs::Check::MetadataLayout, 0);
+    };
+    expectLayoutFails("one call site fewer"_s, [&](ICs::CallLinkSiteCounts& counts) {
+        counts[callPosition] = 1;
+    });
+    expectLayoutFails("one call site more"_s, [&](ICs::CallLinkSiteCounts& counts) {
+        counts[callPosition] = 3;
+    });
+    expectLayoutFails("no construct site"_s, [&](ICs::CallLinkSiteCounts& counts) {
+        counts[constructPosition] = 0;
+    });
+    expectLayoutFails("a tail call the section has no group for"_s, [&](ICs::CallLinkSiteCounts& counts) {
+        counts[callLinkPosition(OpTailCall::opcodeID)] = 1;
+    });
+    // The same three sites under other opcodes: the totals agree, the opcodes do not.
+    expectLayoutFails("the counts of the two opcodes swapped"_s, [&](ICs::CallLinkSiteCounts& counts) {
+        counts[callPosition] = 1;
+        counts[constructPosition] = 2;
+    });
+    expectLayoutFails("the call sites counted as call_ignore_result"_s, [&](ICs::CallLinkSiteCounts& counts) {
+        counts[callPosition] = 0;
+        counts[callLinkPosition(OpCallIgnoreResult::opcodeID)] = 2;
+    });
+    expectLayoutFails("a CB without a metadata table"_s, [](ICs::CallLinkSiteCounts& counts) {
+        counts = { };
+    });
+
+    // A section without groups matches only a CB without call-link sites.
+    Vector<uint8_t> emptyBytes = encode(TestSection { });
+    auto emptyView = parseStrict(emptyBytes.span());
+    if (!emptyView) {
+        JITCACHE_FAIL(makeString("the empty section failed "_s, checkName(emptyView.error().check)));
+        return;
+    }
+    expectCheckPasses(context, "no group and no site"_s, ICs::checkMetadataLayout(*emptyView, ICs::CallLinkSiteCounts { }));
+    ICs::CallLinkSiteCounts oneSite { };
+    oneSite[callLinkPosition(OpCallVarargs::opcodeID)] = 1;
+    expectCheckFails(context, "no group and one varargs site"_s, ICs::checkMetadataLayout(*emptyView, oneSite), ICs::Check::MetadataLayout, 0);
+
+    // A group for every canonical opcode matches one site of each.
+    TestSection everyOpcode;
+    ICs::CallLinkSiteCounts everyCount { };
+    for (OpcodeID opcodeID : canonicalCallLinkOrder) {
+        everyOpcode.groups.append(ICs::CallLinkGroup { opcodeID, 1 });
+        everyOpcode.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0));
+        everyCount[callLinkPosition(opcodeID)] = 1;
+    }
+    everyOpcode.callLinkGroupCount = ICs::numberOfCallLinkOpcodes;
+    everyOpcode.callLinkSiteCount = ICs::numberOfCallLinkOpcodes;
+    Vector<uint8_t> everyBytes = encode(everyOpcode);
+    auto everyView = parseStrict(everyBytes.span());
+    if (!everyView) {
+        JITCACHE_FAIL(makeString("the section with every opcode failed "_s, checkName(everyView.error().check)));
+        return;
+    }
+    expectCheckPasses(context, "one site of every opcode"_s, ICs::checkMetadataLayout(*everyView, everyCount));
+    everyCount[callLinkPosition(OpCallIgnoreResult::opcodeID)] = 2;
+    expectCheckFails(context, "one call_ignore_result site more"_s, ICs::checkMetadataLayout(*everyView, everyCount), ICs::Check::MetadataLayout, 0);
+}
+
+// S1. Molds as baseline emission leaves them carry no fold bit. Each mold list below fails S1 and only S1: it still
+// pairs with the valid section (A7), whose layout matches the site counts (A8).
+JITCACHE_TEST(icsRestoreCheckMolds, No)
+{
+    expectCheckPasses(context, "no mold"_s, ICs::checkMolds({ }));
+    Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
+    expectCheckPasses(context, "the valid section's molds"_s, ICs::checkMolds(molds.span()));
+
+    Vector<uint8_t> bytes = encode(validSection());
+    auto view = parseStrict(bytes.span());
+    if (!view) {
+        JITCACHE_FAIL(makeString("the valid section failed "_s, checkName(view.error().check)));
+        return;
+    }
+    expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));
+
+    auto expectOnlyMoldsFail = [&](ASCIILiteral what, const Vector<BaselineUnlinkedPropertyInlineCache>& changed, uint32_t siteIndex) {
+        expectCheckFails(context, what, ICs::checkMolds(changed.span()), ICs::Check::MoldMegamorphicBit, siteIndex);
+        expectCheckPasses(context, what, ICs::checkMoldPairing(*view, changed.span()));
+    };
+
+    Vector<BaselineUnlinkedPropertyInlineCache> second = molds;
+    second[1].canBeMegamorphic = true;
+    expectOnlyMoldsFail("the second mold with the fold bit"_s, second, 1);
+
+    Vector<BaselineUnlinkedPropertyInlineCache> last = molds;
+    last[2].canBeMegamorphic = true;
+    expectOnlyMoldsFail("the last mold with the fold bit"_s, last, 2);
+
+    // The first failure is the one reported.
+    Vector<BaselineUnlinkedPropertyInlineCache> firstAndLast = molds;
+    firstAndLast[0].canBeMegamorphic = true;
+    firstAndLast[2].canBeMegamorphic = true;
+    expectOnlyMoldsFail("the first and last molds with the fold bit"_s, firstAndLast, 0);
+
+    // Only the fold bit matters: the other identity bits are the molds' own.
+    Vector<BaselineUnlinkedPropertyInlineCache> otherBits = molds;
+    for (auto& changed : otherBits) {
+        changed.propertyIsInt32 = true;
+        changed.propertyIsString = true;
+        changed.propertyIsSymbol = true;
+        changed.prototypeIsKnownObject = true;
+    }
+    expectCheckPasses(context, "molds with every other identity bit"_s, ICs::checkMolds(otherBits.span()));
 }
 
 } // namespace JSC::JITCache::Tests
