@@ -29,9 +29,15 @@
 
 namespace JSC {
 
+namespace JITCache {
+struct DirectEvalSite;
+}
+
 class DirectEvalExecutable final : public EvalExecutable {
 public:
-    static DirectEvalExecutable* create(JSGlobalObject*, const SourceCode&, LexicallyScopedFeatures, DerivedContextType, NeedsClassFieldInitializer, PrivateBrandRequirement, bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType, const TDZEnvironment* parentScopeTDZVariables, const PrivateNameEnvironment*);
+    // JITCache: JSC::eval passes its call site, through which the eval's key names its caller; a null site keeps the
+    // request inactive.
+    static DirectEvalExecutable* create(JSGlobalObject*, const SourceCode&, LexicallyScopedFeatures, DerivedContextType, NeedsClassFieldInitializer, PrivateBrandRequirement, bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType, const TDZEnvironment* parentScopeTDZVariables, const PrivateNameEnvironment*, const JITCache::DirectEvalSite* = nullptr);
 private:
     DirectEvalExecutable(JSGlobalObject*, const SourceCode&, LexicallyScopedFeatures, DerivedContextType, NeedsClassFieldInitializer, PrivateBrandRequirement, bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType);
 };

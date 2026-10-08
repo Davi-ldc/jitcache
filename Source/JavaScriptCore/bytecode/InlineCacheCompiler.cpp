@@ -829,157 +829,6 @@ bool NODELETE doesJSCalls(AccessCase::AccessType type)
     return false;
 }
 
-
-static bool NODELETE isMegamorphic(AccessCase::AccessType type)
-{
-    switch (type) {
-    case AccessCase::LoadMegamorphic:
-    case AccessCase::LoadMegamorphicGetter:
-    case AccessCase::StoreMegamorphic:
-    case AccessCase::InMegamorphic:
-    case AccessCase::IndexedMegamorphicLoad:
-    case AccessCase::IndexedMegamorphicStore:
-    case AccessCase::IndexedMegamorphicIn:
-    case AccessCase::InstanceOfMegamorphic:
-        return true;
-
-    case AccessCase::Getter:
-    case AccessCase::Setter:
-    case AccessCase::ProxyObjectIn:
-    case AccessCase::ProxyObjectLoad:
-    case AccessCase::ProxyObjectStore:
-    case AccessCase::IndexedProxyObjectIn:
-    case AccessCase::IndexedProxyObjectLoad:
-    case AccessCase::IndexedProxyObjectStore:
-    case AccessCase::Load:
-    case AccessCase::Transition:
-    case AccessCase::Delete:
-    case AccessCase::DeleteNonConfigurable:
-    case AccessCase::DeleteMiss:
-    case AccessCase::Replace:
-    case AccessCase::Miss:
-    case AccessCase::GetGetter:
-    case AccessCase::CheckPrivateBrand:
-    case AccessCase::SetPrivateBrand:
-    case AccessCase::IndexedNoIndexingMiss:
-    case AccessCase::IndexedUndefinedKeyLoad:
-    case AccessCase::IndexedUndefinedKeyMiss:
-    case AccessCase::IndexedNullKeyLoad:
-    case AccessCase::IndexedNullKeyMiss:
-    case AccessCase::IndexedTrueKeyLoad:
-    case AccessCase::IndexedTrueKeyMiss:
-    case AccessCase::IndexedFalseKeyLoad:
-    case AccessCase::IndexedFalseKeyMiss:
-    case AccessCase::IndexedUndefinedKeyReplace:
-    case AccessCase::IndexedUndefinedKeyTransition:
-    case AccessCase::IndexedNullKeyReplace:
-    case AccessCase::IndexedNullKeyTransition:
-    case AccessCase::IndexedTrueKeyReplace:
-    case AccessCase::IndexedTrueKeyTransition:
-    case AccessCase::IndexedFalseKeyReplace:
-    case AccessCase::IndexedFalseKeyTransition:
-    case AccessCase::CustomValueGetter:
-    case AccessCase::CustomAccessorGetter:
-    case AccessCase::CustomValueSetter:
-    case AccessCase::CustomAccessorSetter:
-    case AccessCase::IntrinsicGetter:
-    case AccessCase::ModuleNamespaceLoad:
-    case AccessCase::InstanceOfHit:
-    case AccessCase::InstanceOfMiss:
-    case AccessCase::InHit:
-    case AccessCase::InMiss:
-    case AccessCase::IndexedNoIndexingInMiss:
-    case AccessCase::ArrayLength:
-    case AccessCase::StringLength:
-    case AccessCase::DirectArgumentsLength:
-    case AccessCase::ScopedArgumentsLength:
-    case AccessCase::RegExpLastIndexLoad:
-    case AccessCase::RegExpLastIndexStore:
-    case AccessCase::ArrayLengthStore:
-    case AccessCase::IndexedInt32Load:
-    case AccessCase::IndexedDoubleLoad:
-    case AccessCase::IndexedContiguousLoad:
-    case AccessCase::IndexedArrayStorageLoad:
-    case AccessCase::IndexedScopedArgumentsLoad:
-    case AccessCase::IndexedDirectArgumentsLoad:
-    case AccessCase::IndexedTypedArrayInt8Load:
-    case AccessCase::IndexedTypedArrayUint8Load:
-    case AccessCase::IndexedTypedArrayUint8ClampedLoad:
-    case AccessCase::IndexedTypedArrayInt16Load:
-    case AccessCase::IndexedTypedArrayUint16Load:
-    case AccessCase::IndexedTypedArrayInt32Load:
-    case AccessCase::IndexedTypedArrayUint32Load:
-    case AccessCase::IndexedTypedArrayFloat16Load:
-    case AccessCase::IndexedTypedArrayFloat32Load:
-    case AccessCase::IndexedTypedArrayFloat64Load:
-    case AccessCase::IndexedResizableTypedArrayInt8Load:
-    case AccessCase::IndexedResizableTypedArrayUint8Load:
-    case AccessCase::IndexedResizableTypedArrayUint8ClampedLoad:
-    case AccessCase::IndexedResizableTypedArrayInt16Load:
-    case AccessCase::IndexedResizableTypedArrayUint16Load:
-    case AccessCase::IndexedResizableTypedArrayInt32Load:
-    case AccessCase::IndexedResizableTypedArrayUint32Load:
-    case AccessCase::IndexedResizableTypedArrayFloat16Load:
-    case AccessCase::IndexedResizableTypedArrayFloat32Load:
-    case AccessCase::IndexedResizableTypedArrayFloat64Load:
-    case AccessCase::IndexedInt32Store:
-    case AccessCase::IndexedDoubleStore:
-    case AccessCase::IndexedContiguousStore:
-    case AccessCase::IndexedArrayStorageStore:
-    case AccessCase::IndexedTypedArrayInt8Store:
-    case AccessCase::IndexedTypedArrayUint8Store:
-    case AccessCase::IndexedTypedArrayUint8ClampedStore:
-    case AccessCase::IndexedTypedArrayInt16Store:
-    case AccessCase::IndexedTypedArrayUint16Store:
-    case AccessCase::IndexedTypedArrayInt32Store:
-    case AccessCase::IndexedTypedArrayUint32Store:
-    case AccessCase::IndexedTypedArrayFloat16Store:
-    case AccessCase::IndexedTypedArrayFloat32Store:
-    case AccessCase::IndexedTypedArrayFloat64Store:
-    case AccessCase::IndexedResizableTypedArrayInt8Store:
-    case AccessCase::IndexedResizableTypedArrayUint8Store:
-    case AccessCase::IndexedResizableTypedArrayUint8ClampedStore:
-    case AccessCase::IndexedResizableTypedArrayInt16Store:
-    case AccessCase::IndexedResizableTypedArrayUint16Store:
-    case AccessCase::IndexedResizableTypedArrayInt32Store:
-    case AccessCase::IndexedResizableTypedArrayUint32Store:
-    case AccessCase::IndexedResizableTypedArrayFloat16Store:
-    case AccessCase::IndexedResizableTypedArrayFloat32Store:
-    case AccessCase::IndexedResizableTypedArrayFloat64Store:
-    case AccessCase::IndexedStringLoad:
-    case AccessCase::IndexedInt32InHit:
-    case AccessCase::IndexedDoubleInHit:
-    case AccessCase::IndexedContiguousInHit:
-    case AccessCase::IndexedArrayStorageInHit:
-    case AccessCase::IndexedScopedArgumentsInHit:
-    case AccessCase::IndexedDirectArgumentsInHit:
-    case AccessCase::IndexedTypedArrayInt8In:
-    case AccessCase::IndexedTypedArrayUint8In:
-    case AccessCase::IndexedTypedArrayUint8ClampedIn:
-    case AccessCase::IndexedTypedArrayInt16In:
-    case AccessCase::IndexedTypedArrayUint16In:
-    case AccessCase::IndexedTypedArrayInt32In:
-    case AccessCase::IndexedTypedArrayUint32In:
-    case AccessCase::IndexedTypedArrayFloat16In:
-    case AccessCase::IndexedTypedArrayFloat32In:
-    case AccessCase::IndexedTypedArrayFloat64In:
-    case AccessCase::IndexedResizableTypedArrayInt8In:
-    case AccessCase::IndexedResizableTypedArrayUint8In:
-    case AccessCase::IndexedResizableTypedArrayUint8ClampedIn:
-    case AccessCase::IndexedResizableTypedArrayInt16In:
-    case AccessCase::IndexedResizableTypedArrayUint16In:
-    case AccessCase::IndexedResizableTypedArrayInt32In:
-    case AccessCase::IndexedResizableTypedArrayUint32In:
-    case AccessCase::IndexedResizableTypedArrayFloat16In:
-    case AccessCase::IndexedResizableTypedArrayFloat32In:
-    case AccessCase::IndexedResizableTypedArrayFloat64In:
-    case AccessCase::IndexedStringInHit:
-        return false;
-    }
-
-    return false;
-}
-
 bool canBeViaGlobalProxy(AccessCase::AccessType type)
 {
     switch (type) {
@@ -4673,7 +4522,7 @@ RefPtr<AccessCase> InlineCacheCompiler::tryFoldToMegamorphic(CodeBlock* codeBloc
 {
     // Accidentally, it already includes megamorphic case. Then we just return it.
     for (auto accessCase : cases) {
-        if (isMegamorphic(accessCase->m_type))
+        if (AccessCase::isMegamorphic(accessCase->m_type))
             return accessCase;
     }
 
@@ -4932,7 +4781,7 @@ AccessGenerationResult InlineCacheCompiler::compile(const GCSafeConcurrentJSLock
         unsigned callLinkInfoCount = 0;
         bool isMegamorphic = false;
         for (auto& accessCase : cases)
-            isMegamorphic |= JSC::isMegamorphic(accessCase->type());
+            isMegamorphic |= AccessCase::isMegamorphic(accessCase->type());
 
         auto handler = InlineCacheHandler::create(InlineCacheCompiler::generateSlowPathHandler(vm(), m_propertyCache.accessType), codeBlock, m_propertyCache, WTF::move(stub), WTF::move(watchpoint), callLinkInfoCount);
         dataLogLnIf(InlineCacheCompilerInternal::verbose, "Returning: ", handler->callTarget());
@@ -7190,7 +7039,7 @@ AccessGenerationResult InlineCacheCompiler::compileOneAccessCaseHandler(const Ve
         dataLogLnIf(InlineCacheCompilerInternal::verbose, "Returning: ", handler->callTarget());
 
         AccessGenerationResult::Kind resultKind;
-        if (isMegamorphic(accessCase.m_type))
+        if (AccessCase::isMegamorphic(accessCase.m_type))
             resultKind = AccessGenerationResult::GeneratedMegamorphicCode;
         else if (poly.size() >= Options::maxAccessVariantListSize())
             resultKind = AccessGenerationResult::GeneratedFinalCode;
@@ -7213,7 +7062,7 @@ AccessGenerationResult InlineCacheCompiler::compileOneAccessCaseHandler(const Ve
         dataLogLnIf(InlineCacheCompilerInternal::verbose, "Returning: ", handler->callTarget());
 
         AccessGenerationResult::Kind resultKind;
-        if (isMegamorphic(accessCase.m_type))
+        if (AccessCase::isMegamorphic(accessCase.m_type))
             resultKind = AccessGenerationResult::GeneratedMegamorphicCode;
         else if (poly.size() >= Options::maxAccessVariantListSize())
             resultKind = AccessGenerationResult::GeneratedFinalCode;

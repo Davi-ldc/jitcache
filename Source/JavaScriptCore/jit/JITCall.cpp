@@ -245,13 +245,22 @@ void JIT::compileOpCall(const JSInstruction* instruction)
         compileCallDirectEval(bytecode);
         return;
     } else if constexpr (Op::opcodeID == op_super_construct || Op::opcodeID == op_super_construct_varargs) {
-        loadPtr(calleeFrameLowWordSlot(CallFrameSlot::thisArgument), BaselineJITRegisters::Call::callTargetGPR);
-        loadPtrFromMetadata(bytecode, Op::Metadata::offsetOfCachedCallee(), BaselineJITRegisters::Call::callLinkInfoGPR);
-        auto done = branchPtr(Equal, BaselineJITRegisters::Call::callTargetGPR, BaselineJITRegisters::Call::callLinkInfoGPR);
-        auto store = branchTestPtr(Zero, BaselineJITRegisters::Call::callLinkInfoGPR);
-        move(TrustedImmPtr(JSCell::seenMultipleCalleeObjects()), BaselineJITRegisters::Call::callTargetGPR);
+        // Cache new.target as the LLInt's op_super_construct and op_super_construct_varargs do: an empty cache
+        // takes it, a cache holding another cell becomes SeenMultipleCalleeObjects, and the varargs form skips a
+        // new.target that is not a cell. Like the LLInt, the store issues no write barrier.
+        constexpr GPRReg newTargetGPR = BaselineJITRegisters::Call::callTargetGPR;
+        constexpr GPRReg cachedCalleeGPR = BaselineJITRegisters::Call::callLinkInfoGPR;
+        static_assert(noOverlap(BaselineJITRegisters::Call::calleeGPR, newTargetGPR, cachedCalleeGPR));
+        loadPtr(calleeFrameLowWordSlot(CallFrameSlot::thisArgument), newTargetGPR);
+        JumpList done;
+        if constexpr (Op::opcodeID == op_super_construct_varargs)
+            done.append(branchIfNotCell(newTargetGPR));
+        loadPtrFromMetadata(bytecode, Op::Metadata::offsetOfCachedCallee(), cachedCalleeGPR);
+        done.append(branchPtr(Equal, newTargetGPR, cachedCalleeGPR));
+        auto store = branchTestPtr(Zero, cachedCalleeGPR);
+        move(TrustedImmPtr(JSCell::seenMultipleCalleeObjects()), newTargetGPR);
         store.link(this);
-        storePtrToMetadata(BaselineJITRegisters::Call::callLinkInfoGPR, bytecode, Op::Metadata::offsetOfCachedCallee());
+        storePtrToMetadata(newTargetGPR, bytecode, Op::Metadata::offsetOfCachedCallee());
         done.link(this);
     }
 

@@ -67,6 +67,13 @@ public:
         return getCachedDataTempRegisterIDAndInvalidate();
     }
 
+    // The memory temp register, its cached value invalidated, for JITCache's recorded absolute-address forms: no later
+    // move derives a value from the bits of a reference materialized into it.
+    RegisterID memoryTempRegisterForReference()
+    {
+        return getCachedMemoryTempRegisterIDAndInvalidate();
+    }
+
 protected:
     static constexpr Assembler::SetFlags S = Assembler::S;
     static constexpr int64_t maskHalfWord0 = 0xffffl;

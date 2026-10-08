@@ -53,6 +53,10 @@ class ScriptExecutable;
 class SourceProvider;
 class UnlinkedFunctionCodeBlock;
 
+namespace JITCache {
+class FunctionBodyRequest;
+}
+
 enum UnlinkedFunctionKind {
     UnlinkedNormalFunction,
     UnlinkedBuiltinFunction,
@@ -278,7 +282,8 @@ private:
 
     DECLARE_VISIT_CHILDREN;
 
-    void decodeCachedCodeBlocks(VM&);
+    // JITCache: the request seeds the requested slot's decoded UCB before m_isCached clears.
+    void decodeCachedCodeBlocks(VM&, JITCache::FunctionBodyRequest&);
 
     bool codeBlockEdgeMayBeWeak() const
     {

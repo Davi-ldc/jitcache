@@ -229,6 +229,11 @@ public:
         m_prediction = newType;
     }
 
+    // JITCache: the accumulated prediction, read without draining anything.
+    SpeculatedType prediction() const { return m_prediction; }
+    // JITCache: seeds the prediction of a UCB that no holder has published and no CodeBlock references.
+    void restorePrediction(SpeculatedType prediction) { m_prediction = prediction; }
+
 private:
     SpeculatedType m_prediction { SpecNone };
 };

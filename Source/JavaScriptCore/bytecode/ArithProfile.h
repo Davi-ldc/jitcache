@@ -171,6 +171,8 @@ public:
 #endif // ENABLE(JIT)
 
     constexpr uint32_t bits() const { return m_bits; }
+    // JITCache: seeds the bits of a UCB that no holder has published; the twin check also saves and restores them.
+    void restoreBits(BitfieldType bits) { m_bits = bits; }
 
 protected:
     ArithProfile() = default;

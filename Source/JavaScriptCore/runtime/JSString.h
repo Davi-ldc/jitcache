@@ -54,6 +54,10 @@ class JSString;
 class JSRopeString;
 class LLIntOffsetsExtractor;
 
+namespace JITCache {
+void atomizeStringConstant(VM&, const JSString&);
+}
+
 JSString* jsEmptyString(VM&);
 JSString* jsString(VM&, const String&); // returns empty string if passed null string
 JSString* jsString(VM&, String&&); // returns empty string if passed null string
@@ -361,6 +365,7 @@ private:
     friend JSString* jsSubstringOfResolved(VM&, GCDeferralContext*, JSString*, unsigned, unsigned);
     friend JSString* jsOwnedString(VM&, const String&);
     friend class DecoderStringTable;
+    friend void JITCache::atomizeStringConstant(VM&, const JSString&); // JITCache: needs swapToAtomString
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*);
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*, JSString*);
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*, JSString*, JSString*);

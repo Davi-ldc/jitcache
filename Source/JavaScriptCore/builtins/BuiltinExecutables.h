@@ -31,6 +31,7 @@
 #include "SourceCode.h"
 #include "Weak.h"
 #include "WeakHandleOwner.h"
+#include <array>
 #include <wtf/TZoneMalloc.h>
 
 namespace JSC {
@@ -62,6 +63,10 @@ struct BuiltinSourceMetadata {
     int closeBraceOffsetFromEnd { 0 };
     bool isAsyncFunction { false };
     bool isInStrictContext { false };
+    // JITCache: SHA-256 of the byte 1 followed by the source characters as Latin-1 (SPEC-ucb.md section 3.5), which the
+    // builtins generator records; computeBuiltinSourceMetadata leaves both fields as they are.
+    std::array<uint8_t, 32> sourceDigest { };
+    bool hasSourceDigest { false };
 };
 
 // Emitted by the builtins generator, indexed by BuiltinCodeIndex.

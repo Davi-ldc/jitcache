@@ -300,6 +300,9 @@ public:
 
     bool isAccessor() const { return isGetter() || type() == Setter; }
 
+    // Whether this is one of the megamorphic types, which InlineCacheCompiler::tryFoldToMegamorphic folds an IC into.
+    static bool NODELETE isMegamorphic(AccessType);
+
     // Is it still possible for this case to ever be taken? Must call this as a prerequisite for
     // calling generate() and friends. If this returns true, then you can call generate(). If
     // this returns false, then generate() will crash. You must call generate() in the same epoch

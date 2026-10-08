@@ -31,6 +31,10 @@
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/PrintStream.h>
 
+#if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
+#include "ImageRecorder.h"
+#endif
+
 namespace JSC {
 
 void AbstractMacroAssemblerBase::initializeRandom()
@@ -42,8 +46,21 @@ void AbstractMacroAssemblerBase::initializeRandom()
         globalCounter = cryptographicallyRandomNumber<uint32_t>();
     });
     ASSERT(!m_randomSource);
-    m_randomSource.emplace(globalCounter++);
+    uint32_t seed = globalCounter++;
+    m_randomSource.emplace(seed);
+#if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
+    if (m_jitCacheRecorder)
+        m_jitCacheRecorder->didInitializeRandom(seed);
+#endif
 }
+
+#if ENABLE(JITCACHE_TWINS)
+void AbstractMacroAssemblerBase::seedRandomForTwins(uint32_t seed)
+{
+    ASSERT(!m_randomSource);
+    m_randomSource.emplace(seed);
+}
+#endif
 
 }
 

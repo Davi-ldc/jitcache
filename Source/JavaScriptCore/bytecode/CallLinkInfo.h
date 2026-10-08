@@ -190,7 +190,12 @@ public:
     {
         return m_clearedByGC;
     }
-    
+
+    void setClearedByGC()
+    {
+        m_clearedByGC = true;
+    }
+
     bool clearedByVirtual()
     {
         return m_clearedByVirtual;

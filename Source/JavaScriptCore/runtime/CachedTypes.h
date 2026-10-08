@@ -33,9 +33,11 @@
 #include "VariableEnvironment.h"
 #include <wtf/FileSystem.h>
 #include <wtf/HashMap.h>
+#include <wtf/ScopedLambda.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/UniqueArray.h>
 #include <wtf/text/AtomStringImpl.h>
+#include <array>
 #include <optional>
 
 namespace JSC {
@@ -188,11 +190,39 @@ protected:
     Offset m_offset;
 };
 
+// JITCache: the core codec, the bytecode cache's codec run in its JITCacheCore purpose (SPEC-ucb.codec.md, sections 2 to 4).
+// The identity section's core kind.
+enum class UnlinkedCodeBlockCoreKind : uint8_t { Program = 0, Module = 1, Eval = 2, Function = 3 };
+
+// What a JITCacheCore encode charges for everything it allocates (SPEC-ucb.codec.md, E8).
+class CoreEncodingBudget {
+public:
+    virtual ~CoreEncodingBudget() = default;
+    [[nodiscard]] virtual bool charge(size_t) = 0; // before the encoder allocates that many bytes
+    virtual void release(size_t) = 0; // after it frees them
+};
+
+enum class CoreEncodeFailure : uint8_t { None, BudgetRefused };
+enum class CoreDecodeFailure : uint8_t { None, Malformed, KindMismatch, UnresolvedSymbol, InconsistentMapLayout };
+
 class Decoder : public RefCounted<Decoder> {
     WTF_MAKE_NONCOPYABLE(Decoder);
 
 public:
-    static Ref<Decoder> create(VM&, Ref<CachedBytecode>, RefPtr<SourceProvider> = nullptr);
+    // JITCache: the bytecode cache's own payloads, or a core (SPEC-ucb.codec.md, section 4).
+    enum class Purpose : uint8_t { BytecodeCache, JITCacheCore };
+
+    // JITCache: `startChain` is the TDZ chain a core's start record stands for (E14); `validate`, allowed only with
+    // JITCacheCore, makes the decode check the core's structure as it goes (E15).
+    static Ref<Decoder> create(VM&, Ref<CachedBytecode>, RefPtr<SourceProvider> = nullptr, Purpose = Purpose::BytecodeCache, RefPtr<TDZEnvironmentLink> startChain = nullptr, bool validate = false);
+    // JITCache: a JITCacheCore decoder is fallible: what would assert or crash records a failure instead (E5, E15).
+    Purpose purpose() const;
+    bool isFallible() const;
+    bool validates() const;
+    void noteFailure(CoreDecodeFailure); // keeps the first
+    CoreDecodeFailure failure() const;
+    // JITCache: the chain CachedTDZEnvironmentLink::decode returns for a start record; null without one (E14).
+    TDZEnvironmentLink* startChain() const;
     bool canBorrowPayload() const; // the embedder promised the payload outlives every use, so decoded objects may alias it
     // While a code block record is being decoded, its parsed varint tail, so the several accessors that need it share one parse.
     void setActiveCodeBlockTail(const void* record, const void* tail) { m_activeRecord = record; m_activeTail = tail; }
@@ -229,7 +259,7 @@ public:
     void addFinalizer(const Functor&);
 
 private:
-    Decoder(VM&, Ref<CachedBytecode>, RefPtr<SourceProvider>);
+    Decoder(VM&, Ref<CachedBytecode>, RefPtr<SourceProvider>, Purpose, RefPtr<TDZEnvironmentLink> startChain, bool validate);
     DecoderStringTable& externalStrings();
 
     VM& m_vm;
@@ -242,6 +272,10 @@ private:
     Vector<std::function<void()>> m_finalizers;
     UncheckedKeyHashMap<CompactTDZEnvironment*, CompactTDZEnvironmentMap::Handle> m_environmentToHandleMap;
     RefPtr<SourceProvider> m_provider;
+    const Purpose m_purpose;
+    const RefPtr<TDZEnvironmentLink> m_startChain;
+    const bool m_validates;
+    CoreDecodeFailure m_failure { CoreDecodeFailure::None };
 };
 
 JS_EXPORT_PRIVATE RefPtr<CachedBytecode> encodeCodeBlock(VM&, const SourceCodeKey&, const UnlinkedCodeBlock*, EncoderStringTable* = nullptr, BytecodeCacheChecksums = BytecodeCacheChecksums::Yes, BytecodeCacheUpdatable = BytecodeCacheUpdatable::Yes);
@@ -268,5 +302,34 @@ JS_EXPORT_PRIVATE RefPtr<CachedBytecode> encodeFunctionCodeBlock(VM&, const Unli
 JS_EXPORT_PRIVATE void decodeFunctionCodeBlock(Decoder&, int32_t cachedFunctionCodeBlockOffset, WriteBarrier<UnlinkedFunctionCodeBlock>&, const JSCell*);
 
 bool isCachedBytecodeStillValid(VM&, Ref<CachedBytecode>, const SourceCodeKey&, SourceCodeType);
+
+// JITCache: the core codec's entry points (SPEC-ucb.codec.md, section 2).
+// `holder`, wherever an entry point takes one: for a function core, the UFE whose slot holds the UCB, or will hold it once
+// decoded. Its TDZ chain is the start chain of E14. Null for every other core kind.
+
+// Encodes one UCB and its child descriptors, without child bodies. VM thread; allocates no cell.
+// With a budget, on success exactly result->size() bytes stay charged and the caller releases them.
+JS_EXPORT_PRIVATE RefPtr<CachedBytecode> encodeUnlinkedCodeBlockCore(VM&, const UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, CoreEncodingBudget*, CoreEncodeFailure&);
+
+// Decodes a core. VM thread, API lock held; runs under DeferGC; allocates cells. The payload must start 8-byte aligned.
+// `validate`, which the main file passes as strict, makes the decoder check the core's structure as it goes (E15).
+JS_EXPORT_PRIVATE UnlinkedCodeBlock* decodeUnlinkedCodeBlockCore(VM&, Ref<CachedBytecode>, SourceProvider&, UnlinkedCodeBlockCoreKind, const UnlinkedFunctionExecutable* holder, bool validate, CoreDecodeFailure&);
+
+// The descriptor of one UFE: the record a JITCacheCore encoder writes for it as a child of its parent's core, alone, with
+// the strings and records it points to, and with the UFE's own TDZ chain as the start chain, so that the chain is one start
+// record (E14). VM thread; allocates no cell. The budget behaves as for the core; null on refusal.
+JS_EXPORT_PRIVATE RefPtr<CachedBytecode> encodeUnlinkedFunctionExecutableDescriptor(VM&, const UnlinkedFunctionExecutable&, CoreEncodingBudget*, CoreEncodeFailure&);
+
+// The payload each encoder above would return, passed to `sink` page by page in payload order and never assembled (E13).
+// The budget behaves as for the encoders, every charge is released before the call returns, and on a refusal the
+// sink sees nothing and the result is BudgetRefused. VM thread; allocates no cell.
+JS_EXPORT_PRIVATE CoreEncodeFailure forEachUnlinkedCodeBlockCoreChunk(VM&, const UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, CoreEncodingBudget*, const ScopedLambda<void(std::span<const uint8_t>)>& sink);
+JS_EXPORT_PRIVATE CoreEncodeFailure forEachUnlinkedFunctionExecutableDescriptorChunk(VM&, const UnlinkedFunctionExecutable&, CoreEncodingBudget*, const ScopedLambda<void(std::span<const uint8_t>)>& sink);
+
+// The TDZ chain digest of SPEC-ucb.md section 3.4: 32 zero bytes for a null chain. Each environment on the chain is
+// digested at most once while it lives and keeps its digest; `environmentsDigested` gains one for each environment this
+// call digested first. A budget, when given, is charged for each such environment's sort buffer while the buffer lives.
+// Empty on a refusal; digests already kept stay. VM thread; allocates no cell.
+JS_EXPORT_PRIVATE std::optional<std::array<uint8_t, 32>> tdzChainDigest(const TDZEnvironmentLink*, CoreEncodingBudget*, unsigned& environmentsDigested);
 
 } // namespace JSC

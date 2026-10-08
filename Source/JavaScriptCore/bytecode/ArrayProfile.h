@@ -292,6 +292,13 @@ public:
         m_arrayProfileFlags = unlinkedArrayProfileFlags;
     }
 
+    // JITCache: the accumulated modes, read without draining anything.
+    ArrayModes observedArrayModes() const { return m_observedArrayModes; }
+    // JITCache: the accumulated flags, read without draining anything; never the pruning mark, which update() keeps out.
+    OptionSet<ArrayProfileFlag> arrayProfileFlags() const { return m_arrayProfileFlags; }
+    // JITCache: seeds the state of a UCB that no holder has published and no CodeBlock references.
+    void restoreAccumulatedState(ArrayModes modes, OptionSet<ArrayProfileFlag> flags) { ASSERT(!flags.contains(ArrayProfileFlag::DidPerformFirstRunPruning)); m_observedArrayModes = modes; m_arrayProfileFlags = flags; }
+
 private:
     ArrayModes m_observedArrayModes { 0 };
     OptionSet<ArrayProfileFlag> m_arrayProfileFlags { };

@@ -185,7 +185,22 @@ public:
     {
         return hasExitSite(locker, FrequentExitSite(kind));
     }
-    
+
+    // JITCache: passes each stored site to the functor in stored order and copies nothing, so a capture reads the sites
+    // without allocating.
+    template<typename Functor>
+    void forEachFrequentExitSite(const ConcurrentJSLocker&, const Functor& functor) const
+    {
+        if (!m_frequentExitSites)
+            return;
+        for (const FrequentExitSite& site : *m_frequentExitSites)
+            functor(site);
+    }
+
+    // JITCache: seeds the sites of a UCB that no holder has published. Asserts that the profile is empty, and leaves
+    // m_frequentExitSites null for an empty vector.
+    void restoreFrequentExitSites(const ConcurrentJSLocker&, Vector<FrequentExitSite>&&);
+
 private:
     friend class QueryableExitProfile;
     

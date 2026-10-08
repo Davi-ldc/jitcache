@@ -341,6 +341,12 @@ public:
         return applyOffset(jump.m_jump.m_label).offset();
     }
 
+    // The offset in the linked code of a label recorded during emission, after branch compaction moved the code.
+    uint32_t offsetOf(AssemblerLabel label)
+    {
+        return applyOffset(label).offset();
+    }
+
     // Upon completion of all patching 'FINALIZE_CODE()' should be called once to
     // complete generation of the code. Alternatively, call
     // finalizeCodeWithoutDisassembly() directly if you have your own way of

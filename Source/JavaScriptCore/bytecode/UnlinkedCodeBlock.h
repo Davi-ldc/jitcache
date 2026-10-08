@@ -352,6 +352,10 @@ public:
     FixedVector<UnlinkedArrayProfile>& unlinkedArrayProfiles() LIFETIME_BOUND { return m_arrayProfiles; }
     unsigned numberOfValueProfiles() const { return m_valueProfiles.size(); }
     unsigned numberOfArrayProfiles() const { return m_arrayProfiles.size(); }
+    // JITCache: the arithmetic profile counts, which an imported UCB shares with the producer's.
+    unsigned numberOfBinaryArithProfiles() const { return m_binaryArithProfiles.size(); }
+    // JITCache: see numberOfBinaryArithProfiles().
+    unsigned numberOfUnaryArithProfiles() const { return m_unaryArithProfiles.size(); }
 
 #if ASSERT_ENABLED
     bool hasIdentifier(UniquedStringImpl*);

@@ -60,6 +60,13 @@ namespace DFG {
 struct OSRExit;
 }
 
+namespace JITCache {
+class ImageRecorder;
+// Called by Call::linkThunk and Jump::linkThunk when the assembler has a recorder: a thunk link that no emission helper
+// made leaves the record unrecordable.
+JS_EXPORT_PRIVATE void noteSupportLink(ImageRecorder&);
+}
+
 #define JIT_COMMENT(jit, ...) do { if (Options::needDisassemblySupport()) [[unlikely]] { (jit).comment(__VA_ARGS__); } else { (void) jit; } } while (0)
 
 class AbstractMacroAssemblerBase {
@@ -69,7 +76,7 @@ public:
         Success,
         Failure
     };
-    
+
     static StatusCondition invert(StatusCondition condition)
     {
         switch (condition) {
@@ -81,6 +88,16 @@ public:
         RELEASE_ASSERT_NOT_REACHED();
         return Success;
     }
+
+    // The JITCache recorder of the compilation or MathIC regeneration this assembler emits, or null. Only the thread
+    // that emits reads or writes it.
+    JITCache::ImageRecorder* jitCacheRecorder() const { return m_jitCacheRecorder; }
+    void setJITCacheRecorder(JITCache::ImageRecorder* recorder) { m_jitCacheRecorder = recorder; }
+
+#if ENABLE(JITCACHE_TWINS)
+    // Seeds the random source with the seed a twin compile replays, before anything has drawn from it.
+    JS_EXPORT_PRIVATE void seedRandomForTwins(uint32_t seed);
+#endif
 
 protected:
     uint32_t random()
@@ -94,6 +111,7 @@ private:
     JS_EXPORT_PRIVATE void initializeRandom();
 
     std::optional<WeakRandom> m_randomSource;
+    JITCache::ImageRecorder* m_jitCacheRecorder { nullptr };
 };
 
 template <class AssemblerType>
@@ -510,7 +528,9 @@ public:
         }
 
         bool isSet() const { return m_label.isSet(); }
-        
+
+        AssemblerLabel label() const { return m_label; }
+
     private:
         AssemblerLabel m_label;
     };
@@ -611,6 +631,10 @@ public:
         {
             ASSERT(isFlagSet(Near));
             ASSERT(isFlagSet(Linkable));
+#if ENABLE(JIT)
+            if (auto* recorder = masm->jitCacheRecorder()) [[unlikely]]
+                JITCache::noteSupportLink(*recorder);
+#endif
 #if CPU(ARM64)
             if (isFlagSet(Tail))
                 masm->m_assembler.linkJumpThunk(m_label, label.dataLocation(), ARM64Assembler::JumpNoCondition, ARM64Assembler::ConditionInvalid);
@@ -727,6 +751,10 @@ public:
         template<PtrTag tag>
         void linkThunk(CodeLocationLabel<tag> label, AbstractMacroAssemblerType* masm) const
         {
+#if ENABLE(JIT)
+            if (auto* recorder = masm->jitCacheRecorder()) [[unlikely]]
+                JITCache::noteSupportLink(*recorder);
+#endif
 #if CPU(ARM64)
             if ((m_type == ARM64Assembler::JumpCompareAndBranch) || (m_type == ARM64Assembler::JumpCompareAndBranchFixedSize))
                 masm->m_assembler.linkJumpThunk(m_label, label.dataLocation(), m_type, m_condition, m_is64Bit, m_compareRegister);
@@ -743,6 +771,19 @@ public:
         }
 
         bool isSet() const { return m_label.isSet(); }
+
+        AssemblerLabel assemblerLabel() const { return m_label; }
+
+        // Whether the jump has a condition. Only ARM64 asks: there, a conditional jump to code outside its allocation
+        // is compacted by distance to its absolute target, so JITCache links it through a local unconditional jump.
+        bool isConditionalForJITCache() const
+        {
+#if CPU(ARM64)
+            return m_type != ARM64Assembler::JumpNoCondition && m_type != ARM64Assembler::JumpNoConditionFixedSize;
+#else
+            return false;
+#endif
+        }
 
     private:
         AssemblerLabel m_label;
