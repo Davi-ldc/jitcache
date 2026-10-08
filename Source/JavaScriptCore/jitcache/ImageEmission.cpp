@@ -301,6 +301,17 @@ void storeReferenceValue(AssemblyHelpers& jit, const ImageReference& cell, Macro
     jit.store64(scratch, address);
 }
 
+void moveReferenceValue(AssemblyHelpers& jit, const ImageReference& cell, GPRReg gpr)
+{
+    auto recording = ImageEmissionInternal::recordingOf(jit, cell);
+    if (!recording) {
+        jit.moveValue(JSValue(static_cast<JSCell*>(const_cast<void*>(cell.value()))), gpr);
+        return;
+    }
+    // A cell's JSValue encoding is its pointer, so the Pointer is the value.
+    recording->emitPointer(jit, cell.value(), gpr);
+}
+
 MacroAssembler::Jump branchPtrAtReference(MacroAssembler& masm, MacroAssembler::RelationalCondition condition, const ImageReference& address, GPRReg right)
 {
     auto recording = ImageEmissionInternal::recordingOf(masm, address);
@@ -506,6 +517,30 @@ void linkJumpsToImage(MacroAssembler& masm, const MacroAssembler::JumpList& jump
     auto nativeLocation = location.retagged<NoPtrTag>();
     for (auto& jump : jumps.jumps())
         ImageEmissionInternal::linkExternalJump(masm, *recorder, jump, target, nativeLocation);
+}
+
+StringSwitchRecording::StringSwitchRecording(ImageRecorder& recorder, unsigned tableIndex)
+    : m_recorder(recorder)
+    , m_tableIndex(tableIndex)
+{
+}
+
+ImageTarget StringSwitchRecording::rankTarget(TargetKind kind, unsigned rank) const
+{
+    return ImageTarget { .kind = kind, .a = m_tableIndex, .b = rank, .payload = 0 };
+}
+
+MacroAssembler::Jump StringSwitchRecording::branch(MacroAssembler& masm, MacroAssembler::RelationalCondition condition, GPRReg value, unsigned rank, intptr_t key)
+{
+    // The recorded form replaces BinarySwitch's ImmPtr, which on x86_64 may be blinded, with an unblinded Pointer.
+    ASSERT(masm.jitCacheRecorder() == &m_recorder);
+    return branchPtrWithReference(masm, condition, value, ImageReference(rankTarget(TargetKind::SwitchStringRankAtom, rank), std::bit_cast<const void*>(key)));
+}
+
+void StringSwitchRecording::recordCase(MacroAssembler::Jump leaf, unsigned rank)
+{
+    // An internal branch, the only one that carries a fixup: its target follows the order of the case atoms' addresses.
+    m_recorder.recordJump(leaf.assemblerLabel(), rankTarget(TargetKind::SwitchStringRankCase, rank));
 }
 
 void storePtrToVMAddress(MacroAssembler& masm, GPRReg gpr, const void* address)

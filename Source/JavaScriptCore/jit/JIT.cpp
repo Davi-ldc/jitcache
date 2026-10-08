@@ -34,6 +34,7 @@
 #include "CodeBlock.h"
 #include "CodeBlockWithJITType.h"
 #include "DFGCapabilities.h"
+#include "ImageEmission.h"
 #include "JITInlines.h"
 #include "JITOperations.h"
 #include "JITSizeStatistics.h"
@@ -1104,7 +1105,7 @@ Seconds JIT::totalCompileTime()
 
 void JIT::exceptionCheck(Jump jumpToHandler)
 {
-    jumpToHandler.linkThunk(CodeLocationLabel(vm().getCTIStub(CommonJITThunkID::HandleException).retaggedCode<NoPtrTag>()), this);
+    JITCache::linkJumpToSupport(*this, vm(), jumpToHandler, JITCache::ImageTarget { .kind = JITCache::TargetKind::CommonThunk, .a = static_cast<uint32_t>(CommonJITThunkID::HandleException), .b = 0, .payload = 0 });
 }
 
 void JIT::exceptionCheck()

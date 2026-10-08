@@ -34,6 +34,7 @@
 #include "ExecutableInfo.h"
 #include "InstructionStream.h"
 #include "JSCJSValueInlines.h"
+#include "UCBRequests.h"
 #include "UnlinkedMetadataTableInlines.h"
 #include <wtf/DataLog.h>
 
@@ -224,6 +225,7 @@ bool UnlinkedCodeBlock::typeProfilerExpressionInfoForBytecodeOffset(unsigned byt
 
 UnlinkedCodeBlock::~UnlinkedCodeBlock()
 {
+    JITCache::unlinkedCodeBlockWillBeDestroyed(*this);
     if (Options::returnEarlyFromInfiniteLoopsForFuzzing()) [[unlikely]] {
         if (auto* instructions = m_instructions.get()) {
             VM& vm = this->vm();

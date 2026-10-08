@@ -24,6 +24,7 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
 # THE POSSIBILITY OF SUCH DAMAGE.
 
+import hashlib
 import logging
 import os.path
 import re
@@ -62,6 +63,7 @@ def is_js_white_space(ch):
 # Transliterated from computeBuiltinSourceMetadata, which still scans at runtime
 # for sources that have no generated entry. Change one and you must change the
 # other; keeping the two statement-for-statement alike is what makes them agree.
+# The one exception is sourceDigest, which only the generator records.
 def compute_builtin_source_metadata(characters):
     regular_function_begin = "(function ("
     async_function_begin = "(async function ("
@@ -140,6 +142,11 @@ def compute_builtin_source_metadata(characters):
     while characters[len(characters) - close_brace_offset_from_end] != '}':
         close_brace_offset_from_end += 1
 
+    # JITCache's source digest of these characters (SPEC-ucb.md section 3.5): SHA-256 of the byte 1, which names the
+    # Latin-1 encoding, then one byte per character. Builtin sources are 8-bit: they are emitted as a char array that
+    # BuiltinExecutables reads as Latin-1, so a character above 0xFF fails here as it would in that array.
+    source_digest = hashlib.sha256(b'\x01' + characters.encode('latin-1')).digest()
+
     return {
         'sourceLength': len(characters),
         'parametersStart': parameters_start,
@@ -151,6 +158,7 @@ def compute_builtin_source_metadata(characters):
         'closeBraceOffsetFromEnd': close_brace_offset_from_end,
         'isAsyncFunction': 'true' if is_async_function else 'false',
         'isInStrictContext': 'true' if is_in_strict_context else 'false',
+        'sourceDigest': source_digest,
     }
 
 

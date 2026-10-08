@@ -38,10 +38,16 @@
 #include "Parser.h"
 #include "SourceProfiler.h"
 #include "Structure.h"
+#include "UCBRequests.h"
+#include "UCBTwinGeneration.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include <wtf/TZoneMallocInlines.h>
 
 namespace JSC {
+
+namespace JITCache {
+struct TwinParseResults; // UCBTwinGeneration.h defines it in twins builds, the only ones that pass one.
+}
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(UnlinkedFunctionExecutable::ClassElementDefinition);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(UnlinkedFunctionExecutable::RareData);
@@ -50,10 +56,13 @@ static_assert(sizeof(UnlinkedFunctionExecutable) <= 128, "UnlinkedFunctionExecut
 
 const ClassInfo UnlinkedFunctionExecutable::s_info = { "UnlinkedFunctionExecutable"_s, nullptr, nullptr, nullptr, CREATE_METHOD_TABLE(UnlinkedFunctionExecutable) };
 
+// JITCache: a twin generation (SPEC-ucb.md section 13.2) passes twinParseResults, which receives what
+// executable->recordParse would have; it leaves the UFE alone and skips CodeCache::updateCache.
 static UnlinkedFunctionCodeBlock* generateUnlinkedFunctionCodeBlock(
     VM& vm, UnlinkedFunctionExecutable* executable, const SourceCode& source,
     CodeSpecializationKind kind, OptionSet<CodeGenerationMode> codeGenerationMode,
-    UnlinkedFunctionKind functionKind, ParserError& error, SourceParseMode parseMode)
+    UnlinkedFunctionKind functionKind, ParserError& error, SourceParseMode parseMode,
+    JITCache::TwinParseResults* twinParseResults = nullptr)
 {
     JSParserBuiltinMode builtinMode = executable->isBuiltinFunction() ? JSParserBuiltinMode::Builtin : JSParserBuiltinMode::NotBuiltin;
     JSParserScriptMode scriptMode = executable->scriptMode();
@@ -68,7 +77,14 @@ static UnlinkedFunctionCodeBlock* generateUnlinkedFunctionCodeBlock(
     }
 
     function->finishParsing(executable->name(), executable->functionMode());
-    executable->recordParse(function->features(), function->lexicallyScopedFeatures(), function->hasCapturedVariables());
+    if (twinParseResults) {
+#if ENABLE(JITCACHE_TWINS)
+        *twinParseResults = { function->features(), function->lexicallyScopedFeatures(), function->hasCapturedVariables() };
+#else
+        RELEASE_ASSERT_NOT_REACHED();
+#endif
+    } else
+        executable->recordParse(function->features(), function->lexicallyScopedFeatures(), function->hasCapturedVariables());
 
     bool isClassContext = executable->superBinding() == SuperBinding::Needed || executable->parseMode() == SourceParseMode::ClassFieldInitializerMode;
 
@@ -81,7 +97,8 @@ static UnlinkedFunctionCodeBlock* generateUnlinkedFunctionCodeBlock(
 
     if (error.isValid())
         return nullptr;
-    vm.codeCache()->updateCache(executable, source, kind, result);
+    if (!twinParseResults)
+        vm.codeCache()->updateCache(executable, source, kind, result);
     return result;
 }
 
@@ -154,6 +171,7 @@ const Identifier& UnlinkedFunctionExecutable::name() const
 
 UnlinkedFunctionExecutable::~UnlinkedFunctionExecutable()
 {
+    JITCache::unlinkedFunctionExecutableWillBeDestroyed(*this);
     if (m_isCached)
         m_decoder.~RefPtr();
 }
@@ -246,26 +264,28 @@ UnlinkedFunctionCodeBlock* UnlinkedFunctionExecutable::unlinkedCodeBlockFor(
     VM& vm, const SourceCode& source, CodeSpecializationKind specializationKind, 
     OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, SourceParseMode parseMode)
 {
+    // JITCache: the body request of SPEC-ucb.md section 7.2.2; without JITCache state it does nothing.
+    JITCache::FunctionBodyRequest jitCacheRequest(vm, *this, source, specializationKind, codeGenerationMode);
     if (m_isCached)
-        decodeCachedCodeBlocks(vm);
-    switch (specializationKind) {
-    case CodeSpecializationKind::CodeForCall:
-        if (UnlinkedFunctionCodeBlock* codeBlock = m_unlinkedCodeBlockForCall.get())
-            return codeBlock;
-        break;
-    case CodeSpecializationKind::CodeForConstruct:
-        if (UnlinkedFunctionCodeBlock* codeBlock = m_unlinkedCodeBlockForConstruct.get())
-            return codeBlock;
-        break;
+        decodeCachedCodeBlocks(vm, jitCacheRequest);
+    if (UnlinkedFunctionCodeBlock* codeBlock = (specializationKind == CodeSpecializationKind::CodeForCall ? m_unlinkedCodeBlockForCall : m_unlinkedCodeBlockForConstruct).get()) {
+        jitCacheRequest.didServeLive(*codeBlock); // returns at once when the decode above settled the request
+        return codeBlock;
     }
 
-    UnlinkedFunctionCodeBlock* result = generateUnlinkedFunctionCodeBlock(
-        vm, this, source, specializationKind, codeGenerationMode, 
-        isBuiltinFunction() ? UnlinkedBuiltinFunction : UnlinkedNormalFunction, 
-        error, parseMode);
-    
-    if (error.isValid())
-        return nullptr;
+    // An import replaces generation only, and the slot publishes it as it publishes a generated block.
+    UnlinkedFunctionCodeBlock* result = jitCacheRequest.tryImport();
+    if (result)
+        vm.codeCache()->updateCache(this, source, specializationKind, result);
+    else {
+        result = generateUnlinkedFunctionCodeBlock(
+            vm, this, source, specializationKind, codeGenerationMode,
+            isBuiltinFunction() ? UnlinkedBuiltinFunction : UnlinkedNormalFunction,
+            error, parseMode);
+        if (error.isValid())
+            return nullptr;
+        jitCacheRequest.didGenerate(*result);
+    }
 
     switch (specializationKind) {
     case CodeSpecializationKind::CodeForCall:
@@ -280,7 +300,7 @@ UnlinkedFunctionCodeBlock* UnlinkedFunctionExecutable::unlinkedCodeBlockFor(
     return result;
 }
 
-void UnlinkedFunctionExecutable::decodeCachedCodeBlocks(VM& vm)
+void UnlinkedFunctionExecutable::decodeCachedCodeBlocks(VM& vm, JITCache::FunctionBodyRequest& jitCacheRequest)
 {
     ASSERT(m_isCached);
     ASSERT(m_decoder);
@@ -299,6 +319,10 @@ void UnlinkedFunctionExecutable::decodeCachedCodeBlocks(VM& vm)
         decodeFunctionCodeBlock(*decoder, cachedCodeBlockForCallOffset, m_unlinkedCodeBlockForCall, this);
     if (cachedCodeBlockForConstructOffset)
         decodeFunctionCodeBlock(*decoder, cachedCodeBlockForConstructOffset, m_unlinkedCodeBlockForConstruct, this);
+
+    // JITCache: both slots hold their decoded blocks, or null, and neither is published until m_isCached clears. The
+    // request seeds the requested slot's block and records the other (SPEC-ucb.md section 7.2.2).
+    jitCacheRequest.didDecodeCachedSlots(m_unlinkedCodeBlockForCall.get(), m_unlinkedCodeBlockForConstruct.get());
 
     WTF::storeStoreFence();
     m_isCached = false;
@@ -334,5 +358,21 @@ void UnlinkedFunctionExecutable::reconcileWeakReferencesAtGCEnd(VM& vm, Collecti
         }
     }
 }
+
+#if ENABLE(JITCACHE_TWINS)
+namespace JITCache {
+
+// SPEC-ucb.md section 13.2: what the request's native generation makes, with its parse results written only into
+// `results`, so the UFE, its slots and the provider's cache hook stay as the import left them.
+UnlinkedFunctionCodeBlock* generateFunctionBodyTwin(const RequestState& state, TwinParseResults& results, ParserError& error)
+{
+    UnlinkedFunctionExecutable* executable = state.functionExecutable;
+    RELEASE_ASSERT(state.kind == RequestKind::FunctionBody && executable);
+    return generateUnlinkedFunctionCodeBlock(state.vm, executable, state.source, state.specialization, state.requestMode,
+        executable->isBuiltinFunction() ? UnlinkedBuiltinFunction : UnlinkedNormalFunction, error, executable->parseMode(), &results);
+}
+
+} // namespace JITCache
+#endif // ENABLE(JITCACHE_TWINS)
 
 } // namespace JSC

@@ -49,6 +49,13 @@ namespace DFG {
 class RegisteredStructure;
 };
 
+namespace JITCache {
+class ImageRecorder;
+// Called by setupArgumentsImpl for a nonzero TrustedImmPtr argument when the assembler has a JITCache recorder: such an
+// argument is a reference that did not arrive as an ImageReference, so the record becomes unrecordable.
+JS_EXPORT_PRIVATE void notePointerArgument(ImageRecorder&);
+}
+
 class CCallHelpers : public AssemblyHelpers {
     WTF_MAKE_TZONE_ALLOCATED(CCallHelpers);
 public:
@@ -362,6 +369,10 @@ private:
         // If we ever needed to support immediate floating point arguments we would need to duplicate this logic for both types, which sounds
         // gross so it's probably better to do that marshalling before the call operation...
         static_assert(!std::is_floating_point_v<CURRENT_ARGUMENT_TYPE>, "We don't support immediate floats/doubles in setupArguments");
+        if constexpr (std::same_as<Arg, TrustedImmPtr>) {
+            if (auto* recorder = jitCacheRecorder(); recorder && arg.m_value) [[unlikely]]
+                JITCache::notePointerArgument(*recorder);
+        }
         auto numArgRegisters = GPRInfo::numberOfArgumentRegisters;
         auto currentArgCount = numGPRArgs;
         if (currentArgCount < numArgRegisters) {
@@ -555,7 +566,10 @@ public:
     {
         // genericUnwind() leaves the handler CallFrame* in vm->callFrameForCatch,
         // and the address of the handler in vm->targetMachinePCForThrow.
-        loadPtr(&vm.targetMachinePCForThrow, GPRInfo::regT1);
+        if (jitCacheRecorder()) [[unlikely]]
+            JITCache::loadPtrFromVMAddress(*this, &vm.targetMachinePCForThrow, GPRInfo::regT1);
+        else
+            loadPtr(&vm.targetMachinePCForThrow, GPRInfo::regT1);
         farJump(GPRInfo::regT1, ExceptionHandlerPtrTag);
     }
 

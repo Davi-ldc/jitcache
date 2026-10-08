@@ -30,6 +30,7 @@
 #include "BuiltinNames.h"
 #include "JSCJSValueInlines.h"
 #include "Parser.h"
+#include "UCBRequests.h"
 #include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -301,6 +302,10 @@ UnlinkedFunctionExecutable* BuiltinExecutables::createExecutable(VM& vm, const S
     }
 
     UnlinkedFunctionExecutable* functionExecutable = UnlinkedFunctionExecutable::create(vm, source, &metadata, kind, constructAbility, inlineAttribute, JSParserScriptMode::Classic, nullptr, { }, std::nullopt, DerivedContextType::None, EvalContextType::FunctionEvalContext, needsClassFieldInitializer, privateBrandRequirement, isBuiltinDefaultClassConstructor);
+    // JITCache: a builtin root gets its identity before link reads it (SPEC-ucb.md section 7.2.4). A default class
+    // constructor is a child of its class's UCB, which gives it its identity.
+    if (!isBuiltinDefaultClassConstructor)
+        JITCache::didCreateBuiltinExecutable(vm, *functionExecutable, source, scanned);
     return functionExecutable;
 }
 

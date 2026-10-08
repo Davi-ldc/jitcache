@@ -45,9 +45,7 @@
 namespace JSC {
 
 class EvalExecutable;
-#if USE(BUN_JSC_ADDITIONS)
 class GlobalExecutable;
-#endif
 class IndirectEvalExecutable;
 class Identifier;
 class DirectEvalExecutable;
@@ -97,21 +95,16 @@ public:
     iterator begin() { return m_map.begin(); }
     iterator end() { return m_map.end(); }
 
+    // A miss returns null: CodeCache::getUnlinkedGlobalCodeBlock decodes the provider's cached bytecode itself
+    // (fetchFromDisk), so JITCache can seed a decoded block before the map publishes it.
     template<typename UnlinkedCodeBlockType>
-    UnlinkedCodeBlockType* findCacheAndUpdateAge(VM& vm, const SourceCodeKey& key)
+    UnlinkedCodeBlockType* findCacheAndUpdateAge(VM&, const SourceCodeKey& key)
     {
         prune();
 
         iterator findResult = m_map.find(key);
-        if (findResult == m_map.end()) {
-            // A block decoded from the provider's cached bytecode is as reusable as one we generated: remember it the
-            // way getUnlinkedGlobalCodeBlock() remembers those, so another global in this VM loading the same source
-            // links against this block instead of decoding its own copy of the unlinked tree.
-            UnlinkedCodeBlockType* decoded = fetchFromDisk<UnlinkedCodeBlockType>(vm, key);
-            if (decoded && Options::useCodeCache())
-                addCache(key, SourceCodeValue(vm, decoded, m_age));
-            return decoded;
-        }
+        if (findResult == m_map.end())
+            return nullptr;
 
         int64_t age = m_age - findResult->value.age;
         if (age > m_capacity) {
@@ -161,16 +154,7 @@ public:
 
     int64_t age() { return m_age; }
 
-private:
-    template<typename UnlinkedCodeBlockType>
-    UnlinkedCodeBlockType* fetchFromDiskImpl(VM& vm, const SourceCodeKey& key)
-    {
-        RefPtr<CachedBytecode> cachedBytecode = key.source().provider().cachedBytecode();
-        if (!cachedBytecode || !cachedBytecode->size())
-            return nullptr;
-        return decodeCodeBlock<UnlinkedCodeBlockType>(vm, key, *cachedBytecode);
-    }
-
+    // Decodes the block the key's provider holds in its cached bytecode, if any; adds nothing to the map.
     template<typename UnlinkedCodeBlockType>
     UnlinkedCodeBlockType* fetchFromDisk(VM& vm, const SourceCodeKey& key)
     {
@@ -188,6 +172,16 @@ private:
             UNUSED_PARAM(key);
             return nullptr;
         }
+    }
+
+private:
+    template<typename UnlinkedCodeBlockType>
+    UnlinkedCodeBlockType* fetchFromDiskImpl(VM& vm, const SourceCodeKey& key)
+    {
+        RefPtr<CachedBytecode> cachedBytecode = key.source().provider().cachedBytecode();
+        if (!cachedBytecode || !cachedBytecode->size())
+            return nullptr;
+        return decodeCodeBlock<UnlinkedCodeBlockType>(vm, key, *cachedBytecode);
     }
 
     // This constant factor biases cache capacity toward allowing a minimum
@@ -250,8 +244,11 @@ public:
     JS_EXPORT_PRIVATE void write();
 
 private:
-    template <class UnlinkedCodeBlockType, class ExecutableType> 
+    template <class UnlinkedCodeBlockType, class ExecutableType>
     UnlinkedCodeBlockType* getUnlinkedGlobalCodeBlock(VM&, ExecutableType*, const SourceCode&, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType);
+    // What follows a generation, and an import in its place (SPEC-ucb.md section 7.2.1): when useCodeCache is on, the
+    // map entry and the provider's two cache hooks. Does nothing for null.
+    void publishGeneratedCodeBlock(VM&, const SourceCodeKey&, UnlinkedCodeBlock*);
 
     CodeCacheMap m_sourceCode;
 };
@@ -285,11 +282,9 @@ UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModulePro
 // bound stay in the cache as executables whose bodies are generated from source when first called).
 JS_EXPORT_PRIVATE void recursivelyGenerateUnlinkedCodeBlocksForFunction(VM&, UnlinkedFunctionExecutable*, const SourceCode& parentSource, ParserError&, unsigned depth = std::numeric_limits<unsigned>::max());
 
-#if USE(BUN_JSC_ADDITIONS)
 // What a CodeCache hit does besides returning the block: the executable learns the parse results
 // (newCodeBlockFor() requires them) and the provider the //# sourceURL / sourceMappingURL directives.
 void recordParseFromUnlinkedCodeBlock(GlobalExecutable*, const SourceCode&, UnlinkedGlobalCodeBlock*);
-#endif
 
 void writeCodeBlock(const SourceCodeKey&, const SourceCodeValue&);
 RefPtr<CachedBytecode> serializeBytecode(VM&, UnlinkedCodeBlock*, const SourceCode&, SourceCodeType, LexicallyScopedFeatures, JSParserScriptMode, FileSystem::FileHandle&, BytecodeCacheError&, OptionSet<CodeGenerationMode>);

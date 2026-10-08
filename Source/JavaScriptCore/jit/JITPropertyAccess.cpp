@@ -32,6 +32,7 @@
 #include "CacheableIdentifierInlines.h"
 #include "CodeBlock.h"
 #include "DirectArguments.h"
+#include "ImageTypes.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "JSLexicalEnvironment.h"
@@ -1717,6 +1718,58 @@ MacroAssemblerCodeRef<JITThunkPtrTag> JIT::slow_op_put_to_scopeGenerator(VM& vm)
 
     LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::ExtraCTIThunk);
     return FINALIZE_THUNK(patchBuffer, JITThunkPtrTag, "slow_op_put_to_scope"_s, "Baseline: slow_op_put_to_scope");
+}
+
+ThunkGenerator JIT::baselineThunkGenerator(JITCache::BaselineThunk thunk)
+{
+    // A key read from a body file names one of these generators and never the code to run. This file defines the scope
+    // thunk templates, so naming their specializations here instantiates them.
+    using JITCache::BaselineThunk;
+    switch (thunk) {
+    case BaselineThunk::OpEnterHandler:
+        return op_enter_handlerGenerator;
+    case BaselineThunk::OpCheckTrapsHandler:
+        return op_check_traps_handlerGenerator;
+    case BaselineThunk::OpThrowHandler:
+        return op_throw_handlerGenerator;
+    case BaselineThunk::ValueIsTruthy:
+        return valueIsTruthyGenerator;
+    case BaselineThunk::ValueIsFalsey:
+        return valueIsFalseyGenerator;
+    case BaselineThunk::SlowOpPutToScope:
+        return slow_op_put_to_scopeGenerator;
+    case BaselineThunk::ResolveScopeClosureVarWithVarInjectionChecks:
+        return generateOpResolveScopeThunk<ClosureVarWithVarInjectionChecks>;
+    case BaselineThunk::ResolveScopeGlobalVar:
+        return generateOpResolveScopeThunk<GlobalVar>;
+    case BaselineThunk::ResolveScopeGlobalProperty:
+        return generateOpResolveScopeThunk<GlobalProperty>;
+    case BaselineThunk::ResolveScopeGlobalLexicalVar:
+        return generateOpResolveScopeThunk<GlobalLexicalVar>;
+    case BaselineThunk::ResolveScopeGlobalVarWithVarInjectionChecks:
+        return generateOpResolveScopeThunk<GlobalVarWithVarInjectionChecks>;
+    case BaselineThunk::ResolveScopeGlobalPropertyWithVarInjectionChecks:
+        return generateOpResolveScopeThunk<GlobalPropertyWithVarInjectionChecks>;
+    case BaselineThunk::ResolveScopeGlobalLexicalVarWithVarInjectionChecks:
+        return generateOpResolveScopeThunk<GlobalLexicalVarWithVarInjectionChecks>;
+    case BaselineThunk::GetFromScopeGlobalVar:
+        return generateOpGetFromScopeThunk<GlobalVar>;
+    case BaselineThunk::GetFromScopeGlobalProperty:
+        return generateOpGetFromScopeThunk<GlobalProperty>;
+    case BaselineThunk::GetFromScopeGlobalLexicalVar:
+        return generateOpGetFromScopeThunk<GlobalLexicalVar>;
+    case BaselineThunk::GetFromScopeGlobalVarWithVarInjectionChecks:
+        return generateOpGetFromScopeThunk<GlobalVarWithVarInjectionChecks>;
+    case BaselineThunk::GetFromScopeGlobalLexicalVarWithVarInjectionChecks:
+        return generateOpGetFromScopeThunk<GlobalLexicalVarWithVarInjectionChecks>;
+    case BaselineThunk::ConsistencyCheck:
+#if ASSERT_ENABLED
+        return consistencyCheckGenerator;
+#else
+        break; // Only builds with the generator emit this key.
+#endif
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 void JIT::emit_op_get_from_arguments(const JSInstruction* currentInstruction)

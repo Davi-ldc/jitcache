@@ -124,9 +124,7 @@ bool BinarySwitch::advance(MacroAssembler& jit)
                     MacroAssembler::Imm32(static_cast<int32_t>(m_cases[code.index].value))));
                 break;
             case IntPtr:
-                m_fallThrough.append(jit.branchPtr(
-                    MacroAssembler::NotEqual, m_value,
-                    MacroAssembler::ImmPtr(std::bit_cast<const void*>(static_cast<intptr_t>(m_cases[code.index].value)))));
+                m_fallThrough.append(branchPtrToCase(jit, MacroAssembler::NotEqual, code.index));
                 break;
             case UInt32CheckRuns:
                 RELEASE_ASSERT_NOT_REACHED();
@@ -141,9 +139,7 @@ bool BinarySwitch::advance(MacroAssembler& jit)
                     MacroAssembler::Imm32(static_cast<int32_t>(m_cases[code.index].value))));
                 break;
             case IntPtr:
-                m_jumpStack.append(jit.branchPtr(
-                    MacroAssembler::NotEqual, m_value,
-                    MacroAssembler::ImmPtr(std::bit_cast<const void*>(static_cast<intptr_t>(m_cases[code.index].value)))));
+                m_jumpStack.append(branchPtrToCase(jit, MacroAssembler::NotEqual, code.index));
                 break;
             case UInt32CheckRuns:
                 RELEASE_ASSERT_NOT_REACHED();
@@ -158,9 +154,7 @@ bool BinarySwitch::advance(MacroAssembler& jit)
                     MacroAssembler::Imm32(static_cast<int32_t>(m_cases[code.index].value))));
                 break;
             case IntPtr:
-                m_jumpStack.append(jit.branchPtr(
-                    MacroAssembler::LessThan, m_value,
-                    MacroAssembler::ImmPtr(std::bit_cast<const void*>(static_cast<intptr_t>(m_cases[code.index].value)))));
+                m_jumpStack.append(branchPtrToCase(jit, MacroAssembler::LessThan, code.index));
                 break;
             case UInt32CheckRuns:
                 RELEASE_ASSERT_NOT_REACHED();
@@ -187,6 +181,14 @@ bool BinarySwitch::advance(MacroAssembler& jit)
             return true;
         }
     }
+}
+
+MacroAssembler::Jump BinarySwitch::branchPtrToCase(MacroAssembler& jit, MacroAssembler::RelationalCondition condition, unsigned rank)
+{
+    intptr_t key = static_cast<intptr_t>(m_cases[rank].value);
+    if (m_rankedComparisons)
+        return m_rankedComparisons->branch(jit, condition, m_value, rank, key);
+    return jit.branchPtr(condition, m_value, MacroAssembler::ImmPtr(std::bit_cast<const void*>(key)));
 }
 
 class RandomNumberGenerator {

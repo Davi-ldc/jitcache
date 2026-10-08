@@ -61,6 +61,14 @@ namespace JSC {
 // }
 // switch.fallThrough().link(&jit);
 
+// Emits the comparisons of an IntPtr switch in place of BinarySwitch's own branchPtr against an ImmPtr. A case's rank is
+// its position among the cases sorted by value, which is the order BinarySwitch builds its tree in.
+class BinarySwitchRankedComparisons {
+public:
+    virtual ~BinarySwitchRankedComparisons() = default;
+    virtual MacroAssembler::Jump branch(MacroAssembler&, MacroAssembler::RelationalCondition, GPRReg value, unsigned rank, intptr_t key) = 0;
+};
+
 class BinarySwitch {
 public:
     enum Type {
@@ -68,22 +76,35 @@ public:
         IntPtr,
         UInt32CheckRuns,
     };
-    
+
     BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type);
     // Contiguous unsigned key runs: each entry is (firstKey, length). firstKey of run 0 must be 0,
     // and each subsequent run must start immediately after the previous (no holes).
     BinarySwitch(GPRReg value, std::span<const std::tuple<uint32_t, size_t>> runs);
     ~BinarySwitch();
-    
+
     unsigned caseIndex() const { return m_cases[m_caseIndex].index; }
     int64_t caseValue() const { return m_cases[m_caseIndex].value; }
-    
+    // The rank of the case advance() is executing: its position among the cases sorted by value.
+    unsigned caseRank() const { return m_caseIndex; }
+
+    // IntPtr switches only, before the first advance(): advance() emits every comparison through comparisons, which
+    // must outlive the switch's emission.
+    void setRankedComparisons(BinarySwitchRankedComparisons* comparisons)
+    {
+        ASSERT(m_type == IntPtr);
+        ASSERT(!m_index);
+        m_rankedComparisons = comparisons;
+    }
+
     bool advance(MacroAssembler&);
-    
+
     MacroAssembler::JumpList& fallThrough() LIFETIME_BOUND { return m_fallThrough; }
-    
+
 private:
     bool isCheckRuns() const { return m_type == UInt32CheckRuns; }
+
+    MacroAssembler::Jump branchPtrToCase(MacroAssembler&, MacroAssembler::RelationalCondition, unsigned rank);
 
     void build(unsigned start, bool hardStart, unsigned end);
     void buildCheckRuns(unsigned start, unsigned end);
@@ -138,6 +159,7 @@ private:
     Vector<BranchCode, 32> m_branches;
     Vector<MacroAssembler::Jump, 32> m_jumpStack;
     MacroAssembler::JumpList m_fallThrough;
+    BinarySwitchRankedComparisons* m_rankedComparisons { nullptr };
     Type m_type;
     GPRReg m_value;
     unsigned m_index { 0 };

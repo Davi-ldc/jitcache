@@ -32,6 +32,7 @@
 #include "DFGJITCode.h"
 #include "DisallowMacroScratchRegisterUsage.h"
 #include "FunctionCodeBlock.h"
+#include "ImageEmission.h"
 #include "JITThunks.h"
 #include "JSCellInlines.h"
 #include "JSWebAssemblyModule.h"
@@ -324,8 +325,12 @@ void CallLinkInfo::setStub(Ref<PolymorphicCallStubRoutine>&& newStub)
 
 void CallLinkInfo::emitFastPathImpl(CallLinkInfo* callLinkInfo, CCallHelpers& jit, bool isTailCall, ScopedLambda<void()>&& prepareForTailCall)
 {
-    if (callLinkInfo)
+    if (callLinkInfo) {
+        // Only the optimizing tiers embed a CallLinkInfo's address; baseline code loads its own from the metadata.
+        if (auto* recorder = jit.jitCacheRecorder()) [[unlikely]]
+            JITCache::noteUnannotatedReference(*recorder);
         jit.move(CCallHelpers::TrustedImmPtr(callLinkInfo), BaselineJITRegisters::Call::callLinkInfoGPR);
+    }
 
     // For RISCV64, scratch register usage here collides with MacroAssembler's internal usage
     // that's necessary for the test-and-branch operation but is avoidable by loading from the callee
@@ -345,7 +350,7 @@ void CallLinkInfo::emitFastPathImpl(CallLinkInfo* callLinkInfo, CCallHelpers& ji
         found.append(jit.branchTestPtr(CCallHelpers::NonZero, scratchGPR, CCallHelpers::TrustedImm32(polymorphicCalleeMask)));
     }
 
-    jit.move(CCallHelpers::TrustedImmPtr(LLInt::defaultCall().code().taggedPtr()), BaselineJITRegisters::Call::callTargetGPR);
+    JITCache::moveReference(jit, JITCache::ImageReference::processThunk(JITCache::ProcessThunk::DefaultCall), BaselineJITRegisters::Call::callTargetGPR);
 
     found.link(&jit);
     if (isTailCall) {

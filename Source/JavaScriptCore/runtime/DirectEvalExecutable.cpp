@@ -32,10 +32,11 @@
 #include "GlobalObjectMethodTable.h"
 #include "JSCJSValueInlines.h"
 #include "ParserError.h"
+#include "UCBRequests.h"
 
 namespace JSC {
 
-DirectEvalExecutable* DirectEvalExecutable::create(JSGlobalObject* globalObject, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, DerivedContextType derivedContextType, NeedsClassFieldInitializer needsClassFieldInitializer, PrivateBrandRequirement privateBrandRequirement, bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType evalContextType, const TDZEnvironment* variablesUnderTDZ, const PrivateNameEnvironment* privateNameEnvironment)
+DirectEvalExecutable* DirectEvalExecutable::create(JSGlobalObject* globalObject, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, DerivedContextType derivedContextType, NeedsClassFieldInitializer needsClassFieldInitializer, PrivateBrandRequirement privateBrandRequirement, bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType evalContextType, const TDZEnvironment* variablesUnderTDZ, const PrivateNameEnvironment* privateNameEnvironment, const JITCache::DirectEvalSite* site)
 {
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -53,7 +54,15 @@ DirectEvalExecutable* DirectEvalExecutable::create(JSGlobalObject* globalObject,
     OptionSet<CodeGenerationMode> codeGenerationMode = globalObject->defaultCodeGenerationMode();
 
     // We don't bother with CodeCache here because direct eval uses a specialized DirectEvalCodeCache.
-    UnlinkedEvalCodeBlock* unlinkedEvalCode = generateUnlinkedCodeBlockForDirectEval(vm, executable, executable->source(), JSParserScriptMode::Classic, codeGenerationMode, error, evalContextType, variablesUnderTDZ, privateNameEnvironment);
+    // JITCache: constructed before generation, so the request's snapshot is the call site's features this function
+    // received (SPEC-ucb.md section 7.2.3); without a site, or without JITCache state, it does nothing.
+    JITCache::DirectEvalRequest jitCacheRequest(vm, *executable, executable->source(), site, codeGenerationMode, evalContextType, variablesUnderTDZ, privateNameEnvironment);
+    UnlinkedEvalCodeBlock* unlinkedEvalCode = jitCacheRequest.tryImport();
+    if (!unlinkedEvalCode) {
+        unlinkedEvalCode = generateUnlinkedCodeBlockForDirectEval(vm, executable, executable->source(), JSParserScriptMode::Classic, codeGenerationMode, error, evalContextType, variablesUnderTDZ, privateNameEnvironment);
+        if (unlinkedEvalCode)
+            jitCacheRequest.didGenerate(*unlinkedEvalCode);
+    }
 
     if (globalObject->hasDebugger())
         globalObject->debugger()->sourceParsed(globalObject, executable->source().provider(), error.line(), error.message());

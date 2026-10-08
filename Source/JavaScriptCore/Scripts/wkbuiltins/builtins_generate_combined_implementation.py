@@ -88,13 +88,16 @@ class BuiltinsCombinedImplementationGenerator(BuiltinsGenerator):
         return "\n\n".join(sections)
 
     # Indexed by BuiltinCodeIndex. This table and the generated JSC_FOREACH_BUILTIN_CODE that the enum is
-    # built from both iterate model().all_functions(), so the two orders agree by construction.
+    # built from both iterate model().all_functions(), so the two orders agree by construction. Each entry
+    # describes originalSource, the text s_JSCCombinedCode holds at that function's offset and name##Source()
+    # spans, and ends with its source digest and a set hasSourceDigest.
     def generate_source_metadata_table(self, function_data):
         lines = []
         lines.append("constinit const JSC::BuiltinSourceMetadata s_JSCBuiltinSourceMetadata[JSC::numberOfBuiltinCodes] = {")
         for data in function_data:
             entry = dict(compute_builtin_source_metadata(data['originalSource']), codeName=data['codeName'])
-            lines.append("    /* %(codeName)s */ { %(sourceLength)d, %(parametersStart)d, %(parameterCount)d, %(lineCount)d, %(endColumn)d, %(offsetOfLastNewline)d, %(positionBeforeLastNewlineLineStartOffset)d, %(closeBraceOffsetFromEnd)d, %(isAsyncFunction)s, %(isInStrictContext)s }," % entry)
+            entry['sourceDigest'] = ", ".join("0x%02x" % byte for byte in entry['sourceDigest'])
+            lines.append("    /* %(codeName)s */ { %(sourceLength)d, %(parametersStart)d, %(parameterCount)d, %(lineCount)d, %(endColumn)d, %(offsetOfLastNewline)d, %(positionBeforeLastNewlineLineStartOffset)d, %(closeBraceOffsetFromEnd)d, %(isAsyncFunction)s, %(isInStrictContext)s, { %(sourceDigest)s }, true }," % entry)
         lines.append("};")
         lines.append("static_assert(%d == JSC::numberOfBuiltinCodes);" % len(function_data))
         return '\n'.join(lines)

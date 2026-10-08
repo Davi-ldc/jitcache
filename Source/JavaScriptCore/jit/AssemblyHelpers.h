@@ -55,6 +55,18 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 
+namespace JITCache {
+class ImageRecorder;
+// What the inline functions below emit, through these hooks, for a VM address once a JITCache recorder is attached
+// to their assembler. They call a hook only then, so emission without a recorder stays inline and native.
+JS_EXPORT_PRIVATE void storePtrToVMAddress(MacroAssembler&, GPRReg, const void* address);
+JS_EXPORT_PRIVATE void loadPtrFromVMAddress(MacroAssembler&, const void* address, GPRReg);
+JS_EXPORT_PRIVATE MacroAssembler::Jump branch32WithVMAddress(MacroAssembler&, MacroAssembler::RelationalCondition, GPRReg left, const void* address);
+JS_EXPORT_PRIVATE MacroAssembler::Jump branchTest8AtVMAddress(MacroAssembler&, MacroAssembler::ResultCondition, const void* address);
+// Leaves the record unrecordable: the caller embeds a reference that no baseline code embeds.
+JS_EXPORT_PRIVATE void noteUnannotatedReference(ImageRecorder&);
+}
+
 typedef void (*V_DebugOperation_EPP)(CallFrame*, void*, void*);
 
 class AssemblyHelpers : public MacroAssembler {
@@ -79,7 +91,10 @@ public:
     {
         UNUSED_PARAM(vm);
 #if ASSERT_ENABLED
-        storePtr(GPRInfo::callFrameRegister, &vm.topCallFrame);
+        if (jitCacheRecorder()) [[unlikely]]
+            JITCache::storePtrToVMAddress(*this, GPRInfo::callFrameRegister, &vm.topCallFrame);
+        else
+            storePtr(GPRInfo::callFrameRegister, &vm.topCallFrame);
 #endif
     }
 
@@ -278,7 +293,10 @@ public:
     void copyCalleeSavesToEntryFrameCalleeSavesBuffer(EntryFrame*& topEntryFrame, GPRReg scratch)
     {
 #if NUMBER_OF_CALLEE_SAVES_REGISTERS > 0
-        loadPtr(&topEntryFrame, scratch);
+        if (jitCacheRecorder()) [[unlikely]]
+            JITCache::loadPtrFromVMAddress(*this, &topEntryFrame, scratch);
+        else
+            loadPtr(&topEntryFrame, scratch);
         copyCalleeSavesToEntryFrameCalleeSavesBufferImpl(scratch);
 #else
         UNUSED_PARAM(topEntryFrame);
@@ -1301,10 +1319,13 @@ public:
 
     Jump barrierBranchWithoutFence(JSCell* cell)
     {
+        // A cell's address, which no baseline code embeds.
+        if (auto* recorder = jitCacheRecorder()) [[unlikely]]
+            JITCache::noteUnannotatedReference(*recorder);
         uint8_t* address = reinterpret_cast<uint8_t*>(cell) + JSCell::cellStateOffset();
         return branch8(Above, AbsoluteAddress(address), TrustedImm32(blackThreshold));
     }
-    
+
     // FIXME: We should name this something more obvious like branchIfCellIsRememberedOrEden. barrierBranch could mean many things.
     // Branch taken if the cell does not need a memory fence or store barrier.
     // When reverse is true, branch taken when the memory barrier or store barrier is needed.
@@ -1314,11 +1335,16 @@ public:
         if (reverse)
             cond = BelowOrEqual;
         load8(Address(cell, JSCell::cellStateOffset()), scratchGPR);
+        if (jitCacheRecorder()) [[unlikely]]
+            return JITCache::branch32WithVMAddress(*this, cond, scratchGPR, vm.heap.addressOfBarrierThreshold());
         return branch32(cond, scratchGPR, AbsoluteAddress(vm.heap.addressOfBarrierThreshold()));
     }
 
     Jump barrierBranch(VM& vm, JSCell* cell, GPRReg scratchGPR)
     {
+        // A cell's address, which no baseline code embeds.
+        if (auto* recorder = jitCacheRecorder()) [[unlikely]]
+            JITCache::noteUnannotatedReference(*recorder);
         uint8_t* address = reinterpret_cast<uint8_t*>(cell) + JSCell::cellStateOffset();
         load8(address, scratchGPR);
         return branch32(Above, scratchGPR, AbsoluteAddress(vm.heap.addressOfBarrierThreshold()));
@@ -1385,6 +1411,8 @@ public:
     
     Jump jumpIfMutatorFenceNotNeeded(VM& vm)
     {
+        if (jitCacheRecorder()) [[unlikely]]
+            return JITCache::branchTest8AtVMAddress(*this, Zero, vm.heap.addressOfMutatorShouldBeFenced());
         return branchTest8(Zero, AbsoluteAddress(vm.heap.addressOfMutatorShouldBeFenced()));
     }
     

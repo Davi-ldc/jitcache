@@ -33,6 +33,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "AccessCase.h"
 #include "AssemblyHelpersSpoolers.h"
 #include "BaselineJITCode.h"
+#include "ImageEmission.h"
 #include "JITOperations.h"
 #include "JSArrayBufferView.h"
 #include "JSCJSValueInlines.h"
@@ -323,7 +324,7 @@ AssemblyHelpers::Jump AssemblyHelpers::emitExceptionCheck(VM& vm, ExceptionCheck
     if (exceptionReg != InvalidGPRReg) {
 #if ASSERT_ENABLED
         JIT_COMMENT(*this, "Exception validation");
-        Jump ok = branchPtr(Equal, AbsoluteAddress(vm.addressOfException()), exceptionReg);
+        Jump ok = JITCache::branchPtrAtReference(*this, Equal, JITCache::ImageReference::vmAddress(vm, JITCache::VMAddress::Exception), exceptionReg);
         breakpoint();
         ok.link(this);
 #endif
@@ -331,7 +332,7 @@ AssemblyHelpers::Jump AssemblyHelpers::emitExceptionCheck(VM& vm, ExceptionCheck
         result = branchTestPtr(kind == NormalExceptionCheck ? NonZero : Zero, exceptionReg);
     } else {
         JIT_COMMENT(*this, "Exception check from vm");
-        result = branchTestPtr(kind == NormalExceptionCheck ? NonZero : Zero, AbsoluteAddress(vm.addressOfException()));
+        result = JITCache::branchTestPtrAtReference(*this, kind == NormalExceptionCheck ? NonZero : Zero, JITCache::ImageReference::vmAddress(vm, JITCache::VMAddress::Exception));
     }
 
     if (width == NormalJumpWidth)
@@ -759,7 +760,7 @@ void AssemblyHelpers::emitNonNullDecodeZeroExtendedStructureID(RegisterID source
 {
 #if CPU(ADDRESS64)
     // This could use BFI on arm64 but that only helps if the start of structure heap is encodable as a mov and not as an immediate in the add so it's probably not super important.
-    or64(TrustedImm64(structureIDBase()), source, dest);
+    JITCache::orStructureIDBase(*this, source, dest);
 #else // not CPU(ADDRESS64)
     move(source, dest);
 #endif
@@ -1137,7 +1138,7 @@ void AssemblyHelpers::restoreCalleeSavesFromEntryFrameCalleeSavesBuffer(EntryFra
     skipList.add(unusedNextSlotGPR, IgnoreVectors);
 #endif
 
-    loadPtr(&topEntryFrame, scratch);
+    JITCache::loadPtrFromVMAddress(*this, &topEntryFrame, scratch);
     restoreCalleeSavesFromVMEntryFrameCalleeSavesBufferImpl(scratch, skipList);
 
     // Restore the callee save value of the scratch.
@@ -1212,6 +1213,9 @@ void AssemblyHelpers::restoreCalleeSavesFromVMEntryFrameCalleeSavesBufferImpl(GP
 
 void AssemblyHelpers::emitVirtualCall(VM& vm, CallLinkInfo* info)
 {
+    // Only the optimizing tiers embed a CallLinkInfo's address.
+    if (auto* recorder = jitCacheRecorder()) [[unlikely]]
+        JITCache::noteUnannotatedReference(*recorder);
     move(TrustedImmPtr(info), GPRInfo::regT2);
     emitVirtualCallWithoutMovingGlobalObject(vm, GPRInfo::regT2, info->callMode());
 }
@@ -1219,7 +1223,7 @@ void AssemblyHelpers::emitVirtualCall(VM& vm, CallLinkInfo* info)
 void AssemblyHelpers::emitVirtualCallWithoutMovingGlobalObject(VM& vm, GPRReg callLinkInfoGPR, CallMode callMode)
 {
     move(callLinkInfoGPR, GPRInfo::regT2);
-    nearCallThunk(CodeLocationLabel<JITStubRoutinePtrTag> { vm.getCTIVirtualCall(callMode).code() });
+    JITCache::nearCallSupport(*this, vm, JITCache::ImageTarget { .kind = JITCache::TargetKind::VirtualCallThunk, .a = static_cast<uint32_t>(callMode), .b = 0, .payload = 0 });
 }
 
 void AssemblyHelpers::rapidHashMix64(GPRReg inputAndResult, GPRReg scratch1, GPRReg scratch2)
@@ -1423,9 +1427,12 @@ AssemblyHelpers::JumpList AssemblyHelpers::branchIfValue(VM& vm, GPRReg value, G
         JumpList isNotMasqueradesAsUndefined;
         isNotMasqueradesAsUndefined.append(branchTest8(Zero, Address(value, JSCell::typeInfoFlagsOffset()), TrustedImm32(MasqueradesAsUndefined)));
         emitLoadStructure(vm, value, scratch);
-        if (std::holds_alternative<JSGlobalObject*>(globalObject))
+        if (std::holds_alternative<JSGlobalObject*>(globalObject)) {
+            // Only the optimizing tiers embed a global object; baseline code loads it.
+            if (auto* recorder = jitCacheRecorder()) [[unlikely]]
+                JITCache::noteUnannotatedReference(*recorder);
             move(TrustedImmPtr(std::get<JSGlobalObject*>(globalObject)), scratchIfShouldCheckMasqueradesAsUndefined);
-        else if (std::holds_alternative<GPRReg>(globalObject))
+        } else if (std::holds_alternative<GPRReg>(globalObject))
             move(std::get<GPRReg>(globalObject), scratchIfShouldCheckMasqueradesAsUndefined);
         else
             loadPtr(Address(GPRInfo::jitDataRegister, BaselineJITData::offsetOfGlobalObject()), scratchIfShouldCheckMasqueradesAsUndefined);
@@ -1449,7 +1456,7 @@ AssemblyHelpers::JumpList AssemblyHelpers::branchIfValue(VM& vm, GPRReg value, G
     }
 
     isString.link(this);
-    truthy.append(branchPtr(invert ? Equal : NotEqual, value, TrustedImmPtr(jsEmptyString(vm))));
+    truthy.append(JITCache::branchPtrWithReference(*this, invert ? Equal : NotEqual, value, JITCache::ImageReference::vmCell(vm, JITCache::VMCell::EmptyString)));
     done.append(jump());
 
     isHeapBigInt.link(this);
@@ -1692,7 +1699,7 @@ void AssemblyHelpers::copyLLIntBaselineCalleeSavesFromFrameOrRegisterToEntryFram
     FPRReg fpTemp2 = allocator.allocateScratchFPR();
     RELEASE_ASSERT(!allocator.didReuseRegisters());
 
-    loadPtr(&topEntryFrame, destBufferGPR);
+    JITCache::loadPtrFromVMAddress(*this, &topEntryFrame, destBufferGPR);
     addPtr(TrustedImm32(EntryFrame::calleeSaveRegistersBufferOffset()), destBufferGPR);
 
     CopySpooler spooler(*this, framePointerRegister, destBufferGPR, temp1, temp2, fpTemp1, fpTemp2);
@@ -1796,7 +1803,7 @@ void AssemblyHelpers::getArityPadding(VM& vm, unsigned numberOfParameters, GPRRe
     and32(TrustedImm32(~1U), scratchGPR0);
     lshiftPtr(TrustedImm32(3), scratchGPR0);
     subPtr(stackPointerRegister, scratchGPR0, scratchGPR1);
-    stackOverflow.append(branchPtr(GreaterThan, AbsoluteAddress(vm.addressOfSoftStackLimit()), scratchGPR1));
+    stackOverflow.append(JITCache::branchPtrAtReference(*this, GreaterThan, JITCache::ImageReference::vmAddress(vm, JITCache::VMAddress::SoftStackLimit), scratchGPR1));
 }
 
 AssemblyHelpers::JumpList AssemblyHelpers::branchIfResizableOrGrowableSharedTypedArrayIsOutOfBounds(GPRReg baseGPR, GPRReg scratchGPR, GPRReg scratch2GPR, std::optional<TypedArrayType> typedArrayType)

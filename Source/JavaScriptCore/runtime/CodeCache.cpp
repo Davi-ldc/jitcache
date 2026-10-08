@@ -31,10 +31,16 @@
 #include "IndirectEvalExecutable.h"
 #include "ModuleProgramExecutable.h"
 #include "ProgramExecutable.h"
+#include "UCBRequests.h"
+#include "UCBTwinGeneration.h"
 #include "VariableEnvironmentInlines.h"
 #include <wtf/TZoneMallocInlines.h>
 
 namespace JSC {
+
+namespace JITCache {
+struct TwinParseResults; // UCBTwinGeneration.h defines it in twins builds, the only ones that pass one.
+}
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CodeCache);
 
@@ -77,8 +83,10 @@ static void generateUnlinkedCodeBlockForFunctions(VM& vm, UnlinkedCodeBlock* unl
         generate(unlinkedCodeBlock->functionExpr(i));
 }
 
+// JITCache: a twin generation (SPEC-ucb.md section 13.2) passes twinParseResults, which receives what
+// executable->recordParse would have, and leaves the executable alone.
 template<class UnlinkedCodeBlockType, class ExecutableType = ScriptExecutable>
-UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, DerivedContextType derivedContextType, bool isArrowFunctionContext, const TDZEnvironment* variablesUnderTDZ = nullptr, const PrivateNameEnvironment* privateNameEnvironment = nullptr, ExecutableType* executable = nullptr)
+UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, DerivedContextType derivedContextType, bool isArrowFunctionContext, const TDZEnvironment* variablesUnderTDZ = nullptr, const PrivateNameEnvironment* privateNameEnvironment = nullptr, ExecutableType* executable = nullptr, JITCache::TwinParseResults* twinParseResults = nullptr)
 {
     typedef typename CacheTypes<UnlinkedCodeBlockType>::RootNode RootNode;
     bool isInsideOrdinaryFunction = executable && executable->isInsideOrdinaryFunction();
@@ -94,7 +102,13 @@ UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& s
     bool endColumnIsOnStartLine = !lineCount;
     unsigned unlinkedEndColumn = rootNode->endColumn();
     unsigned endColumn = unlinkedEndColumn + (endColumnIsOnStartLine ? startColumn : 1);
-    if (executable)
+    if (twinParseResults) {
+#if ENABLE(JITCACHE_TWINS)
+        *twinParseResults = { rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables(), static_cast<int>(rootNode->lastLine()), endColumn };
+#else
+        RELEASE_ASSERT_NOT_REACHED();
+#endif
+    } else if (executable)
         executable->recordParse(rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables(), rootNode->lastLine(), endColumn);
 
     NeedsClassFieldInitializer needsClassFieldInitializer = NeedsClassFieldInitializer::No;
@@ -165,7 +179,6 @@ UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModulePro
     return recursivelyGenerateUnlinkedCodeBlock<UnlinkedModuleProgramCodeBlock>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, depth);
 }
 
-#if USE(BUN_JSC_ADDITIONS)
 void recordParseFromUnlinkedCodeBlock(GlobalExecutable* executable, const SourceCode& source, UnlinkedGlobalCodeBlock* unlinkedCodeBlock)
 {
     unsigned lineCount = unlinkedCodeBlock->lineCount();
@@ -178,7 +191,6 @@ void recordParseFromUnlinkedCodeBlock(GlobalExecutable* executable, const Source
     if (unlinkedCodeBlock->sourceMappingURLDirective())
         source.provider()->setSourceMappingURLDirective(unlinkedCodeBlock->sourceMappingURLDirective());
 }
-#endif
 
 template<class UnlinkedCodeBlockType, class ExecutableType>
 UnlinkedCodeBlockType* CodeCache::getUnlinkedGlobalCodeBlock(VM& vm, ExecutableType* executable, const SourceCode& source, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType)
@@ -189,38 +201,58 @@ UnlinkedCodeBlockType* CodeCache::getUnlinkedGlobalCodeBlock(VM& vm, ExecutableT
         source, String(), CacheTypes<UnlinkedCodeBlockType>::codeType, executable->lexicallyScopedFeatures(), scriptMode,
         derivedContextType, evalContextType, isArrowFunctionContext, codeGenerationMode,
         std::nullopt);
+    // JITCache: snapshots executable->lexicallyScopedFeatures(), the features the key above was built from, before any
+    // step below overwrites them (SPEC-ucb.md section 7.2.1). Without JITCache state the request does nothing, and the
+    // sequence is the native one: map, then the provider's cached bytecode, then generation.
+    JITCache::GlobalRequest jitCacheRequest(vm, *executable, source, CacheTypes<UnlinkedCodeBlockType>::codeType, scriptMode, codeGenerationMode, evalContextType);
     UnlinkedCodeBlockType* unlinkedCodeBlock = m_sourceCode.findCacheAndUpdateAge<UnlinkedCodeBlockType>(vm, key);
     if (unlinkedCodeBlock && Options::useCodeCache()) {
-#if USE(BUN_JSC_ADDITIONS)
         recordParseFromUnlinkedCodeBlock(executable, source, unlinkedCodeBlock);
-#else
-        unsigned lineCount = unlinkedCodeBlock->lineCount();
-        unsigned startColumn = unlinkedCodeBlock->startColumn() + source.startColumn().oneBasedInt();
-        bool endColumnIsOnStartLine = !lineCount;
-        unsigned endColumn = unlinkedCodeBlock->endColumn() + (endColumnIsOnStartLine ? startColumn : 1);
-        executable->recordParse(unlinkedCodeBlock->codeFeatures(), unlinkedCodeBlock->lexicallyScopedFeatures(), unlinkedCodeBlock->hasCapturedVariables(), source.firstLine().oneBasedInt() + lineCount, endColumn);
-        if (unlinkedCodeBlock->sourceURLDirective())
-            source.provider()->setSourceURLDirective(unlinkedCodeBlock->sourceURLDirective());
-        if (unlinkedCodeBlock->sourceMappingURLDirective())
-            source.provider()->setSourceMappingURLDirective(unlinkedCodeBlock->sourceMappingURLDirective());
-#endif
+        jitCacheRequest.didServeLive(*unlinkedCodeBlock);
         return unlinkedCodeBlock;
     }
 
-    unlinkedCodeBlock = generateUnlinkedCodeBlock<UnlinkedCodeBlockType, ExecutableType>(vm, executable, source, scriptMode, codeGenerationMode, error, evalContextType);
-
-    if (unlinkedCodeBlock && Options::useCodeCache()) {
-        m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
-
-        key.source().provider().cacheBytecode([&] {
-            return encodeCodeBlock(vm, key, unlinkedCodeBlock);
-        });
-#if USE(BUN_JSC_ADDITIONS)
-        key.source().provider().didGenerateUnlinkedCodeBlock(vm, key, unlinkedCodeBlock);
-#endif
+    if (!unlinkedCodeBlock) {
+        // A block decoded from the provider's cached bytecode is as reusable as one we generated: remember it the way
+        // generated blocks are remembered, so another global in this VM loading the same source links against this
+        // block instead of decoding its own copy of the unlinked tree. With useCodeCache off the decoded block is
+        // dropped and the code is generated.
+        unlinkedCodeBlock = m_sourceCode.fetchFromDisk<UnlinkedCodeBlockType>(vm, key);
+        if (unlinkedCodeBlock && Options::useCodeCache()) {
+            jitCacheRequest.didDecode(*unlinkedCodeBlock); // seeds it before the map publishes it
+            m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
+            recordParseFromUnlinkedCodeBlock(executable, source, unlinkedCodeBlock);
+            return unlinkedCodeBlock;
+        }
     }
 
+    // JITCache: an import replaces generation only; the holder publishes it as it publishes a generated block.
+    if (auto* imported = jitCacheRequest.tryImport()) {
+        auto* result = uncheckedDowncast<UnlinkedCodeBlockType>(imported);
+        publishGeneratedCodeBlock(vm, key, result);
+        return result;
+    }
+
+    unlinkedCodeBlock = generateUnlinkedCodeBlock<UnlinkedCodeBlockType, ExecutableType>(vm, executable, source, scriptMode, codeGenerationMode, error, evalContextType);
+    if (unlinkedCodeBlock)
+        jitCacheRequest.didGenerate(*unlinkedCodeBlock);
+    publishGeneratedCodeBlock(vm, key, unlinkedCodeBlock);
     return unlinkedCodeBlock;
+}
+
+void CodeCache::publishGeneratedCodeBlock(VM& vm, const SourceCodeKey& key, UnlinkedCodeBlock* unlinkedCodeBlock)
+{
+    if (!unlinkedCodeBlock || !Options::useCodeCache())
+        return;
+
+    m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
+
+    key.source().provider().cacheBytecode([&] {
+        return encodeCodeBlock(vm, key, unlinkedCodeBlock);
+    });
+#if USE(BUN_JSC_ADDITIONS)
+    key.source().provider().didGenerateUnlinkedCodeBlock(vm, key, unlinkedCodeBlock);
+#endif
 }
 
 UnlinkedProgramCodeBlock* CodeCache::getUnlinkedProgramCodeBlock(VM& vm, ProgramExecutable* executable, const SourceCode& source, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error)
@@ -295,6 +327,10 @@ UnlinkedFunctionExecutable* CodeCache::getUnlinkedGlobalFunctionExecutable(VM& v
     // We initially start with hasCapturedVariables = false.
     functionExecutable->recordParse(program->features(), metadata->lexicallyScopedFeatures(), /* hasCapturedVariables */ false);
 
+    // JITCache: the root's identity, before link reads the UFE and before the map publishes it (SPEC-ucb.md section 7.2.4).
+    // A map hit returns a UFE that already has its identity.
+    JITCache::didCreateFunctionConstructorExecutable(vm, *functionExecutable, source, lexicallyScopedFeatures, functionConstructorParametersEndPosition);
+
     if (Options::useCodeCache())
         m_sourceCode.addCache(key, SourceCodeValue(vm, functionExecutable, m_sourceCode.age()));
     return functionExecutable;
@@ -344,5 +380,48 @@ RefPtr<CachedBytecode> serializeBytecode(VM& vm, UnlinkedCodeBlock* codeBlock, c
 {
     return encodeCodeBlock(vm, sourceCodeKeyForSerializedBytecode(vm, source, codeType, lexicallyScopedFeatures, scriptMode, codeGenerationMode), codeBlock, fileHandle, error);
 }
+
+#if ENABLE(JITCACHE_TWINS)
+namespace JITCache {
+
+// SPEC-ucb.md section 13.2: what the request's native generation makes, with the request's snapshot of its features in
+// place of the executable's, which an import has overwritten with the parse's (F18). Every other input comes from the
+// executable, as native generation reads it, since no import changes those fields.
+UnlinkedCodeBlock* generateGlobalTwin(const RequestState& state, TwinParseResults& results, ParserError& error)
+{
+    VM& vm = state.vm;
+    GlobalExecutable* globalExecutable = state.globalExecutable;
+    RELEASE_ASSERT(globalExecutable);
+
+    switch (state.kind) {
+    case RequestKind::Program: {
+        auto* executable = uncheckedDowncast<ProgramExecutable>(globalExecutable);
+        return generateUnlinkedCodeBlockImpl<UnlinkedProgramCodeBlock, ProgramExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, &results);
+    }
+    case RequestKind::Module: {
+        auto* executable = uncheckedDowncast<ModuleProgramExecutable>(globalExecutable);
+        return generateUnlinkedCodeBlockImpl<UnlinkedModuleProgramCodeBlock, ModuleProgramExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, &results);
+    }
+    case RequestKind::IndirectEval: {
+        auto* executable = uncheckedDowncast<IndirectEvalExecutable>(globalExecutable);
+        return generateUnlinkedCodeBlockImpl<UnlinkedEvalCodeBlock, IndirectEvalExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, &results);
+    }
+    case RequestKind::DirectEval: {
+        auto* executable = uncheckedDowncast<DirectEvalExecutable>(globalExecutable);
+        return generateUnlinkedCodeBlockImpl<UnlinkedEvalCodeBlock, DirectEvalExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), state.variablesUnderTDZ, state.privateNameEnvironment, executable, &results);
+    }
+    case RequestKind::FunctionBody:
+        break;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+    return nullptr;
+}
+
+} // namespace JITCache
+#endif // ENABLE(JITCACHE_TWINS)
 
 }

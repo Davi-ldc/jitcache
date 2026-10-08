@@ -196,7 +196,8 @@ static uint32_t crc32cHardware(uint32_t crc, std::span<const uint8_t> bytes)
 }
 #endif
 
-static uint32_t crc32c(uint32_t crc, std::span<const uint8_t> bytes)
+// External linkage: jitcache/JITCachePlatform.h declares it, and JITCache's artifact files are checksummed with it too.
+uint32_t crc32c(uint32_t crc, std::span<const uint8_t> bytes)
 {
 #if CPU(X86_64)
     static const bool hardware = [] {

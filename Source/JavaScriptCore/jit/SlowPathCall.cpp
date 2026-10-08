@@ -29,6 +29,9 @@
 #if ENABLE(JIT)
 
 #include "CCallHelpers.h"
+#include "ImageEmission.h"
+#include "ImageRecorder.h"
+#include "ImageSupport.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "ThunkGenerators.h"
@@ -47,6 +50,16 @@ void JITSlowPathCall::call()
     ASSERT(BytecodeIndex(bytecodeOffset) == m_jit->m_bytecodeIndex);
 
     m_jit->move(JIT::TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
+
+    // Under a recorder the thunk is a support target keyed by its slow-path function, which a consumer finds in its own
+    // engine at the same offset (census A1). Without one, nothing computes the key.
+    if (auto* recorder = m_jit->jitCacheRecorder()) [[unlikely]] {
+        if (auto function = JITCache::CodeSymbol::of(m_slowPathFunction)) {
+            JITCache::nearCallSupport(*m_jit, vm, JITCache::ImageTarget { .kind = JITCache::TargetKind::SlowPathThunk, .a = 0, .b = 0, .payload = function->offset });
+            return;
+        }
+        recorder->markUnrecordable(JITCache::Unrecordable::ForeignCodeSymbol);
+    }
     m_jit->nearCallThunk(CodeLocationLabel { vm.jitStubs->ctiSlowPathFunctionStub(vm, m_slowPathFunction).retaggedCode<NoPtrTag>() });
 }
 

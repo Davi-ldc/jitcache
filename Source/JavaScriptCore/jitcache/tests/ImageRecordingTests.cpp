@@ -27,9 +27,13 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
+#include "BaselineJITRegisters.h"
+#include "BinarySwitch.h"
 #include "CCallHelpers.h"
+#include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "Completion.h"
+#include "DisallowMacroScratchRegisterUsage.h"
 #include "FunctionExecutable.h"
 #include "ImageEmission.h"
 #include "ImageRecorder.h"
@@ -43,6 +47,7 @@
 #include "ProducerBudget.h"
 #include "SourceCode.h"
 #include "UnlinkedCodeBlock.h"
+#include <algorithm>
 #include <wtf/text/MakeString.h>
 
 namespace JSC::JITCache::Tests {
@@ -323,6 +328,60 @@ static bool sameEmission(CCallHelpers& a, CCallHelpers& b)
 #endif
 }
 
+// I4: helper, without a recorder, emits exactly what native does, both starting from the same random seed.
+template<typename Native, typename Helper>
+static void checkNativeEmission(TestContext& context, ASCIILiteral name, const Native& native, const Helper& helper)
+{
+    CCallHelpers nativeJIT;
+    CCallHelpers helperJIT;
+    nativeJIT.seedRandomForTwins(assemblerSeed);
+    helperJIT.seedRandomForTwins(assemblerSeed);
+    native(nativeJIT);
+    helper(helperJIT);
+    if (!sameEmission(nativeJIT, helperJIT))
+        JITCACHE_FAIL(makeString("I4: "_s, name, " differs from the native sequence"_s));
+}
+
+struct RecordedCode {
+    LinkedCode linked;
+    Vector<ImageFixup> fixups; // In footprint order, sites relative to the code.
+};
+
+// The code emit produces under a fresh recorder, followed by a ret, linked, with the fixups the recorder recorded. Reports
+// and returns nullopt when the recorder stopped recording or no executable memory was left.
+template<typename Emit>
+static std::optional<RecordedCode> recordCode(TestContext& context, VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, ASCIILiteral name, const Emit& emit)
+{
+    auto budget = ProducerBudget::createUnlimited();
+    ImageRecorder recorder(RecordingScope::MathICSnippet, vm, unlinkedCodeBlock, budget.copyRef());
+    CCallHelpers jit;
+    recorder.attachTo(jit);
+    emit(jit, recorder);
+    jit.ret();
+    recorder.emitVeneers(jit);
+    if (!recorder.isRecording()) {
+        JITCACHE_FAIL(makeString(name, " left the record unrecordable"_s));
+        return std::nullopt;
+    }
+    LinkBuffer linkBuffer(jit, nullptr, LinkBuffer::Profile::Uncategorized, JITCompilationCanFail);
+    if (linkBuffer.didFailToAllocate()) {
+        JITCACHE_FAIL("no executable memory for the test code"_s);
+        return std::nullopt;
+    }
+    auto bytes = unsafeMakeSpan(static_cast<const uint8_t*>(linkBuffer.debugAddress()), linkBuffer.size());
+    auto codeRef = linkBuffer.finalizeCodeWithoutDisassembly<JITStubRoutinePtrTag>("JITCache image recording test"_s);
+    auto provenance = recorder.finishSnippet(linkBuffer);
+    if (!provenance) {
+        JITCACHE_FAIL(makeString(name, " produced no provenance"_s));
+        return std::nullopt;
+    }
+    // The fixups leave with the test, which releases their charge here; the budget only counts it.
+    size_t fixupBytes = provenance->fixups.capacity() * sizeof(ImageFixup);
+    recorder.handChargeToRecord(fixupBytes);
+    budget->release(fixupBytes);
+    return RecordedCode { LinkedCode { WTF::move(codeRef), bytes }, WTF::move(provenance->fixups) };
+}
+
 } // namespace ImageRecordingTestsInternal
 
 using namespace ImageRecordingTestsInternal;
@@ -347,14 +406,7 @@ JITCACHE_TEST(imageHelpersEmitNativeWithoutRecorder, Yes)
     constexpr GPRReg regT2 = GPRInfo::regT2;
 
     auto check = [&](ASCIILiteral name, const auto& native, const auto& helper) {
-        CCallHelpers nativeJIT;
-        CCallHelpers helperJIT;
-        nativeJIT.seedRandomForTwins(assemblerSeed);
-        helperJIT.seedRandomForTwins(assemblerSeed);
-        native(nativeJIT);
-        helper(helperJIT);
-        if (!sameEmission(nativeJIT, helperJIT))
-            JITCACHE_FAIL(makeString("I4: "_s, name, " differs from the native sequence"_s));
+        checkNativeEmission(context, name, native, helper);
     };
 
     auto handleException = commonThunk(vm, CommonJITThunkID::HandleException);
@@ -392,6 +444,14 @@ JITCACHE_TEST(imageHelpersEmitNativeWithoutRecorder, Yes)
             jit.storeValue(constantValue, Address(regT1, 8));
         }, [&] (CCallHelpers& jit) {
             storeReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), Address(regT1, 8), StoreValueKind::Value);
+        });
+        // An untrusted Imm64, which on x86_64 draws from the random source and may be blinded, as the native move does.
+        check("moveReferenceValue"_s, [&] (CCallHelpers& jit) {
+            jit.moveValue(constantValue, regT0);
+            jit.moveValue(constantValue, regT2);
+        }, [&] (CCallHelpers& jit) {
+            moveReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), regT0);
+            moveReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), regT2);
         });
         check("branchPtrWithReference(atom)"_s, [&] (CCallHelpers& jit) {
             jit.branchPtr(CCallHelpers::Equal, regT2, TrustedImmPtr(asString(constantValue)->tryGetValueImpl())).link(&jit);
@@ -686,6 +746,7 @@ JITCACHE_TEST(imageHelpersRecordFixedFootprints, Yes)
         branchPtrWithReference(jit, CCallHelpers::NotEqual, regT0, expectPointer(ImageReference::vmCell(vm, VMCell::EmptyString))).link(&jit);
         branchPtrWithReference(jit, CCallHelpers::Equal, regT2, expectPointer(ImageReference::ucbConstantAtom(vm, unlinkedCodeBlock, *constant))).link(&jit);
         storeReferenceValue(jit, expectPointer(ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant)), Address(regT1, 8), StoreValueKind::Value);
+        moveReferenceValue(jit, expectPointer(ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant)), regT0);
         storeReferenceValue(jit, expectPointer(ImageReference::vmCell(vm, VMCell::SmallStringsSentinel)), Address(regT1, 24), StoreValueKind::Trusted);
         branchPtrAtReference(jit, CCallHelpers::GreaterThan, expectPointer(ImageReference::vmAddress(vm, VMAddress::SoftStackLimit)), regT1).link(&jit);
         branch32WithReferenceAt(jit, CCallHelpers::Above, regT0, expectPointer(ImageReference::vmAddress(vm, VMAddress::BarrierThreshold))).link(&jit);
@@ -929,6 +990,376 @@ JITCACHE_TEST(imageRefusedBudgetLinksEveryBranch, Yes)
 #else
     UNUSED_VARIABLE(throughVeneer);
 #endif
+}
+
+// Census part A. Under a recorder, each shared helper emits its reference in its recorded form, records it and leaves
+// the record complete. Without one, each helper that now builds its reference through a factory and an emission helper
+// emits its census native expression, restated below (I4), which also checks the factory's value at that site. The
+// inline functions keep their native code and call a hook only under a recorder, and
+// restoreCalleeSavesFromEntryFrameCalleeSavesBuffer and
+// copyLLIntBaselineCalleeSavesFromFrameOrRegisterToEntryFrameCalleeSavesBuffer change only their loadPtr, which becomes
+// loadPtrFromVMAddress, whose I4 imageHelpersEmitNativeWithoutRecorder checks. JITSlowPathCall::call and
+// JIT::exceptionCheck(Jump) emit only inside a JIT, so the baseline compilations of the JS image tests and their twin
+// checks cover them.
+JITCACHE_TEST(imageSharedHelpersRecordTheirReferences, Yes)
+{
+    VM& vm = *context.vm();
+    auto body = makeBody(context, vm);
+    if (!body)
+        return;
+    UnlinkedCodeBlock& unlinkedCodeBlock = *body->unlinkedCodeBlock;
+    auto& binaryProfile = unlinkedCodeBlock.binaryArithProfile(0);
+    auto& unaryProfile = unlinkedCodeBlock.unaryArithProfile(0);
+    using TestOperation = void (*)(VM*);
+    constexpr GPRReg regT0 = GPRInfo::regT0;
+    constexpr GPRReg regT1 = GPRInfo::regT1;
+    constexpr GPRReg regT2 = GPRInfo::regT2;
+    constexpr GPRReg regT3 = GPRInfo::regT3;
+    constexpr uint16_t profileMask = 0x10;
+
+    struct ExpectedFixup {
+        FixupForm form;
+        ImageTarget target;
+        uintptr_t value;
+    };
+    auto pointer = [](TargetKind kind, uint32_t a, const void* value) {
+        return ExpectedFixup { FixupForm::Pointer, makeTarget(kind, a), reinterpret_cast<uintptr_t>(value) };
+    };
+    auto vmAddress = [&](VMAddress address, const void* value) {
+        return pointer(TargetKind::VMAddress, static_cast<uint32_t>(address), value);
+    };
+
+    // Each fixup the helper recorded matches one expected reference, and every expected reference was recorded.
+    auto check = [&](ASCIILiteral name, Vector<ExpectedFixup> expected, const auto& emit) {
+        auto recorded = recordCode(context, vm, unlinkedCodeBlock, name, [&](CCallHelpers& jit, ImageRecorder&) {
+            emit(jit);
+        });
+        if (!recorded)
+            return;
+        if (recorded->fixups.size() != expected.size()) {
+            JITCACHE_FAIL(makeString(name, " recorded "_s, recorded->fixups.size(), " fixups instead of "_s, expected.size()));
+            return;
+        }
+        Vector<bool> matched(expected.size(), false);
+        for (auto& fixup : recorded->fixups) {
+            auto decoded = decodeFixup(recorded->linked.bytes, fixup);
+            bool found = false;
+            for (size_t i = 0; i < expected.size() && !found && decoded; ++i) {
+                if (matched[i] || expected[i].form != fixup.form || expected[i].target != fixup.target)
+                    continue;
+                found = fixup.form == FixupForm::Pointer ? *decoded == expected[i].value : reaches(*decoded, expected[i].value);
+                matched[i] = found;
+            }
+            if (!found)
+                JITCACHE_FAIL(makeString(name, ": the fixup at "_s, fixup.site, " matches no reference the helper emits"_s));
+        }
+    };
+
+    check("emitExceptionCheck"_s, { vmAddress(VMAddress::Exception, vm.addressOfException()) }, [&](CCallHelpers& jit) {
+        jit.emitExceptionCheck(vm).link(&jit);
+    });
+#if ASSERT_ENABLED
+    // The validation of an operation's exception register reads the VM's exception too.
+    check("emitExceptionCheck(exceptionReg)"_s, { vmAddress(VMAddress::Exception, vm.addressOfException()) }, [&](CCallHelpers& jit) {
+        jit.emitExceptionCheck(vm, CCallHelpers::NormalExceptionCheck, CCallHelpers::NormalJumpWidth, regT0).link(&jit);
+    });
+#endif
+    check("emitNonNullDecodeZeroExtendedStructureID"_s, { pointer(TargetKind::StructureIDBase, 0, reinterpret_cast<const void*>(structureIDBase())) }, [&](CCallHelpers& jit) {
+        jit.emitNonNullDecodeZeroExtendedStructureID(regT0, regT1);
+    });
+    check("branchIfTruthy"_s, { pointer(TargetKind::VMCell, static_cast<uint32_t>(VMCell::EmptyString), jsEmptyString(vm)) }, [&](CCallHelpers& jit) {
+        jit.branchIfTruthy(vm, regT0, regT1, InvalidGPRReg, FPRInfo::fpRegT0, FPRInfo::fpRegT1, false, CCallHelpers::LazyBaselineGlobalObject).link(&jit);
+    });
+    check("getArityPadding"_s, { vmAddress(VMAddress::SoftStackLimit, vm.addressOfSoftStackLimit()) }, [&](CCallHelpers& jit) {
+        CCallHelpers::JumpList stackOverflow;
+        jit.getArityPadding(vm, 3, regT0, regT1, regT2, regT3, stackOverflow);
+        stackOverflow.link(&jit);
+    });
+#if NUMBER_OF_CALLEE_SAVES_REGISTERS > 0
+    check("restoreCalleeSavesFromEntryFrameCalleeSavesBuffer"_s, { vmAddress(VMAddress::TopEntryFrame, &vm.topEntryFrame) }, [&](CCallHelpers& jit) {
+        jit.restoreCalleeSavesFromEntryFrameCalleeSavesBuffer(vm.topEntryFrame);
+    });
+    check("copyLLIntBaselineCalleeSavesFromFrameOrRegisterToEntryFrameCalleeSavesBuffer"_s, { vmAddress(VMAddress::TopEntryFrame, &vm.topEntryFrame) }, [&](CCallHelpers& jit) {
+        jit.copyLLIntBaselineCalleeSavesFromFrameOrRegisterToEntryFrameCalleeSavesBuffer(vm.topEntryFrame);
+    });
+    check("copyCalleeSavesToEntryFrameCalleeSavesBuffer"_s, { vmAddress(VMAddress::TopEntryFrame, &vm.topEntryFrame) }, [&](CCallHelpers& jit) {
+        jit.copyCalleeSavesToEntryFrameCalleeSavesBuffer(vm.topEntryFrame, regT0);
+    });
+#endif
+    auto virtualCall = vm.getCTIVirtualCall(CallMode::Regular).code().untaggedPtr();
+    check("emitVirtualCallWithoutMovingGlobalObject"_s, { ExpectedFixup { FixupForm::Call, makeTarget(TargetKind::VirtualCallThunk, static_cast<uint32_t>(CallMode::Regular)), reinterpret_cast<uintptr_t>(virtualCall) } }, [&](CCallHelpers& jit) {
+        jit.emitVirtualCallWithoutMovingGlobalObject(vm, regT0, CallMode::Regular);
+    });
+    check("barrierBranch"_s, { vmAddress(VMAddress::BarrierThreshold, vm.heap.addressOfBarrierThreshold()) }, [&](CCallHelpers& jit) {
+        jit.barrierBranch(vm, regT0, regT1).link(&jit);
+    });
+    check("jumpIfMutatorFenceNotNeeded"_s, { vmAddress(VMAddress::MutatorShouldBeFenced, vm.heap.addressOfMutatorShouldBeFenced()) }, [&](CCallHelpers& jit) {
+        jit.jumpIfMutatorFenceNotNeeded(vm).link(&jit);
+    });
+    Vector<ExpectedFixup> topCallFrame;
+#if ASSERT_ENABLED
+    topCallFrame.append(vmAddress(VMAddress::TopCallFrame, &vm.topCallFrame));
+#endif
+    check("prepareCallOperation"_s, WTF::move(topCallFrame), [&](CCallHelpers& jit) {
+        jit.prepareCallOperation(vm);
+    });
+    check("jumpToExceptionHandler"_s, { vmAddress(VMAddress::TargetMachinePCForThrow, &vm.targetMachinePCForThrow) }, [&](CCallHelpers& jit) {
+        jit.jumpToExceptionHandler(vm);
+    });
+    check("ArithProfile::emitUnconditionalSet(mask)"_s, { pointer(TargetKind::UCBBinaryArithProfile, 0, binaryProfile.addressOfBits()) }, [&](CCallHelpers& jit) {
+        binaryProfile.emitUnconditionalSet(jit, profileMask);
+    });
+    check("ArithProfile::emitUnconditionalSet(GPRReg)"_s, { pointer(TargetKind::UCBUnaryArithProfile, 0, unaryProfile.addressOfBits()) }, [&](CCallHelpers& jit) {
+        unaryProfile.emitUnconditionalSet(jit, regT2);
+    });
+    check("CallLinkInfo::emitDataICFastPath"_s, { pointer(TargetKind::ProcessThunk, static_cast<uint32_t>(ProcessThunk::DefaultCall), LLInt::defaultCall().code().taggedPtr()) }, [&](CCallHelpers& jit) {
+        CallLinkInfo::emitDataICFastPath(jit);
+    });
+    check("setupArguments(ImageReference)"_s, { vmAddress(VMAddress::VM, &vm) }, [&](CCallHelpers& jit) {
+        jit.setupArguments<TestOperation>(ImageReference::vmAddress(vm, VMAddress::VM));
+    });
+    check("setupArguments(nullptr)"_s, { }, [&](CCallHelpers& jit) {
+        jit.setupArguments<TestOperation>(CCallHelpers::TrustedImmPtr(nullptr));
+    });
+
+    checkNativeEmission(context, "emitExceptionCheck"_s, [&](CCallHelpers& jit) {
+        jit.branchTestPtr(CCallHelpers::NonZero, CCallHelpers::AbsoluteAddress(vm.addressOfException())).link(&jit);
+    }, [&](CCallHelpers& jit) {
+        jit.emitExceptionCheck(vm).link(&jit);
+    });
+#if ASSERT_ENABLED
+    checkNativeEmission(context, "emitExceptionCheck(exceptionReg)"_s, [&](CCallHelpers& jit) {
+        auto ok = jit.branchPtr(CCallHelpers::Equal, CCallHelpers::AbsoluteAddress(vm.addressOfException()), regT0);
+        jit.breakpoint();
+        ok.link(&jit);
+        jit.branchTestPtr(CCallHelpers::NonZero, regT0).link(&jit);
+    }, [&](CCallHelpers& jit) {
+        jit.emitExceptionCheck(vm, CCallHelpers::NormalExceptionCheck, CCallHelpers::NormalJumpWidth, regT0).link(&jit);
+    });
+#endif
+    checkNativeEmission(context, "emitNonNullDecodeZeroExtendedStructureID"_s, [&](CCallHelpers& jit) {
+        jit.or64(CCallHelpers::TrustedImm64(structureIDBase()), regT0, regT1);
+    }, [&](CCallHelpers& jit) {
+        jit.emitNonNullDecodeZeroExtendedStructureID(regT0, regT1);
+    });
+    checkNativeEmission(context, "emitVirtualCallWithoutMovingGlobalObject"_s, [&](CCallHelpers& jit) {
+        jit.move(regT0, regT2);
+        jit.nearCallThunk(CodeLocationLabel<JITStubRoutinePtrTag> { vm.getCTIVirtualCall(CallMode::Regular).code() });
+    }, [&](CCallHelpers& jit) {
+        jit.emitVirtualCallWithoutMovingGlobalObject(vm, regT0, CallMode::Regular);
+    });
+    checkNativeEmission(context, "ArithProfile::emitUnconditionalSet(mask)"_s, [&](CCallHelpers& jit) {
+        jit.or16(CCallHelpers::TrustedImm32(profileMask), CCallHelpers::AbsoluteAddress(binaryProfile.addressOfBits()));
+    }, [&](CCallHelpers& jit) {
+        binaryProfile.emitUnconditionalSet(jit, profileMask);
+    });
+    checkNativeEmission(context, "ArithProfile::emitUnconditionalSet(GPRReg)"_s, [&](CCallHelpers& jit) {
+        jit.or16(regT2, CCallHelpers::AbsoluteAddress(unaryProfile.addressOfBits()));
+    }, [&](CCallHelpers& jit) {
+        unaryProfile.emitUnconditionalSet(jit, regT2);
+    });
+#if !USE(BIGINT32)
+    // AssemblyHelpers::branchIfValue for a truthiness test that skips the masquerades-as-undefined check (A7).
+    checkNativeEmission(context, "branchIfTruthy"_s, [&](CCallHelpers& jit) {
+        CCallHelpers::JumpList done;
+        CCallHelpers::JumpList truthy;
+        auto notCell = jit.branchIfNotCell(regT0);
+        auto isString = jit.branchIfString(regT0);
+        auto isHeapBigInt = jit.branchIfHeapBigInt(regT0);
+        truthy.append(jit.jump());
+        isString.link(&jit);
+        truthy.append(jit.branchPtr(CCallHelpers::NotEqual, regT0, CCallHelpers::TrustedImmPtr(jsEmptyString(vm))));
+        done.append(jit.jump());
+        isHeapBigInt.link(&jit);
+        truthy.append(jit.branchTest32(CCallHelpers::NonZero, CCallHelpers::Address(regT0, JSBigInt::offsetOfLength())));
+        done.append(jit.jump());
+        notCell.link(&jit);
+        auto notInt32 = jit.branchIfNotInt32(regT0);
+        truthy.append(jit.branchTest32(CCallHelpers::NonZero, regT0));
+        done.append(jit.jump());
+        notInt32.link(&jit);
+        auto notDouble = jit.branchIfNotDoubleKnownNotInt32(regT0);
+        jit.unboxDouble(regT0, regT1, FPRInfo::fpRegT0);
+        done.append(jit.branchDoubleZeroOrNaN(FPRInfo::fpRegT0, FPRInfo::fpRegT1));
+        truthy.append(jit.jump());
+        notDouble.link(&jit);
+        truthy.append(jit.branch64(CCallHelpers::Equal, regT0, CCallHelpers::TrustedImm64(JSValue::encode(jsBoolean(true)))));
+        done.link(&jit);
+        truthy.link(&jit);
+    }, [&](CCallHelpers& jit) {
+        jit.branchIfTruthy(vm, regT0, regT1, InvalidGPRReg, FPRInfo::fpRegT0, FPRInfo::fpRegT1, false, CCallHelpers::LazyBaselineGlobalObject).link(&jit);
+    });
+#endif
+    // A8, three declared parameters.
+    checkNativeEmission(context, "getArityPadding"_s, [&](CCallHelpers& jit) {
+        constexpr unsigned numberOfParameters = 3;
+        CCallHelpers::JumpList stackOverflow;
+        if (WTF::roundUpToMultipleOf(stackAlignmentRegisters(), numberOfParameters + CallFrame::headerSizeInRegisters) == numberOfParameters + CallFrame::headerSizeInRegisters)
+            jit.move(CCallHelpers::TrustedImm32(numberOfParameters), regT1);
+        else
+            jit.move(CCallHelpers::TrustedImm32(numberOfParameters + 1), regT1);
+        jit.sub32(regT1, regT0, regT1);
+        jit.add32(CCallHelpers::TrustedImm32(1), regT1, regT2);
+        jit.and32(CCallHelpers::TrustedImm32(~1U), regT2);
+        jit.lshiftPtr(CCallHelpers::TrustedImm32(3), regT2);
+        jit.subPtr(CCallHelpers::stackPointerRegister, regT2, regT3);
+        stackOverflow.append(jit.branchPtr(CCallHelpers::GreaterThan, CCallHelpers::AbsoluteAddress(vm.addressOfSoftStackLimit()), regT3));
+        stackOverflow.link(&jit);
+    }, [&](CCallHelpers& jit) {
+        CCallHelpers::JumpList stackOverflow;
+        jit.getArityPadding(vm, 3, regT0, regT1, regT2, regT3, stackOverflow);
+        stackOverflow.link(&jit);
+    });
+#if NUMBER_OF_CALLEE_SAVES_REGISTERS > 0
+    // The inline A10.
+    checkNativeEmission(context, "copyCalleeSavesToEntryFrameCalleeSavesBuffer"_s, [&](CCallHelpers& jit) {
+        jit.loadPtr(&vm.topEntryFrame, regT0);
+        jit.copyCalleeSavesToEntryFrameCalleeSavesBuffer(regT0);
+    }, [&](CCallHelpers& jit) {
+        jit.copyCalleeSavesToEntryFrameCalleeSavesBuffer(vm.topEntryFrame, regT0);
+    });
+#endif
+#if !CPU(RISCV64)
+    // CallLinkInfo::emitFastPathImpl for a baseline call, which loads its CallLinkInfo from the metadata (A15).
+    checkNativeEmission(context, "CallLinkInfo::emitDataICFastPath"_s, [&](CCallHelpers& jit) {
+        constexpr GPRReg calleeGPR = BaselineJITRegisters::Call::calleeGPR;
+        constexpr GPRReg callLinkInfoGPR = BaselineJITRegisters::Call::callLinkInfoGPR;
+        constexpr GPRReg callTargetGPR = BaselineJITRegisters::Call::callTargetGPR;
+        CCallHelpers::JumpList found;
+        jit.loadPtr(CCallHelpers::Address(callLinkInfoGPR, CallLinkInfo::offsetOfMonomorphicCallDestination()), callTargetGPR);
+        {
+            GPRReg scratchGPR = jit.scratchRegister();
+            DisallowMacroScratchRegisterUsage disallowScratch(jit);
+            jit.loadPtr(CCallHelpers::Address(callLinkInfoGPR, CallLinkInfo::offsetOfCallee()), scratchGPR);
+            found.append(jit.branchPtr(CCallHelpers::Equal, scratchGPR, calleeGPR));
+            found.append(jit.branchTestPtr(CCallHelpers::NonZero, scratchGPR, CCallHelpers::TrustedImm32(CallLinkInfo::polymorphicCalleeMask)));
+        }
+        jit.move(CCallHelpers::TrustedImmPtr(LLInt::defaultCall().code().taggedPtr()), callTargetGPR);
+        found.link(&jit);
+        jit.transferPtr(CCallHelpers::Address(callLinkInfoGPR, CallLinkInfo::offsetOfCodeBlock()), CCallHelpers::calleeFrameCodeBlockBeforeCall());
+        jit.call(callTargetGPR, JSEntryPtrTag);
+    }, [&](CCallHelpers& jit) {
+        CallLinkInfo::emitDataICFastPath(jit);
+    });
+#endif
+}
+
+// The census paths no baseline code takes, and the guard on pointer arguments, leave the record unrecordable.
+JITCACHE_TEST(imageSharedHelpersMarkUnannotatedReferences, Yes)
+{
+    VM& vm = *context.vm();
+    auto body = makeBody(context, vm);
+    if (!body)
+        return;
+    using TestOperation = void (*)(VM*);
+    JSCell* cell = body->globalObject;
+
+    auto check = [&](ASCIILiteral name, Unrecordable expected, const auto& emit) {
+        ImageRecorder recorder(RecordingScope::MathICSnippet, vm, *body->unlinkedCodeBlock, ProducerBudget::createUnlimited());
+        CCallHelpers jit;
+        recorder.attachTo(jit);
+        emit(jit);
+        if (recorder.isRecording() || recorder.unrecordableReason() != expected)
+            JITCACHE_FAIL(makeString(name, " did not leave the record unrecordable for its reason"_s));
+    };
+
+    check("setupArguments(TrustedImmPtr)"_s, Unrecordable::UnannotatedPointerArgument, [&](CCallHelpers& jit) {
+        jit.setupArguments<TestOperation>(CCallHelpers::TrustedImmPtr(&vm));
+    });
+    check("barrierBranch(JSCell*)"_s, Unrecordable::UnannotatedReference, [&](CCallHelpers& jit) {
+        jit.barrierBranch(vm, cell, GPRInfo::regT0).link(&jit);
+    });
+    check("barrierBranchWithoutFence(JSCell*)"_s, Unrecordable::UnannotatedReference, [&](CCallHelpers& jit) {
+        jit.barrierBranchWithoutFence(cell).link(&jit);
+    });
+    check("branchIfTruthy(JSGlobalObject*)"_s, Unrecordable::UnannotatedReference, [&](CCallHelpers& jit) {
+        jit.branchIfTruthy(vm, GPRInfo::regT0, GPRInfo::regT1, GPRInfo::regT2, FPRInfo::fpRegT0, FPRInfo::fpRegT1, true, body->globalObject).link(&jit);
+    });
+
+    // The optimizing tiers' calls, which embed their CallLinkInfo's address (A11a, A15a).
+    OptimizingCallLinkInfo callLinkInfo;
+    callLinkInfo.setUpCall(CallLinkInfo::Call);
+    check("emitVirtualCall(CallLinkInfo*)"_s, Unrecordable::UnannotatedReference, [&](CCallHelpers& jit) {
+        jit.emitVirtualCall(vm, &callLinkInfo);
+    });
+    check("CallLinkInfo::emitFastPath(OptimizingCallLinkInfo*)"_s, Unrecordable::UnannotatedReference, [&](CCallHelpers& jit) {
+        CallLinkInfo::emitFastPath(jit, CompileTimeCallLinkInfo { &callLinkInfo });
+    });
+}
+
+// An inline switch_string's tree records its ranks (SPEC-image section 3.7, I15): every comparison against the key of
+// rank r is a Pointer fixup with target SwitchStringRankAtom(table, r) holding that key, every rank has one, and the leaf
+// jump that executes rank r is that rank's only SwitchStringRankCase fixup.
+JITCACHE_TEST(imageStringSwitchRecordsRanks, Yes)
+{
+    VM& vm = *context.vm();
+    auto body = makeBody(context, vm);
+    if (!body)
+        return;
+    constexpr unsigned tableIndex = 2;
+    // Distinct ints lie at least four bytes apart, so no two keys are consecutive values, as with distinct atoms, and the
+    // tree compares every key. The keys go in against their address order, so that a case's index and rank differ.
+    static int keyStorage[9];
+    Vector<int64_t> keys;
+    for (size_t i = std::size(keyStorage); i--;)
+        keys.append(static_cast<int64_t>(reinterpret_cast<intptr_t>(&keyStorage[i])));
+    Vector<int64_t> sortedKeys = keys;
+    std::sort(sortedKeys.begin(), sortedKeys.end());
+    unsigned keyCount = keys.size();
+
+    Vector<unsigned> executions(keyCount, 0);
+    auto recorded = recordCode(context, vm, *body->unlinkedCodeBlock, "the string switch"_s, [&](CCallHelpers& jit, ImageRecorder& recorder) {
+        StringSwitchRecording recording(recorder, tableIndex);
+        BinarySwitch binarySwitch(GPRInfo::regT0, keys.span(), BinarySwitch::IntPtr);
+        binarySwitch.setRankedComparisons(&recording);
+        CCallHelpers::JumpList leaves;
+        while (binarySwitch.advance(jit)) {
+            unsigned rank = binarySwitch.caseRank();
+            if (rank >= keyCount || sortedKeys[rank] != keys[binarySwitch.caseIndex()]) {
+                JITCACHE_FAIL(makeString("case "_s, binarySwitch.caseIndex(), " executes with rank "_s, rank));
+                return;
+            }
+            ++executions[rank];
+            auto leaf = jit.jump();
+            recording.recordCase(leaf, rank);
+            leaves.append(leaf);
+        }
+        binarySwitch.fallThrough().link(&jit);
+        leaves.link(&jit);
+    });
+    if (!recorded)
+        return;
+    for (unsigned rank = 0; rank < keyCount; ++rank)
+        JITCACHE_CHECK(executions[rank] == 1);
+
+    Vector<unsigned> atomFixups(keyCount, 0);
+    Vector<unsigned> caseFixups(keyCount, 0);
+    auto codeStart = reinterpret_cast<uintptr_t>(recorded->linked.bytes.data());
+    auto codeEnd = codeStart + recorded->linked.bytes.size();
+    for (auto& fixup : recorded->fixups) {
+        auto& target = fixup.target;
+        auto decoded = decodeFixup(recorded->linked.bytes, fixup);
+        bool isRankFixup = (target.kind == TargetKind::SwitchStringRankAtom || target.kind == TargetKind::SwitchStringRankCase)
+            && target.a == tableIndex && target.b < keyCount && !target.payload;
+        if (!isRankFixup || !decoded) {
+            JITCACHE_FAIL(makeString("the fixup at "_s, fixup.site, " is not a rank fixup of the table"_s));
+            continue;
+        }
+        if (target.kind == TargetKind::SwitchStringRankAtom) {
+            JITCACHE_CHECK(fixup.form == FixupForm::Pointer);
+            JITCACHE_CHECK(*decoded == static_cast<uintptr_t>(sortedKeys[target.b]));
+            ++atomFixups[target.b];
+            continue;
+        }
+        // The case jump is an internal branch, which stays inside the code.
+        JITCACHE_CHECK(fixup.form == FixupForm::Jump);
+        JITCACHE_CHECK(*decoded >= codeStart && *decoded < codeEnd);
+        ++caseFixups[target.b];
+    }
+    for (unsigned rank = 0; rank < keyCount; ++rank) {
+        JITCACHE_CHECK(atomFixups[rank] >= 1);
+        JITCACHE_CHECK(caseFixups[rank] == 1);
+    }
 }
 
 } // namespace JSC::JITCache::Tests

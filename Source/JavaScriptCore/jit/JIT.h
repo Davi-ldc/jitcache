@@ -39,6 +39,7 @@
 #include "JSInterfaceJIT.h"
 #include "LLIntData.h"
 #include "PCToCodeOriginMap.h"
+#include "ThunkGenerator.h"
 #include <wtf/SequesteredMalloc.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/UniqueRef.h>
@@ -63,6 +64,10 @@ namespace JSC {
 
     namespace LOL {
         class LOLJIT;
+    }
+
+    namespace JITCache {
+        enum class BaselineThunk : uint8_t;
     }
 
     template<typename> struct BaseInstruction;
@@ -191,6 +196,10 @@ namespace JSC {
 
         JS_EXPORT_PRIVATE static UncheckedKeyHashMap<CString, Seconds> compileTimeStats();
         JS_EXPORT_PRIVATE static Seconds NODELETE totalCompileTime();
+
+        // The private thunk generator a JITCache support key names. Defined in JITPropertyAccess.cpp, the one file that
+        // defines the scope thunk templates whose specializations it names.
+        static ThunkGenerator baselineThunkGenerator(JITCache::BaselineThunk);
 
     private:
         void privateCompileMainPass();
