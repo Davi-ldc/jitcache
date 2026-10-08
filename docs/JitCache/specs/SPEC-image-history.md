@@ -18,11 +18,21 @@ The writers trust their site (N21). `ARM64Assembler::linkJump` treats a `nop` at
 
 Capture now writes each footprint in its canonical encoding (section 8.4), and V3 checks the encoding before any writer runs. V3 first ran on every import; once THREAD made strict off by default, normal mode trusts the checksummed bytes this lane's capture wrote (I8), and V3 runs under strict.
 
+## Fixup order
+
+The first design kept fixups sorted by site, and V3 required sites to strictly increase. That holds on x86_64, where every site ends its footprint.
+
+On ARM64 a `Call`'s site ends its `bl` while a `Pointer`'s or a `Jump`'s site starts its first word, so a `bl` followed at once by a recorded `movz` or `b` puts two fixups at one site. Release builds emit nothing between bytecodes, so this happens wherever a `DEFINE_SLOW_OP` op, which ends with the `bl` of `JITSlowPathCall::call`, precedes a `mov` of a string constant or a `check_traps`, as in `` var a = `${x}y`; var t = "x"; ``. V3 rejected such a body, which under strict turned cache activity off on valid work, and a sort by site alone left the pair's order to `std::sort`, so a record could list the `Pointer` first and fail its own footprint check.
+
+Fixups now follow their footprints: by site, and at a shared site the `Call` first. V3 checks that each footprint starts at or after the end of the one before it, which holds exactly for the order a correct capture writes, and lookups name a fixup by its site and form, which together name at most one.
+
 ## Code symbols and the thunk enumeration
 
 The consumer resolves support keys during import, and resolving a thunk key may run the thunk's generator, so a key read from a file must never name the code to run. C++ operations and slow-path functions are different: the consumer only takes their address, or hands it to `JITThunks::ctiSlowPathFunctionStub` as data. A table of operations was not available either, since the Linux build has no `JITOperationList` section.
 
 The SPEC keys C++ functions by `CodeSymbol`, an offset from `codeSymbolAnchor` in the engine object, which the header's build ID makes stable (section 3.5), and thunk generators by the closed `BaselineThunk` enumeration that `JIT::baselineThunkGenerator` maps (section 3.4). The producer's emitters go through the same mapping.
+
+`JIT::baselineThunkGenerator` was first defined in `JIT.cpp`. Twelve of its entries are specializations of `generateOpResolveScopeThunk` and `generateOpGetFromScopeThunk`, member templates defined only in `JITPropertyAccess.cpp`, which the unified build compiles in another bundle, and nothing instantiates them explicitly. `JIT.cpp` would link only while the native scope emitters instantiated every one, and the census replaces those calls with the mapping itself. The definition moved to `JITPropertyAccess.cpp`.
 
 ## String switch ranks
 
@@ -167,3 +177,7 @@ The runner now places the pool and the structure reservation apart before `JSC::
 ## The scope thunk key
 
 Keying `get_from_scope`'s thunk call by the profiled resolve type seemed right. The default branch of `JIT::emit_op_get_from_scope` mixes `if` and `else if`, so `ClosureVarWithVarInjectionChecks` and `GlobalPropertyWithVarInjectionChecks` link `GetFromScopeGlobalVar`. Keying by type would change native bytes (I4) and bake a shape no fact records. The census keys the thunk the native chain links (census D4), and T20 checks it.
+
+## Untrusted constant moves
+
+`moveReference` seemed right for census B6, a UCB-owned cell constant moved into a register. B6's native code is `moveValue`, an untrusted `Imm64` move. On x86_64, `MacroAssembler::shouldBlind(Imm64)` screens a cell pointer as a double and draws from the assembler's random source at least once, blinding about once in 4096, while `moveReference`'s trusted move draws nothing. Without a recorder, B6 would have changed the bytes at the site whenever blinding fired and shifted every later blinding decision of the compilation, which I4 forbids. The pin comparison folds blinded moves back to their constants, so it would not have shown the change. C1 already kept its untrusted `storeValue` through `storeReferenceValue`. B6 now goes through `moveReferenceValue`, whose native sequence is `moveValue`, and section 4.3 states the rule for both.

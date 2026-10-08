@@ -45,7 +45,7 @@ A17 covers the exception check after every operation call (`JIT::appendCallWithE
 | B3 | same | `jumpThunk(getCTIStub(CommonJITThunkID::ThrowStackOverflowAtPrologue))` | `CommonThunk::ThrowStackOverflowAtPrologue` | `jumpSupport` |
 | B4 | same | `getArityPadding(*m_vm, ...)` | A8 | A8 |
 | B5 | `JIT::emitConsistencyCheck` (`ASSERT_ENABLED`) | `nearTailCallThunk(getCTIStub(consistencyCheckGenerator))` | `BaselineThunk::ConsistencyCheck` | `nearTailCallSupport` |
-| B6 | `JIT::emitGetVirtualRegister` (JITInlines.h) | `moveValue(m_unlinkedCodeBlock->getConstant(src), dst)` for a UCB-owned constant | a cell: `UCBConstantCell(src.toConstantIndex())`; anything else is a literal | `moveReference` for a cell, native otherwise |
+| B6 | `JIT::emitGetVirtualRegister` (JITInlines.h) | `moveValue(m_unlinkedCodeBlock->getConstant(src), dst)` for a UCB-owned constant | a cell: `UCBConstantCell(src.toConstantIndex())`; anything else is a literal | `moveReferenceValue` for a cell, native otherwise |
 | B7 | `JIT::appendCallWithExceptionCheck`, both overloads (JITInlines.h, `ASSERT_ENABLED`) | `branchPtr(Equal, AbsoluteAddress(vm().addressOfException()), reg)` | `VMAddress::Exception` | `branchPtrAtReference` |
 | B8 | `JIT::updateTopCallFrame` (JITInlines.h) | `prepareCallOperation(*m_vm)` | A2 | A2 |
 | B9 | `JIT::appendCall` | far call | `Operation` | recorded centrally in `JIT::link` (SPEC-image section 4.7) |
