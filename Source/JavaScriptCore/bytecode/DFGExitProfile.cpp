@@ -93,12 +93,20 @@ bool ExitProfile::hasExitSite(const ConcurrentJSLocker&, const FrequentExitSite&
 {
     if (!m_frequentExitSites)
         return false;
-    
+
     for (unsigned i = m_frequentExitSites->size(); i--;) {
         if (site.subsumes(m_frequentExitSites->at(i)))
             return true;
     }
     return false;
+}
+
+void ExitProfile::restoreFrequentExitSites(const ConcurrentJSLocker&, Vector<FrequentExitSite>&& sites)
+{
+    ASSERT(!m_frequentExitSites);
+    if (sites.isEmpty())
+        return;
+    m_frequentExitSites = makeUnique<Vector<FrequentExitSite>>(WTF::move(sites));
 }
 
 QueryableExitProfile::QueryableExitProfile() = default;
