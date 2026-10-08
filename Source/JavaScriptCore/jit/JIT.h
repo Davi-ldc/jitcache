@@ -68,6 +68,7 @@ namespace JSC {
 
     namespace JITCache {
         enum class BaselineThunk : uint8_t;
+        class ImageRecorder;
     }
 
     template<typename> struct BaseInstruction;
@@ -913,6 +914,11 @@ namespace JSC {
         struct NotACodeBlock { } m_codeBlock;
 
         bool m_isShareable { true };
+
+        // JITCache: records this compilation's references while its VM produces, and leaves the record on the code
+        // (SPEC-image.md section 4). Attached to this assembler for the whole compilation; JIT.cpp, where the
+        // constructor and destructor live, sees the complete type.
+        std::unique_ptr<JITCache::ImageRecorder> m_imageRecorder;
     };
 
 } // namespace JSC

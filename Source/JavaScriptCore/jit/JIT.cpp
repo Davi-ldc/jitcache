@@ -35,6 +35,8 @@
 #include "CodeBlockWithJITType.h"
 #include "DFGCapabilities.h"
 #include "ImageEmission.h"
+#include "ImageRecord.h"
+#include "ImageRecorder.h"
 #include "JITInlines.h"
 #include "JITOperations.h"
 #include "JITSizeStatistics.h"
@@ -47,6 +49,7 @@
 #include "ModuleProgramCodeBlock.h"
 #include "PCToCodeOriginMap.h"
 #include "ProbeContext.h"
+#include "ProducerBudget.h"
 #include "ProfilerDatabase.h"
 #include "ProgramCodeBlock.h"
 #include "SlowPathCall.h"
@@ -736,6 +739,18 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
         break;
     }
 
+    // JITCache: the compilation records its image when its plan says the UCB has a record and the VM still produces
+    // (SPEC-image.md section 4.1). The recorder is attached before anything is emitted, and takes the facts the code
+    // bakes from this CodeBlock without a guard: the capability class read above and the taint (section 7).
+    if (!m_imageRecorder && m_plan.jitCacheRecordsImage()) {
+        if (auto* context = JITCache::producerContext(vm()))
+            m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, context->budget());
+    }
+    if (m_imageRecorder) {
+        m_imageRecorder->attachTo(*this);
+        m_imageRecorder->bakedFacts().setCodeBlockFacts(level, m_profiledCodeBlock->couldBeTainted());
+    }
+
     if (m_unlinkedCodeBlock->numberOfUnlinkedSwitchJumpTables() || m_unlinkedCodeBlock->numberOfUnlinkedStringSwitchJumpTables()) {
         if (m_unlinkedCodeBlock->numberOfUnlinkedSwitchJumpTables())
             m_switchJumpTables = FixedVector<SimpleJumpTable>(m_unlinkedCodeBlock->numberOfUnlinkedSwitchJumpTables());
@@ -861,6 +876,11 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     stackOverflow.link(this);
     jumpThunk(CodeLocationLabel(vm().getCTIStub(CommonJITThunkID::ThrowStackOverflowAtPrologue).retaggedCode<NoPtrTag>()));
 
+    // JITCache: on ARM64, one veneer per target of the conditional jumps that leave the image, after all other code
+    // (SPEC-image.md section 4.5). Nothing on x86_64.
+    if (m_imageRecorder)
+        m_imageRecorder->emitVeneers(*this);
+
     ASSERT(m_jmpTable.isEmpty());
 
     if (m_disassembler)
@@ -873,8 +893,14 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
 
 RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
 {
-    if (patchBuffer.didFailToAllocate())
+    if (patchBuffer.didFailToAllocate()) {
+        // JITCache: the recorder goes with the failed compilation and releases its charges (SPEC-image.md section 4.7).
+        if (m_imageRecorder) {
+            setJITCacheRecorder(nullptr);
+            m_imageRecorder = nullptr;
+        }
         return nullptr;
+    }
 
     // Translate vPC offsets into addresses in JIT generated code, for switch tables.
     for (auto& record : m_switches) {
@@ -1016,6 +1042,11 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
     jitCode->m_constantPool = WTF::move(m_constantPool);
     jitCode->m_isShareable = m_isShareable;
     jitCode->m_pcToCodeOriginMap = WTF::move(pcToCodeOriginMap);
+
+    // JITCache: the record describes the linked code, after the link tasks have set the MathICs' locations, and lives
+    // exactly as long as the code (SPEC-image.md sections 4.7 and 5).
+    if (m_imageRecorder)
+        jitCode->m_jitCacheImageRecord = m_imageRecorder->finishBaselineCompile(patchBuffer, jitCode.get(), m_farCalls.span());
 
     if (JITInternal::verbose)
         dataLogF("JIT generated code for %p at [%p, %p).\n", m_unlinkedCodeBlock, result.executableMemory()->start().untaggedPtr(), result.executableMemory()->end().untaggedPtr());

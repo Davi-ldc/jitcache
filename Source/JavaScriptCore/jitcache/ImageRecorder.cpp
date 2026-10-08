@@ -29,12 +29,15 @@
 #if ENABLE(JIT)
 
 #include "ArithProfile.h"
+#include "BaselineJITCode.h"
 #include "ImageRecord.h"
 #include "ImageSection.h"
 #include "ImageSupport.h"
+#include "JIT.h"
 #include "LinkBuffer.h"
 #include "UnlinkedCodeBlock.h"
 #include <algorithm>
+#include <limits>
 #include <wtf/MathExtras.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -61,6 +64,12 @@ namespace ImageRecorderInternal {
 static ImageTarget makeTarget(TargetKind kind, uint32_t a = 0)
 {
     return ImageTarget { .kind = kind, .a = a, .b = 0, .payload = 0 };
+}
+
+static std::span<const uint8_t> linkedBytesOf(LinkBuffer& linkBuffer)
+{
+    // The bytes the LinkBuffer wrote, its linked size; the allocation can extend past them (SPEC-image.md N20).
+    return unsafeMakeSpan(static_cast<const uint8_t*>(linkBuffer.debugAddress()), linkBuffer.size());
 }
 
 } // namespace ImageRecorderInternal
@@ -362,22 +371,25 @@ uint32_t ImageRecorder::binarySwitchSeed(uint32_t drawn)
 }
 #endif
 
-bool ImageRecorder::translateFixups(LinkBuffer& linkBuffer)
+void ImageRecorder::translateSites(LinkBuffer& linkBuffer)
 {
     for (auto& fixup : m_fixups)
         fixup.site = linkBuffer.offsetOf(AssemblerLabel(fixup.site));
-    std::sort(m_fixups.begin(), m_fixups.end(), [](const ImageFixup& a, const ImageFixup& b) {
-        return a.site < b.site;
-    });
+}
 
-    auto code = unsafeMakeSpan(static_cast<const uint8_t*>(linkBuffer.debugAddress()), linkBuffer.size());
+bool ImageRecorder::orderAndCheckFixups(std::span<const uint8_t> linkedCode)
+{
+    // Distinct fixups never compare equal in a valid record: two at one site and of one form, or a Pointer and a Jump at
+    // one site, overlap, which the check below reports.
+    std::sort(m_fixups.begin(), m_fixups.end(), precedesInFootprintOrder);
+
     size_t previousEnd = 0;
     for (auto& fixup : m_fixups) {
         // Each footprint holds its form's instruction (table 3.2), whose canonical encoding capture will write.
-        auto footprint = fixupFootprint(fixup.form, fixup.site, code);
+        auto footprint = fixupFootprint(fixup.form, fixup.site, linkedCode);
         bool consistent = footprint && footprint->begin >= previousEnd;
         if (consistent) {
-            auto bytes = code.subspan(footprint->begin, footprint->size());
+            auto bytes = linkedCode.subspan(footprint->begin, footprint->size());
             consistent = isCanonicalFootprint(fixup.form, canonicalFootprint(fixup.form, bytes).span());
         }
         if (!consistent) {
@@ -390,11 +402,156 @@ bool ImageRecorder::translateFixups(LinkBuffer& linkBuffer)
     return true;
 }
 
+void ImageRecorder::recordFarCalls(LinkBuffer& linkBuffer, std::span<const FarCallRecord> farCalls)
+{
+    ASSERT(isRecording());
+    auto count = static_cast<size_t>(std::ranges::count_if(farCalls, [](const FarCallRecord& farCall) {
+        return !!farCall.callee;
+    }));
+    if (!reserveRecorded(m_fixups, count, 0))
+        return;
+
+    for (auto& farCall : farCalls) {
+        if (!farCall.callee)
+            continue;
+        auto symbol = CodeSymbol::of(farCall.callee.untaggedPtr());
+        if (!symbol) {
+            markUnrecordable(Unrecordable::ForeignCodeSymbol);
+            return;
+        }
+        // JIT::link fills the placeholder through LinkBuffer::link, whose writer takes this site (N2).
+        auto site = farCallPointerSite(linkBuffer.offsetOf(farCall.from.m_label));
+        if (!site) {
+            ASSERT_NOT_REACHED();
+            markUnrecordable(Unrecordable::InconsistentRecord);
+            return;
+        }
+        m_fixups.append(ImageFixup {
+            .site = *site,
+            .form = FixupForm::Pointer,
+            .target = ImageTarget { .kind = TargetKind::Operation, .a = 0, .b = 0, .payload = symbol->offset },
+        });
+    }
+}
+
+Vector<MathICRecord> ImageRecorder::buildMathICRecords(std::span<const uint8_t> linkedCode)
+{
+    ASSERT(isRecording());
+    ASSERT(m_mathICs.size() == m_mathICCount);
+    size_t recordBytes = m_mathICs.size() * sizeof(MathICRecord);
+    if (!chargeFor(m_heldBytes + recordBytes))
+        return { };
+    m_heldBytes += recordBytes;
+
+    auto codeStart = reinterpret_cast<uintptr_t>(linkedCode.data());
+    auto offsetInCode = [&](const void* location) -> std::optional<uint32_t> {
+        auto address = reinterpret_cast<uintptr_t>(location);
+        if (address < codeStart || address - codeStart > linkedCode.size())
+            return std::nullopt;
+        return static_cast<uint32_t>(address - codeStart);
+    };
+
+    Vector<MathICRecord> records;
+    records.reserveInitialCapacity(m_mathICs.size());
+    bool consistent = true;
+    for (auto& noted : m_mathICs) {
+        MathICRecord record {
+            .kind = noted.kind,
+            .bytecodeIndex = noted.bytecodeIndex,
+            .mathIC = const_cast<void*>(noted.mathIC),
+            .slowCallPointerSite = std::nullopt,
+            .snippet = std::nullopt,
+        };
+        // The link tasks of JIT::emitMathICSlow have set all four locations of an IC with inline code; an IC without
+        // inline code never reaches emitMathICSlow and keeps all four null (section 6.1, N17).
+        auto locations = mathICLocations(noted.kind, noted.mathIC);
+        if (locations.areAllSet()) {
+            auto slowCall = offsetInCode(locations.slowPathCall);
+            auto site = slowCall ? farCallPointerSite(*slowCall) : std::nullopt;
+            auto fixup = site ? findFixupIndex(m_fixups.span(), *site, FixupForm::Pointer) : std::nullopt;
+            if (!fixup || m_fixups[*fixup].target.kind != TargetKind::Operation) {
+                consistent = false;
+                break;
+            }
+            record.slowCallPointerSite = *site;
+        } else if (!locations.areAllNull()) {
+            consistent = false;
+            break;
+        }
+        records.append(WTF::move(record));
+    }
+
+    if (!consistent) {
+        records = { };
+        m_heldBytes -= recordBytes;
+        ASSERT_NOT_REACHED();
+        markUnrecordable(Unrecordable::InconsistentRecord);
+        return { };
+    }
+    forgetRecorded(m_mathICs);
+    return records;
+}
+
+std::unique_ptr<ImageRecord> ImageRecorder::finishBaselineCompile(LinkBuffer& linkBuffer, BaselineJITCode& jitCode, std::span<const FarCallRecord> farCalls)
+{
+    using namespace ImageRecorderInternal;
+    ASSERT(m_scope == RecordingScope::BaselineCompile);
+    // emitVeneers ran before the LinkBuffer was built.
+    ASSERT(m_veneerGroups.isEmpty());
+    // The record object is charged with the recorder's first step; a recorder whose first charge was refused attaches no
+    // record, which capture and regeneration treat as an image without one.
+    if (!m_chargedRecordObject)
+        return nullptr;
+
+    auto code = linkedBytesOf(linkBuffer);
+    ASSERT(code.size() <= std::numeric_limits<uint32_t>::max());
+
+    // Steps 1 and 2: the far calls' placeholders join the recorded fixups, every site an offset in the linked code, all
+    // in footprint order and inside [0, codeSize).
+    if (isRecording()) {
+        translateSites(linkBuffer);
+        recordFarCalls(linkBuffer, farCalls);
+    }
+    if (isRecording())
+        orderAndCheckFixups(code);
+
+    // Step 3: the MathIC entries, read after the link tasks FINALIZE_BASELINE_CODE ran.
+    Vector<MathICRecord> mathICs;
+    if (isRecording())
+        mathICs = buildMathICRecords(code);
+
+    // Step 4: only the profiler opcodes clear m_isShareable (N29).
+    if (!jitCode.m_isShareable)
+        markUnrecordable(Unrecordable::NotShareable);
+
+    // Steps 5 and 6. The builder's storage goes into the record or is freed here, so that the record's charge follows
+    // its bytes and the recorder keeps none.
+    BakedFacts bakedFacts = m_bakedFacts.finish();
+    if (!isRecording()) {
+        mathICs = { };
+        bakedFacts = { };
+        auto record = makeUnique<ImageRecord>(m_budget.copyRef(), sizeof(ImageRecord), m_state, m_unrecordableReason);
+        handChargeToRecord(sizeof(ImageRecord));
+        return record;
+    }
+
+    m_fixups.shrinkToFit();
+    ASSERT(mathICs.size() == mathICs.capacity());
+    size_t recordBytes = ImageRecord::storageBytes(m_fixups.capacity(), mathICs.capacity(), 0, bakedFacts.scopeFacts.capacity());
+    auto record = makeUnique<ImageRecord>(m_budget.copyRef(), recordBytes, linkBuffer.debugAddress(), static_cast<uint32_t>(code.size()), std::exchange(m_fixups, { }), WTF::move(mathICs), WTF::move(bakedFacts));
+    handChargeToRecord(recordBytes);
+    return record;
+}
+
 std::optional<SnippetProvenance> ImageRecorder::finishSnippet(LinkBuffer& linkBuffer)
 {
+    using namespace ImageRecorderInternal;
     ASSERT(m_scope == RecordingScope::MathICSnippet);
     ASSERT(m_veneerGroups.isEmpty());
-    if (!isRecording() || !translateFixups(linkBuffer))
+    if (!isRecording())
+        return std::nullopt;
+    translateSites(linkBuffer);
+    if (!orderAndCheckFixups(linkedBytesOf(linkBuffer)))
         return std::nullopt;
 
     // The provenance keeps the fixups at their exact size, so that a record's charge follows its bytes. What the

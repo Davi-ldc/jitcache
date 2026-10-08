@@ -137,6 +137,13 @@ public:
 #endif
 
     // Finishing.
+    //
+    // BaselineCompile only, from JIT::link once the code is linked, the link tasks have run and the BaselineJITCode is
+    // built (SPEC-image.md section 4.7): records each far call with a callee as an Operation fixup at its pointer
+    // placeholder, translates every label to its offset in the linked code, puts the fixups in footprint order and checks
+    // them, builds the MathIC entries from each noted IC's locations, marks the record NotShareable when the code is not,
+    // and returns the record JIT::link attaches to the code, holding exactly what it charged. A recorder that stopped
+    // returns a record holding only its state and reason, and one whose first charge was refused returns null.
     std::unique_ptr<ImageRecord> finishBaselineCompile(LinkBuffer&, BaselineJITCode&, std::span<const FarCallRecord> farCalls);
     // MathICSnippet only, after the snippet's LinkBuffer finalized: its fixups translated, sorted and checked, the
     // allocation's start and the linked size, or nullopt once the recorder has stopped. The fixup storage stays charged
@@ -172,10 +179,18 @@ private:
     template<typename T> void forgetRecorded(Vector<T>&);
     void stop(RecordState);
 
-    // Translates every fixup's site to its offset in the linked code, sorts them, and checks that their footprints are
-    // disjoint and lie inside the linked size. A violation is a programming error, which makes the recorder
-    // Unrecordable(InconsistentRecord).
-    bool translateFixups(LinkBuffer&);
+    // Translates every recorded site, a label offset before compaction, to its offset in the linked code.
+    void translateSites(LinkBuffer&);
+    // Puts the fixups in footprint order (SPEC-image.md section 3.2) and checks that each footprint holds its form's
+    // instruction and lies inside the linked code, at or after the end of the one before it. A violation is a programming
+    // error, which makes the recorder Unrecordable(InconsistentRecord).
+    bool orderAndCheckFixups(std::span<const uint8_t> linkedCode);
+    // Step 1 of section 4.7: a Pointer fixup with an Operation target at the placeholder of each far call with a callee,
+    // its site already an offset in the linked code.
+    void recordFarCalls(LinkBuffer&, std::span<const FarCallRecord>);
+    // Step 3 of section 4.7, on fixups in footprint order: one entry per noted MathIC, with the site of its slow call's
+    // Operation fixup when it has inline code. Empty once the recorder stops.
+    Vector<MathICRecord> buildMathICRecords(std::span<const uint8_t> linkedCode);
 
     RecordingScope m_scope;
     RecordState m_state { RecordState::Complete };
@@ -188,7 +203,7 @@ private:
     size_t m_chargedBytes { 0 };
     size_t m_heldBytes { 0 }; // What the recorder's containers and its builder hold, and a record object it will attach.
 
-    Vector<ImageFixup> m_fixups; // Sites are pre-compaction label offsets until translateFixups.
+    Vector<ImageFixup> m_fixups; // Sites are pre-compaction label offsets until translateSites.
     Vector<VeneerGroup> m_veneerGroups;
     Vector<NotedMathIC> m_mathICs;
     unsigned m_mathICCount { 0 };

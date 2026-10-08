@@ -28,6 +28,7 @@
 
 #if ENABLE(JIT)
 
+#include "ImageRecord.h"
 #include "JITMathIC.h"
 #include "JumpTable.h"
 #include "PCToCodeOriginMap.h"
