@@ -34,6 +34,7 @@
 #include "CacheableIdentifierInlines.h"
 #include "CallFrameShuffler.h"
 #include "CodeBlock.h"
+#include "ImageEmission.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "JSSentinel.h"
@@ -52,7 +53,7 @@ void JIT::emit_op_ret(const JSInstruction* currentInstruction)
     // Return the result in returnValueGPR.
     auto bytecode = currentInstruction->as<OpRet>();
     emitGetVirtualRegister(bytecode.m_value, returnValueGPR);
-    jumpThunk(CodeLocationLabel { vm().getCTIStub(CommonJITThunkID::ReturnFromBaseline).retaggedCode<NoPtrTag>() });
+    JITCache::jumpSupport(*this, vm(), JITCacheSupportKey::commonThunk(CommonJITThunkID::ReturnFromBaseline));
 }
 
 template<typename Op>
@@ -435,7 +436,7 @@ void JIT::emitSlowIteratorOpenGeneric(const JSInstruction*, Vector<SlowCaseEntry
 
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
     static_assert(BaselineJITRegisters::GetById::resultGPR == returnValueGPR);
     jump().linkTo(fastPathResumePoint(), this);
 
@@ -564,7 +565,7 @@ void JIT::emitSlow_op_iterator_next(const JSInstruction*, Vector<SlowCaseEntry>:
     {
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
         static_assert(BaselineJITRegisters::GetById::resultGPR == returnValueGPR);
         emitJumpSlowToHotForCheckpoint(jump());
     }
@@ -573,7 +574,7 @@ void JIT::emitSlow_op_iterator_next(const JSInstruction*, Vector<SlowCaseEntry>:
         linkAllSlowCases(iter);
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
         static_assert(BaselineJITRegisters::GetById::resultGPR == returnValueGPR);
     }
 }
@@ -608,7 +609,7 @@ void JIT::emit_op_async_iterator_next(const JSInstruction* instruction)
     else
         moveValue(JSValue(), resumeValueGPR);
     loadGlobalObject(globalObjectGPR);
-    callOperation(operationAsyncIteratorNextWithDriver, globalObjectGPR, iteratorGPR, driverGPR, resumeValueGPR, TrustedImmPtr(&vm().syncResumeCallCache()));
+    callOperation(operationAsyncIteratorNextWithDriver, globalObjectGPR, iteratorGPR, driverGPR, resumeValueGPR, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::SyncResumeCallCache));
     emitPutVirtualRegister(bytecode.m_dst, returnValueGPR);
     Jump doneCase = jump();
 
@@ -755,7 +756,7 @@ void JIT::emitSlow_op_instanceof(const JSInstruction* instruction, Vector<SlowCa
     {
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
         static_assert(GetById::resultGPR == returnValueGPR);
         emitJumpSlowToHotForCheckpoint(jump());
     }
@@ -779,7 +780,7 @@ void JIT::emitSlow_op_instanceof(const JSInstruction* instruction, Vector<SlowCa
     {
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
         static_assert(GetById::resultGPR == returnValueGPR);
         emitJumpSlowToHotForCheckpoint(jump());
     }
@@ -788,7 +789,7 @@ void JIT::emitSlow_op_instanceof(const JSInstruction* instruction, Vector<SlowCa
     linkAllSlowCases(iter);
     {
         JITInstanceOfGenerator& gen = m_instanceOfs[m_instanceOfIndex++];
-        nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
     }
 
     done.link(this);

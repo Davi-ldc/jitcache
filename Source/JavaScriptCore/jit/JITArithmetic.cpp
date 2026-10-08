@@ -31,6 +31,8 @@
 #include "ArithProfile.h"
 #include "BytecodeGenerator.h"
 #include "CodeBlock.h"
+#include "ImageEmission.h"
+#include "ImageRecorder.h"
 #include "JITBitAndGenerator.h"
 #include "JITBitOrGenerator.h"
 #include "JITBitXorGenerator.h"
@@ -638,6 +640,8 @@ void JIT::emit_op_negate(const JSInstruction* currentInstruction)
 {
     UnaryArithProfile* arithProfile = &m_unlinkedCodeBlock->unaryArithProfile(currentInstruction->as<OpNegate>().m_profileIndex);
     JITNegIC* negateIC = m_mathICs.addJITNegIC(arithProfile);
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->noteMathIC(JITCache::MathICKind::Negate, negateIC, m_bytecodeIndex);
     m_instructionToMathIC.add(currentInstruction, negateIC);
     // FIXME: it would be better to call those operationValueNegate, since the operand can be a BigInt
     emitMathICFast<OpNegate>(negateIC, currentInstruction, operationArithNegateProfiled, operationArithNegate);
@@ -790,6 +794,8 @@ void JIT::emit_op_add(const JSInstruction* currentInstruction)
 {
     BinaryArithProfile* arithProfile = &m_unlinkedCodeBlock->binaryArithProfile(currentInstruction->as<OpAdd>().m_profileIndex);
     JITAddIC* addIC = m_mathICs.addJITAddIC(arithProfile);
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->noteMathIC(JITCache::MathICKind::Add, addIC, m_bytecodeIndex);
     m_instructionToMathIC.add(currentInstruction, addIC);
     emitMathICFast<OpAdd>(addIC, currentInstruction, operationValueAddProfiled, operationValueAdd);
 }
@@ -809,18 +815,18 @@ void JIT::emitMathICFast(JITUnaryMathIC<Generator>* mathIC, const JSInstruction*
     VirtualRegister result = bytecode.m_dst;
     VirtualRegister operand = bytecode.m_operand;
 
+    // The generator works in the profiled operation's argument registers, the ones these constants name.
+    static_assert(std::is_same_v<ProfiledFunction, typename JITMathICTraits<Op>::ProfiledOperation>);
     constexpr GPRReg globalObjectGPR = preferredArgumentGPR<ProfiledFunction, 0>();
     constexpr GPRReg srcGPR = preferredArgumentGPR<ProfiledFunction, 1>();
     // ArithNegate benefits from using the same register as src and dst.
     constexpr GPRReg resultGPR = srcGPR;
-    constexpr GPRReg scratchGPR = globalObjectGPR;
-    static_assert(noOverlap(srcGPR, scratchGPR));
 
 #if ENABLE(MATH_IC_STATS)
     auto inlineStart = label();
 #endif
 
-    mathIC->m_generator = Generator(resultGPR, srcGPR, scratchGPR);
+    mathIC->m_generator = mathICGeneratorFor<Op>(*m_unlinkedCodeBlock, currentInstruction);
 
     emitGetVirtualRegister(operand, srcGPR);
 
@@ -831,7 +837,7 @@ void JIT::emitMathICFast(JITUnaryMathIC<Generator>* mathIC, const JSInstruction*
         UnaryArithProfile* arithProfile = mathIC->arithProfile();
         loadGlobalObject(globalObjectGPR);
         if (arithProfile && shouldEmitProfiling())
-            callOperationWithResult(profiledFunction, resultGPR, globalObjectGPR, srcGPR, TrustedImmPtr(arithProfile));
+            callOperationWithResult(profiledFunction, resultGPR, globalObjectGPR, srcGPR, JITCache::ImageReference::arithProfile(vm(), *m_unlinkedCodeBlock, *arithProfile));
         else
             callOperationWithResult(nonProfiledFunction, resultGPR, globalObjectGPR, srcGPR);
     } else
@@ -856,26 +862,19 @@ void JIT::emitMathICFast(JITBinaryMathIC<Generator>* mathIC, const JSInstruction
     VirtualRegister op1 = bytecode.m_lhs;
     VirtualRegister op2 = bytecode.m_rhs;
 
+    // The generator works in the profiled operation's argument registers, the ones these constants name.
+    static_assert(std::is_same_v<ProfiledFunction, typename JITMathICTraits<Op>::ProfiledOperation>);
     constexpr GPRReg globalObjectGPR = preferredArgumentGPR<ProfiledFunction, 0>();
     constexpr GPRReg leftGPR = preferredArgumentGPR<ProfiledFunction, 1>();
     constexpr GPRReg rightGPR = preferredArgumentGPR<ProfiledFunction, 2>();
     constexpr GPRReg resultGPR = returnValueGPR;
-    constexpr GPRReg scratchGPR = regT5;
-    static_assert(noOverlap(leftGPR, rightGPR, scratchGPR));
-    static_assert(noOverlap(resultGPR, scratchGPR));
 
-    SnippetOperand leftOperand(bytecode.m_operandTypes.first());
-    SnippetOperand rightOperand(bytecode.m_operandTypes.second());
-
-    if (isOperandConstantInt(op1))
-        leftOperand.setConstInt32(getOperandConstantInt(op1));
-    else if (isOperandConstantInt(op2))
-        rightOperand.setConstInt32(getOperandConstantInt(op2));
+    auto [leftOperand, rightOperand] = binaryMathICOperandsFor(*m_unlinkedCodeBlock, bytecode);
 
     RELEASE_ASSERT(!leftOperand.isConst() || !rightOperand.isConst());
 
-    mathIC->m_generator = Generator(leftOperand, rightOperand, resultGPR, leftGPR, rightGPR, fpRegT0, fpRegT1, scratchGPR);
-    
+    mathIC->m_generator = mathICGeneratorFor<Op>(*m_unlinkedCodeBlock, currentInstruction);
+
     ASSERT(!(Generator::isLeftOperandValidConstant(leftOperand) && Generator::isRightOperandValidConstant(rightOperand)));
     
     if (!Generator::isLeftOperandValidConstant(leftOperand))
@@ -898,7 +897,7 @@ void JIT::emitMathICFast(JITBinaryMathIC<Generator>* mathIC, const JSInstruction
         BinaryArithProfile* arithProfile = mathIC->arithProfile();
         loadGlobalObject(globalObjectGPR);
         if (arithProfile && shouldEmitProfiling())
-            callOperationWithResult(profiledFunction, resultGPR, globalObjectGPR, leftGPR, rightGPR, TrustedImmPtr(arithProfile));
+            callOperationWithResult(profiledFunction, resultGPR, globalObjectGPR, leftGPR, rightGPR, JITCache::ImageReference::arithProfile(vm(), *m_unlinkedCodeBlock, *arithProfile));
         else
             callOperationWithResult(nonProfiledFunction, resultGPR, globalObjectGPR, leftGPR, rightGPR);
     } else
@@ -924,6 +923,8 @@ void JIT::emitMathICSlow(JITUnaryMathIC<Generator>* mathIC, const JSInstruction*
     auto bytecode = currentInstruction->as<Op>();
     VirtualRegister result = bytecode.m_dst;
 
+    // The fast path left the operand in the profiled operation's argument registers, the ones these constants name.
+    static_assert(std::is_same_v<ProfiledFunction, typename JITMathICTraits<Op>::ProfiledOperation>);
     constexpr GPRReg globalObjetGPR = preferredArgumentGPR<ProfiledFunction, 0>();
     constexpr GPRReg srcGPR = preferredArgumentGPR<ProfiledFunction, 1>();
     constexpr GPRReg resultGPR = returnValueGPR;
@@ -936,11 +937,11 @@ void JIT::emitMathICSlow(JITUnaryMathIC<Generator>* mathIC, const JSInstruction*
     loadGlobalObject(globalObjetGPR);
     if (arithProfile && shouldEmitProfiling()) {
         if (mathICGenerationState.shouldSlowPathRepatch)
-            mathICGenerationState.slowPathCall = callOperationWithResult(reinterpret_cast<J_JITOperation_GJMic>(profiledRepatchFunction), resultGPR, globalObjetGPR, srcGPR, TrustedImmPtr(mathIC));
+            mathICGenerationState.slowPathCall = callOperationWithResult(reinterpret_cast<J_JITOperation_GJMic>(profiledRepatchFunction), resultGPR, globalObjetGPR, srcGPR, JITCache::ImageReference::mathIC(mathIC));
         else
-            mathICGenerationState.slowPathCall = callOperationWithResult(profiledFunction, resultGPR, globalObjetGPR, srcGPR, TrustedImmPtr(arithProfile));
+            mathICGenerationState.slowPathCall = callOperationWithResult(profiledFunction, resultGPR, globalObjetGPR, srcGPR, JITCache::ImageReference::arithProfile(vm(), *m_unlinkedCodeBlock, *arithProfile));
     } else
-        mathICGenerationState.slowPathCall = callOperationWithResult(reinterpret_cast<J_JITOperation_GJMic>(repatchFunction), resultGPR, globalObjetGPR, srcGPR, TrustedImmPtr(mathIC));
+        mathICGenerationState.slowPathCall = callOperationWithResult(reinterpret_cast<J_JITOperation_GJMic>(repatchFunction), resultGPR, globalObjetGPR, srcGPR, JITCache::ImageReference::mathIC(mathIC));
 
 #if ENABLE(MATH_IC_STATS)
     auto slowPathEnd = label();
@@ -969,18 +970,15 @@ void JIT::emitMathICSlow(JITBinaryMathIC<Generator>* mathIC, const JSInstruction
     VirtualRegister op1 = bytecode.m_lhs;
     VirtualRegister op2 = bytecode.m_rhs;
 
+    // The fast path left the operands in the profiled operation's argument registers, the ones these constants name.
+    static_assert(std::is_same_v<ProfiledFunction, typename JITMathICTraits<Op>::ProfiledOperation>);
     constexpr GPRReg globalObjetGPR = preferredArgumentGPR<ProfiledFunction, 0>();
     constexpr GPRReg leftGPR = preferredArgumentGPR<ProfiledFunction, 1>();
     constexpr GPRReg rightGPR = preferredArgumentGPR<ProfiledFunction, 2>();
     constexpr GPRReg resultGPR = returnValueGPR;
 
-    SnippetOperand leftOperand(bytecode.m_operandTypes.first());
-    SnippetOperand rightOperand(bytecode.m_operandTypes.second());
-
-    if (isOperandConstantInt(op1))
-        leftOperand.setConstInt32(getOperandConstantInt(op1));
-    else if (isOperandConstantInt(op2))
-        rightOperand.setConstInt32(getOperandConstantInt(op2));
+    // The constant operand the fast path did not load, as it chose it.
+    auto [leftOperand, rightOperand] = binaryMathICOperandsFor(*m_unlinkedCodeBlock, bytecode);
 
     ASSERT(!(Generator::isLeftOperandValidConstant(leftOperand) && Generator::isRightOperandValidConstant(rightOperand)));
 
@@ -997,11 +995,11 @@ void JIT::emitMathICSlow(JITBinaryMathIC<Generator>* mathIC, const JSInstruction
     loadGlobalObject(globalObjetGPR);
     if (arithProfile && shouldEmitProfiling()) {
         if (mathICGenerationState.shouldSlowPathRepatch)
-            mathICGenerationState.slowPathCall = callOperationWithResult(std::bit_cast<J_JITOperation_GJJMic>(profiledRepatchFunction), resultGPR, globalObjetGPR, leftGPR, rightGPR, TrustedImmPtr(mathIC));
+            mathICGenerationState.slowPathCall = callOperationWithResult(std::bit_cast<J_JITOperation_GJJMic>(profiledRepatchFunction), resultGPR, globalObjetGPR, leftGPR, rightGPR, JITCache::ImageReference::mathIC(mathIC));
         else
-            mathICGenerationState.slowPathCall = callOperationWithResult(profiledFunction, resultGPR, globalObjetGPR, leftGPR, rightGPR, TrustedImmPtr(arithProfile));
+            mathICGenerationState.slowPathCall = callOperationWithResult(profiledFunction, resultGPR, globalObjetGPR, leftGPR, rightGPR, JITCache::ImageReference::arithProfile(vm(), *m_unlinkedCodeBlock, *arithProfile));
     } else
-        mathICGenerationState.slowPathCall = callOperationWithResult(std::bit_cast<J_JITOperation_GJJMic>(repatchFunction), resultGPR, globalObjetGPR, leftGPR, rightGPR, TrustedImmPtr(mathIC));
+        mathICGenerationState.slowPathCall = callOperationWithResult(std::bit_cast<J_JITOperation_GJJMic>(repatchFunction), resultGPR, globalObjetGPR, leftGPR, rightGPR, JITCache::ImageReference::mathIC(mathIC));
 
 #if ENABLE(MATH_IC_STATS)
     auto slowPathEnd = label();
@@ -1077,6 +1075,8 @@ void JIT::emit_op_mul(const JSInstruction* currentInstruction)
 {
     BinaryArithProfile* arithProfile = &m_unlinkedCodeBlock->binaryArithProfile(currentInstruction->as<OpMul>().m_profileIndex);
     JITMulIC* mulIC = m_mathICs.addJITMulIC(arithProfile);
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->noteMathIC(JITCache::MathICKind::Mul, mulIC, m_bytecodeIndex);
     m_instructionToMathIC.add(currentInstruction, mulIC);
     emitMathICFast<OpMul>(mulIC, currentInstruction, operationValueMulProfiled, operationValueMul);
 }
@@ -1093,6 +1093,8 @@ void JIT::emit_op_sub(const JSInstruction* currentInstruction)
 {
     BinaryArithProfile* arithProfile = &m_unlinkedCodeBlock->binaryArithProfile(currentInstruction->as<OpSub>().m_profileIndex);
     JITSubIC* subIC = m_mathICs.addJITSubIC(arithProfile);
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->noteMathIC(JITCache::MathICKind::Sub, subIC, m_bytecodeIndex);
     m_instructionToMathIC.add(currentInstruction, subIC);
     emitMathICFast<OpSub>(subIC, currentInstruction, operationValueSubProfiled, operationValueSub);
 }

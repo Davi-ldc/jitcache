@@ -28,10 +28,35 @@
 #if ENABLE(JIT)
 #include "BytecodeOperandsForCheckpoint.h"
 #include "CommonSlowPathsInlines.h"
+#include "ImageTypes.h"
 #include "JIT.h"
 #include "JSCInlines.h"
+#include <optional>
+#include <type_traits>
+#include <utility>
 
 namespace JSC {
+
+// JITCache: the support keys the baseline emitters link through the helpers of ImageEmission.h (SPEC-image.md sections
+// 3.3 and 3.4), with every field their kind does not use zero.
+namespace JITCacheSupportKey {
+
+constexpr JITCache::ImageTarget baselineThunk(JITCache::BaselineThunk thunk)
+{
+    return JITCache::ImageTarget { .kind = JITCache::TargetKind::BaselineThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+}
+
+constexpr JITCache::ImageTarget commonThunk(CommonJITThunkID thunk)
+{
+    return JITCache::ImageTarget { .kind = JITCache::TargetKind::CommonThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+}
+
+constexpr JITCache::ImageTarget inlineCacheSlowPathThunk(AccessType accessType)
+{
+    return JITCache::ImageTarget { .kind = JITCache::TargetKind::InlineCacheSlowPathThunk, .a = static_cast<uint32_t>(accessType), .b = 0, .payload = 0 };
+}
+
+} // namespace JITCacheSupportKey
 
 ALWAYS_INLINE bool JIT::isOperandConstantDouble(VirtualRegister src)
 {
@@ -575,6 +600,80 @@ ALWAYS_INLINE void JIT::loadCodeBlockConstant(VirtualRegister constant, GPRReg d
     RELEASE_ASSERT(constant.isConstant());
     loadAddrOfCodeBlockConstantBuffer(*this, dst);
     loadValue(Address(dst, constant.toConstantIndex() * sizeof(Register)), dst);
+}
+
+// The MathIC opcodes, each with the generator its IC holds and the profiled operation its emitter passes, whose argument
+// registers the generator works in.
+template<typename Op> struct JITMathICTraits;
+
+template<> struct JITMathICTraits<OpAdd> {
+    using Generator = JITAddGenerator;
+    using ProfiledOperation = decltype(&operationValueAddProfiled);
+};
+
+template<> struct JITMathICTraits<OpSub> {
+    using Generator = JITSubGenerator;
+    using ProfiledOperation = decltype(&operationValueSubProfiled);
+};
+
+template<> struct JITMathICTraits<OpMul> {
+    using Generator = JITMulGenerator;
+    using ProfiledOperation = decltype(&operationValueMulProfiled);
+};
+
+template<> struct JITMathICTraits<OpNegate> {
+    using Generator = JITNegGenerator;
+    using ProfiledOperation = decltype(&operationArithNegateProfiled);
+};
+
+// The operands of a binary MathIC: their types from the bytecode, and the value of the first operand that is an int32
+// constant the UCB owns, as JIT::isOperandConstantInt decides, read from the UCB alone. The fast path, the slow path and
+// the generator take them from here, so they agree on which operand stays a constant.
+template<typename Op>
+inline std::pair<SnippetOperand, SnippetOperand> binaryMathICOperandsFor(const UnlinkedCodeBlock& unlinkedCodeBlock, const Op& bytecode)
+{
+    auto constantInt32 = [&](VirtualRegister operand) -> std::optional<int32_t> {
+        if (!operand.isConstant() || unlinkedCodeBlock.constantSourceCodeRepresentation(operand) == SourceCodeRepresentation::LinkTimeConstant)
+            return std::nullopt;
+        JSValue value = unlinkedCodeBlock.getConstant(operand);
+        if (!value.isInt32())
+            return std::nullopt;
+        return value.asInt32();
+    };
+
+    SnippetOperand leftOperand(bytecode.m_operandTypes.first());
+    SnippetOperand rightOperand(bytecode.m_operandTypes.second());
+    if (auto constant = constantInt32(bytecode.m_lhs))
+        leftOperand.setConstInt32(*constant);
+    else if (auto constant = constantInt32(bytecode.m_rhs))
+        rightOperand.setConstInt32(*constant);
+    return { leftOperand, rightOperand };
+}
+
+template<typename Op>
+auto JIT::mathICGeneratorFor(const UnlinkedCodeBlock& unlinkedCodeBlock, const JSInstruction* instruction)
+{
+    using Generator = typename JITMathICTraits<Op>::Generator;
+    using ProfiledOperation = typename JITMathICTraits<Op>::ProfiledOperation;
+
+    if constexpr (std::is_same_v<Op, OpNegate>) {
+        UNUSED_PARAM(unlinkedCodeBlock);
+        UNUSED_PARAM(instruction);
+        // The result shares the source's register, and the global object's register is the scratch.
+        constexpr GPRReg srcGPR = preferredArgumentGPR<ProfiledOperation, 1>();
+        constexpr GPRReg scratchGPR = preferredArgumentGPR<ProfiledOperation, 0>();
+        static_assert(noOverlap(srcGPR, scratchGPR));
+        return Generator(srcGPR, srcGPR, scratchGPR);
+    } else {
+        constexpr GPRReg leftGPR = preferredArgumentGPR<ProfiledOperation, 1>();
+        constexpr GPRReg rightGPR = preferredArgumentGPR<ProfiledOperation, 2>();
+        constexpr GPRReg resultGPR = returnValueGPR;
+        constexpr GPRReg scratchGPR = regT5;
+        static_assert(noOverlap(leftGPR, rightGPR, scratchGPR));
+        static_assert(noOverlap(resultGPR, scratchGPR));
+        auto [leftOperand, rightOperand] = binaryMathICOperandsFor(unlinkedCodeBlock, instruction->as<Op>());
+        return Generator(leftOperand, rightOperand, resultGPR, leftGPR, rightGPR, fpRegT0, fpRegT1, scratchGPR);
+    }
 }
 
 

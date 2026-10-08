@@ -28,8 +28,10 @@
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "ArithProfile.h"
+#include "BaselineJITPlan.h"
 #include "BaselineJITRegisters.h"
 #include "BinarySwitch.h"
+#include "BytecodeStructs.h"
 #include "CCallHelpers.h"
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
@@ -37,7 +39,10 @@
 #include "DisallowMacroScratchRegisterUsage.h"
 #include "FunctionExecutable.h"
 #include "ImageEmission.h"
+#include "ImageRecord.h"
 #include "ImageRecorder.h"
+#include "ImageTwins.h"
+#include "JIT.h"
 #include "JITCacheTest.h"
 #include "JITThunks.h"
 #include "JSCInlines.h"
@@ -245,6 +250,33 @@ static std::optional<uintptr_t> decodeFixup(std::span<const uint8_t> code, const
 #endif
     UNUSED_PARAM(codeAddress);
     return std::nullopt;
+}
+
+// How many near calls in code (call rel32 on x86_64, bl on ARM64) reach target, following jump islands on ARM64. code
+// starts at an instruction.
+static unsigned nearCallsReaching(std::span<const uint8_t> code, uintptr_t target)
+{
+    auto codeAddress = reinterpret_cast<uintptr_t>(code.data());
+    unsigned count = 0;
+#if CPU(X86_64)
+    for (size_t i = 0; i + 5 <= code.size(); ++i) {
+        if (code[i] != 0xe8)
+            continue;
+        int64_t displacement = signExtend(readLittleEndian(code.subspan(i + 1, 4)), 32);
+        count += codeAddress + i + 5 + displacement == target;
+    }
+#elif CPU(ARM64)
+    for (size_t i = 0; i + 4 <= code.size(); i += 4) {
+        if ((readWord(codeAddress + i) & 0xfc000000) != 0x94000000)
+            continue;
+        auto branchTarget = arm64BranchTarget(codeAddress + i);
+        count += branchTarget && reaches(*branchTarget, target);
+    }
+#else
+    UNUSED_PARAM(codeAddress);
+    UNUSED_PARAM(target);
+#endif
+    return count;
 }
 
 struct LinkedCode {
@@ -1412,6 +1444,135 @@ JITCACHE_TEST_WITH_OPTIONS(imageNegateProfilesThroughICAfterRegeneration, Yes, "
     // Every call ran this baseline code, so each observation came from its MathIC's slow call.
     JITCACHE_CHECK(function->jsExecutable()->codeBlockForCall() == codeBlock);
     JITCACHE_CHECK(codeBlock->jitType() == JITType::BaselineJIT);
+}
+
+// T20 (census D4). A get_from_scope site of type ClosureVarWithVarInjectionChecks and one of type
+// GlobalPropertyWithVarInjectionChecks reach the default branch of JIT::emit_op_get_from_scope, whose native chain links
+// both to the thunk JIT::baselineThunkGenerator(GetFromScopeGlobalVar) gives. Each reader's CodeBlock is compiled twice:
+// under a twin recorder, the one recorder a compilation outside production can have (SPEC-image section 11.3, step 4),
+// whose record must hold one Call fixup in the site's code, with target BaselineThunk::GetFromScopeGlobalVar, reaching
+// that thunk; and without a recorder, whose code must near-call that thunk once there, as the unedited engine does (I4).
+JITCACHE_TEST(imageGetFromScopeKeysTheThunkTheNativeChainLinks, Yes)
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    // Each reader's scope chain passes evalScope, whose sloppy direct eval could inject a var, before the scope that holds
+    // its variable: makeReaders' environment for captured, and the global object for jitcacheGlobalProperty.
+    NakedPtr<Exception> exception;
+    evaluate(globalObject, makeSource("globalThis.jitcacheGlobalProperty = 2; var readCaptured, readGlobalProperty; (function makeReaders() { var captured = 1; (function evalScope() { eval(''); readCaptured = function () { return captured; }; readGlobalProperty = function () { return jitcacheGlobalProperty; }; })(); })(); readCaptured(); readGlobalProperty();"_s, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    if (exception) {
+        JITCACHE_FAIL("evaluating the readers threw"_s);
+        return;
+    }
+
+    auto thunk = reinterpret_cast<uintptr_t>(vm.getCTIStub(JIT::baselineThunkGenerator(BaselineThunk::GetFromScopeGlobalVar)).code().untaggedPtr());
+    auto thunkKey = makeTarget(TargetKind::BaselineThunk, static_cast<uint32_t>(BaselineThunk::GetFromScopeGlobalVar));
+
+    // The twin recorder seeds the assembler. The readers have no strict equality and no switch, so it answers no other
+    // question from its seeds and inputs.
+    TwinSeeds seeds { };
+    seeds.assembler = assemblerSeed;
+    TwinCompileInputs compileInputs { };
+    enum class Recorder : bool {
+        None,
+        Twin,
+    };
+    auto compile = [&](CodeBlock* codeBlock, Recorder recorder) {
+        Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(codeBlock));
+        JIT jit(vm, plan.get(), codeBlock);
+        if (recorder == Recorder::Twin)
+            jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, compileInputs);
+        return jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
+    };
+
+    struct Reader {
+        ASCIILiteral function;
+        ASCIILiteral variable;
+        ResolveType type;
+    };
+    for (auto& reader : { Reader { "readCaptured"_s, "captured"_s, ClosureVarWithVarInjectionChecks }, Reader { "readGlobalProperty"_s, "jitcacheGlobalProperty"_s, GlobalPropertyWithVarInjectionChecks } }) {
+        auto* function = jsDynamicCast<JSFunction*>(globalObject->get(globalObject, Identifier::fromString(vm, reader.function)));
+        CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
+        if (!codeBlock) {
+            JITCACHE_FAIL(makeString(reader.function, " has no CodeBlock"_s));
+            continue;
+        }
+
+        // The site is the reader's get_from_scope of its variable, whose code runs from its instruction's start to the next
+        // instruction's.
+        UnlinkedCodeBlock& unlinkedCodeBlock = *codeBlock->unlinkedCodeBlock();
+        std::optional<BytecodeIndex> site;
+        std::optional<BytecodeIndex> next;
+        for (const auto& instruction : unlinkedCodeBlock.instructions()) {
+            if (!instruction->is<OpGetFromScope>())
+                continue;
+            auto bytecode = instruction->as<OpGetFromScope>();
+            if (unlinkedCodeBlock.identifier(bytecode.m_var).string() != reader.variable)
+                continue;
+            if (bytecode.metadata(codeBlock).m_getPutInfo.resolveType() != reader.type)
+                break;
+            site = instruction.index();
+            next = instruction.next().index();
+        }
+        if (!site) {
+            JITCACHE_FAIL(makeString(reader.function, " has no get_from_scope of "_s, reader.variable, " of the type the test needs"_s));
+            continue;
+        }
+
+        // The site's code in a compilation of the reader, as addresses.
+        auto siteCode = [&](BaselineJITCode& code) -> std::optional<std::pair<uintptr_t, uintptr_t>> {
+            auto start = code.m_jitCodeMap.find(*site);
+            auto end = code.m_jitCodeMap.find(*next);
+            if (!start || !end) {
+                JITCACHE_FAIL(makeString(reader.function, "'s code map lacks the site"_s));
+                return std::nullopt;
+            }
+            return std::pair { reinterpret_cast<uintptr_t>(start.untaggedPtr()), reinterpret_cast<uintptr_t>(end.untaggedPtr()) };
+        };
+
+        // Without a recorder: the native near call to the thunk.
+        auto nativeCode = compile(codeBlock, Recorder::None);
+        if (!nativeCode) {
+            JITCACHE_FAIL("no executable memory for the native compilation"_s);
+            return;
+        }
+        JITCACHE_CHECK(!nativeCode->m_jitCacheImageRecord);
+        if (auto range = siteCode(*nativeCode)) {
+            unsigned calls = nearCallsReaching(unsafeMakeSpan(reinterpret_cast<const uint8_t*>(range->first), range->second - range->first), thunk);
+            if (calls != 1)
+                JITCACHE_FAIL(makeString(reader.function, "'s native site makes "_s, calls, " near calls to the GlobalVar thunk instead of one"_s));
+        }
+
+        // Under the twin recorder: one Call fixup in the site, keyed to that thunk.
+        auto twinCode = compile(codeBlock, Recorder::Twin);
+        if (!twinCode) {
+            JITCACHE_FAIL("no executable memory for the recorded compilation"_s);
+            return;
+        }
+        auto* record = twinCode->m_jitCacheImageRecord.get();
+        if (!record || record->state() != RecordState::Complete) {
+            JITCACHE_FAIL(makeString(reader.function, "'s record is missing or not complete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ", reason "_s, record ? static_cast<unsigned>(record->unrecordableReason()) : 0u, ')'));
+            continue;
+        }
+        auto range = siteCode(*twinCode);
+        if (!range)
+            continue;
+        auto codeStart = reinterpret_cast<uintptr_t>(twinCode->start());
+        auto bytes = unsafeMakeSpan(static_cast<const uint8_t*>(twinCode->start()), record->codeSize());
+        unsigned calls = 0;
+        for (auto& fixup : record->fixups()) {
+            // A Call's site ends its instruction, so a call inside the site's code has its site after the code's start and
+            // at or before its end.
+            if (fixup.form != FixupForm::Call || codeStart + fixup.site <= range->first || codeStart + fixup.site > range->second)
+                continue;
+            ++calls;
+            auto decoded = decodeFixup(bytes, fixup);
+            if (fixup.target != thunkKey || !decoded || !reaches(*decoded, thunk))
+                JITCACHE_FAIL(makeString(reader.function, ": the Call fixup at "_s, fixup.site, " is not keyed to the GlobalVar thunk or does not reach it"_s));
+        }
+        if (calls != 1)
+            JITCACHE_FAIL(makeString(reader.function, "'s recorded site holds "_s, calls, " Call fixups instead of one"_s));
+    }
 }
 
 } // namespace JSC::JITCache::Tests

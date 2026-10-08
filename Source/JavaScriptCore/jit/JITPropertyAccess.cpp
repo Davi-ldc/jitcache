@@ -32,6 +32,8 @@
 #include "CacheableIdentifierInlines.h"
 #include "CodeBlock.h"
 #include "DirectArguments.h"
+#include "ImageEmission.h"
+#include "ImageRecorder.h"
 #include "ImageTypes.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
@@ -45,6 +47,83 @@
 #include <wtf/ScopedLambda.h>
 
 namespace JSC {
+
+namespace JITPropertyAccessInternal {
+
+// The resolve_scope thunk the native emitters link for a resolve type (census D3). The slow path's chain names every
+// global type, and the main pass's default branch selects the same thunk for every type it meets, since its switch
+// compiles GlobalProperty, GlobalVar and GlobalLexicalVar inline; both send every type they do not name to the GlobalVar
+// thunk.
+static JITCache::BaselineThunk resolveScopeThunkFor(ResolveType resolveType)
+{
+    using JITCache::BaselineThunk;
+    switch (resolveType) {
+    case ClosureVarWithVarInjectionChecks:
+        return BaselineThunk::ResolveScopeClosureVarWithVarInjectionChecks;
+    case GlobalProperty:
+        return BaselineThunk::ResolveScopeGlobalProperty;
+    case GlobalLexicalVar:
+        return BaselineThunk::ResolveScopeGlobalLexicalVar;
+    case GlobalVarWithVarInjectionChecks:
+        return BaselineThunk::ResolveScopeGlobalVarWithVarInjectionChecks;
+    case GlobalPropertyWithVarInjectionChecks:
+        return BaselineThunk::ResolveScopeGlobalPropertyWithVarInjectionChecks;
+    case GlobalLexicalVarWithVarInjectionChecks:
+        return BaselineThunk::ResolveScopeGlobalLexicalVarWithVarInjectionChecks;
+    case GlobalVar:
+    case ClosureVar:
+    case ResolvedClosureVar:
+    case ModuleVar:
+    case UnresolvedProperty:
+    case UnresolvedPropertyWithVarInjectionChecks:
+    case Dynamic:
+        return BaselineThunk::ResolveScopeGlobalVar;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+// The get_from_scope thunk the native emitters link for a resolve type (census D4), which follows their selection as
+// written, never the type alone. The main pass's default branch selects with a chain that mixes if and else if, so only
+// GlobalLexicalVar, GlobalVarWithVarInjectionChecks and GlobalLexicalVarWithVarInjectionChecks keep their own thunk there,
+// and every other type it meets, ClosureVarWithVarInjectionChecks and GlobalPropertyWithVarInjectionChecks included,
+// gets the GlobalVar thunk. The slow path runs only for a site the main pass compiled as GlobalProperty, GlobalVar or
+// GlobalLexicalVar, which keep their own thunk. No baseline code links the ClosureVarWithVarInjectionChecks thunk, which
+// BaselineThunk does not name.
+static JITCache::BaselineThunk getFromScopeThunkFor(ResolveType resolveType)
+{
+    using JITCache::BaselineThunk;
+    switch (resolveType) {
+    case GlobalProperty:
+        return BaselineThunk::GetFromScopeGlobalProperty;
+    case GlobalLexicalVar:
+        return BaselineThunk::GetFromScopeGlobalLexicalVar;
+    case GlobalVarWithVarInjectionChecks:
+        return BaselineThunk::GetFromScopeGlobalVarWithVarInjectionChecks;
+    case GlobalLexicalVarWithVarInjectionChecks:
+        return BaselineThunk::GetFromScopeGlobalLexicalVarWithVarInjectionChecks;
+    case GlobalVar:
+    case ClosureVar:
+    case ResolvedClosureVar:
+    case ModuleVar:
+    case GlobalPropertyWithVarInjectionChecks:
+    case ClosureVarWithVarInjectionChecks:
+    case UnresolvedProperty:
+    case UnresolvedPropertyWithVarInjectionChecks:
+    case Dynamic:
+        return BaselineThunk::GetFromScopeGlobalVar;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+// Records a scope access the compilation bakes into its code without a guard (SPEC-image.md section 7).
+static void recordBakedScopeFact(JITCache::ImageRecorder* recorder, BytecodeIndex bytecodeIndex, JITCache::ScopeOpcode opcode, ResolveType resolveType, uint32_t localScopeDepth = 0)
+{
+    if (!recorder) [[likely]]
+        return;
+    recorder->bakedFacts().addScopeFact(JITCache::ScopeFact { .bytecodeOffset = bytecodeIndex.offset(), .opcode = opcode, .resolveType = resolveType, .localScopeDepth = localScopeDepth });
+}
+
+} // namespace JITPropertyAccessInternal
 
 void JIT::emit_op_get_by_val(const JSInstruction* currentInstruction)
 {
@@ -94,7 +173,7 @@ void JIT::generateGetByValSlowCase(const OpcodeType&, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITGetByValGenerator& gen = m_getByVals[m_getByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emitSlow_op_get_by_val(const JSInstruction* currentInstruction, Vector<SlowCaseEntry>::iterator& iter)
@@ -141,7 +220,7 @@ void JIT::emitSlow_op_get_private_name(const JSInstruction*, Vector<SlowCaseEntr
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITGetByValGenerator& gen = m_getByVals[m_getByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_set_private_brand(const JSInstruction* currentInstruction)
@@ -181,7 +260,7 @@ void JIT::emitSlow_op_set_private_brand(const JSInstruction* currentInstruction,
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPrivateBrandAccessGenerator& gen = m_privateBrandAccesses[m_privateBrandAccessIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_check_private_brand(const JSInstruction* currentInstruction)
@@ -216,7 +295,7 @@ void JIT::emitSlow_op_check_private_brand(const JSInstruction*, Vector<SlowCaseE
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPrivateBrandAccessGenerator& gen = m_privateBrandAccesses[m_privateBrandAccessIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 template<typename Op>
@@ -281,7 +360,7 @@ void JIT::generatePutByValSlowCase(const OpcodeType&, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPutByValGenerator& gen = m_putByVals[m_putByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emitSlow_op_put_by_val(const JSInstruction* currentInstruction, Vector<SlowCaseEntry>::iterator& iter)
@@ -334,7 +413,7 @@ void JIT::emitSlow_op_put_private_name(const JSInstruction*, Vector<SlowCaseEntr
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPutByValGenerator& gen = m_putByVals[m_putByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_put_getter_by_id(const JSInstruction* currentInstruction)
@@ -344,7 +423,7 @@ void JIT::emit_op_put_getter_by_id(const JSInstruction* currentInstruction)
     int32_t options = bytecode.m_attributes;
     emitGetVirtualRegister(bytecode.m_accessor, regT1);
     loadGlobalObject(regT2);
-    callOperation(operationPutGetterById, regT2, regT0, TrustedImmPtr(m_unlinkedCodeBlock->identifier(bytecode.m_property).impl()), options, regT1);
+    callOperation(operationPutGetterById, regT2, regT0, JITCache::ImageReference::ucbIdentifier(vm(), *m_unlinkedCodeBlock, bytecode.m_property), options, regT1);
 }
 
 void JIT::emit_op_put_setter_by_id(const JSInstruction* currentInstruction)
@@ -354,7 +433,7 @@ void JIT::emit_op_put_setter_by_id(const JSInstruction* currentInstruction)
     int32_t options = bytecode.m_attributes;
     emitGetVirtualRegister(bytecode.m_accessor, regT1);
     loadGlobalObject(regT2);
-    callOperation(operationPutSetterById, regT2, regT0, TrustedImmPtr(m_unlinkedCodeBlock->identifier(bytecode.m_property).impl()), options, regT1);
+    callOperation(operationPutSetterById, regT2, regT0, JITCache::ImageReference::ucbIdentifier(vm(), *m_unlinkedCodeBlock, bytecode.m_property), options, regT1);
 }
 
 void JIT::emit_op_put_getter_setter_by_id(const JSInstruction* currentInstruction)
@@ -365,7 +444,7 @@ void JIT::emit_op_put_getter_setter_by_id(const JSInstruction* currentInstructio
     emitGetVirtualRegister(bytecode.m_getter, regT1);
     emitGetVirtualRegister(bytecode.m_setter, regT2);
     loadGlobalObject(regT3);
-    callOperation(operationPutGetterSetter, regT3, regT0, TrustedImmPtr(m_unlinkedCodeBlock->identifier(bytecode.m_property).impl()), attribute, regT1, regT2);
+    callOperation(operationPutGetterSetter, regT3, regT0, JITCache::ImageReference::ucbIdentifier(vm(), *m_unlinkedCodeBlock, bytecode.m_property), attribute, regT1, regT2);
 }
 
 void JIT::emit_op_put_getter_by_val(const JSInstruction* currentInstruction)
@@ -452,7 +531,7 @@ void JIT::emitSlow_op_del_by_id(const JSInstruction*, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITDelByIdGenerator& gen = m_delByIds[m_delByIdIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_del_by_val(const JSInstruction* currentInstruction)
@@ -503,7 +582,7 @@ void JIT::emitSlow_op_del_by_val(const JSInstruction*, Vector<SlowCaseEntry>::it
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITDelByValGenerator& gen = m_delByVals[m_delByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_get_by_id_direct(const JSInstruction* currentInstruction)
@@ -543,7 +622,7 @@ void JIT::emitSlow_op_get_by_id_direct(const JSInstruction*, Vector<SlowCaseEntr
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_get_by_id(const JSInstruction* currentInstruction)
@@ -625,7 +704,7 @@ void JIT::emitSlow_op_get_by_id(const JSInstruction*, Vector<SlowCaseEntry>::ite
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emitSlow_op_get_length(const JSInstruction*, Vector<SlowCaseEntry>::iterator& iter)
@@ -634,7 +713,7 @@ void JIT::emitSlow_op_get_length(const JSInstruction*, Vector<SlowCaseEntry>::it
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_get_by_id_with_this(const JSInstruction* currentInstruction)
@@ -679,7 +758,7 @@ void JIT::emitSlow_op_get_by_id_with_this(const JSInstruction*, Vector<SlowCaseE
     JITGetByIdWithThisGenerator& gen = m_getByIdsWithThis[m_getByIdWithThisIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_put_by_id(const JSInstruction* currentInstruction)
@@ -730,7 +809,7 @@ void JIT::emitSlow_op_put_by_id(const JSInstruction*, Vector<SlowCaseEntry>::ite
     JITPutByIdGenerator& gen = m_putByIds[m_putByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_in_by_id(const JSInstruction* currentInstruction)
@@ -770,7 +849,7 @@ void JIT::emitSlow_op_in_by_id(const JSInstruction*, Vector<SlowCaseEntry>::iter
     JITInByIdGenerator& gen = m_inByIds[m_inByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_in_by_val(const JSInstruction* currentInstruction)
@@ -815,7 +894,7 @@ void JIT::emitSlow_op_in_by_val(const JSInstruction*, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITInByValGenerator& gen = m_inByVals[m_inByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emitHasPrivate(VirtualRegister dst, VirtualRegister base, VirtualRegister propertyOrBrand, AccessType type)
@@ -852,7 +931,7 @@ void JIT::emitHasPrivateSlow(AccessType type, Vector<SlowCaseEntry>::iterator& i
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITInByValGenerator& gen = m_inByVals[m_inByValIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_has_private_name(const JSInstruction* currentInstruction)
@@ -897,12 +976,14 @@ void JIT::emit_op_resolve_scope(const JSInstruction* currentInstruction)
     // If we profile certain resolve types, we're guaranteed all linked code will have the same
     // resolve type.
 
-    if (profiledResolveType == ModuleVar)
+    if (profiledResolveType == ModuleVar) {
+        JITPropertyAccessInternal::recordBakedScopeFact(m_imageRecorder.get(), m_bytecodeIndex, JITCache::ScopeOpcode::ResolveScope, ModuleVar);
         loadPtrFromMetadata(bytecode, Metadata::offsetOfLexicalEnvironment(), returnValueGPR);
-    else if (profiledResolveType == ClosureVar) {
+    } else if (profiledResolveType == ClosureVar) {
         emitGetVirtualRegister(scope, scopeGPR);
         static_assert(scopeGPR == returnValueGPR);
         unsigned localScopeDepth = bytecode.metadata(m_profiledCodeBlock).m_localScopeDepth;
+        JITPropertyAccessInternal::recordBakedScopeFact(m_imageRecorder.get(), m_bytecodeIndex, JITCache::ScopeOpcode::ResolveScope, ClosureVar, localScopeDepth);
         if (localScopeDepth < 8) {
             for (unsigned index = 0; index < localScopeDepth; ++index)
                 loadPtr(Address(returnValueGPR, JSScope::offsetOfNext()), returnValueGPR);
@@ -951,21 +1032,14 @@ void JIT::emit_op_resolve_scope(const JSInstruction* currentInstruction)
                 addPtr(TrustedImm32(metadataOffset), GPRInfo::metadataTableRegister, metadataGPR);
             }
 
-            MacroAssemblerCodeRef<JITThunkPtrTag> code;
+            // The ClosureVarWithVarInjectionChecks thunk walks the depth in this CodeBlock's metadata without checking its
+            // resolve type.
             if (profiledResolveType == ClosureVarWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpResolveScopeThunk<ClosureVarWithVarInjectionChecks>);
-            else if (profiledResolveType == GlobalVarWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalVarWithVarInjectionChecks>);
-            else if (profiledResolveType == GlobalPropertyWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalPropertyWithVarInjectionChecks>);
-            else if (profiledResolveType == GlobalLexicalVarWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalLexicalVarWithVarInjectionChecks>);
-            else
-                code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalVar>);
+                JITPropertyAccessInternal::recordBakedScopeFact(m_imageRecorder.get(), m_bytecodeIndex, JITCache::ScopeOpcode::ResolveScope, ClosureVarWithVarInjectionChecks);
 
             emitGetVirtualRegister(scope, scopeGPR);
             move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-            nearCallThunk(CodeLocationLabel { code.retaggedCode<NoPtrTag>() });
+            JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITPropertyAccessInternal::resolveScopeThunkFor(profiledResolveType)));
             break;
         }
         }
@@ -994,28 +1068,10 @@ void JIT::emitSlow_op_resolve_scope(const JSInstruction* currentInstruction, Vec
     if (metadataAddress.base != metadataGPR)
         addPtr(TrustedImm32(m_profiledCodeBlock->metadataTable()->offsetInMetadataTable(bytecode)), GPRInfo::metadataTableRegister, metadataGPR);
 
-    MacroAssemblerCodeRef<JITThunkPtrTag> code;
     // FIXME: Why do we generate the cases for the thunks we already emitted in the fast path. It seems like those should just go straight to the generic slow path thunk.
-    if (profiledResolveType == ClosureVarWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<ClosureVarWithVarInjectionChecks>);
-    else if (profiledResolveType == GlobalVar)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalVar>);
-    else if (profiledResolveType == GlobalProperty)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalProperty>);
-    else if (profiledResolveType == GlobalLexicalVar)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalLexicalVar>);
-    else if (profiledResolveType == GlobalVarWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalVarWithVarInjectionChecks>);
-    else if (profiledResolveType == GlobalPropertyWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalPropertyWithVarInjectionChecks>);
-    else if (profiledResolveType == GlobalLexicalVarWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalLexicalVarWithVarInjectionChecks>);
-    else
-        code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalVar>);
-
     emitGetVirtualRegister(scope, scopeGPR);
     move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-    nearCallThunk(CodeLocationLabel { code.retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITPropertyAccessInternal::resolveScopeThunkFor(profiledResolveType)));
 }
 
 template <ResolveType profiledResolveType>
@@ -1209,6 +1265,7 @@ void JIT::emit_op_get_from_scope(const JSInstruction* currentInstruction)
     using BaselineJITRegisters::GetFromScope::scratch1GPR;
 
     if (profiledResolveType == ClosureVar) {
+        JITPropertyAccessInternal::recordBakedScopeFact(m_imageRecorder.get(), m_bytecodeIndex, JITCache::ScopeOpcode::GetFromScope, ClosureVar);
         emitGetVirtualRegister(scope, scopeGPR);
         loadPtrFromMetadata(bytecode, Metadata::offsetOfOperand(), scratch1GPR);
         loadValue(BaseIndex(scopeGPR, scratch1GPR, TimesEight, JSLexicalEnvironment::offsetOfVariables()), returnValueGPR);
@@ -1262,25 +1319,9 @@ void JIT::emit_op_get_from_scope(const JSInstruction* currentInstruction)
                 addPtr(TrustedImm32(metadataOffset), GPRInfo::metadataTableRegister, metadataGPR);
             }
 
-            MacroAssemblerCodeRef<JITThunkPtrTag> code;
-            if (profiledResolveType == ClosureVarWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<ClosureVarWithVarInjectionChecks>);
-            if (profiledResolveType == GlobalProperty)
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalProperty>);
-            if (profiledResolveType == GlobalVar)
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalVar>);
-            if (profiledResolveType == GlobalLexicalVar)
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalLexicalVar>);
-            else if (profiledResolveType == GlobalVarWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalVarWithVarInjectionChecks>);
-            else if (profiledResolveType == GlobalLexicalVarWithVarInjectionChecks)
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalLexicalVarWithVarInjectionChecks>);
-            else
-                code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalVar>);
-
             emitGetVirtualRegister(scope, scopeGPR);
             move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-            nearCallThunk(CodeLocationLabel { code.retaggedCode<NoPtrTag>() });
+            JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITPropertyAccessInternal::getFromScopeThunkFor(profiledResolveType)));
             break;
         }
         }
@@ -1312,26 +1353,15 @@ void JIT::emitSlow_op_get_from_scope(const JSInstruction* currentInstruction, Ve
     if (metadataAddress.base != metadataGPR)
         addPtr(TrustedImm32(metadataOffset), GPRInfo::metadataTableRegister, metadataGPR);
 
-    MacroAssemblerCodeRef<JITThunkPtrTag> code;
-    if (profiledResolveType == ClosureVarWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<ClosureVarWithVarInjectionChecks>);
-    else if (profiledResolveType == GlobalVar)
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalVar>);
-    else if (profiledResolveType == GlobalVarWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalVarWithVarInjectionChecks>);
-    else if (profiledResolveType == GlobalProperty)
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalProperty>);
-    else if (profiledResolveType == GlobalLexicalVar)
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalLexicalVar>);
-    else if (profiledResolveType == GlobalLexicalVarWithVarInjectionChecks)
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalLexicalVarWithVarInjectionChecks>);
-    else
-        code = vm().getCTIStub(generateOpGetFromScopeThunk<GlobalVar>);
+    // The main pass adds slow cases only for the global types it compiles inline, and the runtime promotes a global type
+    // only to another global type, so this path never meets ClosureVarWithVarInjectionChecks, the one type whose thunk
+    // the native slow path chose differently from getFromScopeThunkFor.
+    ASSERT(profiledResolveType != ClosureVarWithVarInjectionChecks);
 
     emitGetVirtualRegister(scope, scopeGPR);
     addPtr(TrustedImm32(metadataOffset), GPRInfo::metadataTableRegister, metadataGPR);
     move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-    nearCallThunk(CodeLocationLabel { code.retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITPropertyAccessInternal::getFromScopeThunkFor(profiledResolveType)));
 }
 
 template <ResolveType profiledResolveType>
@@ -1618,6 +1648,8 @@ void JIT::emit_op_put_to_scope(const JSInstruction* currentInstruction)
     // all CodeBlocks will be ClosureVar. If we're ClosureVarWithVarInjectionChecks, we're always ClosureVar
     // if the var injection watchpoint isn't fired. If it is fired, then we take the slow path, so it doesn't
     // matter what type we are dynamically.
+    if (profiledResolveType == ClosureVar || profiledResolveType == ResolvedClosureVar || profiledResolveType == ClosureVarWithVarInjectionChecks)
+        JITPropertyAccessInternal::recordBakedScopeFact(m_imageRecorder.get(), m_bytecodeIndex, JITCache::ScopeOpcode::PutToScope, profiledResolveType);
     if (profiledResolveType == ClosureVar)
         emitCode(ClosureVar);
     else if (profiledResolveType == ResolvedClosureVar)
@@ -1671,6 +1703,7 @@ void JIT::emitSlow_op_put_to_scope(const JSInstruction* currentInstruction, Vect
     if (profiledResolveType == ModuleVar) {
         // If any linked CodeBlock saw a ModuleVar, then all linked CodeBlocks are guaranteed
         // to also see ModuleVar.
+        JITPropertyAccessInternal::recordBakedScopeFact(m_imageRecorder.get(), m_bytecodeIndex, JITCache::ScopeOpcode::PutToScope, ModuleVar);
         JITSlowPathCall slowPathCall(this, slow_path_throw_strict_mode_readonly_property_write_error);
         slowPathCall.call();
     } else {
@@ -1681,7 +1714,7 @@ void JIT::emitSlow_op_put_to_scope(const JSInstruction* currentInstruction, Vect
         using BaselineJITRegisters::PutToScope::bytecodeOffsetGPR;
 
         move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-        nearCallThunk(CodeLocationLabel { vm().getCTIStub(slow_op_put_to_scopeGenerator).retaggedCode<NoPtrTag>() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::SlowOpPutToScope));
     }
 }
 
@@ -1878,7 +1911,7 @@ void JIT::emitSlow_op_get_by_val_with_this(const JSInstruction*, Vector<SlowCase
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITGetByValWithThisGenerator& gen = m_getByValsWithThis[m_getByValWithThisIndex++];
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { InlineCacheCompiler::generateSlowPathCode(vm(), gen.accessType()).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::inlineCacheSlowPathThunk(gen.accessType()));
 }
 
 void JIT::emit_op_get_property_enumerator(const JSInstruction* currentInstruction)
@@ -1966,7 +1999,7 @@ void JIT::emit_op_enumerator_next(const JSInstruction* currentInstruction)
         done.append(jump());
 
         outOfBounds.link(this);
-        storeTrustedValue(vm().smallStrings.sentinelString(), addressFor(propertyName));
+        JITCache::storeReferenceValue(*this, JITCache::ImageReference::vmCell(vm(), JITCache::VMCell::SmallStringsSentinel), addressFor(propertyName), JITCache::StoreValueKind::Trusted);
         done.append(jump());
     }
 
@@ -2232,7 +2265,7 @@ void JIT::emitWriteBarrier(VirtualRegister owner, VirtualRegister value, WriteBa
         ownerNotCell = branchIfNotCell(tmpGPR);
 
     Jump ownerIsRememberedOrInEden = barrierBranch(vm(), tmpGPR, regT2);
-    callOperationNoExceptionCheck(operationWriteBarrierSlowPath, TrustedImmPtr(&vm()), tmpGPR);
+    callOperationNoExceptionCheck(operationWriteBarrierSlowPath, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), tmpGPR);
     ownerIsRememberedOrInEden.link(this);
 
     if (mode == ShouldFilterBase || mode == ShouldFilterBaseAndValue)
@@ -2254,7 +2287,7 @@ void JIT::emitWriteBarrier(GPRReg ownerGPR, WriteBarrierMode mode)
         ownerNotCell = branchIfNotCell(ownerGPR);
 
     Jump ownerIsRememberedOrInEden = barrierBranch(vm(), ownerGPR, tempGPR);
-    callOperationNoExceptionCheck(operationWriteBarrierSlowPath, TrustedImmPtr(&vm()), ownerGPR);
+    callOperationNoExceptionCheck(operationWriteBarrierSlowPath, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), ownerGPR);
     ownerIsRememberedOrInEden.link(this);
 
     if (mode == ShouldFilterBase)
@@ -2269,6 +2302,9 @@ void JIT::emitWriteBarrier(VirtualRegister owner, WriteBarrierMode mode)
 
 void JIT::emitWriteBarrier(JSCell* owner)
 {
+    // No baseline emitter calls this, and the owner's address is a reference the census does not cover (census D8).
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->markUnrecordable(JITCache::Unrecordable::UnannotatedReference);
     Jump ownerIsRememberedOrInEden = barrierBranch(vm(), owner, regT0);
     callOperationNoExceptionCheck(operationWriteBarrierSlowPath, TrustedImmPtr(&vm()), TrustedImmPtr(owner));
     ownerIsRememberedOrInEden.link(this);
@@ -2277,7 +2313,7 @@ void JIT::emitWriteBarrier(JSCell* owner)
 void JIT::emitWriteBarrier(GPRReg owner)
 {
     Jump ownerIsRememberedOrInEden = barrierBranch(vm(), owner, selectScratchGPR(owner));
-    callOperationNoExceptionCheck(operationWriteBarrierSlowPath, TrustedImmPtr(&vm()), owner);
+    callOperationNoExceptionCheck(operationWriteBarrierSlowPath, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), owner);
     ownerIsRememberedOrInEden.link(this);
 }
 
