@@ -16,16 +16,18 @@ export const meta = {
 // conventions, and the mechanical parts keep his words.
 //
 // - THREAD and the SPECs are sealed. Every agent answers to THREAD and its task's SPEC set and
-//   edits neither. A requirement the code cannot meet as written is a spec conflict: it goes in
-//   the result, never into the code as a workaround, and its task fails.
+//   edits neither. A requirement the code cannot meet as written is a spec conflict, and it goes
+//   in the result. The code takes the narrowest reading that keeps the SPEC's meaning (a spelling
+//   this pin cannot compile, a constructor a declared interface lacks), never a workaround that
+//   changes what the SPEC specifies; the reviewers judge which one it is.
 // - The task graph is the SPECs' task lists, verbatim. One agent extracts it; the script
 //   truncates nothing and stops on an unresolved or unknown dependency, a cycle, a gap in a list
 //   or an unsafe path.
 // - Tasks run in DAG waves of pairwise-disjoint files. Implementers never build: a reviewer is
 //   usually worth more than a build. Each task alternates three adversarial lenses and an
 //   amender until a pass finds nothing serious, and its last pass is always a review.
-// - A task passes only on a clean pass with no spec conflict standing. A missing result or a
-//   missing reviewer never counts as done or clean. A failed task blocks its dependents, and its
+// - A task passes only on a clean pass. A missing result or a missing reviewer never counts as
+//   done or clean. A failed task blocks its dependents, and its
 //   wave's commit restores its files. One commit per wave, of the passed tasks' files.
 // - The tree compiles once, in the Build phase, as Jarred's does. Verify then runs HARNESS.md's
 //   end-of-task checks; the ARM64 runs under QEMU, the concurrency family and the benches wait
@@ -458,7 +460,8 @@ Tasks this one depends on (their code is LANDED — read it, build on it, do not
 ${doneBlock(t)}
 Implement this task COMPLETELY per its SPEC. Do not weaken any SPEC invariant to make
 something work — record genuine spec conflicts in specConflicts instead, and put in forHuman
-what the SPEC leaves to the human.`
+what the SPEC leaves to the human. Where the SPEC as written cannot compile in this pin, write
+the narrowest reading that keeps its meaning and record it as a conflict.`
 
 const LENSES = [
   ['soundness', `LENS: native soundness. Hunt ONLY: hooks placed against the native protocol they
@@ -482,7 +485,9 @@ ${taskBlock(t)}
 Files to review (Read them directly — git is forbidden): ${JSON.stringify(t.files)}
 Implementer's summary: ${fence('implementer_summary', work.summary, 12000)}
 Spec conflicts recorded so far: ${fence('spec_conflicts', work.specConflicts, 20000)}
-A genuine one is no finding; one that is not genuine is a blocker.
+A genuine one whose code is the narrowest reading that keeps the SPEC's meaning is no finding;
+one that is not genuine, or whose code changes what the SPEC specifies or leaves it out, is a
+blocker.
 ${SEVERITY}${ROUND(pass)}`
 
 const amendPrompt = (t, pass, kept, conflicts) => `${CONTEXT}${authority([t.part], 'in full')}
@@ -705,9 +710,8 @@ async function implementTask(t) {
     const found = serious(findings)
     perPass.push(found.length)
     if (!found.length) {
-      if (latest.specConflicts.length) return fail('a spec conflict stands', { specConflicts: latest.specConflicts, forHuman, minor })
       log(`${t.id}: clean pass ${pass} (serious findings per pass: ${perPass.join(' -> ')})`)
-      return { status: 'passed', summary: work.summary, forHuman, minor }
+      return { status: 'passed', summary: work.summary, specConflicts: latest.specConflicts, forHuman, minor }
     }
     if (pass === MAX_TASK_PASSES)
       return fail(`${found.length} serious findings still open after ${MAX_TASK_PASSES} passes`,
