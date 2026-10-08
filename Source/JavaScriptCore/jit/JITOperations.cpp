@@ -5022,6 +5022,38 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegate, EncodedJSValue, (JSGlobalObject* 
 
 }
 
+ALWAYS_INLINE static EncodedJSValue profiledArithNegate(JSGlobalObject* globalObject, JSValue operand, UnaryArithProfile& arithProfile)
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    arithProfile.observeArg(operand);
+
+    JSValue primValue = operand.toPrimitive(globalObject, PreferNumber);
+    RETURN_IF_EXCEPTION(scope, encodedJSValue());
+
+#if USE(BIGINT32)
+    if (primValue.isBigInt32()) {
+        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32());
+        RETURN_IF_EXCEPTION(scope, encodedJSValue());
+        arithProfile.observeResult(result);
+        return JSValue::encode(result);
+    }
+#endif
+    if (primValue.isHeapBigInt()) {
+        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt());
+        RETURN_IF_EXCEPTION(scope, encodedJSValue());
+        arithProfile.observeResult(result);
+        return JSValue::encode(result);
+    }
+
+    double number = primValue.toNumber(globalObject);
+    RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    JSValue result = jsNumber(-number);
+    arithProfile.observeResult(result);
+    return JSValue::encode(result);
+}
+
 // FIXME: it would be better to call those operationValueNegate, since the operand can be a BigInt
 JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiled, EncodedJSValue, (JSGlobalObject* globalObject, EncodedJSValue encodedOperand, UnaryArithProfile* arithProfile))
 {
@@ -5031,32 +5063,7 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiled, EncodedJSValue, (JSGlobal
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    JSValue operand = JSValue::decode(encodedOperand);
-    arithProfile->observeArg(operand);
-
-    JSValue primValue = operand.toPrimitive(globalObject, PreferNumber);
-    OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-
-#if USE(BIGINT32)
-    if (primValue.isBigInt32()) {
-        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32());
-        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-        arithProfile->observeResult(result);
-        OPERATION_RETURN(scope, JSValue::encode(result));
-    }
-#endif
-    if (primValue.isHeapBigInt()) {
-        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt());
-        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-        arithProfile->observeResult(result);
-        OPERATION_RETURN(scope, JSValue::encode(result));
-    }
-
-    double number = primValue.toNumber(globalObject);
-    OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-    JSValue result = jsNumber(-number);
-    arithProfile->observeResult(result);
-    OPERATION_RETURN(scope, JSValue::encode(result));
+    OPERATION_RETURN(scope, profiledArithNegate(globalObject, JSValue::decode(encodedOperand), *arithProfile));
 }
 
 // FIXME: it would be better to call those operationValueNegate, since the operand can be a BigInt
@@ -5072,7 +5079,8 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiledOptimize, EncodedJSValue, (
     UnaryArithProfile* arithProfile = negIC->arithProfile();
     ASSERT(arithProfile);
     arithProfile->observeArg(operand);
-    negIC->generateOutOfLine(callFrame->codeBlock(), operationArithNegateProfiled);
+    // The repointed slow call keeps passing the IC, so its replacement must take the IC, not a profile.
+    negIC->generateOutOfLine(callFrame->codeBlock(), operationArithNegateProfiledNoOptimize);
 
 #if ENABLE(MATH_IC_STATS)
     callFrame->codeBlock()->dumpMathICStats();
@@ -5101,6 +5109,18 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiledOptimize, EncodedJSValue, (
     JSValue result = jsNumber(-number);
     arithProfile->observeResult(result);
     OPERATION_RETURN(scope, JSValue::encode(result));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiledNoOptimize, EncodedJSValue, (JSGlobalObject* globalObject, EncodedJSValue encodedOperand, JITNegIC* negIC))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    UnaryArithProfile* arithProfile = negIC->arithProfile();
+    ASSERT(arithProfile);
+    OPERATION_RETURN(scope, profiledArithNegate(globalObject, JSValue::decode(encodedOperand), *arithProfile));
 }
 
 // FIXME: it would be better to call those operationValueNegate, since the operand can be a BigInt

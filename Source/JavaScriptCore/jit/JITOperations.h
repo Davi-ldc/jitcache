@@ -422,6 +422,7 @@ JSC_DECLARE_JIT_OPERATION(operationValueMulProfiled, EncodedJSValue, (JSGlobalOb
 JSC_DECLARE_JIT_OPERATION(operationArithNegate, EncodedJSValue, (JSGlobalObject*, EncodedJSValue operand));
 JSC_DECLARE_JIT_OPERATION(operationArithNegateProfiled, EncodedJSValue, (JSGlobalObject*, EncodedJSValue operand, UnaryArithProfile*));
 JSC_DECLARE_JIT_OPERATION(operationArithNegateProfiledOptimize, EncodedJSValue, (JSGlobalObject*, EncodedJSValue encodedOperand, JITNegIC*));
+JSC_DECLARE_JIT_OPERATION(operationArithNegateProfiledNoOptimize, EncodedJSValue, (JSGlobalObject*, EncodedJSValue encodedOperand, JITNegIC*));
 JSC_DECLARE_JIT_OPERATION(operationArithNegateOptimize, EncodedJSValue, (JSGlobalObject*, EncodedJSValue encodedOperand, JITNegIC*));
 JSC_DECLARE_JIT_OPERATION(operationValueSub, EncodedJSValue, (JSGlobalObject*, EncodedJSValue encodedOp1, EncodedJSValue encodedOp2));
 JSC_DECLARE_JIT_OPERATION(operationValueSubProfiled, EncodedJSValue, (JSGlobalObject*, EncodedJSValue encodedOp1, EncodedJSValue encodedOp2, BinaryArithProfile*));
