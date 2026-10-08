@@ -16,10 +16,10 @@ unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
 Then run:
 
 ```sh
-bun --jitcache=./.jitcache --jitcache-role=p/c/p-c run server.ts
+bun --jitcache=./.jitcache --jitcache-role=producer --jitcache-producer-limit=max run server.ts
 ```
 
-`p` saves the JIT for each function as it is compiled. `c` (default) consumes jitcache from a dir and `p-c` uses the cache for already saved functions and keeps updating it (if better)[^1] code is compiled.
+A `producer` saves each function's baseline code as it is compiled, and needs `--jitcache-producer-limit` (`max` sets no limit). A `consumer`, the default, runs from what a producer saved, and a `consumer-producer` uses the saved functions and keeps updating them when it learns more[^1].
 
 ```sh
 bun --jitcache=./.jitcache run server.ts

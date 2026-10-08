@@ -140,7 +140,7 @@ Bun runs it as `bun jitcache <command>`. `src/runtime/cli/mod.rs` gains `Tag::JI
 | `unknown-file` | a name that is neither a body, a temporary nor `header` | left as it is |
 | `unlink-failed` | an `unlinkat` fails | the body stays; the outcome is still `Done`, except that a whole-artifact deletion keeps `header` and returns `Failed` (section 4.5) |
 | `rmdir-failed` | removing `bodies/` or `cache/` fails after `header` is gone | the bodiless remnant stays for the next Producer or `clean`; the outcome is still `Done` |
-| `io` | opening a directory (the parent's absence aside, section 2) or the lock file, or listing, fails | `Failed` |
+| `io` | opening a directory (the parent's absence aside, section 2), opening the lock file, locking it with an error other than `busy`, or listing fails | `Failed` |
 
 ## 7. Tests
 

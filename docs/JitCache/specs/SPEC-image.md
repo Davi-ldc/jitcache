@@ -228,7 +228,7 @@ CodePtr<NoPtrTag> resolveSupport(VM&, const ImageTarget&);               // supp
 
 ### 3.9 Recording rules
 
-Recording follows these rules, which keep every byte outside a fixup the same in every process (I1).
+Recording follows these rules, which keep every byte outside a fixup the same in every process for the same inputs and draws (I1).
 
 - R1. A reference is emitted through a helper of section 4.3, which takes its typed target. Without a recorder the helper emits exactly the native instruction sequence (I4).
 - R2. A recorded `Pointer` uses `moveWithPatch(TrustedImmPtr(value), reg)` and records the `DataLabelPtr`. Nothing is folded into an immediate operand, a displacement or arithmetic, and nothing is blinded.
@@ -246,7 +246,7 @@ Recording follows these rules, which keep every byte outside a fixup the same in
 
 A baseline compilation records when `JIT::compileAndLinkWithoutFinalizing` starts, `producerContext(vm)` (R-INT-1) returns a context and its plan's `jitCacheRecordsImage()` is true, which `JIT::compileAndLinkWithoutFinalizing` reads through `JIT::m_plan` (R-INT-12); in twins builds it also records when `JIT::setJITCacheTwin` already gave the JIT a twin recorder (section 11.3, step 4). The flag says whether the CB's UCB has a record, which a UCB gets only at a request point, before it is published (SPEC-ucb.md section 6.2).
 
-A MathIC regeneration records when `producerContext(codeBlock->vm())` returns a context, `codeBlock->jitType()` is `BaselineJIT`, and the `BaselineJITCode` carries an image record in state `Complete` (section 5). In a ConsumerProducer VM this includes imported images, whose record is rebuilt at import (section 10.3, step 14). A twin regeneration, which exists only in twins builds, always records, into its twin compile's record (section 11.3, step 5).
+A MathIC regeneration records when the CB `generateOutOfLine` receives (section 6.2) runs `BaselineJIT`, `producerContext` of that CB's VM returns a context, and the CB's `BaselineJITCode` carries an image record in state `Complete` (section 5). In a ConsumerProducer VM this includes imported images, whose record is rebuilt at import (section 10.3, step 14). A twin regeneration, which exists only in twins builds, always records, into its twin compile's record (section 11.3, step 5).
 
 Since a context exists only while a producing VM's cache activity is on (R-INT-1), every recording compilation runs with the fixed options of options.md at their required values, which `start` checks, and without the per-bytecode profiler, which only `useProfiler` creates (N29). None meets Debugger-mode bytecode (`op_debug`, the ShadowChicken opcodes) or builds a PC-to-origin map: both need an attached debugger or options fixed off, and a debugger attach turns cache activity off for good (THREAD Session; N15, N29). A compilation that read the context just before it turned null records an image that is never captured: the context turns null only when production ends, for good (R-INT-1), and capture runs only while production is active (R-INT-6). Other VMs emit unchanged.
 
@@ -621,7 +621,7 @@ template void JITMathIC<JITAddGenerator, BinaryArithProfile>::generateOutOfLine(
 // ... the same pair for <JITMulGenerator, BinaryArithProfile>, <JITSubGenerator, BinaryArithProfile> and <JITNegGenerator, UnaryArithProfile>
 ```
 
-A native regeneration is active exactly when section 4.1 has it record. A `Complete` record lists every MathIC of its code, the record step 14 of section 10.3 rebuilds included, so a regeneration whose record does not list its IC is a programming error: an `ASSERT` in debug builds, and in release builds the regeneration marks the record `Unrecordable(InconsistentRecord)` and records nothing, so no capture reads a record that lacks the snippet. DFG and FTL MathICs, every non-recording VM, and a VM whose cache activity is off see an inactive object whose recording methods do nothing. A twin regeneration, which exists only in twins builds, is always active: it records into the twin compile's record and draws its seeds from the replay (section 11.3, step 5).
+A native regeneration is active exactly when section 4.1 has it record. A `Complete` record lists every MathIC of its code, the record step 14 of section 10.3 rebuilds included, so a regeneration whose record does not list its IC is a programming error: an `ASSERT` in debug builds, and in release builds the regeneration marks the record `Unrecordable(InconsistentRecord)` and records nothing, so no capture reads a record that lacks the snippet. DFG and FTL MathICs, every non-recording VM, and a VM whose cache activity is off see an inactive object whose recording methods do nothing. A twin regeneration is always active (section 4.1) and draws its seeds from the replay (section 11.3, step 5).
 
 ```cpp
 namespace JSC::JITCache {
@@ -629,7 +629,7 @@ class MathICRegeneration {
     WTF_MAKE_NONCOPYABLE(MathICRegeneration);
 public:
     MathICRegeneration(CodeBlock*, const void* mathIC,
-        CodePtr<CFunctionPtrTag> callReplacement, uint16_t profileBitsAtEntry);         // native; the last two feed the twins log only
+        CodePtr<CFunctionPtrTag> callReplacement, uint16_t profileBitsAtEntry);         // native; the last two feed only the twins builds' regeneration log (section 11.1)
 #if ENABLE(JITCACHE_TWINS)
     MathICRegeneration(TwinReplay&, ImageRecord& twinRecord, const void* mathIC);      // twin replay
 #endif
@@ -835,7 +835,7 @@ public:
 #endif
 };
 
-Expected<ImageCapture, CaptureFailure> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&, bool strict);
+std::expected<ImageCapture, CaptureFailure> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&, bool strict);
 }
 ```
 
@@ -877,8 +877,8 @@ struct ImageSectionSpans {
 };
 class ImageSectionsView; // spans into the borrowed payload; under strict, structurally valid (V1 to V7, and W1 to W3 in twins builds)
 
-Expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&, bool strict); // the V and W1 to W3 checks only under strict
-Expected<void, ImageCheck> validateImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&); // U1 to U7, W4; strict only
+std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&, bool strict); // the V and W1 to W3 checks only under strict
+std::expected<void, ImageCheck> validateImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&); // U1 to U7, W4; strict only
 
 enum class BakedFactsResult : uint8_t { Match, Mismatch };
 BakedFactsResult compareBakedFacts(const ImageSectionsView&, CodeBlock& newborn);
@@ -894,7 +894,7 @@ public:
     Ref<BaselineJITCode> commit(VM&, CodeBlock& installing); // infallible; consumes the object; returns code()
 };
 
-Expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict); // not const: steps 2 and 13 call UCB accessors that have no const overload; a non-null budget rebuilds the record (step 14)
+std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict); // not const: steps 2 and 13 call UCB accessors that have no const overload; a non-null budget rebuilds the record (step 14)
 }
 ```
 
@@ -908,7 +908,7 @@ The glue calls these in THREAD Restoration's order under R-INT-7, and `prepareIm
 
 ### 10.3 Steps
 
-1. Validate nothing here. Validation is the glue's: under strict it runs before `compareBakedFacts`, which relies on U4 (R-INT-3, R-INT-7, section 8.5). Either way every footprint holds its form's canonical encoding (I8), which the writers of step 9 rely on. History: [Validation](SPEC-image-history.md#validation).
+1. Validate nothing here. Validation is the glue's: under strict it runs before `compareBakedFacts`, which relies on U4 (R-INT-3, R-INT-7, section 8.5), and normal mode runs none. In both modes every footprint holds its form's canonical encoding (I8), which the writers of step 9 rely on. History: [Validation](SPEC-image-history.md#validation).
 2. Create every MathIC, with inline code or without, in a local `MathICHolder`, with `addJITAddIC(&ucb.binaryArithProfile(op.m_profileIndex))` and the matching calls for sub, mul and negate, in MathIC index order; set each `m_generator` with `JIT::mathICGeneratorFor<Op>`, as `JIT::emitMathICFast` sets it for every IC, and `m_generateFastPathOnRepatch` from the flags.
 3. Build the switch tables: `FixedVector<SimpleJumpTable>` and `FixedVector<StringJumpTable>` of the UCB's counts, each dense or string table's `m_ctiOffsets` sized from the section. Their storage addresses are final from here on; moving the outer vectors into the `BaselineJITCode` later does not move them.
 4. Rank the string tables: `rankStringSwitches` of the consumer's UCB (section 3.8), which sorts each inline-tree table's keys by signed address, giving rank to key and to `m_indexInTable`.
@@ -1094,7 +1094,7 @@ The restored image and its twin are two allocations at different addresses. Ever
 - Rates. The restored code's coverage rates equal the capture's, state the engine cannot recompute, which THREAD compares with its capture record.
 - Relocation. For every fixup the clause compares, the producer value from the twins section differs from the target's resolution in the restored context, and each equal pair is reported with the relocation domain that resolution lies in (below). A reference missing from the record keeps the producer's value in the restored image and takes the consumer's in the twin, so the byte comparison above finds it only where those values differ, which THREAD Verification secures by computing twins "with every process, VM, UCB, support and Structure-reservation address differing between producer and consumer". The clause compares no pair for three kinds of fixup:
   - one with an artifact target, whose addresses are the two processes' own allocations, which THREAD Verification does not ask to differ; the decodes compare it by logical target;
-  - one whose target lies "inside an object loaded at its link-time address", which THREAD Verification's relocation requirement skips: its resolution lies in a loaded segment of an object whose load bias is zero, as `dl_iterate_phdr` reports the objects, read once per process as section 3.5 reads the text segment. The domain table's engine-image row names the targets this skips under Bun's build flags (N23). History: [Relocation domains](SPEC-image-history.md#relocation-domains);
+  - one whose target lies "inside an object loaded at its link-time address", which THREAD Verification's relocation requirement skips: its resolution lies in a loaded segment of an object whose load bias is zero, as `dl_iterate_phdr` reports the objects, read once per process as section 3.5 reads the text segment. The domain table's engine-image row names the targets this skips under Bun's build flags (N23; history: [Relocation domains](SPEC-image-history.md#relocation-domains));
   - every fixup of a body whose twins section carries the importing process's own `captureProcessToken()`, since the requirement also "skips every target of a body the importing process captured itself": this process captured it, by this VM or another, so no domain can have moved between its capture and its import. A process forked from another inherits its token with the address space it describes. Every comparison above still runs for such a body. History: [Bodies a process captured itself](SPEC-image-history.md#bodies-a-process-captured-itself).
 
 Each difference goes to the `TwinReport`.
@@ -1153,10 +1153,10 @@ On the integrator (the owner of these interfaces; names are working names):
   - A per-VM `JITCache::Twins` object, created no later than the VM's first `Twins::checkImage` and destroyed during VM destruction, at any point, since it holds no twin CB (section 11.3, step 2).
   - The `image-twins.baseline` span passed to `parseImageSections` in `ImageSectionSpans`, and the payload kept alive until `Twins::checkImage` returns.
   - A call to `Twins::checkImage` for every installed import, at the end of `ScriptExecutable::prepareForExecutionImpl` after `installCode` and before JS runs, on both install points (before `setupLLInt`, and in `JIT::compileSync` reached through `setupJIT`), with the installed CB, the scope `prepareForExecutionImpl` received, the committed `BaselineJITCode` and the parsed sections.
-  - The producer-then-consumer runner. It runs every process with strict on (THREAD Verification) and turns `useConcurrentJIT` off in every process of a twins run; it fails a run on a skipped image check, as on a difference, under THREAD Verification's skip rule (section 11.3).
-  - The runner moves every relocation domain the clause of section 11.4 compares between each process that imports a body and each process whose captures it imports; a ConsumerProducer that recaptures a body is that body's capturing process for every process that imports it later (T15). The importing process's executable pool lies in a range disjoint from the capturing process's (`g_jscConfig.startExecutableMemory` to `endExecutableMemory`), and its structure reservation at another base (`startOfStructureHeap`); both are settled before its `JSC::initialize` makes them (N22), for example with an inaccessible placeholder mapping over every free page of the capturing process's two ranges, or, for the pool, with `jitMemoryReservationAddress`, a free option. Address randomization stays on in every process (`kernel.randomize_va_space` at 2, no `ADDR_NO_RANDOMIZE` personality), which moves the heap. The runner checks on each architecture that the heap moved, and where the build's allocator keeps a fixed base, it takes the heap from an allocator whose mappings the kernel places.
+  - The producer-then-consumer runner. It runs every process with strict on (THREAD Verification) and turns `useConcurrentJIT` off in every process of a twins run unless the run's options turn it on, as T14's do; a skipped image check fails a run as harness sub-SPEC section 7.4 applies THREAD Verification's skip rule (section 11.3).
+  - The runner moves every relocation domain the clause of section 11.4 compares between each process that imports a body and each process whose captures it imports; a ConsumerProducer that recaptures a body is that body's capturing process for every process that imports it later (T15). The importing process's executable pool lies in a range disjoint from the capturing process's (`g_jscConfig.startExecutableMemory` to `endExecutableMemory`), and its structure reservation at another base (`startOfStructureHeap`); both are settled before its `JSC::initialize` makes them (N22), for example with an inaccessible placeholder mapping over every free page of the capturing process's two ranges, or, for the pool, with `jitMemoryReservationAddress`, a free option. Address randomization stays on in every process (`kernel.randomize_va_space` at 2, no `ADDR_NO_RANDOMIZE` personality). The runner checks on each architecture that the heap moved, and where the build's allocator keeps a fixed base, it takes the heap from an allocator whose mappings the kernel places.
   - A run whose only twin reports are equal relocation pairs in the heap domain is repeated once in fresh processes, and an equal pair in the repetition fails it. A heap coincidence is chance, which fresh processes do not repeat, while a defect, such as a resolution that ignores its context, recurs.
-  - A twins-only run flag that sets the process's image test hook (section 16.1) before its first VM: `--jitcache-test-image-hook=<name>` in the shell and the matching Bun environment variable, with `<name>` one of `relocation-pairs`, `operation-pair`, `change-recorded-target` and `skip-patch`, calling `JITCache::setImageTestHook`.
+  - A twins-only run flag that sets the process's image test hook (section 16.1) before its first VM: `--jitcache-test-image-hook=<name>`, which both hosts take (harness sub-SPEC section 5.1, SPEC-integrator.md section 11.2), with `<name>` one of `relocation-pairs`, `operation-pair`, `change-recorded-target` and `skip-patch`, calling `JITCache::setImageTestHook`.
   - The C++ unit-test runner for `Source/JavaScriptCore/jitcache/tests/`, and a `TwinReport` sink that keeps a skipped check, with its reason, apart from a difference.
 - R-INT-12. Whether a plan's compilation records (section 4.1): the integrator's edit to `BaselineJITPlan::BaselineJITPlan(CodeBlock*)` computes, on the VM thread, whether `producerContext(vm)` returns a context and the UCB registry's `keyOf(*codeBlock->unlinkedCodeBlock())` (SPEC-ucb.md section 6.1) returns a key. It stores the result in the plan, which exposes it as `bool BaselineJITPlan::jitCacheRecordsImage() const`. The member is written once, before the plan is enqueued or compiled, and only read afterward, from whichever thread compiles, so it needs no lock. A VM with no JITCache state pays one null test. A plan the image check constructs for its twin (section 11.3, step 4) computes the flag the same way, and the twin recorder that `setJITCacheTwin` installs does not read it.
 
@@ -1294,7 +1294,7 @@ A body that needs more moves to a `.cpp`, as `JITMathIC::generateOutOfLine` does
 
 ### 16.1 Test obligations
 
-Every test runs on x86_64 and ARM64, in `debug-local` (ASan and LSan, `jsc --destroy-vm`) and `release-local`, through the runners of R-INT-11, with strict on (THREAD Verification); the C++ tests pass `strict` explicitly.
+Every test runs on x86_64 and ARM64 in the builds and at the cadence HARNESS.md gives, through the runners of R-INT-11, with strict on (THREAD Verification); the C++ tests pass `strict` explicitly.
 
 The JS tests follow SPEC-integrator.md R-ALL-4 and the runner's directives and argument conventions (harness sub-SPEC sections 7.2 to 7.6).
 
@@ -1344,6 +1344,6 @@ Ordered; each fits one implementation agent. A task that needs an integrator pie
 8. MathIC regeneration (the move of `JITMathIC::generateOutOfLine` to `jit/JITMathIC.cpp` with its explicit instantiations, the wrapper and body edits, the native `MathICRegeneration` with the snippet's linked size in its provenance). After tasks 4 and 6.
 9. `ImageCapture` with S1 to S4, the `JITCodeMap` accessors of section 14.1 that its step 2 reads the code map through (N27), and `MathICHolder::forEachMathIC`, which S3 uses. After tasks 5, 6 and 8.
 10. `ImagePrepare` with `PreparedImage::code()`, `compareBakedFacts` and S5; T9. After tasks 1, 4 and 6 (section 10.3, step 2, calls task 6's `JIT::mathICGeneratorFor`).
-11. Twins, all under `ENABLE(JITCACHE_TWINS)`, after tasks 9 and 10. The producer side: `snapshotCompileInputs` with its API-lock flag and its call in `JIT::compileAndLinkWithoutFinalizing`, `ImageRecorder::recordCompileInputs`, the strict-equality inputs (`ImageRecorder::strictEqualityAtomOperand`, its calls in `JIT::compileOpStrictEq` and `JIT::compileOpStrictEqJump`, and the merge in `finishBaselineCompile`), the regeneration log in the native `MathICRegeneration` (the entry at construction, a slot per `attach`), and capture's producer values (section 9, step 6). The section: the `image-twins.baseline` codec with W1 to W4, `ImageSectionSpans::twins`, and the twin data of the rebuilt record (section 10.3, step 14). The check: `JIT::setJITCacheTwin`, the `BinarySwitch` seed overload, the twin recorder's strict-equality answers, the twin `MathICRegeneration`, `Twins::checkImage` with its preconditions and its relocation clause, including the skip of a target at its link-time address, `captureProcessToken` with the clause's rule for a body its own process captured, the twin registry (`rememberImageTwin`, `forgetImageTwin`, `imageTwinCountForTesting`) with its call in `CodeBlock::~CodeBlock`, the test hooks of section 16.1 with `setImageTestHook`, and T21.
+11. Twins, all under `ENABLE(JITCACHE_TWINS)`, after tasks 9 and 10. The producer side: `snapshotCompileInputs` with its API-lock flag and its call in `JIT::compileAndLinkWithoutFinalizing`, `ImageRecorder::recordCompileInputs`, the strict-equality inputs (`ImageRecorder::strictEqualityAtomOperand`, its calls in `JIT::compileOpStrictEq` and `JIT::compileOpStrictEqJump`, and the merge in `finishBaselineCompile`), the regeneration log in the native `MathICRegeneration` (section 11.1: the entry at construction, a slot per `attach`), and capture's producer values (section 9, step 6). The section: the `image-twins.baseline` codec with W1 to W4, `ImageSectionSpans::twins`, and the twin data of the rebuilt record (section 10.3, step 14). The check: `JIT::setJITCacheTwin`, the `BinarySwitch` seed overload, the twin recorder's strict-equality answers, the twin `MathICRegeneration`, `Twins::checkImage` with its preconditions and its relocation clause, including the skip of a target at its link-time address, `captureProcessToken` with the clause's rule for a body its own process captured, the twin registry (`rememberImageTwin`, `forgetImageTwin`, `imageTwinCountForTesting`) with its call in `CodeBlock::~CodeBlock`, the test hooks of section 16.1 with `setImageTestHook`, and T21.
 12. The JS corpus and T1 to T5, T7, T8 and T11 to T19, once the integrator's glue and runners land.
 13. B1 to B5.

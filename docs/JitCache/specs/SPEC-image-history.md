@@ -78,7 +78,7 @@ MathIC entries now have a state without inline code, read from the IC's null loc
 
 ## Exported headers
 
-The first design constructed `MathICRegeneration` by value and called `ImageEmission.h` helpers inside `JITMathIC.h`, and turned inline `AssemblyHelpers.h` functions into callers of helpers that take `ImageReference`. A review then suggested exporting the lane's headers.
+The first design constructed `MathICRegeneration` by value and called `ImageEmission.h` helpers inside `JITMathIC.h`, and turned inline `AssemblyHelpers.h` functions into callers of helpers that take `ImageReference`. A review offered two ways out: keep exported headers to declarations and hooks, or export every `jitcache/` header they reach.
 
 Bun compiles against JSC's copied headers only, and its `JavaScriptCore/JIT.h` include reaches those headers (section 14.4), so neither version would have built in Bun. `ImageEmission.h` could not have been included from `AssemblyHelpers.h` anyway: `ImageReference` derives from `CCallHelpers::ConstantMaterializer`, and `CCallHelpers.h` includes `AssemblyHelpers.h`. Exporting would have handed the lane's internals to Bun and still left that cycle. A data member that exists only in twins builds would give an exported class two layouts if the switch reached JSC's translation units and not Bun's.
 
@@ -92,7 +92,7 @@ The rewrite now stays native. `didRewriteInlineStart` drops only the fixups whol
 
 ## The MathIC allocation fault
 
-THREAD Failures has the VM thread raise the fault for a failed allocation before the failure's effects are written. `JITMathIC::generateOutOfLine` repoints the slow call before it allocates the full snippet, unconditionally, so the repoint is no effect of the failure; the failure's own effect is the native fallback that follows. The SPEC raises the fault at each `didFailToAllocate` branch, inside the operation and before the fallback (section 6.2, edit 5), so no capture can run between them. THREAD Execution now gives this lane MathIC regeneration in every tier.
+THREAD Failures has the VM thread raise the fault for a failed allocation before the failure's effects are written. `JITMathIC::generateOutOfLine` repoints the slow call before it allocates the full snippet, unconditionally, so the repoint is no effect of the failure; the failure's own effect is the native fallback that follows. The SPEC raises the fault at each `didFailToAllocate` branch, inside the operation and before the fallback (section 6.2, edit 5), so no capture can run between them. THREAD Execution gives this lane MathIC regeneration in every tier, so the call sits at those branches whatever tier owns the MathIC and whether or not the regeneration records.
 
 ## The `negate` operations
 
@@ -148,7 +148,7 @@ The check now tests both preconditions itself and reports a skip (section 11.3),
 
 ## The twin's lifetime
 
-The first design kept every twin CB in a `Strong` list until VM destruction, so its destructor never wrote `didOptimize`, which is UCB feedback that travels. The list pinned UCBs, executables and realms and changed what dies in twins runs; the UCB lane's `drop-and-reimport.js` failed. For a CB that never received JIT code, the `didOptimize` write is the destructor's only effect on shared state (N18), so skipping that one write is enough. `CodeBlock::~CodeBlock` can run at process exit while another thread finalizes, so the registry that tells it to skip must outlive exit-time destructors; `LazyNeverDestroyed` would need an explicit first caller to construct it, and any thread destroying a CB can be first. A failed twin compile also left the UCB's arithmetic profiles overwritten.
+The first design kept every twin CB in a `Strong` list until VM destruction, so its destructor never wrote `didOptimize`, which is UCB feedback that travels. The list pinned UCBs, executables and realms and changed what dies in twins runs; the UCB lane's `drop-and-reimport.js` failed. For a CB that never received JIT code, the `didOptimize` write is the destructor's only effect on shared state (N18), so skipping that one write is enough. `CodeBlock::~CodeBlock` can run at process exit while another thread finalizes: `VM::~VM` finalizes every live cell, Bun destroys every worker's VM on exit and the main thread's under `BUN_DESTRUCT_VM_ON_EXIT`, and `process.exit()` calls `exit()`, whose exit-time destructors can run while another thread still finalizes. The registry that tells it to skip must therefore outlive exit-time destructors; `LazyNeverDestroyed` would need an explicit first caller to construct it, and any thread destroying a CB can be first. A failed twin compile also left the UCB's arithmetic profiles overwritten.
 
 The twin now dies after its check. A process-wide registry, a `NeverDestroyed` set its first user creates and a `Lock` with no destructor, makes `~CodeBlock` skip the write, and a scope object restores the profiles on every exit (section 11.3, steps 2, 3 and 6).
 

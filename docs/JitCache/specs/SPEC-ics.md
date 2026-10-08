@@ -18,7 +18,7 @@ THREAD's omissions apply: property-IC cases, handlers, stubs and the inline mirr
 
 ## 2. Design in brief
 
-Capture writes one record per property IC and one per call-link site, holding raw producer facts in native index order (sections 4.2 and 4.3). One pure derivation per record kind turns a record into the consumer's state; seeding, attach and the twin check all apply it, and a recapture function closes the round trip of I5 (section 6.1). Capture also hands the CB lane the polymorphic bit (section 5.3).
+Capture writes one record per property IC and one per call-link site, holding raw producer facts in native index order (sections 4.2 and 4.3). One pure derivation per record kind turns a record into the consumer's state; seeding, attach and the twin check all apply it. A recapture function gives the record a capture of the restored state yields, so a recapture of an imported body carries every fact it imported, a fold not yet replayed included (I5, section 6.1). Capture also hands the CB lane the polymorphic bit (section 5.3).
 
 ## 3. State census
 
@@ -59,7 +59,7 @@ Every field of the two native objects this lane covers, with its fate in the con
 
 ## 4. The `ICsBaseline` section
 
-A body file holds at most one `ICsBaseline` section, whose type id the integrator assigns (R-INT-1), describing the baseline CB of the capture. Later versions add `ICsDFG` and `ICsFTL` sections beside it, so this layout needs no tier field.
+A body file holds at most one `ICsBaseline` section, which describes the baseline CB of the capture; the integrator assigns its type id (R-INT-1). Later versions add `ICsDFG` and `ICsFTL` sections beside it, so this layout needs no tier field.
 
 ### 4.1 Layout
 
@@ -222,11 +222,11 @@ struct SectionView {
 
 // Slices the section by the counts its header states. With StrictChecks::Yes it checks A1 to A6
 // first (section 4.5); otherwise it trusts the counts. Reads only its argument and needs no VM.
-Expected<SectionView, Invalid> parseSection(std::span<const uint8_t>, StrictChecks);
+std::expected<SectionView, Invalid> parseSection(std::span<const uint8_t>, StrictChecks);
 
 // Reads the summary of a saved body from its ICsBaseline section, checking A1 and A2 under
 // strict and trusting the header otherwise. Takes no lock and needs no VM.
-Expected<Summary, Invalid> readBaselineICsSummary(std::span<const uint8_t> section, StrictChecks);
+std::expected<Summary, Invalid> readBaselineICsSummary(std::span<const uint8_t> section, StrictChecks);
 
 // The property-IC half of the polymorphic bit (section 5.3): two or more cases listed, none of
 // them megamorphic.
@@ -237,7 +237,7 @@ bool isPolymorphicPropertyIC(const PropertyICRecord&);
 
 ### 4.5 Well-formedness
 
-Normal mode trusts what the lane's checks verify, since THREAD Session has it check only the artifact's integrity (header, keys and checksums), which the integrator does before the lane sees a byte. Without strict, `parseSection` slices the record arrays by the header's counts, `readBaselineICsSummary` reads the header as it stands, and prepare and capture check nothing (section 5.5), so no call into the lane can fail; debug builds still assert A1 to A6. With strict on, which every test runs, the checks validate the section's full structure: prepare (section 6.2) runs A1 to A8 and `readBaselineICsSummary` runs A1 and A2 on the header alone. Each failure is invalid material (THREAD Session) and names its check ([history](SPEC-ics-history.md#checks-run-only-under-strict-and-copy-no-native-table)).
+Normal mode checks only the artifact's integrity (header, keys and checksums), which the integrator does before the lane sees a byte, and trusts the rest, the assumptions capture and prepare make included (THREAD Session). Without strict, `parseSection` slices the record arrays by the header's counts, `readBaselineICsSummary` reads the header as it stands, and prepare and capture check nothing (section 5.5), so no call into the lane can fail; debug builds still assert A1 to A6. With strict on, which every test runs, the checks validate the section's full structure: prepare (section 6.2) runs A1 to A8 and `readBaselineICsSummary` runs A1 and A2 on the header alone. Each failure is invalid material (THREAD Session) and names its check ([history](SPEC-ics-history.md#checks-run-only-under-strict-and-copy-no-native-table)).
 
 - A1. The span holds at least 16 bytes, `callLinkGroupCount` ≤ 14, and `sectionSize` of the header counts is defined and equals the span's length.
 - A2. `icSitesWithCases` ≤ `propertyICCount`.
@@ -362,7 +362,7 @@ CaptureSummary summarizeBaselineICs(CodeBlock&);
 // Writes the whole section into output, whose size must equal baselineICsSectionSize(codeBlock),
 // and returns its summary and polymorphic bit. Takes CodeBlock::m_lock. Allocates no cell
 // (section 5.1). Reads only.
-Expected<CaptureSummary, CaptureError> captureBaselineICs(CodeBlock&, std::span<uint8_t> output, StrictChecks);
+std::expected<CaptureSummary, CaptureError> captureBaselineICs(CodeBlock&, std::span<uint8_t> output, StrictChecks);
 
 }
 ```
@@ -480,7 +480,7 @@ public:
     Summary summary() const { return m_summary; }
 
 private:
-    friend Expected<PreparedBaselineICs, Invalid> prepareBaselineICs(std::span<const uint8_t>, const BaselineJITCode&, CodeBlock&, StrictChecks);
+    friend std::expected<PreparedBaselineICs, Invalid> prepareBaselineICs(std::span<const uint8_t>, const BaselineJITCode&, CodeBlock&, StrictChecks);
 
     std::span<const PropertyICRecord> m_propertyICs; // borrowed from the payload
     std::span<const CallLinkRecord> m_callLinks;     // borrowed from the payload, canonical order
@@ -491,7 +491,7 @@ private:
 };
 
 // preparedCode is PreparedImage::code(), read before commit (R-IMG-1); prepare keeps no reference to it.
-Expected<PreparedBaselineICs, Invalid> prepareBaselineICs(std::span<const uint8_t> section, const BaselineJITCode& preparedCode, CodeBlock& newbornCodeBlock, StrictChecks);
+std::expected<PreparedBaselineICs, Invalid> prepareBaselineICs(std::span<const uint8_t> section, const BaselineJITCode& preparedCode, CodeBlock& newbornCodeBlock, StrictChecks);
 void seedCallLinkHistory(const PreparedBaselineICs&, CodeBlock&);
 void attachPropertyICState(const PreparedBaselineICs&, CodeBlock&);
 
@@ -651,7 +651,7 @@ The file-static `isMegamorphic(AccessCase::AccessType)` in InlineCacheCompiler.c
 
 ### E5. Executable-allocation fault calls in IC compilation (bytecode/InlineCacheCompiler.cpp)
 
-THREAD Execution gives this lane the call sites of the fault THREAD Failures raises, before the failure's effects are written, when an IC stub or handler cannot get executable memory; the entry point and its parameters are the integrator's (R-INT-6).
+When an IC stub or handler cannot get executable memory, THREAD Failures raises a fault before the failure's effects are written, and THREAD Execution gives this lane its call sites, the three `didFailToAllocate()` branches of `InlineCacheCompiler`. The entry point and its parameters are the integrator's (R-INT-6).
 
 IC compilation allocates executable memory with `JITCompilationCanFail` at three sites, and each turns a failure into a give-up: `InlineCacheCompiler::compile` (repatching ICs, FTL) and `InlineCacheCompiler::compileOneAccessCaseHandler` (handler ICs, baseline and DFG) return `AccessGenerationResult::GaveUp` after `LinkBuffer::didFailToAllocate()`, and `InlineCacheCompiler::compileGetByDOMJITHandler` returns an empty code ref, which `compileOneAccessCaseHandler` turns into `GaveUp`. Every other `LinkBuffer` in the file is a must-succeed thunk, which crashes natively and keeps JSC behavior. At each of the three `didFailToAllocate()` branches, before returning, the code calls, with `jitcache/JITCacheFaults.h` included:
 
@@ -689,9 +689,9 @@ The check functions of section 6.2 and the walkers of section 4.6 are the lane's
 - R-INT-1. A section type id for `ICsBaseline`, and later ones for `ICsDFG` and `ICsFTL`. The lane's bytes go into the body file unchanged and come back as a `std::span<const uint8_t>` of exactly the written length; no alignment is required.
 - R-INT-2. Capture glue. At each capture point and for each candidate CB: call `baselineICsSectionSize`, charge that many bytes to the producer limit (THREAD Session), allocate them, call `captureBaselineICs` with the config's strict flag, and turn a `CaptureError` into a recording fault whose diagnostic names this lane and the `CaptureCheck`. Call it before the CB lane's capture of the same CB, in the same pause, and pass `CaptureSummary::hasPolymorphicSite` to that capture (THREAD Restoration; SPEC-cb.md R-INT-5). The locks held on the call are those of L2.
 - R-INT-3. Scoring. The candidate's `icSitesWithCases` and `hasPolymorphicSite` come from `summarizeBaselineICs` or from `captureBaselineICs`, called before the CB lane's `scoreLive` of the same CB in the same pause, and the bit goes to `scoreLive`, which scores the counter as SPEC-cb.md section 4.3 says (SPEC-cb.md R-INT-5). The saved body's count comes from `readBaselineICsSummary`, given the whole `ICsBaseline` section and the config's strict flag, and its `Invalid` is invalid material; the saved body's bit comes from the CB lane's summary (section 5.6).
-- R-INT-4. Install glue. Call `prepareBaselineICs` after `prepareImage` succeeded and before `PreparedImage::commit`, while nothing has been written to the CB, with the section, `PreparedImage::code()` (R-IMG-1), the newborn CB and the config's strict flag. Turn an `Invalid` into invalid material and then destroy the prepared image without `commit`, as the Image lane requires after any failed preparation, so the failure leaves no effect outside the prepared objects. Keep the payload alive and unchanged until `attachPropertyICState` returns. Call `seedCallLinkHistory` after every prepare, the baked-fact comparison and the `shouldJIT` gate passed and before `setupWithUnlinkedBaselineCode`; call `attachPropertyICState` right after `setupWithUnlinkedBaselineCode` returns and before the baseline counter is re-sliced. Never call either for a CB other than the prepared one, or after a failed prepare. Every baseline capture writes an `ICsBaseline` section, so a body file without one is invalid material when strict checks the directory, and normal mode trusts that it is there.
+- R-INT-4. Install glue. Call `prepareBaselineICs` after `prepareImage` succeeded and before `PreparedImage::commit`, while nothing has been written to the CB, with the section, `PreparedImage::code()` (R-IMG-1), the newborn CB and the config's strict flag. Turn an `Invalid` into invalid material and then destroy the prepared image without `commit`, as the Image lane requires after any failed preparation, so the failure writes nothing to the CB (THREAD Restoration); support code the image's resolution generated stays, as the VM's first use of it would leave it (SPEC-image.md section 13). Keep the payload alive and unchanged until `attachPropertyICState` returns. Call `seedCallLinkHistory` after every prepare, the baked-fact comparison and the `shouldJIT` gate passed and before `setupWithUnlinkedBaselineCode`; call `attachPropertyICState` right after `setupWithUnlinkedBaselineCode` returns and before the baseline counter is re-sliced. Never call either for a CB other than the prepared one, or after a failed prepare. Every baseline capture writes an `ICsBaseline` section, so a body file without one is invalid material when strict checks the directory, and normal mode trusts that it is there.
 - R-INT-5. The seven option rows of options.md that name this lane, in the fixed-option table `start` checks.
-- R-INT-6. The fault entry point the IC compiler calls (E5): `JSC::JITCache::didFailExecutableAllocation`, declared in `jitcache/JITCacheFaults.h`, whose parameters the integrator owns (THREAD Execution); this lane passes `ExecutableAllocationSite::InlineCacheHandler` beside the `VM&`. THREAD Execution requires it to accept a call on the VM's thread with `CodeBlock::m_lock` held through a `GCSafeConcurrentJSLocker`, from any tier's IC compilation and in any VM. It is a no-op for a VM `start` never configured, and otherwise raises the fault of THREAD Failures with the failing step `exec-alloc.ic-handler` (SPEC-integrator.md section 4.5).
+- R-INT-6. The fault entry point the IC compiler calls (E5): `JSC::JITCache::didFailExecutableAllocation`, declared in `jitcache/JITCacheFaults.h`, whose parameters the integrator owns (THREAD Execution); this lane passes `ExecutableAllocationSite::InlineCacheHandler` beside the `VM&`. THREAD Execution requires it to be callable with `CodeBlock::m_lock` held; this lane calls it on the VM's thread with that lock held through a `GCSafeConcurrentJSLocker`, from any tier's IC compilation and in any VM (E5). It is a no-op for a VM `start` never configured, and otherwise raises the fault of THREAD Failures with the failing step `exec-alloc.ic-handler` (SPEC-integrator.md section 4.5).
 - R-INT-7. Test builds (`ENABLE(JITCACHE_TWINS)`), for the JS tests of section 11.2 ([history](SPEC-ics-history.md#the-lane-owns-its-test-bindings-shapes)):
   1. Call `checkRestoredBaselineICs` right after `attachPropertyICState` returns, and report each mismatch as a twin failure.
   2. Register the lane's `JSC::JITCache::ICs::functionSnapshotBaselineICs` on the jsc shell's global object as `jitcacheICsSnapshot`, length 2. Section 11.1 defines its arguments and the object it returns.
@@ -705,7 +705,7 @@ The check functions of section 6.2 and the walkers of section 4.6 are the lane's
 - R-IMG-1 (Image lane). `const BaselineJITCode& PreparedImage::code() const` can be called before `commit`, with no effect outside the prepared objects, and returns the `BaselineJITCode` that `commit` will return and setup will install ([history](SPEC-ics-history.md#prepare-reads-the-prepared-baselinejitcode)). The returned code's `m_unlinkedPropertyInlineCaches` holds the producer's molds in mold order. SPEC-image.md sections 10.1 and 12.1 give the rest of the accessor's contract.
 - R-UCB-1 (UCB lane). An imported or reused UCB has the producer's metadata layout: for each opcode with a `CallLinkInfo`, the same number of metadata entries and the same metadata IDs. THREAD Storage states this guarantee of the producer's index spaces; seeding relies on it, and A8 checks it under strict. SPEC-ucb.md section 9.1 meets it.
 - R-CB-1 (CB lane). The CB lane's metadata seeds write profile fields only and never `m_callLinkInfo` of a call opcode's metadata entry, so the two lanes' seeds are disjoint and their order inside the seeding window is free. Its baseline-counter re-slice comes after `attachPropertyICState`, as THREAD orders it, and touches no IC field. SPEC-cb.md section 6.4 states the other side of this rule.
-- R-CB-2 (CB lane). Its capture and `scoreLive` take `hasPolymorphicSite`, which the integrator passes from this lane (R-INT-2, R-INT-3); when it is set, they carry and score no baseline counter progress and mark the counter withheld, in the summary as well, so a saved body keeps the bit for THREAD Capture's tie-break (THREAD Restoration and Capture; section 5.6). SPEC-cb.md I16, sections 3.3, 4.3 and 4.4 and its R-INT-5 meet this.
+- R-CB-2 (CB lane). Its capture and `scoreLive` take `hasPolymorphicSite`, which the integrator passes from this lane (R-INT-2, R-INT-3); when it is set, they carry and score no baseline counter progress and mark the counter withheld, with `counterMode` `NotCarried` in `cb.summary` as in `cb.state`, so a saved body keeps the bit for THREAD Capture's tie-break (THREAD Restoration and Capture; section 5.6). SPEC-cb.md I16, sections 3.3, 4.3 and 4.4 and its R-INT-5 meet this.
 
 ## 9. Locks, GC and threads
 
@@ -902,7 +902,7 @@ Ordered; each fits one implementation agent. A task that needs an integrator pie
 3. `ICSection` and `ICSites`: types, size, canonical positions, `parseSection` (A1 to A6 under strict), `readBaselineICsSummary`, `isPolymorphicPropertyIC`, the derivation and recapture functions (section 6.1), the walkers, and T7's format, derivation, round-trip and `isPolymorphicPropertyIC` parts.
 4. `ICCapture`: section 5, after tasks 1 and 3. T12 items 1 and 2, and T14.
 5. `ICRestore`: sections 6.2 to 6.4, applying 6.1, after tasks 1 and 3. T7's A7, A8 and S1 parts, T12 items 1, 3 and 4.
-6. `ICTwins` (snapshot, twin check, shell function), T11, which reads the snapshot, and T13, after tasks 2, 4 and 5 and the C++ test runner of R-INT-9 (SPEC-integrator.md task 1). The integrator's install glue calls `checkRestoredBaselineICs` in twins builds and its jsc host registers the shell function (SPEC-integrator.md tasks 8 and 12, R-INT-7), so this task needs neither and lands before both ([history](SPEC-ics-history.md#the-lane-owns-its-test-bindings-shapes)).
+6. `ICTwins` (snapshot, twin check, shell function), T11, which reads the snapshot, and T13, after tasks 2, 4 and 5 and the C++ test runner of R-INT-9 (SPEC-integrator.md task 1). The integrator's install glue calls `checkRestoredBaselineICs` in twins builds and its jsc host registers the shell function (SPEC-integrator.md tasks 8 and 12, R-INT-7), so this task needs neither and lands before both ([history](SPEC-ics-history.md#task-6-lands-before-the-integrators-glue)).
 7. `resources/ics.js`, T2 to T6, T8 and T10 on the integrator's runner, after task 6 and the integrator's capture and install glue, shell functions and runner (R-INT-2, R-INT-4 and R-INT-7; SPEC-integrator.md tasks 8, 9, 12 and 13).
 8. E5 and T9, after R-INT-6 lands (SPEC-integrator.md task 2); T9 is a runner sequence, so it also waits for the integrator's tasks 12 and 13, as task 7 does.
 9. B1 to B6 inside the integrator's bench loop.

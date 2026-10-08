@@ -58,7 +58,7 @@ class ProducerLock final {
     WTF_MAKE_TZONE_ALLOCATED(ProducerLock);
 public:
     struct Failure { bool busy; int error; };   // busy: another holder has it; otherwise the errno of the call that failed
-    static Expected<std::unique_ptr<ProducerLock>, Failure> tryAcquire(int parentFd);
+    static std::expected<std::unique_ptr<ProducerLock>, Failure> tryAcquire(int parentFd);
     uint64_t bumpEpoch();                       // returns the value the bump replaced
     ~ProducerLock();                            // unmaps and closes, which releases the lock
 };
@@ -167,7 +167,7 @@ The checksum is the CRC-32C of RFC 3720: the Castagnoli polynomial `0x1EDC6F41`,
 
 ### 4.5 Validation
 
-`validateBody(bytes, expectedKey, headerDigest, ValidationMode) -> Expected<BodyLayout, ContainerCheck>` runs these checks in this order and names the first that fails. `JITCacheContainer.h` declares `enum class ValidationMode : uint8_t { Integrity, Full }`. Each check has an integrity part, which both modes run, and some have a structure part, which only `Full` adds. Integrity is what THREAD Session has normal mode check: the header digest (B4) ties the body to the header `start` checked, B3 checks the key and B2, B6 and B8 the checksums, with the sizes and bounds that keep those checksums inside the file (B1 and the framing parts of B2 and B6). ([history](SPEC-integrator-history.md#strict-integrity-in-both-modes-structure-under-strict))
+`validateBody(bytes, expectedKey, headerDigest, ValidationMode) -> std::expected<BodyLayout, ContainerCheck>` runs these checks in this order and names the first that fails. `JITCacheContainer.h` declares `enum class ValidationMode : uint8_t { Integrity, Full }`. Each check has an integrity part, which both modes run, and some have a structure part, which only `Full` adds. Integrity is what THREAD Session has normal mode check: the header digest (B4) ties the body to the header `start` checked, B3 checks the key and B2, B6 and B8 the checksums, with the sizes and bounds that keep those checksums inside the file (B1 and the framing parts of B2 and B6). ([history](SPEC-integrator-history.md#strict-integrity-in-both-modes-structure-under-strict))
 
 | check | name | integrity, both modes | structure, `Full` only |
 |---|---|---|---|
@@ -194,14 +194,14 @@ struct BodyLayout {
     std::array<std::optional<SectionExtent>, numberOfSectionKinds> sections;   // by SectionKind; nullopt when absent
 };
 
-Expected<BodyLayout, ContainerCheck> validateBody(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
+std::expected<BodyLayout, ContainerCheck> validateBody(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
     std::span<const uint8_t, 16> headerDigest, ValidationMode);
 
 class BodyValidationStream {   // keeps the envelope and directory (at most 128 + 64 * 24 bytes) and a CRC per section; allocates nothing
 public:
     BodyValidationStream(const BodyKey& expectedKey, std::span<const uint8_t, 16> headerDigest, ValidationMode, uint64_t fileSize);
     void append(std::span<const uint8_t>);           // the file's bytes in order
-    Expected<BodyLayout, ContainerCheck> finish();   // after the last byte; names the first check that failed
+    std::expected<BodyLayout, ContainerCheck> finish();   // after the last byte; names the first check that failed
 };
 ```
 
@@ -218,7 +218,7 @@ class ArtifactRegistry {
 public:
     // The object for the directory cacheFd names; builds and registers one when no VM of the process holds it.
     // An error is the errno of the failing call, which start reports at start.io.
-    static Expected<Ref<OpenedArtifact>, int> take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
+    static std::expected<Ref<OpenedArtifact>, int> take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
 };
 ```
 
@@ -260,7 +260,7 @@ private:
     friend class ArtifactRegistry;   // builds and registers objects (section 5.1)
     friend class ArtifactWriter;     // runs step 8 of section 8.2 under m_indexLock
     // Opens the descriptors, the epoch mapping and the inotify watch, then lists; an error is the failing call's errno.
-    static Expected<Ref<OpenedArtifact>, int> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
+    static std::expected<Ref<OpenedArtifact>, int> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
 
     void refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock);                       // section 6.3
     bool list() WTF_REQUIRES_LOCK(m_indexLock);                                // section 6.2; false leaves the index as it was
@@ -344,7 +344,7 @@ The kernel queues a rename's events during the rename itself, before the writer 
 
 ### 6.4 Lookup and update
 
-`token(key) -> uint64_t`, 0 for a key the index lacks, `learn(key, inode)`, which gives the key a fresh token and that inode and inserts it when absent, `erase(key)` and `containsKey(key)` run under `m_indexLock`, as do the refresh, the listings and the writer's index update. The lock is a leaf: nothing under it takes another lock, the only system calls made under it are the `read`s of the inotify descriptor and the listings' calls, and the epoch is read and bumped with atomic operations on its shared page. It is never held while a body is mapped or validated, while an envelope is read, or while any lane, JSC or the collector is called. `open` and `readSavedSummaries` release it around their file work and take it again only to erase a key whose file is gone, and only while the key still holds the token they read before their `openat` (0 when absent): a token learned meanwhile, from the writer's own commit or an event, names a body that arrived after that `openat`, and erasing it would hide that body from `bodyVersion` (II8).
+`token(key) -> uint64_t`, 0 for a key the index lacks, `learn(key, inode)`, which gives the key a fresh token and that inode and inserts it when absent, `erase(key)` and `containsKey(key)` run under `m_indexLock`, as do the refresh, the listings and the writer's index update. The lock is a leaf: nothing under it takes a JSC or JITCache lock. Plain memory work and malloc run under it, since the listings build their maps there (section 6.2), and the only system calls made under it are the `read`s of the inotify descriptor and the listings' calls, and the epoch is read and bumped with atomic operations on its shared page. It is never held while a body is mapped or validated, while an envelope is read, or while any lane, JSC or the collector is called. `open` and `readSavedSummaries` release it around their file work and take it again only to erase a key whose file is gone, and only while the key still holds the token they read before their `openat` (0 when absent): a token learned meanwhile, from the writer's own commit or an event, names a body that arrived after that `openat`, and erasing it would hide that body from `bodyVersion` (II8).
 
 ## 7. Opening bodies
 
@@ -447,7 +447,7 @@ Only `ENABLE(JITCACHE_TWINS)` builds compile these, in `ArtifactWriter.cpp` behi
 
 - A fault injection, `{ check, n }`: the writer's n-th commit fails at `check` (one of `writer.create`, `writer.write`, `writer.reread`, `writer.publish`) as if the call had failed with `EIO`, after doing the real work of the earlier steps.
 - A kill point, `{ point, n }`: the n-th commit calls `raise(SIGKILL)` right after the step the point names, so the process dies leaving the files that step left. The seven points and what each leaves are in harness sub-SPEC section 12: after step 2, after step 3, after step 4's first `write`, after steps 4, 5 and 6, and after step 7's rename.
-- `rewriteSection(key, kind, offset, bytes) -> Expected<CommitResult, CommitFailure>`: it opens the key's current body in `Full` mode (section 7.2), copies it, overwrites `bytes.size()` bytes of the section at `offset`, which must lie inside the section, and commits the copy's sections, each an in-memory source, under a stamp holding the envelope's key, tier, L and P. The commit recomputes every checksum and draws a fresh commit identifier, so the lanes' validation sees the damage while the container sees a sound file. It runs only in a producing VM, whose writer and lock it uses; the capture glue's `rewriteSectionForTesting` calls it and erases the key's kept summary (SPEC-integrator.md section 8.3).
+- `rewriteSection(key, kind, offset, bytes) -> std::expected<CommitResult, CommitFailure>`: it opens the key's current body in `Full` mode (section 7.2), copies it, overwrites `bytes.size()` bytes of the section at `offset`, which must lie inside the section, and commits the copy's sections, each an in-memory source, under a stamp holding the envelope's key, tier, L and P. The commit recomputes every checksum and draws a fresh commit identifier, so the lanes' validation sees the damage while the container sees a sound file. It runs only in a producing VM, whose writer and lock it uses; the capture glue's `rewriteSectionForTesting` calls it and erases the key's kept summary (SPEC-integrator.md section 8.3).
 
 ## 9. Tests
 
