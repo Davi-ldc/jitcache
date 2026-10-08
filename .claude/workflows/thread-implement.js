@@ -1,10 +1,10 @@
 export const meta = {
   name: 'thread-implement',
-  description: 'JITCache step 2: implement every task of the five SPECs in DAG waves of disjoint files, review each task until a clean pass and commit each wave, then compile once and run the tests, sending each failure back to the code that caused it',
+  description: 'JITCache step 2: implement every task of the five SPECs in DAG waves of disjoint files, review each task until a clean pass and commit it, then compile once and run the tests, sending each failure back to the code that caused it',
   whenToUse: 'After thread-prep and spec-compaction, with THREAD and the SPECs sealed and committed. args: { landed: ids of the tasks earlier runs committed, runDir: where logs and failed diffs go }.',
   phases: [
     { title: 'Plan', detail: 'One agent extracts the task graph from the five task lists, verbatim; an unresolved or unknown dependency, a cycle or a gap stops the run' },
-    { title: 'Implement', detail: 'DAG waves: parallel write-only task agents with DISJOINT files; each task: write -> 3 adversarial reviewers -> amend, until a clean pass; one commit per wave' },
+    { title: 'Implement', detail: 'DAG waves: parallel write-only task agents with DISJOINT files; each task: write -> 3 adversarial reviewers -> amend, until a clean pass; one commit per task as it passes' },
     { title: 'Build', detail: 'The only phase that compiles: build -> a fix proposal per file -> 3 adversarial reviewers -> apply the approved ones -> rebuild, looped to green; one commit per round' },
     { title: 'Verify', detail: 'HARNESS.md end-of-task checks -> an item per failure, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per round' },
   ],
@@ -27,8 +27,9 @@ export const meta = {
 //   usually worth more than a build. Each task alternates three adversarial lenses and an
 //   amender until a pass finds nothing serious, and its last pass is always a review.
 // - A task passes only on a clean pass. A missing result or a missing reviewer never counts as
-//   done or clean. A failed task blocks its dependents, and its
-//   wave's commit restores its files. One commit per wave, of the passed tasks' files.
+//   done or clean. A failed task blocks its dependents, and its files go back to HEAD. Each
+//   task commits its own files as soon as it passes: one line, "checkpoint: <task> <what it
+//   did>", with no body, no trailer and no wave number. Tasks run in parallel; commits queue.
 // - The tree compiles once, in the Build phase, as Jarred's does. Verify then runs HARNESS.md's
 //   end-of-task checks; the ARM64 runs under QEMU, the concurrency family and the benches wait
 //   for the milestones. A failure goes back to the code that caused it: a cause in another file
@@ -260,11 +261,10 @@ const VERIFY = {
 
 const COMMIT = {
   type: 'object',
-  required: ['ok', 'commits', 'leftModified'],
+  required: ['ok', 'commits'],
   properties: {
     ok: { type: 'boolean', description: 'false if any step failed' },
     commits: { type: 'array', items: { type: 'string' }, description: 'repository and hash of each commit made' },
-    leftModified: { type: 'array', items: { type: 'string' } },
     note: { type: 'string' },
   },
 }
@@ -309,9 +309,7 @@ const overlaps = (a, b) => covers(a, b) || covers(b, a)
 const ownedBy = (files, path) => files.some(f => covers(f, path))
 const isReport = path => /^report\/[^/\\\0]+\.md$/.test(path)
 const unique = items => [...new Set(items)]
-const base = path => String(path).split('/').filter(Boolean).pop()
-const slug = text => String(text).replace(/[^\w.-]+/g, '-')
-// ---------------------------------------------------------------------------
+const base = path => String(path).split('/').filter(Boolean).pop()// ---------------------------------------------------------------------------
 // Run state. The script cannot read or write files: the result carries everything.
 // ---------------------------------------------------------------------------
 
@@ -322,7 +320,6 @@ const CONFLICTS = []
 const FOR_HUMAN = []
 const MINOR = []
 const WAVES = []
-const LEFT_MODIFIED = new Set()
 const BUILD_REPORT = { green: false, rounds: 0, notBuilt: [], unresolved: [] }
 const VERIFY_REPORT = { green: false, rounds: 0, rungs: [], unresolved: [] }
 const NOT_RUN = ['the ARM64 runs under QEMU', 'the concurrency family', 'the benches and microbenchmarks']
@@ -365,7 +362,6 @@ function report(status, extra) {
     build: BUILD_REPORT,
     verify: VERIFY_REPORT,
     notRun: [...NOT_RUN, ...VERIFY_REPORT.rungs.filter(r => r.status === 'notRun').map(r => `${r.rung}: ${r.detail || ''}`)],
-    leftModified: [...LEFT_MODIFIED],
     minorFindings: MINOR,
     plan: order.map(t => ({ id: t.id, deps: t.deps.map(d => d.id), files: t.files })),
     agentsUsed: AGENT_CAP - agentsLeft,
@@ -504,20 +500,26 @@ ${fence('spec_conflicts', conflicts, 20000)}
 Findings:
 ${fence('reviewer_findings', kept, FINDINGS_PROMPT_LIMIT)}`
 
-const commitPrompt = (what, files, restore) => `Repo: ${REPO}. You are the committer of
-thread-implement, and no other agent runs while you work. Read skills/SKILL.md only: this task
-needs neither its references, THREAD nor any SPEC. Do not build, and change no file except as
-step 2 says.
-${files.length ? `1. Commit the listed paths that exist and changed (a path ending in / is a directory),
-   those under ${BUN_REPO}/ in that repository and the rest in this one, one commit per
-   repository, and nothing else: leave every other change in the working tree as it is. The
-   message is exactly "checkpoint": no other line and no trailer, Co-Authored-By included.
-${fence('paths_to_commit', files, Infinity)}` : '1. There is nothing to commit.'}
-${restore.length ? `2. Save the diff of these paths of failed tasks against HEAD, new files whole, to
-   ${RUN_DIR}/${slug(what)}-failed.diff; then restore each tracked file to HEAD and delete each new one.
-${fence('paths_to_restore', restore, Infinity)}` : '2. There is nothing to restore.'}
-3. Put in leftModified every file under Source, Tools and JSTests here, and under src, scripts
-   and test in ${BUN_REPO}, that still differs from HEAD.`
+const COMMITTER = `Repo: ${REPO}. You are thread-implement's committer. No other committer runs
+while you work, though implementers may be writing other files. Read skills/SKILL.md only: this
+task needs neither its references, THREAD nor any SPEC. Do not build, and run nothing but git.`
+
+// A passed task's commit names its task, and the committer says what it did; a fix's commit
+// carries the subject the script gives it.
+const commitPrompt = (files, subject, task) => `${COMMITTER}
+Commit the listed paths that exist and changed (a path ending in / is a directory), those under
+${BUN_REPO}/ in that repository and the rest in this one, one commit per repository, and nothing
+else: leave every other change in the working tree as it is. ${task
+  ? `The message is one line: "checkpoint: ${task.id} " followed by what the task did in two to
+five words, taken from its text below and its diff, as in "checkpoint: ucb.1 SHA-256".`
+  : `The message is one line: "${subject}".`} No body and no trailer, Co-Authored-By included.
+${fence('paths_to_commit', files, Infinity)}${task ? `\n${taskBlock(task)}` : ''}`
+
+const restorePrompt = t => `${COMMITTER}
+Task ${t.id} failed. Save the diff of its paths against HEAD, new files whole, to
+${RUN_DIR}/${t.id}-failed.diff; then restore each tracked path to HEAD and delete each new one.
+Commit nothing.
+${fence('paths_to_restore', t.files, Infinity)}`
 
 const buildLog = round => `${RUN_DIR}/build-r${round}.log`
 
@@ -725,15 +727,34 @@ async function implementTask(t) {
   }
 }
 
-// One commit per wave or round, of the passed work's files; the failed tasks' files go back to
-// HEAD. A commit that does not happen stops the run.
-async function commitWork(what, phaseName, files, restore) {
-  if (!files.length && !restore.length) return { commits: [] }
-  const commit = await runSolo(commitPrompt(what, unique(files), unique(restore)),
-    { label: `commit:${slug(what)}`, phase: phaseName, schema: COMMIT, ...CLERK }, 0)
-  if (!commit || !commit.ok) return null
-  for (const f of commit.leftModified) LEFT_MODIFIED.add(normalize(f))
-  return commit
+// Git takes one commit at a time, so every commit and restore waits in one queue while the tasks
+// run in parallel. A step that does not happen stops the run once the current wave or round ends.
+let gitQueue = Promise.resolve()
+let gitFailure = null
+async function gitStep(label, phaseName, prompt) {
+  const step = gitQueue.then(() => runSolo(prompt, { label, phase: phaseName, schema: COMMIT, ...CLERK }, 0))
+  gitQueue = step.then(() => {}, () => {})
+  const result = await step.catch(() => null)
+  if (result && result.ok) return result
+  gitFailure = gitFailure || label
+  return null
+}
+const commitTask = t => gitStep(`commit:${t.id}`, 'Implement', commitPrompt(t.files, null, t))
+const restoreTask = t => gitStep(`restore:${t.id}`, 'Implement', restorePrompt(t))
+
+// A round's fixes commit once per task whose files they changed, in dependency order.
+async function commitFixes(files, kind, phaseName, round) {
+  const groups = new Map()
+  for (const f of unique(files)) {
+    const owner = order.find(t => isPassed(t.id) && ownedBy(t.files, f))
+    const id = owner ? owner.id : 'unowned'
+    groups.set(id, [...(groups.get(id) || []), f])
+  }
+  for (const [id, group] of groups) {
+    const subject = id === 'unowned' ? `checkpoint: ${kind}` : `checkpoint: ${id} ${kind}`
+    if (!(await gitStep(`commit:r${round}:${id}`, phaseName, commitPrompt(group, subject, null)))) return false
+  }
+  return true
 }
 
 // A proposal settles one way: a spec conflict for the human, a move to the file that caused the
@@ -819,7 +840,16 @@ while (!capReached) {
   }
   wave++
   log(`Wave ${wave}: ${batch.map(t => t.id).join(', ')} (${batch.length} task(s) in parallel)`)
-  const outcomes = await parallel(batch.map(t => () => implementTask(t)))
+  // Each task commits its files, or has them restored, as soon as it ends.
+  const outcomes = await parallel(batch.map(t => async () => {
+    const outcome = (await implementTask(t)) || { status: 'failed', reason: 'its agents threw' }
+    if (outcome.status !== 'passed') {
+      await restoreTask(t)
+      return outcome
+    }
+    const commit = await commitTask(t)
+    return commit ? { ...outcome, commits: commit.commits } : { ...outcome, status: 'failed', reason: 'its commit failed' }
+  }))
   batch.forEach((t, i) => state.set(t.id, outcomes[i] || { status: 'failed', reason: 'its agents threw' }))
   for (const t of batch) {
     const s = state.get(t.id)
@@ -829,13 +859,9 @@ while (!capReached) {
   }
   const passed = batch.filter(t => isPassed(t.id))
   const failed = batch.filter(t => !isPassed(t.id))
-  const commit = await commitWork(`wave ${wave}`, 'Implement', passed.flatMap(t => t.files), failed.flatMap(t => t.files))
-  if (!commit) {
-    for (const t of passed) state.set(t.id, { status: 'failed', reason: `wave ${wave}'s commit failed` })
-    return report('stopped', { where: 'Implement', reason: `wave ${wave}'s commit failed` })
-  }
-  WAVES.push({ wave, passed: passed.map(t => t.id), failed: failed.map(t => t.id), commits: commit.commits })
+  WAVES.push({ wave, passed: passed.map(t => t.id), failed: failed.map(t => t.id), commits: passed.flatMap(t => state.get(t.id).commits) })
   log(`Wave ${wave}: ${passed.length} passed, ${failed.length} failed`)
+  if (gitFailure) return report('stopped', { where: 'Implement', reason: `${gitFailure} did not complete` })
 }
 if (capReached) return report('agent-cap')
 if (!order.some(t => isPassed(t.id))) return report('complete', { note: 'no task passed, so nothing was built' })
@@ -903,10 +929,8 @@ for (let round = 1; round <= MAX_BUILD_ROUNDS && !capReached; round++) {
     else if (o.outcome !== 'conflict') BUILD_REPORT.unresolved.push({ round, file: item.file, outcome: o.outcome, reason: o.reason })
   })
   log(`Build round ${round}: ${applied.length} fix(es) applied, ${carried.size} moved to the file that caused them`)
-  if (applied.length) {
-    const commit = await commitWork(`build round ${round}`, 'Build', applied, [])
-    if (!commit) return report('stopped', { where: 'Build', reason: `build round ${round}'s commit failed` })
-  }
+  if (applied.length && !(await commitFixes(applied, 'compile fix', 'Build', round)))
+    return report('stopped', { where: 'Build', reason: `build round ${round}'s commit failed` })
   if (!applied.length && !carried.size && all.length === items.length
       && !outcomes.some(o => o && o.outcome === 'rejected')) {
     BUILD_REPORT.stalled = `round ${round} left nothing a later round could change`
@@ -988,10 +1012,8 @@ for (let round = 1; round <= MAX_VERIFY_ROUNDS && !capReached; round++) {
   }
   const applied = items.filter((_, i) => outcomes[i] && outcomes[i].outcome === 'applied')
   log(`Verify round ${round}: ${applied.length} fix(es) applied`)
-  if (applied.length) {
-    const commit = await commitWork(`verify round ${round}`, 'Verify', applied.flatMap(it => it.scope), [])
-    if (!commit) return report('stopped', { where: 'Verify', reason: `verify round ${round}'s commit failed` })
-  }
+  if (applied.length && !(await commitFixes(applied.flatMap(it => it.scope), 'test fix', 'Verify', round)))
+    return report('stopped', { where: 'Verify', reason: `verify round ${round}'s commit failed` })
 }
 
 return report(capReached ? 'agent-cap' : 'complete')
