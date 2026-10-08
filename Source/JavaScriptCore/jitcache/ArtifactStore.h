@@ -45,6 +45,7 @@
 #include <wtf/Noncopyable.h>
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
+#include <wtf/ScopedLambda.h>
 #include <wtf/Seconds.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/ThreadSafeWeakPtr.h>
@@ -52,8 +53,53 @@
 
 namespace JSC::JITCache {
 
-// The artifact in a process (container sub-SPEC sections 2 and 5 to 7): the producer lock, the registry of opened
-// artifacts, an opened artifact with its index, and the store's reads.
+// The artifact in a process (container sub-SPEC sections 1.1, 2 and 5 to 7): the artifact's names, the producer lock,
+// the registry of opened artifacts, an opened artifact with its index, and the store's reads.
+
+// The names of container sub-SPEC section 1.1, relative to <parent> (Config::artifactPath):
+//   <parent>/.cache.producer.lock
+//   <parent>/cache/header
+//   <parent>/cache/.header.<32 hex>.tmp    a header being written
+//   <parent>/cache/.<32 hex>.tmp           a body being written
+//   <parent>/cache/bodies/<80 hex>.bin     a body
+namespace ArtifactNames {
+inline constexpr ASCIILiteral lockFile = ".cache.producer.lock"_s;
+inline constexpr ASCIILiteral cacheDirectory = "cache"_s;
+inline constexpr ASCIILiteral header = "header"_s;
+inline constexpr ASCIILiteral bodiesDirectory = "bodies"_s;
+} // namespace ArtifactNames
+
+// A body's name: the lowercase hex of its 40 canonical key bytes, which is THREAD Storage's body-key hash, then ".bin".
+// A lookup computes no hash for it.
+constexpr size_t bodyFileNameLength = 2 * BodyKey::byteSize + 4;
+struct BodyFileName {
+    std::array<char, bodyFileNameLength + 1> characters { }; // NUL-terminated, for the *at calls
+    const char* data() const LIFETIME_BOUND { return characters.data(); }
+    std::span<const char> span() const LIFETIME_BOUND { return std::span { characters }.first(bodyFileNameLength); }
+};
+BodyFileName bodyFileName(const BodyKey&);
+// The key a name encodes, or nothing: a name is a body name exactly when it has 80 lowercase hex digits before ".bin"
+// and BodyKey::fromBytes accepts the decoded bytes. name holds the characters without a terminator.
+std::optional<BodyKey> bodyKeyFromFileName(std::span<const char> name);
+
+// A temporary's name: a dot, 32 lowercase hex digits of a fresh 128-bit value from cryptographicallyRandomValues and
+// ".tmp", or ".header.", 32 hex digits and ".tmp" for a header temporary. Both are created with O_CREAT | O_EXCL in
+// cache/, so a body enters bodies/ only through the writer's rename.
+enum class TemporaryKind : uint8_t { Body, Header };
+constexpr size_t maximumTemporaryFileNameLength = 8 + 32 + 4; // ".header.", the hex digits, ".tmp"
+struct TemporaryFileName {
+    std::array<char, maximumTemporaryFileNameLength + 1> characters { }; // NUL-terminated
+    const char* data() const LIFETIME_BOUND { return characters.data(); }
+};
+TemporaryFileName temporaryFileName(TemporaryKind);
+std::optional<TemporaryKind> temporaryKindOfFileName(std::span<const char> name);
+
+// Reads the directory directoryFd names the way every listing of the artifact does (container sub-SPEC section 6.2): it
+// opens "." relative to directoryFd, so it reads an open file description of its own from offset zero and never one it
+// shares with directoryFd, reads it with readdir on fdopendir of that descriptor, which closedir closes, and calls visit
+// with each entry's name, "." and ".." aside, and its inode. Returns 0, or the errno of the call that failed, after
+// which visit may have seen part of the directory. Any thread; it takes no lock, so a caller may hold one.
+int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char> name, uint64_t inode)>& visit);
 
 // The producer lock (container sub-SPEC section 2): a non-blocking flock on <parent>/.cache.producer.lock, a 64-byte file
 //   0   8  the bytes JITCLOCK
@@ -123,6 +169,10 @@ struct BodyOpen {
     StoreOutcome outcome;
     RefPtr<ValidatedBody> body; // Found only
     StoreFailure failure;
+    // The size of the file the read mapped: set for Found and for an Invalid at a check of section 4.5, 0 when no file
+    // was mapped. The open bench event and Progress::bodyOpens count the opens that mapped a file (harness sub-SPEC
+    // section 9.2).
+    uint64_t mappedBytes { 0 };
 };
 
 class OpenedArtifact;
@@ -171,11 +221,16 @@ public:
     uint64_t token(const BodyKey&); // refreshes the index and returns the key's token, 0 when it lists no body; opens no file
     BodyOpen open(const BodyKey&, ValidationMode); // maps the body name with MAP_POPULATE and validates it (section 7.2)
     SavedSummaryRead readSavedSummaries(const BodyKey&, ValidationMode); // opens the body name whatever the index holds (section 7.3)
-    bool containsKey(const BodyKey&); // section 6.4
+    // Section 6.4: whether the index lists the key, after the refresh token makes, so the capture glue charges an index
+    // entry exactly when the writer's index update will add one (SPEC-integrator.md section 8.4, step 8).
+    bool containsKey(const BodyKey&);
     // The number of keys the index lists, read under m_indexLock without a refresh: Progress::indexedBodies in status,
     // which opens no file and changes no state, and the start bench event (SPEC-integrator.md section 3.3; harness
     // sub-SPEC section 9.2).
     uint64_t indexedBodies();
+    // The names in bodies/ that the last listing that succeeded found to be neither a body name nor a temporary, which
+    // a listing counts for status (section 6.2). Read under m_indexLock without a refresh.
+    uint64_t foreignNames();
 
     std::span<const uint8_t, 16> headerDigest() const LIFETIME_BOUND;
     int cacheFd() const; // the writer's temporaries (section 8.2)
@@ -189,10 +244,17 @@ private:
     OpenedArtifact(int parentFd, int cacheFd, int bodiesFd, const std::array<uint8_t, 16>& headerDigest, const uint64_t* epoch, int inotifyFd);
 
     void refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock); // section 6.3
-    bool list() WTF_REQUIRES_LOCK(m_indexLock); // section 6.2; false leaves the index as it was
+    // Section 6.2: drains the inotify queue, reads the epoch and lists. Success swaps the new map in, records that epoch as
+    // the last seen and clears a pending listing; a failure leaves the index as it was, records the epoch it read and
+    // marks a listing pending. Returns 0, or the errno of the call that failed.
+    int list() WTF_REQUIRES_LOCK(m_indexLock);
     void drainEvents(bool listOnOverflow) WTF_REQUIRES_LOCK(m_indexLock); // section 6.3; the writer's step 8 passes false
     void learn(const BodyKey&, uint64_t inode) WTF_REQUIRES_LOCK(m_indexLock); // section 6.4
     void erase(const BodyKey&) WTF_REQUIRES_LOCK(m_indexLock);
+    // The current token of the key, 0 when the index lacks it, without a refresh: what open and readSavedSummaries read
+    // before their openat, and what an ENOENT compares with before it erases the key (section 6.4).
+    uint64_t currentToken(const BodyKey&) WTF_REQUIRES_LOCK(m_indexLock);
+    void eraseIfTokenIs(const BodyKey&, uint64_t token);
 
     const int m_parentFd; // O_PATH | O_DIRECTORY
     const int m_cacheFd;
@@ -207,6 +269,7 @@ private:
     // When the last listing started, so an object that refreshes by listing lists at most once per
     // fallbackListingIntervalMilliseconds (section 6.3).
     MonotonicTime m_lastListingStart WTF_GUARDED_BY_LOCK(m_indexLock);
+    uint64_t m_foreignNames WTF_GUARDED_BY_LOCK(m_indexLock) { 0 };
     bool m_listingPending WTF_GUARDED_BY_LOCK(m_indexLock) { false };
     bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false };
 };
@@ -233,13 +296,14 @@ private:
 };
 
 #if ENABLE(JITCACHE_TWINS)
-// The store's test interface (container sub-SPEC section 7.5).
+// The store's test interface (container sub-SPEC section 7.5). Every hook is process-wide and made of atomics, so it is
+// read without a lock, under m_indexLock included.
 namespace StoreTesting {
 enum class Call : uint8_t { Open, ReadSavedSummaries, Listing };
 struct Fault {
     Call call;
     int error;
-    std::optional<uint64_t> n; // counts calls of that kind from 1; absent: every call
+    std::optional<uint64_t> n; // counts calls of that kind from 1, from the setFault call; absent: every call
 };
 void setFault(std::optional<Fault>); // process-wide, any thread
 void setRegistrySharing(bool); // false: ArtifactRegistry::take builds a new OpenedArtifact at every call (test C4)

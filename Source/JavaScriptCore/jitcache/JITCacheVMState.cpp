@@ -26,16 +26,34 @@
 #include "config.h"
 #include "JITCacheVMState.h"
 
+#include "ArtifactStore.h"
+#include "JITCacheBench.h"
+#include "JITCacheContainer.h"
+#include <wtf/SafeStrerror.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/text/CString.h>
+#include <wtf/text/MakeString.h>
 
-// The VMState members that neither create nor destroy a state nor read the store (SPEC-integrator.md section 17, task 2):
-// the switches, the fault records and the members that raise faults, and the producer context. The body lookups and their
-// test override live beside the store's reads (task 5), releaseEndedProductionMemory beside the memory it releases
-// (task 9), and the constructor and destructor beside start (task 7).
+// The VMState members that neither create nor destroy a state (SPEC-integrator.md section 17): the switches, the fault
+// records and the members that raise faults, and the producer context (task 2), and the body lookups with their test
+// override (task 5). releaseEndedProductionMemory lives beside the memory it releases (task 9), and the constructor and
+// destructor beside start (task 7).
 
 namespace JSC::JITCache {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(VMState);
+
+namespace JITCacheVMStateInternal {
+
+// The detail of invalid material an open raises: the errno's text for container.io, and the body's key either way.
+static String invalidBodyDetail(const BodyKey& key, const StoreFailure& failure)
+{
+    if (failure.error)
+        return makeString(String::fromUTF8(safeStrerror(failure.error).data()), "; body "_s, bodyKeyHex(key));
+    return makeString("body "_s, bodyKeyHex(key));
+}
+
+} // namespace JITCacheVMStateInternal
 
 bool VMState::tracksKeys() const
 {
@@ -62,6 +80,78 @@ bool VMState::strict() const
 UCBRegistry& VMState::registry()
 {
     return m_registry;
+}
+
+uint64_t VMState::bodyVersion(const BodyKey& key)
+{
+    if (!activityOn())
+        return 0;
+#if ENABLE(JITCACHE_TWINS)
+    if (m_bodyVersionOverride)
+        return m_bodyVersionOverride(key);
+#endif
+    // Activity is on only after a start that did not fault, which leaves the opened artifact.
+    OpenedArtifact* artifact = m_artifact.get();
+    ASSERT(artifact);
+
+    // The index's token, without a system call unless the epoch moved (container sub-SPEC section 7.1).
+    BenchReport* report = m_benchReport.get();
+    uint64_t startNanoseconds = report ? benchThreadCPUNanoseconds() : 0;
+    uint64_t token = artifact->token(key);
+    if (report)
+        report->countLookup(token ? BenchReport::Lookup::BodyVersionPresent : BenchReport::Lookup::BodyVersionAbsent, benchThreadCPUNanoseconds() - startNanoseconds);
+    return token;
+}
+
+BodyLookup VMState::openBody(const BodyKey& key)
+{
+    if (!activityOn())
+        return BodyLookup::unusable();
+#if ENABLE(JITCACHE_TWINS)
+    if (m_openBodyOverride)
+        return m_openBodyOverride(key);
+#endif
+    OpenedArtifact* artifact = m_artifact.get();
+    ASSERT(artifact);
+
+    BenchReport* report = m_benchReport.get();
+    uint64_t startNanoseconds = report ? benchThreadCPUNanoseconds() : 0;
+    // Full validation exactly when strict is on; both modes run the integrity checks (section 4.3).
+    BodyOpen opened = artifact->open(key, strict() ? ValidationMode::Full : ValidationMode::Integrity);
+    if (opened.mappedBytes)
+        ++m_progress.bodyOpens;
+
+    BenchReport::Lookup tally = BenchReport::Lookup::OpenBodyMissing;
+    BodyLookup lookup = [&] {
+        switch (opened.outcome) {
+        case StoreOutcome::Found:
+            tally = BenchReport::Lookup::OpenBodyFound;
+            return BodyLookup::found(opened.body.releaseNonNull());
+        case StoreOutcome::Absent:
+            // A file that vanished included; the store took the key out of its index unless its token changed meanwhile.
+            return BodyLookup::missing();
+        case StoreOutcome::Unavailable:
+            // EMFILE, ENFILE or ENOMEM: the artifact is not at fault, and the body is as good as none for now.
+            ++m_progress.transientOpenFailures;
+            return BodyLookup::missing();
+        case StoreOutcome::Invalid:
+            // The UCB lane reads Unusable as "the integrator raised the fault" (SPEC-ucb.md section 7.3.1).
+            raiseInvalidMaterial(opened.failure.check, JITCacheVMStateInternal::invalidBodyDetail(key, opened.failure));
+            tally = BenchReport::Lookup::OpenBodyUnusable;
+            return BodyLookup::unusable();
+        }
+        RELEASE_ASSERT_NOT_REACHED();
+        return BodyLookup::unusable();
+    }();
+
+    if (report) {
+        uint64_t nanoseconds = benchThreadCPUNanoseconds() - startNanoseconds;
+        report->countLookup(tally, nanoseconds);
+        // Harness sub-SPEC section 9.2: each openBody that maps a file.
+        if (opened.mappedBytes)
+            report->record("open"_s, { { "key"_s, bodyKeyHex(key) }, { "bytes"_s, opened.mappedBytes }, { "nanoseconds"_s, nanoseconds } });
+    }
+    return lookup;
 }
 
 void VMState::raiseInvalidMaterial(ASCIILiteral step, String detail)
@@ -94,6 +184,21 @@ TwinReportSink* VMState::twinReportSink()
 Ref<ProducerBudget> VMState::twinBudget()
 {
     return m_twinBudget.copyRef();
+}
+
+void VMState::setBodyLookupForTesting(Function<uint64_t(const BodyKey&)>&& token, Function<BodyLookup(const BodyKey&)>&& open)
+{
+    // The override answers alone, without the store, the index or a progress counter, and changes neither the role nor
+    // strictness; the activity test still runs first (section 6.2).
+    ASSERT(token && open);
+    m_bodyVersionOverride = WTF::move(token);
+    m_openBodyOverride = WTF::move(open);
+}
+
+void VMState::clearBodyLookupForTesting()
+{
+    m_bodyVersionOverride = nullptr;
+    m_openBodyOverride = nullptr;
 }
 #endif
 

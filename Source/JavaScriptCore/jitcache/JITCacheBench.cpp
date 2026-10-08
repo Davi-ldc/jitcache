@@ -26,8 +26,10 @@
 #include "config.h"
 #include "JITCacheBench.h"
 
+#include "ArtifactStore.h"
 #include "ExecutableAllocator.h"
 #include "JITCacheVMState.h"
+#include "UCBKeys.h"
 #include "VM.h"
 #include <atomic>
 #include <cmath>
@@ -53,13 +55,6 @@ static constexpr size_t flushThresholdCharacters = 1 * MB;
 
 // Each report takes the next ordinal, which every line carries as "vm".
 static std::atomic<unsigned> nextVMOrdinal { 0 };
-
-static uint64_t threadCPUTimeNanoseconds()
-{
-    struct timespec now { };
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
-    return static_cast<uint64_t>(now.tv_sec) * 1000000000 + static_cast<uint64_t>(now.tv_nsec);
-}
 
 static void appendValue(StringBuilder& line, const decltype(BenchField::value)& value)
 {
@@ -222,6 +217,20 @@ BenchReport* benchReport(VM& vm)
     return state ? state->benchReport() : nullptr;
 }
 
+uint64_t benchThreadCPUNanoseconds()
+{
+    struct timespec now { };
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return static_cast<uint64_t>(now.tv_sec) * 1000000000 + static_cast<uint64_t>(now.tv_nsec);
+}
+
+String bodyKeyHex(const BodyKey& key)
+{
+    // One encoding serves the file names and the reports, so a report's key names its body file.
+    BodyFileName name = bodyFileName(key);
+    return String { name.span().first(2 * BodyKey::byteSize) };
+}
+
 RelinkTimer::RelinkTimer(VM& vm)
 {
     // A collection's End phase can relink too (harness sub-SPEC section 9.3); only the VM thread outside GC work
@@ -230,13 +239,13 @@ RelinkTimer::RelinkTimer(VM& vm)
     if (!report || vm.heap.currentThreadIsDoingGCWork())
         return;
     m_report = report;
-    m_startNanoseconds = JITCacheBenchInternal::threadCPUTimeNanoseconds();
+    m_startNanoseconds = benchThreadCPUNanoseconds();
 }
 
 RelinkTimer::~RelinkTimer()
 {
     if (m_report)
-        m_report->addRelinkNanoseconds(JITCacheBenchInternal::threadCPUTimeNanoseconds() - m_startNanoseconds);
+        m_report->addRelinkNanoseconds(benchThreadCPUNanoseconds() - m_startNanoseconds);
 }
 
 } // namespace JSC::JITCache

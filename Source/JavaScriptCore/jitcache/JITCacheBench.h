@@ -48,6 +48,8 @@ class VM;
 
 namespace JSC::JITCache {
 
+class BodyKey;
+
 // The bench report (harness sub-SPEC section 9). When Config::benchReportPath is set, the VMState keeps one, which
 // appends JSON lines to that path, buffered and flushed when the buffer passes 1 MiB, after each delta, at each host's
 // exit (flushBenchReport) and in willDestroyVM. Every line holds event, pid and the VM's ordinal in the process, then the
@@ -105,6 +107,15 @@ private:
 
 // Null when no report is open.
 BenchReport* benchReport(VM&);
+
+// Any thread. The clock every event's times read (section 9.1): CLOCK_THREAD_CPUTIME_ID, in nanoseconds. The vDSO does not
+// serve it on Linux, so each read is a system call inside the span it measures; a counted span reads it only where it
+// begins and ends.
+uint64_t benchThreadCPUNanoseconds();
+
+// A key as every event writes it: the lowercase hex of its 40 canonical bytes, which is also its body file's name
+// without ".bin" (container sub-SPEC section 1.1).
+String bodyKeyHex(const BodyKey&);
 
 // A scope around ScriptExecutable::installCode's relink of incoming calls (section 9.3). It reads the thread CPU clock
 // when benchReport(vm) is non-null and !vm.heap.currentThreadIsDoingGCWork(), and otherwise measures nothing, so it
