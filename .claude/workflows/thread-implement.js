@@ -311,8 +311,6 @@ const isReport = path => /^report\/[^/\\\0]+\.md$/.test(path)
 const unique = items => [...new Set(items)]
 const base = path => String(path).split('/').filter(Boolean).pop()
 const slug = text => String(text).replace(/[^\w.-]+/g, '-')
-const firstLine = text => String(text ?? '').split('\n')[0].slice(0, 200)
-
 // ---------------------------------------------------------------------------
 // Run state. The script cannot read or write files: the result carries everything.
 // ---------------------------------------------------------------------------
@@ -440,8 +438,10 @@ the SPEC writes it, the files it creates or edits, and the checks its text says 
 Resolve the files from the SPEC's owned-paths, edit and manifest tables; be EXHAUSTIVE: a file a
 task edits but does not list will collide with a parallel task. Its deps are every task that its
 list or its text says it follows, waits on or needs, a requirement or manifest entry that another
-task meets included: resolve each against the list it cites, quote the words it comes from, and
-put a reference that list does not hold in unresolved. Do not invent, merge, drop or shorten tasks.`
+task meets included: resolve each against the list it cites and quote the words it comes from.
+Put in unresolved only a reference to a task by its number that the list it cites does not hold;
+a work item that no list numbers, such as the bench loop THREAD Execution ends with, is no task
+and no dependency. Do not invent, merge, drop or shorten tasks.`
 
 const doneBlock = t => t.deps.length
   ? fence('completed_tasks', t.deps.map(d => ({ task: d.id, done: state.get(d.id).summary })), Infinity)
@@ -504,17 +504,15 @@ ${fence('spec_conflicts', conflicts, 20000)}
 Findings:
 ${fence('reviewer_findings', kept, FINDINGS_PROMPT_LIMIT)}`
 
-const commitPrompt = (what, files, restore, entries) => `Repo: ${REPO}. You are the committer of
+const commitPrompt = (what, files, restore) => `Repo: ${REPO}. You are the committer of
 thread-implement, and no other agent runs while you work. Read skills/SKILL.md only: this task
 needs neither its references, THREAD nor any SPEC. Do not build, and change no file except as
 step 2 says.
 ${files.length ? `1. Commit the listed paths that exist and changed (a path ending in / is a directory),
    those under ${BUN_REPO}/ in that repository and the rest in this one, one commit per
    repository, and nothing else: leave every other change in the working tree as it is. The
-   message's first line is "checkpoint: ${what}", then one line per entry below, then a
-   blank line and "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".
-${fence('paths_to_commit', files, Infinity)}
-${fence('message_entries', entries, Infinity)}` : '1. There is nothing to commit.'}
+   message is exactly "checkpoint": no other line and no trailer, Co-Authored-By included.
+${fence('paths_to_commit', files, Infinity)}` : '1. There is nothing to commit.'}
 ${restore.length ? `2. Save the diff of these paths of failed tasks against HEAD, new files whole, to
    ${RUN_DIR}/${slug(what)}-failed.diff; then restore each tracked file to HEAD and delete each new one.
 ${fence('paths_to_restore', restore, Infinity)}` : '2. There is nothing to restore.'}
@@ -729,9 +727,9 @@ async function implementTask(t) {
 
 // One commit per wave or round, of the passed work's files; the failed tasks' files go back to
 // HEAD. A commit that does not happen stops the run.
-async function commitWork(what, phaseName, files, restore, entries) {
+async function commitWork(what, phaseName, files, restore) {
   if (!files.length && !restore.length) return { commits: [] }
-  const commit = await runSolo(commitPrompt(what, unique(files), unique(restore), entries),
+  const commit = await runSolo(commitPrompt(what, unique(files), unique(restore)),
     { label: `commit:${slug(what)}`, phase: phaseName, schema: COMMIT, ...CLERK }, 0)
   if (!commit || !commit.ok) return null
   for (const f of commit.leftModified) LEFT_MODIFIED.add(normalize(f))
@@ -831,8 +829,7 @@ while (!capReached) {
   }
   const passed = batch.filter(t => isPassed(t.id))
   const failed = batch.filter(t => !isPassed(t.id))
-  const commit = await commitWork(`wave ${wave}`, 'Implement', passed.flatMap(t => t.files), failed.flatMap(t => t.files),
-    passed.map(t => `${t.id}: ${firstLine(state.get(t.id).summary)}`))
+  const commit = await commitWork(`wave ${wave}`, 'Implement', passed.flatMap(t => t.files), failed.flatMap(t => t.files))
   if (!commit) {
     for (const t of passed) state.set(t.id, { status: 'failed', reason: `wave ${wave}'s commit failed` })
     return report('stopped', { where: 'Implement', reason: `wave ${wave}'s commit failed` })
@@ -907,7 +904,7 @@ for (let round = 1; round <= MAX_BUILD_ROUNDS && !capReached; round++) {
   })
   log(`Build round ${round}: ${applied.length} fix(es) applied, ${carried.size} moved to the file that caused them`)
   if (applied.length) {
-    const commit = await commitWork(`build round ${round}`, 'Build', applied, [], applied.map(f => `compile fix in ${f}`))
+    const commit = await commitWork(`build round ${round}`, 'Build', applied, [])
     if (!commit) return report('stopped', { where: 'Build', reason: `build round ${round}'s commit failed` })
   }
   if (!applied.length && !carried.size && all.length === items.length
@@ -992,8 +989,7 @@ for (let round = 1; round <= MAX_VERIFY_ROUNDS && !capReached; round++) {
   const applied = items.filter((_, i) => outcomes[i] && outcomes[i].outcome === 'applied')
   log(`Verify round ${round}: ${applied.length} fix(es) applied`)
   if (applied.length) {
-    const commit = await commitWork(`verify round ${round}`, 'Verify', applied.flatMap(it => it.scope), [],
-      applied.map(it => `${it.id} (${it.task}): ${firstLine(it.symptom)}`))
+    const commit = await commitWork(`verify round ${round}`, 'Verify', applied.flatMap(it => it.scope), [])
     if (!commit) return report('stopped', { where: 'Verify', reason: `verify round ${round}'s commit failed` })
   }
 }
