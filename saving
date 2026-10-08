@@ -1,0 +1,39 @@
+Li o README. Como o contexto está baixo, segue um resumo para você colar na próxima sessão. Nada foi editado.
+
+**O README hoje.** O parágrafo da linha 21, em "It was made", mistura duas coisas. A primeira é o estudo: um mês de JSC, docs em português, corte e tradução, e um agente por doc drenando reports com o limite de 40 KB. A segunda é o processo de design: a conversa serializada no THREAD.md e o workflow que gera as SPECs. A quebra natural é exatamente aí, e o parágrafo novo de cima pode dizer por que fazer assim: o Claude erra muito sobre o interior do WebKit, então primeiro ele precisa de referência confiável e depois de um processo que verifique tudo contra o código.
+
+**O que aprendemos com o fluxo do Jarred.** Isto vem da análise do PR 249 e das nossas duas rodadas:
+- **Funcionou:** um design curto que fixa o objetivo e o contrato. Os mecanismos entram como hipóteses ligadas a código real, e toda divergência fica num lugar só. Também deram certo as SPECs congeladas, com cada substituição citando os dois lados, as revisões adversariais por lentes com refutação registrada, uma revisão do sistema inteiro, e um leitor novo refazendo os fluxos (o walkthrough achou o que nove rodadas de lentes não acharam).
+- **Foi frágil:** constantes nos scripts e documentos derivados envelheceram; os revisores julgavam contra um documento diferente do que os autores seguiam; loops só registravam a falta de convergência; um revisor que falhava contava como passada limpa; e o limite de tamanho empurrou texto obrigatório para os históricos.
+
+**O que mudamos por causa disso:**
+- Nenhum brief nem documento derivado como entrada: cada agente lê o THREAD e o código.
+- Lacuna do THREAD não para a execução: o agente faz a escolha provisória mais estreita, marca no texto, e a lacuna vai para o resultado.
+- Achados menores nunca chegam ao revisor.
+- Só param a execução falha de agente, revisor ausente e escrita fora dos caminhos permitidos.
+- SPEC só se divide por assunto, nunca para caber num tamanho.
+- Agentes novos com contexto de 1M em vez de forks, porque um fork herda o contexto inteiro da sessão.
+- Toda afirmação do tipo "isto não dá" é conferida no código antes de virar design.
+
+**Pendências desta sessão para retomar:**
+- Mudar o Scope do SKILL.md para cobrir defeitos nativos, além das escolhas deliberadas. Proposta: "JITCache não corrige, não reporta nem acompanha defeitos do JSC ou do Bun que não pioram o run em relação ao nativo". Com isso, sai a entrada "Bun upstream" do todo.md. Foi ela que levou o agente a achar que reportar o use-after-free era tarefa nossa: a regra atual só fala de "escolha deliberada", e um bug não é escolha.
+- O report `thread-twin-skip-rule-spans-processes` já está resolvido no THREAD atual.
+- Não consegui identificar qual "cláusula R-INT-11" está aberta. Há três: a de Image bate com o THREAD, a de UCB só atribui as falhas no plano, e a de CB é o item 9, que você tirou do escopo.
+- O sysroot aarch64 precisa de sudo para ir para `/opt`. A alternativa é um caminho do usuário, por exemplo `~/collo-local/sysroots/`.
+
+
+**"Envelheceram"** quer dizer que o script do Jarred guardava cópias de afirmações do THREAD, e nada as atualizava quando o design mudava. Por exemplo, as SPECs concluíram que o `VMManager` não bastava para os safepoints. Mesmo assim, o `thread-implement.js` continuou pedindo "safepoints via the existing VMManager machinery", e a lente de conformidade continuou julgando o código contra o THREAD, não contra a SPEC que os autores seguiam. A lista de caminhos de cada parte no script também divergia da SPEC, e por isso os testes de heap viraram blocker nas quatro rodadas.
+
+**Por que briefs são ruins aqui:** um brief é uma segunda cópia do escopo que o THREAD já define, e envelhece da mesma forma. O nosso envelheceu antes de rodar: o brief da UCB dizia que `vm.Script` com cachedData "nunca importa", enquanto o THREAD dizia que as execuções importam. Com 1M de contexto, o agente lê o THREAD direto, então o brief só acrescenta um lugar para errar. Os fatos nativos no prompt são diferentes: eles mudam com o pin do motor, não com o THREAD.
+
+**Como eu desenharia.** Uma única autoridade, lida por quem escreve e por quem revisa. Nada copiado dela para o script. Lacunas viram escolhas marcadas, não paradas. E a verificação fica no fim, por um leitor novo. Foi quase isso que fizemos; o que eu mudaria é tirar até a lista de lanes do script e lê-la do THREAD na hora de rodar.
+
+Um rascunho para a seção "It was made", na ordem que você quer:
+
+> Jarred's threads PR showed how far a short design can carry a large change. His THREAD.md fixed the goal and the contract and offered one mechanism per layer as a hypothesis tied to real code. Each SPEC had to verify those claims in the tree and list every departure in a Deviations section, so wrong guesses surfaced early. Frozen SPECs could only be superseded by later ones that cited both sides, adversarial lenses re-reviewed every revision from scratch, a whole-system review built the global lock graph, and late in the process a fresh reader rebuilt real flows from the texts and found what nine review rounds had missed.
+>
+> What broke was everything copied out of the design. His scripts restated THREAD's claims in their prompts, and when a SPEC corrected one, the script kept asking for the old version. Reviewers judged against a different document than the one writers followed. Loops that never converged were logged and passed over, a reviewer that failed counted as a clean pass, and a size cap pushed binding rules into history files where no reviewer read them.
+>
+> So in our version THREAD is the only authority, and nothing in the workflow copies it. The work splits into four lanes by the native object that holds each piece of state, and every decision that binds two lanes is written in THREAD before any SPEC exists. Each lane's author writes a full design from THREAD and the code, then three lenses (native fidelity, implementability, simplicity) review it until a pass comes back clean. The lanes are then reviewed as one system, an integrator is derived from them, and everything is reviewed together again. Nothing about the design stops the run: a gap in THREAD becomes the narrowest provisional choice, marked in the text and handed to me, and minor findings are shelved instead of reaching a reviser. Only a failed agent, a missing reviewer or a write outside an agent's files stops it. Every agent starts fresh with a 1M-token context. Afterward, each SPEC set was drained, compacted with a map from old sections to new ones, and walked as a whole by a fresh reader.
+
+O último parágrafo pode virar dois se você quiser separar a execução do workflow do que veio depois dele.

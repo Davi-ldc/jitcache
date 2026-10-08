@@ -1,4 +1,7 @@
 {
+  "permissions": {
+    "additionalDirectories": ["~/bun"]
+  },
   "extraKnownMarketplaces": {
     "webkit-plugins": {
       "source": {

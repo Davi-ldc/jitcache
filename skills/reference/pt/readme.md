@@ -1,0 +1,1 @@
+A maioria foi feito a mão, voltado ao estudo humano. Parei de manter.

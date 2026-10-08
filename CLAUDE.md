@@ -1,71 +1,70 @@
-# CLAUDE.md
+# JITCache
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+You are building JITCache in JSC for Bun.
 
-## Repository Overview
+Avoid `git`; the worktree is often large during multi-agent work. Answers should be at most 6 paragraphs.
 
-This is the Bun WebKit fork - a customized version of WebKit's JavaScriptCore engine optimized for Bun's runtime. The repository contains three core components:
-- **JavaScriptCore (JSC)**: The JavaScript engine with multi-tier JIT compilation
-- **WTF (Web Template Framework)**: Platform abstraction and utility library
-- **bmalloc**: High-performance memory allocator
+Avoid slow commands. Scope searches to the relevant file or directory and check metadata before reading contents. In partial clones, `git show --stat`, `git log -- <path>` and diffs can trigger downloads; for triage, prefer `git show -s` and the cached API (`gh api --cache`, with pagination when needed), then open only the relevant diff. If a query takes too long, investigate before repeating it or running multiple copies in parallel.
 
-## Build Commands
+Go optimal not minimal. Good design is timeless, if you can imagine someone surpassing you 100 years in the future you should do it yourself. Dont leave organization aside. Say what you mean (in paragraphs, usually 2-3) and say it briefly.
 
-### Quick Build (TypeScript)
-```bash
-# Debug build (recommended for development)
-bun build.ts debug
+Start with the simplest change that meets THREAD's goals and add mechanism only when a measurement or a concrete failing case demands it; check any proposal from an agent that does not know those goals, including its fix for a finding it raised, against them before building on it. Before designing around a constraint ("this cannot be scanned", "this must be paused"), find the code that proves it; an unverified constraint usually hides a simpler design.
 
-# Release build
-bun build.ts release
+Edit the file using the Edit tool, never by script.
 
-# Release with LTO (Link Time Optimization)
-bun build.ts lto
-```
+No Python slop. Bash or the built-in tools work better 99% of the time. To read an entire file, use the `Read` tool, not `cat`.
 
-### Platform-Specific Build Scripts
-```bash
-# macOS
-bash mac-release.bash
+Limit GPT Astra concurrency to at most 6 at a time (including yourself if you are an Astra), or 20 at a time if you are Claude.
 
-# Linux (Docker-based)
-bash release.sh
+Before tackling problem X, always ask why it happens: what causes it (Y), and recursively what causes Y (Z), rather than addressing X or Y directly.
 
-# Linux musl (Docker-based)
-bash musl-release.sh
+Always reflect on review/revision results never accept all findings/suggestions blindly.
 
-# Windows
-./windows-release.ps1
-```
+When running a census or review with several agents in parallel, check each group as soon as it is produced, wait for all of them to return and summarize only once. Agents inside a workflow cannot launch subagents, so give each one work that fits a single context.
 
-### CMake Build (Advanced)
-```bash
-# Configure
-cmake -G Ninja \
-  -DPORT=JSCOnly \
-  -DENABLE_STATIC_JSC=ON \
-  -DUSE_BUN_JSC_ADDITIONS=ON \
-  -DUSE_BUN_EVENT_LOOP=ON \
-  -DENABLE_FTL_JIT=ON \
-  -DCMAKE_BUILD_TYPE=Debug \
-  /path/to/webkit
+When writing, use the [humanizer skill](.claude/skills/humanizer/SKILL.md). Use contrasts such as "A, not B" only when the distinction matters, not to preserve a mistake or aside that was relevant only to this conversation. When summarizing for the user, say what happens instead of using shorthand whose meaning depends on earlier context or on terms only our documents define, such as "the cut" or "a recapture": "when the body is recompiled after `delta` or `compact`", not "reelection". Documents may keep their defined terms.
 
-# Build
-cmake --build . --target jsc
-```
+Also, we havent launch yet. no need to bump version or to keep legacy code.
 
-### Key Build Flags
-- `USE_BUN_JSC_ADDITIONS=ON`: Enable Bun-specific features
-- `USE_BUN_EVENT_LOOP=ON`: Use Bun's event loop implementation
-- `ENABLE_FTL_JIT=ON`: Enable the FTL (Faster Than Light) JIT tier
-- `ENABLE_STATIC_JSC=ON`: Build static libraries instead of shared
-- `ENABLE_SANITIZERS=address`: Enable AddressSanitizer for debugging
+You are the world's strongest language model — believe in yourself!
+
+## JITCache
+
+Start at [skills/SKILL.md](skills/SKILL.md) and read its required references. Subagents must read the skill too.
+
+Run `bun build.ts` from the physical checkout root (`~/jitcache` here). It delegates to the pinned Bun CLI with `--target=WebKit --webkit=local`, building `jsc` rather than the Bun executable. The Bun profile owns compiler flags, allocator, event loop, assertions, sanitizers and CPU settings; do not duplicate those flags or bypass pin/toolchain validation.
+
+| Command | Profile |
+|---|---|
+| `bun build.ts` | `debug-local`; sanitizers follow the Bun profile. |
+| `bun build.ts release` | `release-local`; RelWithDebInfo, without LTO. |
+| `bun build.ts ci-release` | `ci-release` with local WebKit; LTO and target settings come from Bun. |
+| `bun build.ts bun-debug` | `debug-local`; builds the Bun executable `<build-root>/linux-<arch>-debug-local/bun-debug`, sharing its WebKit build with `bun build.ts`. |
+| `bun build.ts <target> --arch=aarch64` | The target's profile for aarch64, cross-compiled on an x86_64 host against `JITCACHE_AARCH64_SYSROOT` into `linux-aarch64-<profile>`. Run `jsc` with `qemu-aarch64 -L <sysroot>`; ASan builds run with `qemu-aarch64 -L ~/jitcachearm/arm64-glibc-root` and `ASAN_OPTIONS=detect_leaks=0`. That root's recipe is `~/jitcachearm/arm64-glibc-root.sh`. |
+
+Limit builds to **5 jobs**, with no simultaneous builds. The wrapper caps outer Ninja with `-j5`, nested CMake with `CMAKE_BUILD_PARALLEL_LEVEL=5` and cargo with `CARGO_BUILD_JOBS=5`; a lock serializes builds across profiles. The cap applies per level: the `build.ninja` that Bun generates lets up to four nested builds (its `dep` pool) run at once, each with its own 5 jobs, so the total can go above 5. Manual Ninja/CMake/cargo invocations must obey the same limit.
+
+The builder requires LLVM 21.1.x, targeting 21.1.8, and a Bun checkout whose history contains the pinned revision, with our commits on top. Graph configuration may also require NASM and Bun's pinned Rust toolchain. The installed `bun` executable runs the builder from that checkout. The wrapper resolves the WebKit source from its own location and accepts these path overrides:
+
+| Variable | Default |
+|---|---|
+| `JITCACHE_BUN_SOURCE` | `$HOME/bun` |
+| `JITCACHE_BUILD_ROOT` | `$HOME/collo-local/build/jitcache` |
+| `JITCACHE_LLVM_PREFIX` | `$HOME/collo-local/tools/llvm-21` |
+| `JITCACHE_AARCH64_SYSROOT` | `$HOME/collo-local/tools/linux-sysroot-glibc-arm64` |
+
+The local LLVM prefix uses the package layout `usr/lib/llvm-21/bin`; the wrapper adjusts `PATH` and `LD_LIBRARY_PATH`. It also adds `~/collo-local/tools/bin` to `PATH`, where this environment exposes NASM. Outputs live under `<build-root>/linux-<arch>-<profile>/deps/WebKit`, with `<arch>` equal to `x86_64` or `aarch64`; the executable is `bin/jsc`. Keep binaries, headers and libraries from the same profile, since sanitizers can change ABI.
+
+Tests follow native WebKit/JSC conventions. On Linux x86_64, `debug-local` includes ASan and LSan with Baseline, DFG and FTL enabled; use it for native memory checks and `release-local` for performance measurements. Run shell smoke tests and leak checks with `jsc --destroy-vm` so the VM is released, rather than disabling LeakSanitizer. For symbolized diagnostics, set `ASAN_SYMBOLIZER_PATH` to the matching `llvm-symbolizer` and expose its shared libraries.
+
+ASan instruments compiled native code, not automatically the machine code emitted by the JIT; coverage also depends on the allocator and memory annotations. A passing smoke test is not a full test-suite result or proof that a restored baseline is correct. A TSan target with JITs disabled cannot validate the full baseline emission/install/execution path. Matching Bun's build flags does not establish parity with the `JSC::Options` its host applies when creating a VM.
 
 ## High-Level Architecture
 
 ### JavaScriptCore (Source/JavaScriptCore)
 
 #### Execution Tiers
+
 JSC uses a 4-tier JIT compilation strategy:
 
 1. **LLInt** (`llint/`): Low-level interpreter written in assembly
@@ -149,28 +148,6 @@ High-performance memory allocator with:
    - Stack trace improvements
    - Better error reporting for development
 
-### USE_BUN_EVENT_LOOP
-Custom event loop implementation for Bun's runtime requirements
-
-## Testing
-
-### Run JSC Shell
-```bash
-# After building
-./WebKitBuild/Debug/bin/jsc [script.js]
-./WebKitBuild/Release/bin/jsc [script.js]
-```
-
-### Run Tests
-```bash
-# C++ tests
-./WebKitBuild/Debug/bin/testmasm
-./WebKitBuild/Debug/bin/testb3
-
-# JavaScript tests (from JSTests directory)
-./Tools/Scripts/run-javascriptcore-tests
-```
-
 ## Development Tips
 
 ### Important Directories
@@ -181,7 +158,7 @@ Custom event loop implementation for Bun's runtime requirements
 - **For platform code**: See `wtf/` and platform-specific subdirectories
 
 ### Debugging
-1. Use debug builds for development (`bun build.ts debug`)
+1. Use debug builds for development (`bun build.ts`)
 2. Enable sanitizers for memory debugging: `ENABLE_SANITIZERS=address`
 3. Use `dataLog()` for printf-style debugging in JSC code
 4. Set breakpoints in tier transitions: `DFG::Plan::compileInThread`, `FTL::compile`
@@ -196,32 +173,3 @@ Custom event loop implementation for Bun's runtime requirements
 - Use `ninja` for faster incremental builds
 - `ccache` can significantly speed up rebuilds
 - For quick iterations, build only `jsc` target instead of full WebKit
-
-## CI/CD
-
-GitHub Actions workflows (`.github/workflows/build.yml`) build for:
-- **macOS**: x64/arm64, debug/release/ASAN builds
-- **Linux**: x64/arm64, glibc/musl, debug/release/LTO/ASAN
-- **Windows**: x64, debug/release
-
-Artifacts are automatically published to GitHub releases as `autobuild-{sha}`. The release starts as a draft, each build job uploads its tarball onto it, and the `release` job publishes it once every build succeeded (or deletes the draft when one failed).
-
-## Architecture Notes
-
-### Memory Safety
-- IsoHeaps provide type segregation for security
-- Gigacage prevents out-of-bounds access in typed arrays
-- Conservative stack scanning ensures C++ integration safety
-
-### Performance Considerations
-- LLInt provides fast startup
-- Baseline JIT balances compilation time vs execution speed  
-- DFG/FTL optimize hot code paths
-- Inline caches accelerate property access
-- Polymorphic inline caches handle multiple types efficiently
-
-### Threading Model
-- Main thread runs JavaScript execution
-- Compiler threads handle JIT compilation
-- Marking threads assist with garbage collection
-- DFG/FTL compilation happens off the main thread

@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with Ja
 
 ### Building just JSC
 ```bash
-# From repository root - fastest way to test changes
-bun build.ts debug  # or: release, lto
-./WebKitBuild/Debug/bin/jsc your-test.js
+# From the physical repository root
+bun build.ts debug  # or: release, ci-release
+JSC="${JITCACHE_BUILD_ROOT:-$HOME/collo-local/build/jitcache}/linux-$(uname -m)-debug-local/deps/WebKit/bin/jsc"
+"$JSC" --destroy-vm your-test.js
 ```
 
 ### Finding code
@@ -56,7 +57,7 @@ Check `builtins/*.js` first before diving into C++. These get compiled to byteco
 
 ### Debugging a crash
 1. Build with `bun build.ts debug`
-2. Run with lldb/gdb: `lldb ./WebKitBuild/Debug/bin/jsc`
+2. Run with lldb/gdb using the matching profile's binary: `lldb "$JSC"` (path above).
 3. Useful breakpoints:
    - `jsDynamicCast` - type casting issues
    - `JSC::throwException` - where exceptions originate
@@ -164,18 +165,11 @@ p codeBlock->dumpBytecode()
 
 ## Build System
 
-### Regenerate after changing BytecodeList.rb
-The build system should handle this, but if not:
-```bash
-cd WebKitBuild/Debug
-ninja JSCBuiltins
-```
-
-### Speed up builds
-- Use `ninja` not `make`
-- Only build jsc target: `ninja jsc`
-- Use ccache if available
-- Consider `--no-webkit2` for faster builds
+Use `bun build.ts [debug|release|ci-release]` for incremental builds and regeneration after
+changes to `BytecodeList.rb`. The launcher uses Bun's pinned WebKit recipe, builds only `jsc`,
+limits both build layers to five jobs and serializes builds across profiles. Keep headers
+and binaries from the same profile. See the JITCache section of the root [CLAUDE.md](../../CLAUDE.md)
+for toolchain requirements and path overrides.
 
 ## Testing
 
