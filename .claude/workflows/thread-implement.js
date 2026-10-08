@@ -506,8 +506,8 @@ step 2 says.
 ${files.length ? `1. Commit the listed paths that exist and changed (a path ending in / is a directory),
    those under ${BUN_REPO}/ in that repository and the rest in this one, one commit per
    repository, and nothing else: leave every other change in the working tree as it is. The
-   message's first line is "JITCache thread-implement: ${what}", then one line per entry
-   below, then a blank line and "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".
+   message's first line is "checkpoint: ${what}", then one line per entry below, then a
+   blank line and "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>".
 ${fence('paths_to_commit', files, Infinity)}
 ${fence('message_entries', entries, Infinity)}` : '1. There is nothing to commit.'}
 ${restore.length ? `2. Save the diff of these paths of failed tasks against HEAD, new files whole, to
@@ -757,7 +757,7 @@ async function settle(f) {
     objections: votes.map(v => !v ? 'a reviewer returned no vote' : v.approve ? null : clean(v.reasons, 1000)).filter(Boolean),
   }
   const applied = await run(applyPrompt(f.what, f.scope, prop, votes),
-    { label: `apply:${f.label}`, phase: f.phase, schema: APPLIED, ...BUILDER })
+    { label: `apply:${f.label}`, phase: f.phase, schema: APPLIED, ...WRITER })
   if (!applied || !applied.applied) return { outcome: 'not applied', reason: applied ? clean(applied.summary, 1000) : 'the applier returned no result' }
   return { outcome: 'applied' }
 }
