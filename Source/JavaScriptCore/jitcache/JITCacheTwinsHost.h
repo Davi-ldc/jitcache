@@ -70,10 +70,6 @@ JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheBodyEvents);
 // The body-event dump at the end of a run (harness sub-SPEC section 10.3); it needs no JITCache configuration.
 JS_EXPORT_PRIVATE void writeBodyEvents(VM&, const String& path);
 
-// Maps a hook's run-flag name (relocation-pairs, operation-pair, change-recorded-target or skip-patch) to the Image
-// lane's ImageTestHook and sets it with setImageTestHook (SPEC-image.md section 11.3); false for an unknown name.
-JS_EXPORT_PRIVATE bool setImageTestHookNamed(const char*);
-
 } // namespace JSC::JITCache
 
 #endif // ENABLE(JITCACHE_TWINS)
