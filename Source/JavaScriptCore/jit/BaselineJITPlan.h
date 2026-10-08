@@ -50,10 +50,16 @@ public:
     bool isKnownToBeLiveAfterGC() final;
     bool isKnownToBeLiveDuringGC(AbstractSlotVisitor&) final;
 
+    // JITCache: whether this plan's compilation records its image (SPEC-integrator.md section 4.4, SPEC-image.md
+    // R-INT-12). The constructor writes it on the VM thread before the plan is enqueued or compiled, and whichever thread
+    // compiles only reads it, so it needs no lock.
+    bool jitCacheRecordsImage() const { return m_jitCacheRecordsImage; }
+
 private:
     CompilationPath compileInThreadImpl(JITCompilationEffort);
 
     RefPtr<BaselineJITCode> m_jitCode;
+    bool m_jitCacheRecordsImage { false };
 };
 
 } // namespace JSC

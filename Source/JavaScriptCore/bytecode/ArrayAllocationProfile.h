@@ -104,6 +104,14 @@ public:
         m_storage.setType(current().withIndexingType(recommendedIndexingMode));
     }
 
+    // JITCache: restores the hint of a profile that has no last array yet.
+    void restoreHint(IndexingType indexingType, unsigned vectorLength)
+    {
+        ASSERT(!isCompilationThread());
+        ASSERT(!m_storage.pointer());
+        m_storage.setType(IndexingTypeAndVectorLength(indexingType, vectorLength));
+    }
+
 private:
     struct IndexingTypeAndVectorLength {
         static_assert(sizeof(IndexingType) <= sizeof(uint8_t));

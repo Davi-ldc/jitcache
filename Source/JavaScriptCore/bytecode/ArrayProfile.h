@@ -252,6 +252,18 @@ public:
     void NODELETE observeIndexedRead(JSCell*, unsigned index);
 
     ArrayModes observedArrayModes() const { return m_observedArrayModes; }
+    // JITCache: the accumulated flags, the pruning mark included, read without draining anything.
+    OptionSet<ArrayProfileFlag> arrayProfileFlags() const { return m_arrayProfileFlags; }
+
+    // JITCache: restores the accumulated modes and flags of a profile at its link state.
+    // The two StructureID samples stay empty.
+    void restoreAccumulatedState(ArrayModes observedArrayModes, OptionSet<ArrayProfileFlag> flags)
+    {
+        ASSERT(!m_lastSeenStructureID && !m_speculationFailureStructureID);
+        m_observedArrayModes = observedArrayModes;
+        m_arrayProfileFlags = flags;
+    }
+
     bool mayInterceptIndexedAccesses() const { return m_arrayProfileFlags.contains(ArrayProfileFlag::MayInterceptIndexedAccesses); }
 
     bool mayStoreToHole() const { return m_arrayProfileFlags.contains(ArrayProfileFlag::MayStoreHole); }

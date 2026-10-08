@@ -26,6 +26,7 @@
 #pragma once
 
 #include "LazyOperandValueProfile.h"
+#include <utility>
 
 namespace JSC {
 
@@ -45,6 +46,16 @@ public:
     JSValue* addSpeculationFailureValueProfile(BytecodeIndex);
 
     UncheckedKeyHashMap<BytecodeIndex, JSValue*> speculationFailureValueProfileBucketsMap();
+
+    // JITCache: visits each operand profile in the holder's order. The functor reads key() and m_prediction only,
+    // never the buckets.
+    template<typename Functor> void forEachOperandValueProfile(const Functor& functor)
+    {
+        if (!m_data)
+            return;
+        for (auto& profile : m_data->operandValueProfiles)
+            functor(std::as_const(profile));
+    }
 
 private:
     friend class LazyOperandValueProfileParser;

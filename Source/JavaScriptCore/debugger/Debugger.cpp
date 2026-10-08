@@ -26,6 +26,7 @@
 #include "DebuggerCallFrame.h"
 #include "DebuggerScope.h"
 #include "HeapIterationScope.h"
+#include "JITCacheFaults.h"
 #include "JSAsyncFunctionGenerator.h"
 #include "JSCInlines.h"
 #include "JSWebAssemblyModule.h"
@@ -179,6 +180,8 @@ void Debugger::attach(JSGlobalObject* globalObject)
     m_globalObjects.add(globalObject);
 
     m_vm.setShouldBuildPCToCodeOriginMapping();
+    // JITCache: images carry no PC-to-origin maps, so turning the maps on turns cache activity off for good.
+    JITCache::didAttachDebugger(m_vm);
 
     // Call `sourceParsed` after iterating because it will execute JavaScript in Web Inspector.
     UncheckedKeyHashSet<RefPtr<SourceProvider>> sourceProviders;
