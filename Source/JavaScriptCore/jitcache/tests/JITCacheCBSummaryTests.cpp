@@ -463,7 +463,7 @@ static JSGlobalObject* createRealm(TestContext& context, VM& vm, ASCIILiteral so
 static JSFunction* globalFunction(TestContext& context, JSGlobalObject* globalObject, ASCIILiteral name)
 {
     JSValue value = globalObject->get(globalObject, Identifier::fromString(globalObject->vm(), name));
-    auto* function = jsDynamicCast<JSFunction*>(value);
+    auto* function = dynamicDowncast<JSFunction>(value);
     if (!function || function->isHostFunction()) {
         JITCACHE_FAIL(makeString("the test source defines no JS function "_s, name));
         return nullptr;
