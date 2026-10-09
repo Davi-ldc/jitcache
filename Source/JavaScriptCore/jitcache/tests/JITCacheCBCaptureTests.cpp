@@ -82,7 +82,7 @@ static JSValue globalValue(JSGlobalObject* globalObject, ASCIILiteral name)
 
 static JSFunction* globalFunction(TestContext& context, JSGlobalObject* globalObject, ASCIILiteral name)
 {
-    auto* function = jsDynamicCast<JSFunction*>(globalValue(globalObject, name));
+    auto* function = dynamicDowncast<JSFunction>(globalValue(globalObject, name));
     if (!function || function->isHostFunction()) {
         JITCACHE_FAIL(makeString("the test source defines no JS function "_s, name));
         return nullptr;
