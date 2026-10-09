@@ -27,7 +27,10 @@
 #include "BaselineJITPlan.h"
 #include "LOLJIT.h"
 
+#include "JITCacheVMState.h"
 #include "JITSafepoint.h"
+#include "ProducerBudget.h"
+#include "VM.h"
 
 #if ENABLE(JIT)
 
@@ -36,7 +39,14 @@ namespace JSC {
 BaselineJITPlan::BaselineJITPlan(CodeBlock* codeBlock)
     : JITPlan(JITCompilationMode::Baseline, codeBlock)
 {
-    JIT::doMainThreadPreparationBeforeCompile(codeBlock->vm());
+    VM& vm = codeBlock->vm();
+    JIT::doMainThreadPreparationBeforeCompile(vm);
+
+    // JITCache: the compilation records its image when the VM's production is active and the parent-key registry holds
+    // a key for the UCB (SPEC-integrator.md section 4.4, SPEC-image.md R-INT-12). Both callers, jitCompileAndSetHeuristics
+    // and JIT::compileSync, construct the plan on the VM thread, and the lookup takes only the registry's leaf lock.
+    if (JITCache::producerContext(vm))
+        m_jitCacheRecordsImage = vm.jitCacheState()->registry().keyOf(*codeBlock->unlinkedCodeBlock()).has_value();
 }
 
 auto BaselineJITPlan::compileInThreadImpl(JITCompilationEffort effort) -> CompilationPath

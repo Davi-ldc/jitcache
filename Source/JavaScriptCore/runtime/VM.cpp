@@ -67,6 +67,7 @@
 #include "Interpreter.h"
 #include "IntlCache.h"
 #include "IntlObject.h"
+#include "JITCacheGlue.h"
 #include "JITCode.h"
 #include "JITOperationList.h"
 #include "JITSizeStatistics.h"
@@ -658,8 +659,11 @@ VM::~VM()
 #if ENABLE(JIT)
     if (JITWorklist* worklist = JITWorklist::existingGlobalWorklistOrNull())
         worklist->cancelAllPlansForVM(*this);
+    // JITCache: with GC deferred for good and no compilation of this VM running, production ends without a delta and
+    // its memory goes.
+    JITCache::willDestroyVM(*this);
 #endif // ENABLE(JIT)
-    
+
     // Clear this first to ensure that nobody tries to remove themselves from it.
     m_perBytecodeProfiler = nullptr;
 
@@ -667,6 +671,10 @@ VM::~VM()
     m_apiLock->willDestroyVM(this);
     smallStrings.setIsInitialized(false);
     heap.lastChanceToFinalize();
+#if ENABLE(JIT)
+    // JITCache: every UCB and UFE destructor has run, so the state and its parent-key registry go now.
+    JITCache::didFinalizeHeap(*this);
+#endif
 
     while (!m_microtaskQueues.isEmpty())
         m_microtaskQueues.begin()->remove();

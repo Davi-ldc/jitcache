@@ -89,12 +89,67 @@ public:
     OpenedArtifact* artifact(); // null after a start fault
     BenchReport* benchReport(); // null unless Config::benchReportPath was set
     ~VMState(); // defined in JITCacheAPI.cpp
-    // Task 7 (section 17) adds the constructor and the accessors later tasks use.
+
+    // What the glue, the hosts and status read and write on the state's parts. VM thread.
+    StartOutcome startOutcome() const; // Created, Opened or Fault
+    // The faults status reports (section 3.3), which delta returns too (section 3.4). activityFault is the recorded one,
+    // or debugger.attach when a debugger turned activity off before any fault was recorded. productionFault, for a
+    // producing role only, is the recorded one; while production is active and no fault is recorded, budget.limit once
+    // the budget has refused a charge the VM thread has not raised yet (section 4.5); and once production went off with
+    // activity without a record of its own, the activity fault, a start fault or a debugger's attach. firstFault is the
+    // earlier of the two, which is the production fault whenever there is one.
+    std::optional<FaultReport> activityFault() const;
+    std::optional<FaultReport> productionFault() const;
+    std::optional<FaultReport> firstFault() const;
+    ProductionState productionState() const; // Ended once productionFault reports a fault
+    // The integrator's progress counters, which the glue counts; status adds the index's size and the UCB registry's
+    // statistics to its copy.
+    Progress& progress();
+    ProducerBudget* producerBudget(); // producing roles, a faulted start included; null otherwise
+    ArtifactWriter* writer(); // producing roles whose start did not fault; null otherwise
+    // Production memory the capture glue creates (sections 4.4 and 8.3), which releaseEndedProductionMemory frees. The
+    // kept summaries come with the deleter of the file that defines them, and destroying them releases their charges;
+    // each index-entry charge is one the glue already made against the producer budget.
+    using KeptSummariesHolder = std::unique_ptr<KeptSummaries, void (*)(KeptSummaries*)>;
+    KeptSummaries* keptSummaries(); // null before the first kept entry and once production memory is released
+    void setKeptSummaries(KeptSummariesHolder&&); // at the first kept entry, while production memory is held
+    void addIndexEntryCharge(size_t bytes); // an index entry the writer adds for a key the index lacks (section 8.4, step 8)
+#if ASSERT_ENABLED
+    unsigned& capturesInProgress(); // the finalize capture and delta assert on entry that it is zero (section 8.7)
+#endif
+#if ENABLE(JITCACHE_TWINS)
+    // Harness sub-SPEC section 3: install step 18 creates the image twin-check state, with JITCacheInstall.cpp's deleter,
+    // at the VM's first stash, and willDestroyVM destroys it.
+    using ImageTwinCheckStateHolder = std::unique_ptr<ImageTwinCheckState, void (*)(ImageTwinCheckState*)>;
+    ImageTwinCheckState* imageTwinCheckState(); // null before the VM's first stash
+    void setImageTwinCheckState(ImageTwinCheckStateHolder&&);
+#endif
 
 private:
+    // start constructs the state (section 3.2, step 10), and willDestroyVM ends its production and closes its twin
+    // report before the heap's last finalization (section 4.6).
+    friend StartResult start(VM&, const Config&);
+    friend void willDestroyVM(VM&);
     // The entry points of JITCacheFaults.h turn the switches off through the two members below (section 4.5).
     friend void didFailExecutableAllocation(VM&, ExecutableAllocationSite);
     friend void didAttachDebugger(VM&);
+
+    // What start hands the constructor. The outcome is Created, Opened or Fault; a Fault carries the start fault, which
+    // becomes the first activity fault, and neither a producer lock nor an artifact. A producing role carries its limit.
+    struct StartParts {
+        StartOutcome outcome { StartOutcome::Fault };
+        std::optional<FaultReport> startFault;
+        std::optional<size_t> producerLimitBytes;
+        std::unique_ptr<ProducerLock> producerLock;
+        RefPtr<OpenedArtifact> artifact;
+        std::unique_ptr<BenchReport> benchReport;
+#if ENABLE(JITCACHE_TWINS)
+        std::unique_ptr<TwinReport> twinReport;
+#endif
+    };
+    // Defined in JITCacheAPI.cpp. Creates the producer budget, the context and, over the lock and the artifact, the
+    // writer, and hands the budget to the bench report.
+    VMState(const Config&, StartParts&&);
 
     // VM thread. Turns activity off, which ends production (section 4.2). The report becomes the first activity fault
     // when activity was on and the first production fault when production was active; a switch already off keeps the
@@ -154,9 +209,10 @@ private:
 
     // Production memory (sections 4.2, 4.4 and 8.3): the kept summaries, which the capture glue creates with a deleter
     // of its own, so neither this header nor the destructor's file names the capture glue's types, and the charge for
-    // the index entries the writer added. The end of production releases both.
-    std::unique_ptr<KeptSummaries, void (*)(KeptSummaries*)> m_keptSummaries { nullptr, nullptr };
+    // the index entries the writer added. The end of production releases both, with the writer's staging buffer, once.
+    KeptSummariesHolder m_keptSummaries { nullptr, nullptr };
     size_t m_indexEntryChargeBytes { 0 };
+    bool m_productionMemoryReleased { false };
 
 #if ASSERT_ENABLED
     unsigned m_capturesInProgress { 0 }; // the finalize capture and delta assert that none is in progress (section 8.7)
@@ -165,7 +221,7 @@ private:
 #if ENABLE(JITCACHE_TWINS)
     // Harness sub-SPEC section 3: created with JITCacheInstall.cpp's deleter at the VM's first stash, destroyed by
     // willDestroyVM; an empty holder calls nothing.
-    std::unique_ptr<ImageTwinCheckState, void (*)(ImageTwinCheckState*)> m_imageTwinCheckState { nullptr, nullptr };
+    ImageTwinCheckStateHolder m_imageTwinCheckState { nullptr, nullptr };
 #endif
 };
 

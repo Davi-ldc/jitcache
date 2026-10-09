@@ -34,10 +34,11 @@
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
 
-// The VMState members that neither create nor destroy a state (SPEC-integrator.md section 17): the switches, the fault
-// records and the members that raise faults, and the producer context (task 2), and the body lookups with their test
-// override (task 5). releaseEndedProductionMemory lives beside the memory it releases (task 9), and the constructor and
-// destructor beside start (task 7).
+// The VMState members that neither create nor destroy a state nor free production memory (SPEC-integrator.md section
+// 17): the switches, the fault records and the members that raise faults, the producer context, the body lookups with
+// their test override, and what the glue, the hosts and status read and write on the state's parts. JITCacheAPI.cpp
+// defines the constructor, the destructor and releaseEndedProductionMemory beside start and the teardown hooks
+// (sections 4.1, 4.2 and 4.6), since destroying a state or its production memory runs the destructors of every part.
 
 namespace JSC::JITCache {
 
@@ -235,6 +236,114 @@ BenchReport* VMState::benchReport()
 {
     return m_benchReport.get();
 }
+
+StartOutcome VMState::startOutcome() const
+{
+    return m_startOutcome;
+}
+
+std::optional<FaultReport> VMState::activityFault() const
+{
+    if (m_activityFault)
+        return m_activityFault;
+    // A debugger's attach records no report, since it may run on any thread. A fault recorded after it found activity
+    // already off and recorded nothing, so the attach came first.
+    if (m_debuggerAttached.load(std::memory_order_acquire))
+        return FaultReport { FaultClass::DebuggerAttached, { }, "debugger.attach"_s, { } };
+    return std::nullopt;
+}
+
+std::optional<FaultReport> VMState::productionFault() const
+{
+    if (!producing())
+        return std::nullopt;
+    if (m_productionFault)
+        return m_productionFault;
+    if (productionActive()) {
+        // A charge a JIT worker made was refused, which the VM thread raises at its next capture or delta (section 4.5).
+        // A recording fault refuses further charges too, but it records itself first.
+        if (m_budget && m_budget->hasRefused())
+            return FaultReport { FaultClass::RecordingFault, { }, "budget.limit"_s, { } };
+        return std::nullopt;
+    }
+    // Production is off whenever activity is (II2), and the two ways activity goes off without recording a production
+    // fault are a start fault, when production never began, and a debugger's attach.
+    return activityFault();
+}
+
+std::optional<FaultReport> VMState::firstFault() const
+{
+    // A production fault is never recorded after the activity fault (turnActivityOff), and the two productionFault
+    // reports without a record come either while activity is still on or as the activity fault itself.
+    if (auto fault = productionFault())
+        return fault;
+    return activityFault();
+}
+
+ProductionState VMState::productionState() const
+{
+    if (!producing())
+        return ProductionState::NotProducing;
+    // A refusal the VM thread has not raised yet already ends production as status reports it (section 3.3).
+    if (productionActive() && !(m_budget && m_budget->hasRefused()))
+        return ProductionState::Active;
+    return ProductionState::Ended;
+}
+
+Progress& VMState::progress()
+{
+    return m_progress;
+}
+
+ProducerBudget* VMState::producerBudget()
+{
+    return m_budget.get();
+}
+
+ArtifactWriter* VMState::writer()
+{
+    return m_writer.get();
+}
+
+KeptSummaries* VMState::keptSummaries()
+{
+    return m_keptSummaries.get();
+}
+
+void VMState::setKeptSummaries(KeptSummariesHolder&& summaries)
+{
+    // The capture glue creates them only while production is active, before releaseEndedProductionMemory can free them.
+    ASSERT(!m_keptSummaries);
+    ASSERT(!m_productionMemoryReleased);
+    m_keptSummaries = WTF::move(summaries);
+}
+
+void VMState::addIndexEntryCharge(size_t bytes)
+{
+    ASSERT(m_budget);
+    ASSERT(!m_productionMemoryReleased);
+    m_indexEntryChargeBytes += bytes;
+}
+
+#if ASSERT_ENABLED
+unsigned& VMState::capturesInProgress()
+{
+    return m_capturesInProgress;
+}
+#endif
+
+#if ENABLE(JITCACHE_TWINS)
+ImageTwinCheckState* VMState::imageTwinCheckState()
+{
+    return m_imageTwinCheckState.get();
+}
+
+void VMState::setImageTwinCheckState(ImageTwinCheckStateHolder&& twinCheckState)
+{
+    ASSERT(!m_imageTwinCheckState);
+    m_imageTwinCheckState = WTF::move(twinCheckState);
+}
+#endif
 
 void VMState::turnActivityOff(FaultReport&& report)
 {
