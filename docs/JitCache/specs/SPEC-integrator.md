@@ -25,7 +25,7 @@ In outline: `start` checks options and process facts, takes the producer lock fo
 
 ## 2. Native facts
 
-Each was verified by reading the code at this pin. The facts only the harness uses, N16 to N25, sit in the harness sub-SPEC's sections that use them.
+Each was verified by reading the code at this pin. The facts only the harness uses, N16 to N27, sit in the harness sub-SPEC's sections that use them.
 
 - N1. `ScriptExecutable::prepareForExecutionImpl` (`runtime/ScriptExecutable.cpp`) runs under `DeferGCForAWhile`, creates the CB with `newCodeBlockFor`, then installs `codeBlock->unlinkedCodeBlock()->m_unlinkedBaselineCode` with `setupWithUnlinkedBaselineCode` when the slot holds code, and otherwise calls the file-static `setupLLInt` when `Options::useLLInt()` holds and `setupJIT` when it does not. It always ends with `installCode(vm, codeBlock, codeBlock->codeType(), codeBlock->specializationKind(), Profiler::JettisonReason::NotJettisoned)`. `UnlinkedCodeBlock::m_unlinkedBaselineCode` is a public member.
 - N2. `setupJIT` calls `JIT::compileSync(vm, codeBlock, JITCompilationMustSucceed)` and `RELEASE_ASSERT`s `CompilationSuccessful`. `JIT::compileSync` (`jit/JIT.cpp`, `static CompilationResult compileSync(VM&, CodeBlock*, JITCompilationEffort)` with an unnamed `VM&`) creates a `BaselineJITPlan`, compiles it on the calling thread and returns `plan->finalize()`. Bun's `node:vm` `Script` route also calls it, on a CB whose UCB Bun decoded (install.md, "Embedder routes").
@@ -93,7 +93,7 @@ enum class ProductionState : uint8_t { NotProducing, Active, Ended };
 
 struct Progress {
     uint64_t indexedBodies { 0 };
-    uint64_t bodyOpens { 0 };
+    uint64_t bodyOpens { 0 };             // openBody calls that mapped a file (section 6.2)
     uint64_t transientOpenFailures { 0 };
     uint64_t imports { 0 };               // UCB statistics: imports, seededDecodes, attaches, gateDrops, misses (summed)
     uint64_t seededDecodes { 0 };
@@ -160,6 +160,7 @@ JS_EXPORT_PRIVATE String toJSON(const Status&);
 
 `start(vm, config)` runs on the VM thread. A call before the VM's first global object covers every body, and a later one misses the bodies created before it and everything nested in them (THREAD Session). It writes nothing to the VM before step 10, so `Busy` and `Rejected` leave the VM unconfigured and the host may call `start` again. It takes no JSC lock but its callees', allocates no cell and stops for no collector.
 
+0. The process runs on Linux; otherwise `Rejected` at `start.platform` (section 11).
 1. The caller holds the API lock and heap access (`vm.currentThreadIsHoldingAPILock()`, `vm.heap.hasHeapAccess()`); otherwise `Rejected` at `start.locks`.
 2. `vm.jitCacheState()` is null; otherwise `Rejected` at `start.already-configured`, since created, opened and fault configure the VM for good.
 3. The config is well formed: a non-empty `artifactPath`, a role in range, for a producing role a limit from `producerLimitBytes` or `defaultProducerLimitBytes` (section 16), a `benchReportPath` that is empty or opens (harness sub-SPEC section 9.1), and in twins builds a `twinReportPath` that is empty or opens (harness sub-SPEC section 2); otherwise `Rejected` at `start.config`, with a detail naming the field. A report opened here is closed again on any outcome but `Created`, `Opened` and `Fault`.
@@ -176,11 +177,11 @@ JS_EXPORT_PRIVATE String toJSON(const Status&);
    Any other I/O error, such as a `flock` that fails other than busy or a listing that fails, is a `Fault` at `start.io`. A rejection or busy result taken after the lock was acquired releases it.
 8. Outcome: `Created` for a Producer, `Opened` for the other roles, or the `Fault` of step 7.
 9. On `Fault`, the producer lock, if taken, is released, since a faulted VM never produces.
-10. A `VMState` is created with the role, the config, the outcome and, on `Fault`, activity off with the start fault recorded (section 4.2), and published with `vm.setJITCacheState` (release store). It keeps the bench report of step 3; in twins builds it also creates the twin budget and keeps the twin report of step 3 (section 4.1; harness sub-SPEC section 2).
+10. A `VMState` is created with the role, the config, the outcome and, on `Fault`, activity off with the start fault recorded (section 4.2), and published with `vm.setJITCacheState` (release store). It keeps the bench report of step 3 and, for a producing role, hands it the producer budget with `setBudget`, which each flush's `budget` line reads (harness sub-SPEC section 9.2); in twins builds it also creates the twin budget and keeps the twin report of step 3 (section 4.1; harness sub-SPEC section 2).
 
 ### 3.3 `status`
 
-`status(vm)` runs on the VM thread and reads only: it opens no file, raises no fault and changes no state (THREAD Session). For a VM without state it returns `SessionState::Unconfigured`. Otherwise it reports the session state (`Faulted` when `start` faulted), the role, strictness, whether activity is on and why it went off, the production state and why it ended, the earlier of the two faults as `firstFault`, the progress counters of `VMState` and the UCB registry's statistics, and the budget snapshot. A producer budget that has refused a charge reports production `Ended` with the fault `budget.limit` even when the VM thread has not raised it yet (section 4.5).
+`status(vm)` runs on the VM thread and reads only: it opens no file, raises no fault and changes no state (THREAD Session). For a VM without state it returns `SessionState::Unconfigured`. Otherwise it reports the session state (`Faulted` when `start` faulted), the role, strictness, whether activity is on and why it went off, the production state and why it ended, the earlier of the two faults as `firstFault`, the progress counters of `VMState`, the index's size as `Progress::indexedBodies` (`OpenedArtifact::indexedBodies()`, read without a refresh), the UCB registry's statistics, and the budget snapshot. A producer budget that has refused a charge reports production `Ended` with the fault `budget.limit` even when the VM thread has not raised it yet (section 4.5).
 
 ### 3.4 `delta`
 
@@ -217,6 +218,7 @@ class BenchReport;
 class OpenedArtifact;
 class ProducerLock;
 struct ImageTwinCheckState;   // twins builds; defined in JITCacheInstall.cpp (harness sub-SPEC section 3)
+struct KeptSummaries;         // the kept summaries (section 8.3); defined in JITCacheCapture.cpp
 
 class VMState final {
     WTF_MAKE_NONCOPYABLE(VMState);
@@ -273,7 +275,7 @@ The state owns these parts:
 | the `OpenedArtifact` the VMs of the process share (container sub-SPEC section 5) | `RefPtr<OpenedArtifact>` | `start` | the destructor |
 | the body-lookup override (twins builds) | two `Function`s | `setBodyLookupForTesting` | `clearBodyLookupForTesting`; the destructor |
 | the writer (producing roles) | `std::unique_ptr<ArtifactWriter>` | `start` | its staging buffer at the end of production; the writer with the state |
-| the kept summaries and the index-entry charge (sections 4.4 and 8.3) | a map and a byte count | the capture glue | the end of production |
+| the kept summaries and the index-entry charge (sections 4.4 and 8.3) | `std::unique_ptr<KeptSummaries, void (*)(KeptSummaries*)>`, with the deleter its creator supplies, and a `size_t` | the capture glue, at the first kept entry | the end of production |
 | the count of captures in progress (`ASSERT_ENABLED` builds) | an integer the VM thread writes | the constructor | (section 8.7) |
 | the image twin-check state (twins builds; harness sub-SPEC section 3) | `std::unique_ptr<ImageTwinCheckState, void (*)(ImageTwinCheckState*)>` | install step 18, at the VM's first stash | `willDestroyVM` |
 
@@ -290,7 +292,7 @@ Two switches go from on to off and never back:
 
 Both are atomics, because JIT workers read production through `producerContext` and a debugger may attach from another thread. The first fault that turns each switch off is recorded on the VM thread, except a debugger attach, which only sets an atomic flag that `status` reads. After a recording fault a ConsumerProducer goes on importing.
 
-Production memory (kept summaries, the writer's staging buffer, `delta`'s candidates, and the charge for the index entries the writer added, section 4.4) is released by `releaseEndedProductionMemory()`, which each glue entry on the VM thread calls first: the install function before its step 1 (section 7.2), the finalize capture at its step 2 (section 8.5) and `delta` once its preconditions pass (section 3.4). The call does nothing while production is active or once the memory is released, so it costs a flag test; teardown releases whatever remains. Nothing is released inside a fault entry point, so those of section 4.5 free nothing and wait for nothing.
+Production memory (kept summaries, the writer's staging buffer, `delta`'s candidates, and the charge for the index entries the writer added, section 4.4) is released by `releaseEndedProductionMemory()`, which each glue entry on the VM thread calls first: the install function before its step 1 (section 7.2), the finalize capture at its step 2 (section 8.5) and `delta` once its preconditions pass (section 3.4). The call does nothing while production is active or once the memory is released, so it costs a flag test; teardown releases whatever remains ([history](SPEC-integrator-history.md#production-memory-is-released-by-task-7s-code)). Nothing is released inside a fault entry point, so those of section 4.5 free nothing and wait for nothing.
 
 ### 4.3 Strict
 
@@ -304,6 +306,7 @@ Both modes check the artifact's integrity: `start` checks the header in full (co
 namespace JSC::JITCache {
 
 class ProducerBudget final : public ThreadSafeRefCounted<ProducerBudget> {
+    WTF_MAKE_TZONE_ALLOCATED(ProducerBudget);
 public:
     static Ref<ProducerBudget> create(size_t limitBytes);
     static Ref<ProducerBudget> createUnlimited();   // twin compiles; never refuses
@@ -314,11 +317,24 @@ public:
     size_t limitBytes() const;
     size_t chargedBytes() const;
     size_t peakBytes() const;
+
+private:
+    ProducerBudget(size_t limitBytes, bool isUnlimited);
+
+    const size_t m_limitBytes;                      // SIZE_MAX for an unlimited budget
+    const bool m_isUnlimited;                       // createUnlimited: no charge is refused, an overflowing one included
+    std::atomic<size_t> m_chargedBytes { 0 };
+    std::atomic<size_t> m_peakBytes { 0 };
+    std::atomic<bool> m_hasRefused { false };
 };
 
 class ProducerContext {
 public:
+    explicit ProducerContext(Ref<ProducerBudget>&&);
     Ref<ProducerBudget> budget() const;
+
+private:
+    const Ref<ProducerBudget> m_budget;
 };
 
 ProducerContext* producerContext(VM&);   // any thread, no lock
@@ -332,7 +348,7 @@ ProducerContext* producerContext(VM&);   // any thread, no lock
 
 Whether a baseline compilation records is decided when its plan is built (SPEC-image.md R-INT-12 and section 4.1). `BaselineJITPlan` gains `bool m_jitCacheRecordsImage { false }` and `bool jitCacheRecordsImage() const`. Its constructor, which both callers (`jitCompileAndSetHeuristics` and `JIT::compileSync`) run on the VM thread, sets the member when `producerContext(vm)` returns a context and `vm.jitCacheState()->registry().keyOf(*codeBlock->unlinkedCodeBlock())` returns a key; the lookup takes only the registry's leaf lock (SPEC-ucb.md section 6.3). ([history](SPEC-integrator-history.md#which-compilations-record-is-decided-at-plan-construction))
 
-The integrator charges, before allocating: the ICs section buffer of each capture (SPEC-ics.md R-INT-2), the writer's staging buffer (container sub-SPEC section 8.1), the kept summaries (section 8.3), `delta`'s candidate table (section 8.6), and each index entry the writer adds for a key the index lacks (section 8.4, step 8).
+The integrator charges, before allocating: the ICs section buffer of each capture (SPEC-ics.md R-INT-2), the writer's staging buffer (container sub-SPEC section 8.1), the kept summaries (section 8.3), `delta`'s candidate table (section 8.6), each index entry the writer adds for a key the index lacks (section 8.4, step 8), and in twins builds the copy `rewriteSection` commits (container sub-SPEC section 8.3).
 
 A hash table the integrator owns for production is charged eight bucket sizes with its first entry and six more per entry; each entry's six are released when the entry goes, and the eight when the table goes. That bounds WTF's storage for a table that only grows, rehashes included: `HashTableSizePolicy` (`wtf/HashTable.h`) starts a table at `HashTraits::minimumTableSize`, eight buckets, and doubles it once it is three-quarters full up to 1024 buckets and half full above, so a table of k entries holds at most max(8, 4k) buckets, and at most 6k while a rehash holds the old table beside the new one.
 
@@ -342,7 +358,7 @@ These allocations are not production memory and go uncharged:
 
 - the parent-key registry and the digests the UCB lane keeps for identity (each TDZ environment's, SPEC-ucb.md section 3.4), which serve every role (THREAD Session);
 - the index's other entries, which listings and refreshes create, and the writer too when it applies the queued events of changes made before its VM took the lock: they hold the bodies on disk and what other processes commit, which every importing VM needs whoever produces;
-- the scoring read's mapping of a saved body (container sub-SPEC section 7.3), which borrows page-cache pages of a file JITCache does not own for production and is unmapped before the scoring returns;
+- the scoring read's mapping of a saved body (container sub-SPEC section 7.3), and in twins builds the mapping of the body `rewriteSection` opens through the store's `open` (container sub-SPEC section 8.3): each borrows page-cache pages of a file JITCache does not own for production, and each is unmapped, with the store's object that holds it, before the scoring returns or the rewrite's commit starts;
 - the bench report's buffer (harness sub-SPEC section 9.1), which exists only in bench runs, whatever the role, and holds measurements.
 
 The registry's and the index's allocations crash when memory runs out, as any native allocation does. Everything else the integrator allocates for production is charged (II4).
@@ -391,7 +407,7 @@ The `VMState` members of section 4.1 raise the other classes, on the VM thread:
 
 `JITCacheGlue.h` declares two hooks that `VM::~VM` calls (section 14, M4), and `JITCacheAPI.cpp` defines them with the state's constructor and destructor (section 4.1):
 
-- `willDestroyVM(VM&)`, right after the `cancelAllPlansForVM` block and before `m_perBytecodeProfiler` is cleared. GC is deferred for good and no compilation of the VM runs (N5, N6). It destroys the image twin-check state (harness sub-SPEC section 3), closes the twin report, flushes the bench report, ends production without recording a fault (no implicit `delta`, THREAD Failures), frees the production memory and releases its charges, the index entries' included.
+- `willDestroyVM(VM&)`, right after the `cancelAllPlansForVM` block and before `m_perBytecodeProfiler` is cleared. GC is deferred for good and no compilation of the VM runs (N5, N6). It destroys the image twin-check state (harness sub-SPEC section 3), closes the twin report, flushes the bench report, ends production without recording a fault (no implicit `delta`, THREAD Failures) and calls `releaseEndedProductionMemory()` (section 4.2), which frees the production memory and releases its charges, the index entries' included.
 - `didFinalizeHeap(VM&)`, right after `heap.lastChanceToFinalize()`. Every UCB and UFE destructor has run by then (SPEC-ucb.md section 6.3). In twins builds it first erases the VM's retired body-event totals, for every VM whether or not `start` configured it, since the UCBs `lastChanceToFinalize` destroyed retired their counts into them (harness sub-SPEC section 10.3). It stores null into the VM's pointer and destroys the state, which destroys the registry, destroys the `ProducerLock`, which releases the lock, and drops the reference to the opened artifact, which is destroyed with the last VM of the process that holds it.
 
 ## 5. Options and process facts
@@ -406,7 +422,7 @@ The `VMState` members of section 4.1 raise the other classes, on the VM thread:
 
 `JITCachePlatform.cpp` computes, once per process:
 
-- Build IDs. The main executable is the first object `dl_iterate_phdr` lists. The engine object is the one whose loaded segments contain the address of `JITCache::codeSymbolAnchor` (SPEC-image.md section 3.5 and R-INT-8). For each, the build ID is the descriptor of the first `NT_GNU_BUILD_ID` note whose owner is `GNU` in one of its `PT_NOTE` segments, 1 to 64 bytes long. The header records the main executable's ID, and the engine object's when it is a different object. A missing ID in either object makes `start` reject at `start.build-id`. In twins builds `JITCachePlatform.h` also declares `void removeMainBuildIDForTesting(bool)`; while it is set, the process facts report the main executable without an ID, which is how T-START reaches `start.build-id`.
+- Build IDs. The main executable is the first object `dl_iterate_phdr` lists. The engine object is the one whose loaded segments contain the address of `JITCache::codeSymbolAnchor` (SPEC-image.md section 3.5 and R-INT-8); a build without `ENABLE(JIT)` has no anchor and takes the address of `processFacts`, which lies in the same object. For each, the build ID is the descriptor of the first `NT_GNU_BUILD_ID` note whose owner is `GNU` in one of its `PT_NOTE` segments, 1 to 64 bytes long. The header records the main executable's ID, and the engine object's when it is a different object. A missing ID in either object makes `start` reject at `start.build-id`. In twins builds `JITCachePlatform.h` also declares `void removeMainBuildIDForTesting(bool)`; while it is set, the process facts report the main executable without an ID, which is how T-START reaches `start.build-id`.
 - The values of the must-match options (options.md), read with `Options::evalMode()`, `Options::useExplicitResourceManagement()` and `Options::useImportDefer()`.
 - The CPU feature vector, a `uint64_t` whose bit i is the answer of predicate i (N11), with every other bit zero:
   - x86_64: 0 `supportsSSE3`, 1 `supportsSupplementalSSE3`, 2 `supportsSSE4_1`, 3 `supportsFloatingPointRounding`, 4 `supportsCountPopulation`, 5 `supportsAVX`, 6 `supportsAVX2`, 7 LZCNT, 8 BMI1, 9 `supportsFloat16`. Bits 7 and 8 are read as `MacroAssemblerX86_64::s_lzcntCheckState == CPUIDCheckState::Set` and `s_bmi1CheckState == CPUIDCheckState::Set` after `MacroAssemblerX86_64::collectCPUFeatures()`, which is what the protected `supportsLZCNT` and `supportsBMI1` return.
@@ -438,6 +454,16 @@ void removeMainBuildIDForTesting(bool);
 #endif
 
 }
+```
+
+`JITCachePlatform.cpp` reads each object's ID through a function with external linkage that no header declares; T-BUILDID declares it itself in `tests/IntegratorTests.cpp`, under `OS(LINUX)`, and reads crafted objects through it:
+
+```cpp
+#if OS(LINUX)
+namespace JSC::JITCache::PlatformInternal {
+BuildID buildIDOfObject(const struct dl_phdr_info&);   // one loaded object's build ID by the rule above, or none
+}
+#endif
 ```
 
 The header's byte layout, its creation and its comparison are in the container sub-SPEC, section 3.
@@ -483,6 +509,8 @@ public:
     const BodyKey& key() const;
     uint64_t version() const;                               // the file's commit identifier, which the writer never makes 0
     uint8_t highestTier() const;
+    uint32_t llintThreshold() const;                        // the envelope's L (container sub-SPEC section 4.1); 0 for a test body
+    uint32_t counterProgress() const;                       // the envelope's P; 0 for a test body
     std::span<const uint8_t> section(SectionKind) const;    // empty when absent; starts 8-byte aligned
     size_t fileSize() const;                                // the mapped file's size, or a test body's buffer size
     ~ValidatedBody();                                       // unmaps or frees; any thread that holds no JITCache lock
@@ -499,9 +527,22 @@ public:
 private:
     friend class OpenedArtifact;   // open builds a body from a mapping validateBody accepted (container sub-SPEC section 7.2)
     using SectionSpans = std::array<std::span<const uint8_t>, numberOfSectionKinds>;   // by SectionKind; empty when absent
-    // Takes the mapping, which the destructor unmaps. open fills the spans from validateBody's BodyLayout, so this
-    // header needs nothing from JITCacheContainer.h.
-    ValidatedBody(const BodyKey&, uint64_t version, uint8_t highestTier, std::span<const uint8_t> mapping, const SectionSpans&);
+    // Takes the mapping, which the destructor unmaps. open fills the version, the tier, L, P and the spans from
+    // validateBody's BodyLayout, so this header needs nothing from JITCacheContainer.h.
+    ValidatedBody(const BodyKey&, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress,
+        std::span<const uint8_t> mapping, const SectionSpans&);
+
+    const BodyKey m_key;
+    const uint64_t m_version;
+    const uint8_t m_highestTier;
+    const uint32_t m_llintThreshold;            // the envelope's L; 0 for a test body
+    const uint32_t m_counterProgress;           // the envelope's P; 0 for a test body
+    const std::span<const uint8_t> m_mapping;   // the private mapping the destructor unmaps; empty for a test body
+    const SectionSpans m_sections;              // spans into m_mapping, or into m_testBuffer for a test body
+#if ENABLE(JITCACHE_TWINS)
+    MallocSpan<uint8_t> m_testBuffer;           // createForTesting's copy of its sections; fastMalloc aligns it to 8 bytes or more
+    Function<void()> m_onDestroy;
+#endif
 };
 
 class BodyLookup {
@@ -512,6 +553,12 @@ public:
     static BodyLookup found(Ref<ValidatedBody>&&);
     Kind kind() const;
     RefPtr<ValidatedBody> body() const;   // non-null exactly for Found
+
+private:
+    BodyLookup(Kind, RefPtr<ValidatedBody>&&);
+
+    Kind m_kind;
+    RefPtr<ValidatedBody> m_body;
 };
 ```
 
@@ -520,7 +567,7 @@ A `ValidatedBody` the store opens holds a private read-only mapping of one body 
 `VMState::bodyVersion(key)` and `VMState::openBody(key)` run on the VM thread, allocate no JSC cell, take only the artifact's index lock (container sub-SPEC section 6.4), and answer UCB R-INT-3. Each returns 0, or `Unusable`, when activity is off; then the override's answer while a test has set one (below); and otherwise the opened artifact's:
 
 - `bodyVersion` returns `OpenedArtifact::token(key)` (container sub-SPEC section 7.1): the key's index token, nonzero while the index lists a body for the key and changed whenever the index learns of another body there (container sub-SPEC section 6.1), or 0 while it lists none. It reads no file and raises nothing. It may lag other processes' commits and maintenance runs by the cadence of container sub-SPEC section 6.3 and II16, which UCB R-INT-3 leaves to the integrator. ([history](SPEC-integrator-history.md#the-index-holds-tokens))
-- `openBody` asks `OpenedArtifact::open(key, mode)`, with `ValidationMode::Full` exactly when strict is on, which maps the file and checks it (container sub-SPEC sections 4.5 and 7.2); a key the index lacks is `Absent` without a filesystem call. `Found` gives `Found` with the body. `Absent`, a file that vanished included, gives `Missing`, and the open's `ENOENT` takes the key out of the index unless its token changed meanwhile (container sub-SPEC section 6.4); `Unavailable` (`EMFILE`, `ENFILE` or `ENOMEM`) gives `Missing` and counts in `Progress::transientOpenFailures`, since the artifact is not at fault; `Invalid` raises invalid material at its check, `container.io` with `strerror` of the error in the detail or a container check's name, and gives `Unusable`.
+- `openBody` asks `OpenedArtifact::open(key, mode)`, with `ValidationMode::Full` exactly when strict is on, which maps the file and checks it (container sub-SPEC sections 4.5 and 7.2); a key the index lacks is `Absent` without a filesystem call. `Found` gives `Found` with the body. `Absent`, a file that vanished included, gives `Missing`, and the open's `ENOENT` takes the key out of the index unless its token changed meanwhile (container sub-SPEC section 6.4); `Unavailable` (`EMFILE`, `ENFILE` or `ENOMEM`) gives `Missing` and counts in `Progress::transientOpenFailures`, since the artifact is not at fault; `Invalid` raises invalid material at its check, `container.io` with `strerror` of the error in the detail or a container check's name, and gives `Unusable`. A call whose open mapped a file (`BodyOpen::mappedBytes` nonzero: `Found`, or `Invalid` at a check `validateBody` ran) counts in `Progress::bodyOpens` and writes the `open` event with those bytes (harness sub-SPEC section 9.2).
 
 A token is no commit identifier. `ValidatedBody::version()` returns the opened file's commit identifier, the body version THREAD Maintenance names, which the index does not hold, so the two can disagree while the index lags; the UCB lane compares tokens only with tokens and commit identifiers only with commit identifiers (UCB R-INT-3). A miss it stamps with a token is tried again once the index learns of another body at the key (SPEC-ucb.md section 7.3.2).
 
@@ -562,7 +609,12 @@ struct CommitStamp {
     uint8_t highestTier;         // 1
 };
 struct CommitResult { uint64_t version; uint64_t fileSize; };
-struct CommitFailure { ASCIILiteral check; String detail; };   // budget.limit, or a writer.* step of container sub-SPEC section 8.2
+struct CommitTiming {   // thread CPU nanoseconds of a commit's parts (container sub-SPEC section 8.2), for the capture event
+    std::array<uint64_t, numberOfSectionKinds> streamNanoseconds { };   // by SectionKind; 0 for a kind the commit lacks
+    uint64_t rereadNanoseconds { 0 };    // step 6
+    uint64_t publishNanoseconds { 0 };   // steps 7 and 8
+};
+struct CommitFailure { ASCIILiteral check; String detail; };   // budget.limit, a writer.* step of container sub-SPEC section 8.2, or writer.rewrite (its section 8.3)
 
 class ArtifactWriter {
     WTF_MAKE_NONCOPYABLE(ArtifactWriter);
@@ -570,18 +622,36 @@ class ArtifactWriter {
 public:
     ArtifactWriter(OpenedArtifact&, ProducerLock&, ProducerBudget&, size_t stagingBytes);
     ~ArtifactWriter();             // frees the staging buffer and releases its charge
-    std::expected<CommitResult, CommitFailure> commit(const CommitStamp&, const CommitSections&);
+    std::expected<CommitResult, CommitFailure> commit(const CommitStamp&, const CommitSections&, CommitTiming* = nullptr);
     void releaseStagingBuffer();   // the end of production
 
 #if ENABLE(JITCACHE_TWINS)
     // Container sub-SPEC section 8.3. n counts this writer's commits from 1.
     struct FaultForTesting { ASCIILiteral check; uint64_t n; };   // writer.create, writer.write, writer.reread or writer.publish
     void setFaultForTesting(std::optional<FaultForTesting>);
+    static std::optional<ASCIILiteral> faultCheckNamed(StringView);   // the check of that name, for --jitcache-test-writer-fault; nullopt for any other
     // Harness sub-SPEC section 12: raise(SIGKILL) at the point of the n-th commit.
     enum class KillPoint : uint8_t { BeforeCreate, AfterCreate, MidStream, AfterStream, AfterEnvelope, AfterReread, AfterRename };
     struct KillForTesting { KillPoint point; uint64_t n; };
     void setKillForTesting(std::optional<KillForTesting>);
+    static ASCIILiteral name(KillPoint);                               // the point's name in harness sub-SPEC section 12, such as "after-rename"
+    static std::optional<KillPoint> killPointNamed(StringView);        // the point of that name, for --jitcache-test-kill; nullopt for any other
     std::expected<CommitResult, CommitFailure> rewriteSection(const BodyKey&, SectionKind, uint64_t offset, std::span<const uint8_t> bytes);
+#endif
+
+private:
+    // Step 8 of container sub-SPEC section 8.2, under the opened artifact's m_indexLock.
+    void didPublish(const BodyKey&, uint64_t inode);
+
+    OpenedArtifact& m_artifact;
+    ProducerLock& m_producerLock;
+    ProducerBudget& m_budget;
+    const size_t m_stagingBytes;      // at least one byte
+    MallocSpan<uint8_t> m_staging;    // allocated and charged at the first commit; empty before it and once released
+#if ENABLE(JITCACHE_TWINS)
+    uint64_t m_commits { 0 };         // the commits started, which the fault injection's and the kill point's n count
+    std::optional<FaultForTesting> m_faultForTesting;
+    std::optional<KillForTesting> m_killForTesting;
 #endif
 };
 ```
@@ -738,7 +808,7 @@ A saved body's score comes from its three summary sections: the highest tier, ri
 
 ### 8.3 Kept summaries
 
-A producing `VMState` keeps a `HashMap<BodyKey, SavedScore, BodyKeyHash, BodyKeyHashTraits>` of kept summaries (container sub-SPEC section 6.1), charged per entry (section 4.4) before the entry is added. A refused charge raises `budget.limit` and keeps nothing: at a key's first scoring the capture then writes nothing, and a commit charges the entry its step 10 adds at step 8, before writing, so a refusal there also writes nothing (section 8.4). A key with an entry is scored against it. At a key's first scoring the glue reads the saved body once, through the store's scoring read `OpenedArtifact::readSavedSummaries(key, mode)`, in `ValidationMode::Full` exactly when strict is on (container sub-SPEC section 7.3), which opens the body file by its name, whatever the index holds, and tells four cases apart: ([history](SPEC-integrator-history.md#the-scoring-read-opens-by-name))
+A producing `VMState` keeps its kept summaries in a `KeptSummaries`, a struct `JITCacheCapture.cpp` defines around a `HashMap<BodyKey, SavedScore, BodyKeyHash, BodyKeyHashTraits>` (container sub-SPEC section 6.1), charged per entry (section 4.4) before the entry is added. The capture glue creates it at the first kept entry with a deleter of its own, a captureless lambda that deletes it, so neither `JITCacheVMState.h` nor the state's destructor names the capture glue's types (section 4.1). Destroying a `KeptSummaries` releases, into the budget it charged, the charges of its entries and its buckets (section 4.4), so `releaseEndedProductionMemory()` frees it through the deleter alone. A refused charge raises `budget.limit` and keeps nothing: at a key's first scoring the capture then writes nothing, and a commit charges the entry its step 10 adds at step 8, before writing, so a refusal there also writes nothing (section 8.4). A key with an entry is scored against it. At a key's first scoring the glue reads the saved body once, through the store's scoring read `OpenedArtifact::readSavedSummaries(key, mode)`, in `ValidationMode::Full` exactly when strict is on (container sub-SPEC section 7.3), which opens the body file by its name, whatever the index holds, and tells four cases apart: ([history](SPEC-integrator-history.md#the-scoring-read-opens-by-name))
 
 | result | meaning | the glue |
 |---|---|---|
@@ -749,7 +819,7 @@ A producing `VMState` keeps a `HashMap<BodyKey, SavedScore, BodyKeyHash, BodyKey
 
 A deferred key is scored again at the next finalize capture of one of its CBs or at the next `delta`. An unreadable body never scores as absent, since any candidate beats an absent body (THREAD Capture).
 
-A commit replaces the entry with the score of the capture it wrote (section 8.4), so a kept summary always describes the file its key names. The producer lock keeps every other process from committing, so an entry never goes stale while the VM produces. The one other way a body changes then is a test's: in twins builds `JITCacheCapture.h` declares `std::expected<CommitResult, CommitFailure> rewriteSectionForTesting(VM&, const BodyKey&, SectionKind, uint64_t offset, std::span<const uint8_t> bytes)`, which requires active production, rewrites the body through the writer's `rewriteSection` (container sub-SPEC section 8.3) and erases the key's entry; the shell's `jitcacheRewriteSection` calls it (harness sub-SPEC section 5.2). Twins builds also declare `std::optional<SavedScore> keptScoreForTesting(VM&, const BodyKey&)`, which returns the key's entry, for T-STAMP. ([history](SPEC-integrator-history.md#the-kept-score-comes-from-the-builders))
+A commit replaces the entry with the score of the capture it wrote (section 8.4), so a kept summary always describes the file its key names. The producer lock keeps every other process from committing, so an entry never goes stale while the VM produces. The one other way a body changes then is a test's: in twins builds `JITCacheCapture.h` declares `std::expected<CommitResult, CommitFailure> rewriteSectionForTesting(VM&, const BodyKey&, SectionKind, uint64_t offset, std::span<const uint8_t> bytes)`, which requires active production and rewrites the body through the writer's `rewriteSection` (container sub-SPEC section 8.3). A rewrite that succeeds erases the key's entry. A failure at `writer.rewrite` leaves the artifact and production as they were and raises nothing; any other failure is raised as a recording fault at its check, as step 9 of section 8.4 raises a commit's. The shell's `jitcacheRewriteSection` calls it (harness sub-SPEC section 5.2). Twins builds also declare `std::optional<SavedScore> keptScoreForTesting(VM&, const BodyKey&)`, which returns the key's entry, for T-STAMP. ([history](SPEC-integrator-history.md#the-kept-score-comes-from-the-builders))
 
 ### 8.4 Building and committing one capture
 
@@ -762,7 +832,7 @@ A commit replaces the entry with the score of the capture it wrote (section 8.4)
 5. `CBStateCapture::capture(cb, budget, strict, ics.hasPolymorphicSite)`. A `CBFault` raises a recording fault, part `cb`, at `description(check)`.
 6. `committed = CaptureScore { 1, ucbRichness.total() + cbState.score().richnessUnits, ics.summary.icSitesWithCases, cbState.score().counterWithheld, cbState.score().counterProgress }`: the score of the bytes just built, taken from what the builders return, which equals what `scoreSections` would compute from the committed file, so no lane's bytes are read back (II23). When `!beats(committed, saved)`, the capture stops here, with no fault and no commit: the lanes' outputs are destroyed and the ICs buffer is freed and released as in step 10, and the `capture` event records the capture as beaten (THREAD Capture). The live score and `committed` differ only when a marker's or a compiler thread's drain between the scoring and the build added bits by folding in a pending sample or dropped them in a racing merge (SPEC-cb.md section 4; profiles.md, "Drain"). ([history](SPEC-integrator-history.md#the-kept-score-comes-from-the-builders))
 7. `CommitStamp { record.key, envelopeLLIntThreshold(ucb), cbState.score().counterProgress, 1 }`, the L and P compact orders by (UCB R-INT-5, CB R-INT-5, THREAD Maintenance). P is zero for a body whose counter does not travel, as for every body the ICs lane reported a polymorphic site for: ICs R-INT-2 passes the bit, and CB I16 zeroes the progress.
-8. Charge, before anything is written, the entries the commit adds. When `artifact.containsKey(record.key)` is false, the writer will add an index entry: `budget.tryCharge` six of the index's bucket sizes (section 4.4), a success adding to the state's index charge. When the kept summaries hold no entry for the key, as after an `Absent` scoring read, step 10 will add one: charge it as section 8.3 does. A refusal of either raises `budget.limit` with nothing written.
+8. Charge, before anything is written, the entries the commit adds. When `artifact.containsKey(record.key)` is false, the writer will add an index entry: `budget.tryCharge` six of the index's bucket sizes (section 4.4), a success adding to the state's index charge. When the kept summaries hold no entry for the key, as after an `Absent` scoring read, step 10 will add one: charge it as section 8.3 does. A refusal of either raises `budget.limit` with nothing written. A commit whose index update finds the object gone (container sub-SPEC section 8.2, step 8) adds no index entry, and the charge made here is released with the other index charges when production ends.
 9. `writer.commit(stamp, commitSectionsFor(ucbSections, image, cbState, buffer))` (section 6.3). A `CommitFailure` raises a recording fault at its check, `budget.limit` or a `writer.*` step, with its detail.
 10. On success: the kept summary becomes `SavedScore { committed, result.version }`, in an entry step 8 charged when it is new, `Progress::capturesCommitted` and `bytesCommitted` grow, and the bench event is recorded. The writer's reread checked every section of the file against the checksum computed from these same bytes as they were streamed, so the kept score describes the file. The lanes' outputs are then destroyed, which releases their charges (UCB R-INT-5), and the ICs buffer is freed and released.
 
@@ -877,6 +947,8 @@ Fences: `VM::setJITCacheState` stores with release order and `jitCacheState` loa
 
 THREAD Session says when each host calls `start` and what the host decides.
 
+JITCache runs only on Linux (THREAD's opening), but its code compiles wherever Bun builds, so both hosts build and call it on every platform. Every call into the operating system that WTF does not wrap, with its headers, sits behind `OS(LINUX)`, while every function keeps a definition on every platform. Off Linux, `start` returns `Rejected` at `start.platform` (section 3.2), so no VM gets a state and no guarded code runs, and maintenance returns `Failed` with `platform` (maintenance sub-SPEC section 2). Code under `ENABLE(JITCACHE_TWINS)` needs no guard of its own, since only `build.ts` makes twins builds and it runs only on Linux.
+
 ### 11.1 The jsc shell
 
 `CommandLine::parseArguments` (`jsc.cpp`) recognizes these flags before its generic `--` option fallback (N14), and `printUsageStatement` lists them:
@@ -917,7 +989,7 @@ A script that calls `quit()` exits inside the call and skips all of these, so th
 - `extern "C" void Bun__JITCache__atExit(JSC::JSGlobalObject*)`, which takes `JSLockHolder`, calls `delta` when the VM's state produces with production active, writes the log lines of that `delta` result, if any, and of the final status when `--jitcache-log` is on, in twins builds writes the body-event dump with `writeBodyEvents` when its path is set, whether or not JITCache is configured (harness sub-SPEC section 10.3), and then calls `flushBenchReport` in every role. Bun destroys its main VM at exit only under `BUN_DESTRUCT_VM_ON_EXIT` (`VirtualMachine::should_destruct_main_thread_on_exit`), so `willDestroyVM` does not run by default, and without this flush a consumer, which never calls `delta`, would lose every event still buffered. `VirtualMachine::on_exit` (`src/jsc/VirtualMachine.rs`) calls it right after `ExitHandler::dispatch_on_exit(self)`, on the main thread and in workers, so the user's exit handlers have run and teardown has not begun. Process exit is thus Bun's idle point, as it is for the Node compile cache (N15); THREAD's "no implicit `delta`" binds JITCache, and this call is the host's.
 - `extern "C" int Bun__JITCache__runMaintenance(int argc, const char* const* argv)` for `bun jitcache` (maintenance sub-SPEC section 5).
 
-`scripts/build/deps/webkit.ts` passes `-Wl,--build-id=sha1` in `CMAKE_EXE_LINKER_FLAGS` for local Linux builds, so the `jsc` executable carries a build ID as Bun's own executable does (N15, THREAD Storage). No other compile or link flag changes, in any profile: THREAD Verification keeps Bun's build flags, under which the engine sits at its link-time address (N15), and the twins profile only switches the test builds on (harness sub-SPEC, section 1).
+`scripts/build/deps/webkit.ts` passes `-Wl,--build-id=sha1` in `CMAKE_EXE_LINKER_FLAGS` for local Linux builds, so the `jsc` executable carries a build ID as Bun's own executable does (N15, THREAD Storage). No other compile or link flag changes, in any profile, except that twins builds of Bun leave `BUN_DYNAMIC_JS_LOAD_PATH` out (harness sub-SPEC section 1): THREAD Verification keeps Bun's build flags, under which the engine sits at its link-time address (N15), and the twins profile otherwise only switches the test builds on.
 
 ## 12. Requirements on the other parts
 
@@ -931,6 +1003,7 @@ The integrator owns these interfaces; each requirement names what the parts prov
 - R-ALL-6. `description(ImageCheck)` and `description(CBCheck)` return `ASCIILiteral`s with static storage, which a `FaultReport` keeps (SPEC-cb.md section 6.1 declares its function so).
 - R-ALL-7. A part's test that needs a body no producer committed builds it with `ValidatedBody::createForTesting` and, when the code under test looks bodies up, serves it with `VMState::setBodyLookupForTesting` (section 6.2), in twins builds: SPEC-ucb.md U4 builds the pending import whose body asserts in its destructor, and U8 stubs the lookup.
 - R-ALL-8. Unified sources compile several `jitcache/*.cpp` files of different parts as one translation unit, where their anonymous namespaces merge and their file-static names meet (M1). Every helper and constant at namespace scope that a part's file keeps to itself, `static` or in an anonymous namespace, therefore has a name that begins with its part's prefix (`ucb`, `image`, `cb`, `ics`, `integrator`) or sits in a per-file named namespace such as `JSC::JITCache::ContainerInternal`. Section 14.1 holds the integrator's files to it.
+- R-ALL-9. Every part's code meets the platform rule of section 11, so that Bun's builds for other platforms compile it.
 
 ## 13. Invariants
 
@@ -966,8 +1039,9 @@ No other part edits the functions of section 14.2. Implementers may not edit the
 
 | file | contents |
 |---|---|
-| `JITCacheAPI.h`, `.cpp` | `Config`, `start`, `status`, `delta` and their result types (section 3); the `.cpp` defines `start`, `status`, the `toJSON` functions, the state's constructor and destructor and the teardown hooks (sections 4.1 and 4.6), and `JITCacheCapture.cpp` defines `delta` |
+| `JITCacheAPI.h`, `.cpp` | `Config`, `start`, `status`, `delta` and their result types (section 3); the `.cpp` defines `start`, `status`, the `toJSON` functions, the state's constructor and destructor, `VMState::releaseEndedProductionMemory` and the teardown hooks (sections 4.1, 4.2 and 4.6), and `JITCacheCapture.cpp` defines `delta` |
 | `JITCacheMaintenance.h`, `.cpp` | the maintenance backend and command line (maintenance sub-SPEC) |
+| `JITCacheMaintenanceTesting.h` | maintenance's test hooks (maintenance sub-SPEC section 7), twins builds only |
 | `JITCacheVMState.h`, `.cpp` | `VMState` (section 4.1): the switches, the fault records and the members that raise faults, `producerContext`, the body lookups of section 6.2 and, in twins builds, their override |
 | `JITCacheFaults.h`, `.cpp` | `ExecutableAllocationSite`, `didFailExecutableAllocation`, `didAttachDebugger` (section 4.5) |
 | `ProducerBudget.h`, `.cpp` | `ProducerBudget`, `ProducerContext`, `producerContext` (section 4.4) |
@@ -989,7 +1063,7 @@ No other part edits the functions of section 14.2. Implementers may not edit the
 | `tests/JITCacheTest.h`, `tests/testjitcache.cpp` | the C++ test framework and runner (harness sub-SPEC section 8) |
 | `tests/IntegratorTests.cpp`, `tests/ContainerTests.cpp`, `tests/StoreTests.cpp`, `tests/WriterTests.cpp`, `tests/MaintenanceTests.cpp` | the integrator's C++ tests |
 
-Of these, `JITCacheAPI.h`, `JITCacheMaintenance.h` and `JITCacheTwinsHost.h` are exported to Bun (section 3.5). `ArtifactStore.h`, `ArtifactWriter.h`, `JITCacheCapture.h`, `JITCacheContainer.h`, `JITCacheOptions.h` and `JITCachePlatform.h` are the integrator's private headers; the lanes include `JITCacheVMState.h`, `JITCacheFaults.h`, `ProducerBudget.h`, `ValidatedBody.h`, `JITCacheBench.h`, `TwinReport.h` and `tests/JITCacheTest.h`.
+Of these, `JITCacheAPI.h`, `JITCacheMaintenance.h` and `JITCacheTwinsHost.h` are exported to Bun (section 3.5). `ArtifactStore.h`, `ArtifactWriter.h`, `JITCacheCapture.h`, `JITCacheContainer.h`, `JITCacheOptions.h`, `JITCachePlatform.h` and, in twins builds, `JITCacheMaintenanceTesting.h` are the integrator's private headers; the lanes include `JITCacheVMState.h`, `JITCacheFaults.h`, `ProducerBudget.h`, `ValidatedBody.h`, `JITCacheBench.h`, `TwinReport.h` and `tests/JITCacheTest.h`.
 
 Outside `jitcache/`: `Tools/Scripts/run-jitcache-tests` (the runner), `Tools/Scripts/jitcache-pin-compare.ts` (the pin comparison the runner calls, harness sub-SPEC section 11) and `JSTests/jitcache/integrator/` (the integrator's JS tests). The integrator's files follow R-ALL-8 with the prefix `integrator` or a per-file named namespace such as `JSC::JITCache::ContainerInternal`, as `Heap.cpp`'s `HeapInternal` does, so nothing at namespace scope has a generic name.
 
@@ -1027,6 +1101,7 @@ Outside `jitcache/`: `Tools/Scripts/run-jitcache-tests` (the runner), `Tools/Scr
 | `src/runtime/cli/mod.rs`, `src/runtime/cli/jitcache_command.rs` (new) | the root command matcher, `Tag`, the dispatch, the help text | `bun jitcache` (maintenance sub-SPEC section 5) | the CLI's thread; no VM |
 | `src/jsc/modules/BunJSCModule.h` | `DEFINE_NATIVE_MODULE(BunJSC)` | twins builds: five more exports (harness sub-SPEC section 5.3) | the VM thread |
 | `scripts/build/deps/webkit.ts`, `scripts/build/profiles.ts`, `scripts/build/config.ts` | the local WebKit recipe, the profiles and the resolved config | the build-id link flag and the twins profile; Bun's compile and link flags stay as they are (section 11.2, harness sub-SPEC section 1) | build time |
+| `scripts/build/flags.ts` | the entry that defines `BUN_DYNAMIC_JS_LOAD_PATH` | its condition also requires `!c.jitcacheTwins` (harness sub-SPEC section 1) | build time |
 | `test/js/bun/jitcache/` (new) | Bun tests | section 15.3 | |
 
 In this repository's root, `build.ts` gains the `twins` and `bun-twins` targets (harness sub-SPEC section 1) and the `pin` target, which builds the pin from a worktree of this repository (harness sub-SPEC section 11.1). The build table of `CLAUDE.md` gains these three targets and the `JITCACHE_PIN_SOURCE` override; the human edits that file.
@@ -1068,7 +1143,7 @@ The integrator restores no piece of its own, so its tests check its contracts an
 
 - T-OPT. In the default option group: every fixed row's required value equals the option's effective value, and the must-match reads return the effective values.
 - T-CPU. The CPU feature vector equals the predicates of N11, bit by bit, and its unused bits are zero.
-- T-BUILDID. The test executable has a build ID; a crafted `PT_NOTE` segment yields the descriptor; an object without the note yields none.
+- T-BUILDID. The test executable has a build ID; `PlatformInternal::buildIDOfObject` (section 5.2) of a crafted object whose `PT_NOTE` segment holds the note yields the descriptor, and of an object without the note yields none.
 - T-BUDGET. Eight threads charge and release concurrently until the limit refuses: the refusal is sticky, the total never exceeds the limit, an overflowing charge is refused, the peak is the maximum total, and the balance returns to zero. `createUnlimited` never refuses.
 - T-BODY. `ValidatedBody::createForTesting` with sections of sizes 0, 1, 7, 8 and 4097 returns each at an 8-byte-aligned address with its bytes, an empty span for an absent kind, the key and version given and the highest tier of the kinds; its `onDestroy` runs exactly once, from the destructor, on the thread that drops the last reference.
 - T-FAULTS. Each fault entry point moves the switches of section 4.2 as specified; `producerContext` is null after each; `didFailExecutableAllocation` called with a CB's `m_lock` held through a `GCSafeConcurrentJSLocker` returns without blocking; a `JSC::Debugger` attached to a global object turns activity off and `status` names `debugger.attach`; a VM without state ignores every entry point.
@@ -1097,6 +1172,7 @@ The integrator restores no piece of its own, so its tests check its contracts an
 | `default-mode.js` | the corpus of `finalize-capture.js` in two sequences, one with strict on, as every test runs, and one with `--jitcache-strict=0` in every run, the default the bench measures: each consumer installs the same bodies (`jitcacheProgress().installs`), and every output equals the JITCache-off run |
 | `must-match.js` | `Producer --evalMode=true; Consumer` with `jitcache-expect-no-install: 1`: the consumer's start is `Rejected` at `start.incompatible`, and its output equals the JITCache-off run |
 | `fixed-option.js` | `Producer --useLOLJIT=true` is `Rejected` at `start.fixed-option`, naming `useLOLJIT`, and its output equals the JITCache-off run |
+| `cpu-vector.js` | under QEMU only (harness sub-SPEC section 7.9): `Producer --jitcache-delta-at-exit; Consumer` with `jitcache-qemu-cpu: 0 max`, `jitcache-qemu-cpu: 1 neoverse-n1` and `jitcache-expect-no-install: 1`, whose vectors differ in JSCVT, SHA3 and FRINTTS (harness sub-SPEC N27): the consumer's start is `Rejected` at `start.incompatible`, and its output equals the JITCache-off run |
 
 ### 15.3 Bun (`~/bun/test/js/bun/jitcache/jitcache.test.ts`)
 
@@ -1128,14 +1204,14 @@ These serve the bench loop THREAD Execution ends with. The bench report (harness
 |---|---|---|
 | `defaultProducerLimitBytes` | the limit a producing role uses when the host passes none | `std::optional<size_t>`, empty until the bench sets it; until then a producing role must pass a limit (section 3.2, step 3) |
 | `installationBoundFraction` | THREAD's fixed fraction of the native cost an import may take | set by the bench; read only by the bench, which raises an alert and fails nothing |
-| `installationBoundSmallestBody` | THREAD's smallest body the bound covers | set by the bench; read only by the bench, which raises an alert and fails nothing |
+| `installationBoundSmallestBody` | THREAD's smallest body the bound covers, as the body's baseline code size in bytes, which its `compile` and `install` events report (harness sub-SPEC section 9.2) | set by the bench; read only by the bench, which raises an alert and fails nothing |
 | `writerStagingBytes` | the writer's staging buffer | 64 KiB until IB5 tunes it |
 | `fallbackListingIntervalMilliseconds` | the least time between the starts of two listings that a refresh without inotify, or with a listing pending, makes (container sub-SPEC section 6.3) | 1000 until IB2 tunes it |
 | `benchConsumerProducerGenerations` | the number of ConsumerProducer runs IB10 chains between its Producer and its Consumer | set by the bench; read only by the bench |
 
 ## 17. Tasks
 
-Ordered; each fits one implementation agent. A task that needs a lane piece builds against the headers in which that lane declares it and lands when the piece does. Every manifest entry of section 14.4 belongs to exactly one task, named below and in the entry. A task calls only functions that it or an earlier task defines, and its tests need only those, so the tree builds and every listed test runs after every task. The state's lifecycle lands with `start` in task 7, the first task by which every part's type exists: destroying a state runs every part's destructor, `ValidatedBody`'s included, which the registry's pending imports hold, so the constructor, the destructor and both teardown hooks are defined in `JITCacheAPI.cpp` beside `start` (section 4.1), and the members `JITCacheVMState.cpp` defines in earlier tasks neither create nor destroy a state. ([history](SPEC-integrator-history.md#the-state-is-created-and-destroyed-in-task-7s-file))
+Ordered; each fits one implementation agent. A task that needs a lane piece builds against the headers in which that lane declares it and lands when the piece does. Every manifest entry of section 14.4 belongs to exactly one task, named below and in the entry. A task calls only functions that it or an earlier task defines, and its tests need only those, so the tree builds and every listed test runs after every task. A header task adds declarations and never changes the signature of anything already defined, so the tree compiles after it. The state's lifecycle lands with `start` in task 7, the first task by which every part's type exists: destroying a state runs every part's destructor, `ValidatedBody`'s included, which the registry's pending imports hold, so the constructor, the destructor and both teardown hooks are defined in `JITCacheAPI.cpp` beside `start` (section 4.1), and the members `JITCacheVMState.cpp` defines in earlier tasks neither create nor destroy a state. ([history](SPEC-integrator-history.md#the-state-is-created-and-destroyed-in-task-7s-file))
 
 Other parts' code calls the integrator too. Task 2 defines every integrator function another part's code calls (the fault entry points, the budget, `producerContext`, the `VMState` members of the lanes' interface, `ValidatedBody` with its test factory, the twin report and the bench report) except `VMState::bodyVersion`, `VMState::openBody` and the lookup override, which task 5 adds. A lane task that calls those three lands after task 5, and any other after task 2.
 
@@ -1148,14 +1224,14 @@ The waits run one way. A lane task that an integrator task waits on depends on n
 4. `JITCacheContainer.cpp`: the header and body formats and their validation (container sub-SPEC sections 3 and 4) and tests C1 to C3. The task adds to `JITCacheContainer.h` the declarations of container sub-SPEC section 3 (the header's bytes, reading, comparison and digest) and section 6.1's table of section type ids, tiers and required sections, which tasks 5 to 7 call.
 5. `ArtifactStore.cpp`: `ProducerLock`, the registry, the opened artifact with its index, listings and refresh, its token read, its open and its scoring read, and the twins-build fault and registry hooks (container sub-SPEC sections 2 and 5 to 7); in `JITCacheVMState.cpp`, `VMState::bodyVersion`, `VMState::openBody` and the lookup override, with their `lookup` and `open` bench events; tests C4 to C6, which read the store's own results and need no configured VM. After tasks 2, 3 and 4.
 6. `ArtifactWriter.cpp` with its twins-build hooks (container sub-SPEC section 8) and test C7, which builds its sections from crafted spans and streamed sources. After task 5.
-7. `JITCacheAPI.cpp`: `start`, `status`, `flushBenchReport` and the `toJSON` functions, with the `start` bench event; every accessor tasks 8, 9, 12, 14 and 16 use on the state's parts, the last edit of `JITCacheVMState.h` (section 4.1); and the state's constructor and destructor and the teardown hooks of section 4.6, with manifest entry M4, which calls them from `VM::~VM`; the computation of `m_jitCacheRecordsImage` in `BaselineJITPlan`'s constructor (section 4.4), which reads the registry; T-START, which includes container test C8, T-FAULTS and T-LOOKUP, which need a configured VM. After tasks 2 to 6 and the UCB lane's task 6, which defines the registry the state holds and `status` reads.
+7. `JITCacheAPI.cpp`: `start`, with its `start.platform` step (section 3.2, step 0), `status`, `flushBenchReport` and the `toJSON` functions, with the `start` bench event; every accessor tasks 8, 9, 12, 14 and 16 use on the state's parts, the last edit of `JITCacheVMState.h` (section 4.1); and the state's constructor and destructor, `VMState::releaseEndedProductionMemory` (section 4.2) and the teardown hooks of section 4.6, with manifest entry M4, which calls them from `VM::~VM`, and the opening comment of `JITCacheVMState.cpp` corrected to say that `JITCacheAPI.cpp` defines `releaseEndedProductionMemory`; the computation of `m_jitCacheRecordsImage` in `BaselineJITPlan`'s constructor (section 4.4), which reads the registry; T-START, which includes container test C8, T-FAULTS and T-LOOKUP, which need a configured VM. After tasks 2 to 6 and the UCB lane's task 6, which defines the registry the state holds and `status` reads.
 8. The install glue (section 7): `JITCacheInstall.cpp` with the `install` bench event, the edits to `prepareForExecutionImpl`, `JIT::compileSync` and `shouldJIT`, and in twins builds the image twin-check state with its deleter, its stash and `didFinishPrepareForExecution` (harness sub-SPEC section 3). After task 7, each lane's install functions and, for twins builds, each lane's twin checks: the CB lane's task 6, the ICs lane's task 6 and the Image lane's task 11.
-9. The capture glue (section 8): `JITCacheCapture.cpp` with `scoreSections`, the kept summaries, the index-entry charge, `commitSectionsFor`, `delta`, `VMState::releaseEndedProductionMemory` (section 4.2) beside the memory it releases, `rewriteSectionForTesting`, `keptScoreForTesting`, the assertion that captures never nest, and the `capture` and `delta` bench events, and the finalize hook in `BaselineJITPlan::finalize`, called with a null timing, without the `compile` event of section 8.5's step 1, which task 16 adds with the timing, and with the twins builds' baseline compile count (harness sub-SPEC section 10.1); T-SCORE, T-DELTA, T-CHARGE and T-STAMP. After tasks 6, 7 and 10 and each lane's capture functions, so the three tasks that edit `BaselineJITPlan::finalize` land in the order 10, 9, 16.
+9. The capture glue (section 8): `JITCacheCapture.cpp` with `scoreSections`, the kept summaries, the index-entry charge, `commitSectionsFor`, `delta`, `KeptSummaries` and its deleter (section 8.3), `rewriteSectionForTesting`, `keptScoreForTesting`, the assertion that captures never nest, the `delta` bench event and the `capture` event without the writer's fields, which task 16 adds, and the finalize hook in `BaselineJITPlan::finalize`, called with a null timing, without the `compile` event of section 8.5's step 1, which task 16 adds with the timing, and with the twins builds' baseline compile count (harness sub-SPEC section 10.1); `ValidatedBody`'s L and P (section 6.2), with `llintThreshold()`, `counterProgress()`, their members and the constructor's two parameters in `ValidatedBody.h` and `ValidatedBody.cpp`, where `createForTesting` passes 0 for both, the store's `open` in `ArtifactStore.cpp` passing the `BodyLayout`'s values, and `rewriteSection` in `ArtifactWriter.cpp` stamping from the body it opened, without `readOpenedEnvelope`, `readFileStart` and the failures of that second read of the envelope (container sub-SPEC section 8.3), with `ArtifactWriter.h`'s comments on it and on `WriterChecks::rewrite` to match; T-SCORE, T-DELTA, T-CHARGE and T-STAMP. After tasks 6, 7 and 10 and each lane's capture functions, so the three tasks that edit `BaselineJITPlan::finalize` land in the order 10, 9, 16.
 10. The plan-site faults (section 9): `BaselineJITPlan`, `DFG::Plan`, `SpeculativeJIT`. The engine side of the twins builds' event counts (harness sub-SPEC section 10): `JITCacheBodyEvents.cpp`, manifest entry M10, the counts in the LLInt, `DFG::Plan::finalize`, `handleExitCounts` and `CodeBlock::jettison`, and the erasure of a VM's retired totals in `didFinalizeHeap`. After tasks 2 and 7 and the UCB lane's task that adds its destructor hook (SPEC-ucb.md section 6.3).
-11. Maintenance (maintenance sub-SPEC) with its command line and tests M1 to M6. After tasks 5 and 6.
+11. Maintenance (maintenance sub-SPEC) with its command line, the twins-only test hooks of `JITCacheMaintenanceTesting.h` and tests M1 to M6. After tasks 5 and 6.
 12. The jsc host: the flags and calls of section 11.1; in twins builds, `JITCacheTwinsHarness.cpp` (the address-space placement, the shell helpers and the twins host functions of harness sub-SPEC sections 4 and 5, the reachable-heap description of its section 6, `jitcacheBodyEvents` and the body-event dump of its section 10), the shell flags that set the store's and the writer's hooks, the writer's kill points among them, the image test hook and H1's test entry, and manifest entry M7, `$vm`'s two functions. After tasks 8, 9 and 11, the UCB lane's tasks 6 and 10, and the ICs lane's task 6, which defines the `functionSnapshotBaselineICs` that `jitcacheICsSnapshot` registers.
-13. The runner, `Tools/Scripts/run-jitcache-tests` (harness sub-SPEC section 7), with the JITCache-off oracle (its section 7.6) and its self-tests H1 to H6 and H8. After task 12.
-14. The Bun host (section 11.2): `JITCacheHost`, `Zig__GlobalObject__create`'s call, `on_exit`'s call, `JSCInitialize`'s placement and image test hook, `configureVM`'s `recordVMLayout` call, the twins builds' body-event dump at exit, `bun:jsc`'s twins exports and `bun jitcache`. After tasks 7, 9, 11 and 12, which defines the twins host functions and the placement functions it calls. Then the `bun-debug` and `bun-twins` targets of `build.ts` must build: they compile Bun's side against the copied headers alone, so each JSC declaration it uses must come from a header of section 3.5.
+13. The runner, `Tools/Scripts/run-jitcache-tests` (harness sub-SPEC section 7), with the JITCache-off oracle (its section 7.6), its runs under QEMU (its section 7.9) and its self-tests H1 to H6 and H8, H2 also on a twins build made with `bun build.ts twins --arch=aarch64`. After task 12.
+14. The Bun host (section 11.2): `JITCacheHost`, `Zig__GlobalObject__create`'s call, `on_exit`'s call, `JSCInitialize`'s placement and image test hook, `configureVM`'s `recordVMLayout` call, the twins builds' body-event dump at exit, `bun:jsc`'s twins exports and `bun jitcache`; the condition `!c.jitcacheTwins` on the entry of `scripts/build/flags.ts` that defines `BUN_DYNAMIC_JS_LOAD_PATH` (harness sub-SPEC section 1); and the `OS(LINUX)` guards of section 11's platform rule around the Linux-only code of the Bun host and of `ValidatedBody.cpp`, `JITCacheBench.cpp`, `ArtifactStore.cpp` and `ArtifactWriter.cpp`, which tasks 2, 5 and 6 wrote, so that Bun's builds for other platforms compile JITCache's entry points. After tasks 7, 9, 11 and 12, which defines the twins host functions and the placement functions it calls. Then the `bun-debug` and `bun-twins` targets of `build.ts` must build: they compile Bun's side against the copied headers alone, so each JSC declaration it uses must come from a header of section 3.5.
 15. The JS tests of section 15.2 and the Bun tests of section 15.3. After tasks 13 and 14.
-16. The native-cost hooks of harness sub-SPEC section 9.3 (`BaselineJITPlan`'s three members, the constructor `BaselineJITPlan::BaselineJITPlan(CodeBlock*)` that sets `m_jitCacheMeasure`, and the clock reads, the `RelinkTimer` in `ScriptExecutable::installCode`, the support-generation count of `JITThunks` and `generateSlowPathHandler` with its reads in the `install` and `compile` events), the `BaselineCompileTiming` that `finalize` passes to the finalize hook and the `compile` event it feeds, and the measurements of section 16. After tasks 9 and 13.
-17. The pin comparison (harness sub-SPEC section 11): `Tools/Scripts/jitcache-pin-compare.ts`, the `pin` target of `build.ts`, the runner's `--pin` option and `jitcache-pin` directive, the forced blinding of its section 11.5 with its edit to `MacroAssembler::shouldConsiderBlinding`, and self-test H7. It lands after the JITCache-off oracle (task 13) and the twins (task 8, with the lanes' twin checks it waits on).
+16. The native-cost hooks of harness sub-SPEC section 9.3 (`BaselineJITPlan`'s three members, the constructor `BaselineJITPlan::BaselineJITPlan(CodeBlock*)` that sets `m_jitCacheMeasure`, and the clock reads, the `RelinkTimer` in `ScriptExecutable::installCode`, the support-generation count of `JITThunks` and `generateSlowPathHandler` with its reads in the `install` and `compile` events), the `BaselineCompileTiming` that `finalize` passes to the finalize hook and the `compile` event it feeds, the writer's `CommitTiming` (section 6.3) in `ArtifactWriter.h` and `ArtifactWriter.cpp` with the `capture` event's writer fields and its check in container sub-SPEC test C7 (`tests/WriterTests.cpp`), and the measurements of section 16. After tasks 9 and 13.
+17. The pin comparison (harness sub-SPEC section 11): `Tools/Scripts/jitcache-pin-compare.ts`, the `pin` target of `build.ts`, which also accepts `--arch=aarch64`, so that H7 runs on each architecture, the runner's `--pin` option and `jitcache-pin` directive, the forced blinding of its section 11.5 with its edit to `MacroAssembler::shouldConsiderBlinding`, and self-test H7. It lands after the JITCache-off oracle (task 13) and the twins (task 8, with the lanes' twin checks it waits on).

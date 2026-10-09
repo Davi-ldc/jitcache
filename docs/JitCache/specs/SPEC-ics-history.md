@@ -112,3 +112,7 @@ T10 first checked only that F's folded sites carry `canBeMegamorphic` in the Con
 ## Task 6 lands before the integrator's glue
 
 The integrator's install glue calls the twin check in twins builds, so a task that bundled `ICTwins` with a runner sequence would wait for that glue while the glue waited for it. Task 6 therefore holds no runner sequence: T2 runs in task 7, and task 6 lands with T11, which reads the snapshot, and T13, which tests the twin API on a live VM.
+
+## No task owns the bench obligations
+
+The list first ended with task 9, "B1 to B6 inside the integrator's bench loop", which owned no file. The integrator's events and IB10 already give B1 to B4 and B6, and a lane task with nothing to write left its implementer to invent bench code the glue owns, as the Image lane's task 13 did. Giving each lane accessors and one integrator task the reader was weighed and left for the bench loop to ask for, since HARNESS treats benches as alerts and no failing case needs it. The obligations stay in section 12, and THREAD Execution's bench loop takes them after the implementation.

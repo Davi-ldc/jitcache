@@ -1,16 +1,17 @@
 # SPEC-integrator.harness: test builds and bench reports
 
-Part of [SPEC-integrator.md](SPEC-integrator.md), which indexes it and lists what this file covers (its section 1): the test builds THREAD Verification relies on and the tools every part's tests run on. [SPEC-integrator-history.md](SPEC-integrator-history.md) records the path to its non-obvious decisions. Everything here exists only in `ENABLE(JITCACHE_TWINS)` builds except the bench report, the runner's plain mode and the pin comparison of section 11, whose forced blinding is again twins-only. The native facts only this file uses, N16 to N25, sit in the sections they serve; each was verified by reading the code at this pin, except N17's measurement, which the history records.
+Part of [SPEC-integrator.md](SPEC-integrator.md), which indexes it and lists what this file covers (its section 1): the test builds THREAD Verification relies on and the tools every part's tests run on. [SPEC-integrator-history.md](SPEC-integrator-history.md) records the path to its non-obvious decisions. Everything here exists only in `ENABLE(JITCACHE_TWINS)` builds except the bench report, the runner's plain mode and the pin comparison of section 11, whose forced blinding is again twins-only. The facts only this file uses, N16 to N27, sit in the sections they serve; each was verified by reading the code at this pin, except the measurements in N17, N26 and N27, which the history records.
 
 ## 1. The twins build
 
 THREAD Execution's test builds are those with `ENABLE(JITCACHE_TWINS)`, which the CMake option `ENABLE_JITCACHE_TWINS` switches on, off by default (SPEC-integrator.md section 14, M8).
 
-A twins build compiles and links with Bun's build flags, as every build does (SPEC-image.md R-INT-11). The engine therefore sits at its link-time address in every process of the build, in the jsc shell and in Bun alike (SPEC-integrator.md N15), which section 4 relies on. The UCB lane's Bun-hosted tests run with twins on too (SPEC-ucb.md section 13), so the profile serves both hosts. ([history](SPEC-integrator-history.md#twins-builds-keep-buns-build-flags-and-the-runner-moves-the-heap)) In `~/bun`:
+A twins build compiles and links with Bun's build flags, as every build does (SPEC-image.md R-INT-11), except that Bun's own sources do not get `BUN_DYNAMIC_JS_LOAD_PATH` (below). The engine therefore sits at its link-time address in every process of the build, in the jsc shell and in Bun alike (SPEC-integrator.md N15), which section 4 relies on. The UCB lane's Bun-hosted tests run with twins on too (SPEC-ucb.md section 13), so the profile serves both hosts. ([history](SPEC-integrator-history.md#twins-builds-keep-buns-build-flags-and-the-runner-moves-the-heap)) In `~/bun`:
 
 - `scripts/build/config.ts`: `PartialConfig` and the resolved `Config` gain `jitcacheTwins`, false unless the profile sets it.
 - `scripts/build/profiles.ts`: `"debug-local-twins": { buildType: "Debug", webkit: "local", jitcacheTwins: true }`.
 - `scripts/build/deps/webkit.ts`, when `cfg.jitcacheTwins` holds: `ENABLE_JITCACHE_TWINS: "ON"` and the nested build's targets `jsc` and `testjitcache`. Its compile flags and `CMAKE_POSITION_INDEPENDENT_CODE` stay as every local build has them, and the build-id link flag comes from the rule of SPEC-integrator.md section 11.2.
+- `scripts/build/flags.ts`: the entry that defines `BUN_DYNAMIC_JS_LOAD_PATH` also requires `!c.jitcacheTwins`. A twins Bun then embeds the internal modules' text and the builtins section's digest table as a release build does, so its runs take each internal module's digest from its provider (SPEC-ucb.md section 7.2.6) and check it through SPEC-ucb.md T7.
 
 In this repository's `build.ts`, two targets join the table: `twins` (profile `debug-local-twins`, ninja target `WebKit`, which builds `jsc` and `testjitcache`) and `bun-twins` (profile `debug-local-twins`, Bun's default targets, which build the Bun executable against that WebKit). Both share the profile's build directory, as `debug` and `bun-debug` do. A third target, `pin`, builds the pinned engine for the comparison of section 11 (section 11.1).
 
@@ -36,6 +37,15 @@ public:
     unsigned differences() const;
     unsigned skips() const;
     unsigned coincidences() const;
+    ~TwinReport();   // closes the file
+
+private:
+    explicit TwinReport(int fd);
+
+    const int m_fd;   // opened for appending; each line goes out in one write, with no buffer of its own
+    unsigned m_differences { 0 };
+    unsigned m_skips { 0 };
+    unsigned m_coincidences { 0 };
 };
 
 using TwinReportSink = TwinReport;   // the name SPEC-ucb.md uses
@@ -79,7 +89,7 @@ Install step 18 (SPEC-integrator.md section 7.2) creates the state at the VM's f
 - N16. `g_jscConfig.startExecutableMemory`, `endExecutableMemory`, `startOfStructureHeap` and `sizeOfStructureHeap` (`runtime/JSCConfig.h`) hold the two process-wide reservations once `JSC::initialize` has made them.
 - N17. The twins profile is a Debug build, and Bun's config turns ASan on for every Debug build on Linux (`asanDefault` in `scripts/build/config.ts`). With ASan the local WebKit recipe passes `ENABLE_SANITIZERS=address` and sets `USE_MIMALLOC` only without it (`scripts/build/deps/webkit.ts`), and Bun's mimalloc leaves `malloc` to ASan (`override` in `scripts/build/deps/mimalloc.ts`). bmalloc then sends every allocation to the system heap, ASan's allocator, because `isSanitizerEnabled` finds `__asan_init` (`Environment::computeShouldBmallocAllocateThroughSystemHeap`): libpas's bmalloc heaps defer to it (`pas_system_heap_is_enabled`), TZone heaps fall back to it (`determineTZoneMallocFallback`), and `FastMallocAlignedMemoryAllocator::tryAllocateAlignedMemory` takes MarkedBlocks from it through `tryFastCompactAlignedMalloc`. The VM, its cells and atoms and every UCB's vectors therefore live in the sanitizer allocator's space. With the toolchain's clang 21.1.8 on x86_64 that space lies at a different base in every process, position-independent or not, a measurement the history records; ARM64 was not measured. ([history](SPEC-integrator-history.md#twins-builds-keep-buns-build-flags-and-the-runner-moves-the-heap)) `computeShouldBmallocAllocateThroughSystemHeap` tests the environment variable `WebKitMallocForceEnabled` before the sanitizer, and with it set bmalloc uses libpas, which maps its pages with `mmap` at addresses the kernel chooses (`pas_page_malloc.c`).
 
-SPEC-image.md R-INT-11 has the runner move the relocation domains the image check compares, and THREAD Verification's relocation requirement skips the engine image, loaded at its link-time address under Bun's build flags (section 1), and every target of a body the importing process captured itself (SPEC-image.md section 11.4), which leaves three domains. Placement moves two: the importing process's executable pool to a range disjoint from the capturing process's, and its structure reservation to another base, both settled before its `JSC::initialize` makes them. Address randomization, which stays on, moves the heap with the base of the space its allocator maps, ASan's in the twins build, whose space moves on x86_64 (N17). Before its first twins sequence the runner checks that space on the machine it runs on and takes the heap off it where it stays put (section 7.3), and H2 checks the three domains on each architecture. ([history](SPEC-integrator-history.md#imports-a-process-captured-itself)) Both hosts call these functions, so `JITCacheTwinsHost.h` (SPEC-integrator.md section 3.5) declares them in `namespace JSC::JITCache`, under `ENABLE(JITCACHE_TWINS)`:
+SPEC-image.md R-INT-11 has the runner move the relocation domains the image check compares, and THREAD Verification's relocation requirement skips the engine image, loaded at its link-time address under Bun's build flags (section 1), and every target of a body the importing process captured itself (SPEC-image.md section 11.4), which leaves three domains. Placement moves two: the importing process's executable pool to a range disjoint from the capturing process's, and its structure reservation to another base, both settled before its `JSC::initialize` makes them. Address randomization, which stays on, moves the heap with the base of the space its allocator maps, ASan's in the twins build, whose space moves on x86_64 (N17). Under QEMU user mode no guest mapping moves by itself, and the runner moves the heap with each process's guest stack size instead (N26, section 7.9). Before its first twins sequence the runner checks that space on the machine it runs on and takes the heap off it where it stays put (section 7.3), and H2 checks the three domains on each architecture. ([history](SPEC-integrator-history.md#imports-a-process-captured-itself)) Both hosts call these functions, so `JITCacheTwinsHost.h` (SPEC-integrator.md section 3.5) declares them in `namespace JSC::JITCache`, under `ENABLE(JITCACHE_TWINS)`:
 
 ```cpp
 enum class HeapProbes : bool { Live, Fixed };
@@ -130,7 +140,7 @@ In twins builds `CommandLine::parseArguments` also recognizes:
 | `jitcacheBodyKey(fn, kind)` | 2 | the lowercase hex of the key recorded for the UCB of `fn`'s CB of `kind` (`"call"` or `"construct"`), using the CB's baseline alternative for an optimized CB, or `null` |
 | `jitcacheBodyEvents(fn, kind)` | 2 | the event counts of the UCB of `fn`'s CB of `kind`, or `null` (section 10.2) |
 | `jitcacheReadSection(keyHex, name)` | 2 | a new `ArrayBuffer` holding the section `name` (the lane's name of SPEC-integrator.md section 6.1) of the key's current body, or `null` when the body or the section is absent or the VM's cache activity is off |
-| `jitcacheRewriteSection(keyHex, name, offset, bytes)` | 4 | the capture glue's `rewriteSectionForTesting` (SPEC-integrator.md section 8.3), which rewrites through the writer's `rewriteSection` (container sub-SPEC section 8.3) and forgets the key's kept summary, where `bytes` is an array of byte values; throws unless the shell's VM produces |
+| `jitcacheRewriteSection(keyHex, name, offset, bytes)` | 4 | the capture glue's `rewriteSectionForTesting` (SPEC-integrator.md section 8.3), which rewrites through the writer's `rewriteSection` (container sub-SPEC section 8.3) and, when it succeeds, forgets the key's kept summary, where `bytes` is an array of byte values; throws unless the shell's VM produces, and throws a failed rewrite's check and detail |
 | `jitcacheDescribeHeap(...roots)` | 1 | the description of section 6 of the graph reachable from the given values, as a string; throws a `TypeError` without a value. The default roots serve only the shell's end-of-run description |
 
 SPEC-ics.md R-INT-7 asks for the first three; the others serve the integrator's tests and the lanes' tests that rewrite a body (`jitcacheRewriteSection`, SPEC-ucb.md section 13.3) or compare heap state in the middle of a run. Plain builds register none of them (SPEC-integrator.md R-ALL-4).
@@ -210,10 +220,10 @@ The jsc shell writes the description of the default roots to the path `--jitcach
 run-jitcache-tests --build=<WebKit build directory> [--bun=<Bun executable>] [--mode=twins|plain]
                    [--pin=<the pin's WebKit build directory>] [--pin-options="<options>"]
                    [--extra-options="<options>"] [--filter=<regex>] [--jobs=<n>] [--timeout=<seconds>]
-                   [--js-only | --cpp-only] [<test paths>...]
+                   [--js-only | --cpp-only] [--qemu-cpu=<model>] [<test paths>...]
 ```
 
-`--build` names `<build-root>/linux-<arch>-<profile>/deps/WebKit`, where it finds `bin/jsc` and `bin/testjitcache`. The mode defaults to `twins` when that build's `cmakeconfig.h` defines `ENABLE_JITCACHE_TWINS` as 1 and to `plain` otherwise; `--mode=plain` forces plain. `--bun` names the Bun executable for Bun-hosted scripts, which are skipped and listed without it. `--pin` names the build of section 11.1, against which the runner compares the off path of every jsc-hosted script (section 11); without it the comparison is skipped and listed. `--pin-options` adds options to this build's comparison runs alone, which only the self-tests of H7 use. `--extra-options` adds options to every run of every sequence, after the directory's defaults and before the run's own options, which is how a variant such as `--collectContinuously=true` or `--useUnlinkedCodeBlockJettisoning=true` reruns a whole directory (SPEC-ucb.md section 13.3). `--jobs` runs that many sequences at once, 5 by default; `--timeout` bounds each process, 600 seconds by default. The default test paths are `JSTests/jitcache/ucb`, `image`, `cb`, `ics` and `integrator`. The runner exits with 1 when any sequence or C++ group fails.
+`--build` names `<build-root>/linux-<arch>-<profile>/deps/WebKit`, where it finds `bin/jsc` and `bin/testjitcache`. The mode defaults to `twins` when that build's `cmakeconfig.h` defines `ENABLE_JITCACHE_TWINS` as 1 and to `plain` otherwise; `--mode=plain` forces plain. `--bun` names the Bun executable for Bun-hosted scripts, which are skipped and listed without it. `--pin` names the build of section 11.1, against which the runner compares the off path of every jsc-hosted script (section 11); without it the comparison is skipped and listed. `--pin-options` adds options to this build's comparison runs alone, which only the self-tests of H7 use. `--extra-options` adds options to every run of every sequence, after the directory's defaults and before the run's own options, which is how a variant such as `--collectContinuously=true` or `--useUnlinkedCodeBlockJettisoning=true` reruns a whole directory (SPEC-ucb.md section 13.3). `--jobs` runs that many sequences at once, 5 by default; `--timeout` bounds each process, 600 seconds by default. When `--build`'s `<arch>` is `aarch64` on an x86_64 host, every process the runner starts from that build, from `--pin`'s or from `--bun` runs under QEMU user mode (section 7.9), and `--qemu-cpu` names its CPU model, `max` by default; elsewhere `--qemu-cpu` is malformed. The default test paths are `JSTests/jitcache/ucb`, `image`, `cb`, `ics` and `integrator`. The runner exits with 1 when any sequence or C++ group fails.
 
 ### 7.2 Directives
 
@@ -226,10 +236,11 @@ A script declares, in comment lines within its first 50 lines, the directives be
 - `// jitcache-expect-fault: <run index> <step>`: the run at that index may report the fault whose full step name (`FaultReport::stepName()`) is `<step>`, such as `budget.limit` or `exec-alloc.dfg-plan`. A run that may report one of several faults carries one directive per step, and any fault that none of them names fails the run (section 7.5).
 - `// jitcache-require-fault: <run index> <step>`: allows the step as `jitcache-expect-fault` does, and requires at least one named run to report it. The runner checks the requirement after the script's last sequence, so a bare index spans every sequence, and a sequence prefix narrows it to one.
 - `// jitcache-expect-no-install: <run index>`: the `Consumer` or `ConsumerProducer` run at that index need not install a body (section 7.5), as when the producer before it faulted before committing one or the run's own `start` is rejected on purpose.
-- `// jitcache-expect-twin: <run index> <kind> <domain>`: the twin report of the run at that index must hold a report of that kind, spelled as in section 2. A `coincidence` names its domain; a `difference` or a `skip` names its part in the domain's place. A declared report is required and fails nothing (section 7.5). A test hook that forces reports, such as SPEC-image.md T3's, declares them this way.
+- `// jitcache-expect-twin: <run index> <kind> <domain>`: the twin report of the run at that index must hold a report of that kind, spelled as in section 2. A `coincidence` names its domain; a `difference` or a `skip` names its part in the domain's place. The directive declares every report of its kind and part, or of its domain, in that run: at least one is required, and none fails the run (section 7.5). A test hook that forces reports, such as SPEC-image.md T3's, declares them this way.
 - `// jitcache-check: <run index> <checker>`: after that run, the runner executes `bun <checker> <stdout file> <stderr file> <scratch>`, where `<checker>` is a path relative to the script, and fails the run when the checker exits nonzero. A test that must read what the engine prints to stderr, such as the `verboseOSR` lines of SPEC-cb.md section 11.3, checks it this way.
 - `// jitcache-heap: off <reason>`: the oracle compares this script's output but not its heap (section 7.6). A script uses it only when it cannot keep a value that depends on its role out of the heap it leaves, and says why.
 - `// jitcache-pin: off <reason>`: the pin comparison (section 11) skips this script. A script uses it only when its `Off` run cannot run on the pin, because it calls a function only this build has, or when the two native fixes change its optimizing compiles (section 11.4), and says which.
+- `// jitcache-qemu-cpu: <run index> <model>`: under QEMU the run at that index uses that CPU model in place of `--qemu-cpu`'s (section 7.9). A script that declares it runs only under QEMU; elsewhere the runner skips and lists it.
 
 ### 7.3 Sequences and runs
 
@@ -266,7 +277,7 @@ After each run: the exit code is 0, or the one `jitcache-expect-exit` names, and
 
 In both modes, for a run with JITCache, the runner reads every final status the run wrote to standard error, a `{"jitcache":"status", ...}` line of `toJSON` (SPEC-integrator.md sections 3.1 and 11.1); the jsc shell writes one for its main VM, and Bun one for each VM at exit (section 7.7). A run that `jitcache-expect-exit` expects to end by a signal writes none, and these checks skip it. Any other run fails when it wrote none; when a status reports a fault, as its `activityFault` or its `productionFault`, whose `step` no `jitcache-expect-fault` or `jitcache-require-fault` directive of the run names; and when it is a `Consumer` or `ConsumerProducer` run that `jitcache-expect-no-install` does not name and the `installs` of its statuses' `progress` add up to zero. A strict check that fails at an import or an install turns cache activity off and leaves the run on the native path, whose output still matches the oracle and whose later bodies meet no twin check, so these checks fail a run that the oracle and the twin report would pass. After a script's last sequence, the runner fails the script when some `jitcache-require-fault` step was reported by none of the runs it names. ([history](SPEC-integrator-history.md#the-runner-fails-undeclared-faults-and-runs-that-install-nothing))
 
-In twins mode, for a run with JITCache: its twin report exists, and holds every report a `jitcache-expect-twin` directive of the run declares, or the run fails. A declared report neither fails nor marks anything. Every other report follows these rules: any `difference` fails the run; a `skip` follows section 7.4; a `coincidence` in the `heap` domain marks the sequence; and any other `coincidence` fails the run. Placement moved the `executable-pool` and `structure-reservation` domains between processes, the check skips every target of an engine at its link-time address, so it reports the `engine-image` domain only for an engine loaded elsewhere, and an import of a body the run's own process captured reports no pair (SPEC-image.md section 11.4). ([history](SPEC-integrator-history.md#imports-a-process-captured-itself))
+In twins mode, for a run with JITCache: its twin report exists, and holds at least one report of each `jitcache-expect-twin` directive of the run, or the run fails. A declared report neither fails nor marks anything. Every other report follows these rules: any `difference` fails the run; a `skip` follows section 7.4; a `coincidence` in the `heap` domain marks the sequence; and any other `coincidence` fails the run. Placement moved the `executable-pool` and `structure-reservation` domains between processes, the check skips every target of an engine at its link-time address, so it reports the `engine-image` domain only for an engine loaded elsewhere, and an import of a body the run's own process captured reports no pair (SPEC-image.md section 11.4). ([history](SPEC-integrator-history.md#imports-a-process-captured-itself))
 
 A sequence whose only failures are marked heap coincidences is run once more, with fresh directories and processes, and any coincidence in that repetition fails it (SPEC-image.md R-INT-11).
 
@@ -287,6 +298,22 @@ A Bun-hosted run executes `<bun> <JITCache flags> <script> <role> <scratch> <art
 
 The runner calls `testjitcache --list`, which prints one `name<TAB>options` line per test, then runs `testjitcache --group=<options>` once per distinct options string, up to `--jobs` at once; a group fails on a nonzero exit.
 
+### 7.9 Under QEMU
+
+HARNESS.md runs ARM64 on this machine's x86_64 host under QEMU user mode. ([history](SPEC-integrator-history.md#under-qemu-the-runner-moves-the-heap-with-the-guest-stack))
+
+- N26. QEMU user mode (`qemu-aarch64` 8.2.2 here) places every guest mapping itself, upward from a fixed base with the guest stack first, and never randomizes them, so two runs of one script repeat every guest address, with `WebKitMallocForceEnabled=1` or without. A guest stack n bytes larger (`-s`) moves every later mapping n bytes up, except where an allocator's alignment absorbs the step: ASan's primary allocator aligns its space to 128 KiB, and a 1 MiB step left the cells of Bun's ASan build in place where a 16 MiB step moved them. `-B` and the environment's size move nothing the guest sees. QEMU honours `MAP_FIXED_NOREPLACE` and lists the guest's mappings in its emulated `/proc/self/maps`, so section 4's placement works unchanged. A guest cannot start another aarch64 process, since QEMU follows no `exec` and this host registers no binfmt handler for aarch64.
+- N27. `qemu-aarch64 -cpu` decides the HWCAP bits `MacroAssemblerARM64::collectCPUFeatures` reads: `cortex-a53` sets none of LSE, JSCVT, FP16, FRINTTS, SHA3 and DotProd, `neoverse-n1` sets LSE, FP16 and DotProd, `neoverse-v1` adds JSCVT and SHA3, and `max`, the model without `-cpu`, sets all six. The mimalloc bundled in bmalloc turns `MI_OPT_ARCH` on for arm64 and compiles with `-march=armv8.1-a` (`Source/bmalloc/mimalloc/mimalloc/CMakeLists.txt`), so the release build, which uses it, executes an LSE instruction in `mi_process_init` and dies of `SIGILL` under `cortex-a53`; the ASan builds of jsc and Bun use no mimalloc and run under every model.
+
+The runner starts every process of an aarch64 build, the calibration's of section 7.3 and the oracle's included, as `qemu-aarch64 -L <root> -cpu <model> -s <n>M <executable> <arguments>`:
+
+- `<root>` is `JITCACHE_AARCH64_ASAN_ROOT`, by default `~/jitcachearm/arm64-glibc-root`, which `~/jitcachearm/arm64-glibc-root.sh` provisions, when the build's `CMakeCache.txt` sets `ENABLE_SANITIZERS` to `address`, because its ASan runtime needs glibc 2.34 or newer; otherwise `JITCACHE_AARCH64_SYSROOT`, by default `~/collo-local/tools/linux-sysroot-glibc-arm64`, the sysroot `build.ts` links against.
+- `<model>` is the run's `jitcache-qemu-cpu` model, or `--qemu-cpu`'s.
+- `<n>` is 8 + 64·k, with k drawn at random from 1 to 64 for each process, different from every k already drawn in its sequence or its calibration, and drawn again when section 7.5 repeats the sequence. QEMU would place the heap at the same addresses in every process (N26), and the stack, which it maps before ASan reserves its space, is the one input that moves them; 64 MiB exceeds every alignment measured, and the calibration and H2 check that the step moves the build's heap. The size is written in `M`, because `qemu-aarch64` 8.2.2 reads `-s 1G` as a 128 KiB stack. JSC uses at most `maxPerThreadStackUsage` (5 MiB) of a stack, so no result depends on the size.
+- For an ASan build, `ASAN_OPTIONS` gets `detect_leaks=0` appended after any value it holds, because LeakSanitizer cannot start its tracer under QEMU. The rest of the environment, `WebKitMallocForceEnabled` and Bun's variables included, reaches the guest unchanged.
+
+A Bun-hosted script that starts another engine process cannot run under QEMU (N26).
+
 ## 8. The C++ test framework
 
 ### 8.1 `tests/JITCacheTest.h`
@@ -298,10 +325,17 @@ namespace JSC::JITCache::Tests {
 enum class NeedsVM : bool { No, Yes };
 
 class TestContext {
+    WTF_MAKE_NONCOPYABLE(TestContext);
 public:
+    explicit TestContext(VM*);     // testjitcache's main: the test's fresh VM, or null
     VM* vm() const;                // NeedsVM::Yes: a fresh VM whose API lock the test holds; null otherwise
     void fail(const char* file, int line, String message);
     bool failed() const;
+    const Vector<String>& messages() const;   // what fail recorded, which main prints after FAIL <name>
+
+private:
+    VM* const m_vm;
+    Vector<String> m_messages;
 };
 
 using TestFunction = void (*)(TestContext&);
@@ -391,8 +425,8 @@ When `Config::benchReportPath` is set, the `VMState` keeps a `BenchReport` (`JIT
 | `open` | each `openBody` that maps a file | key, bytes, CPU time |
 | `request` | each request point that imports, seeds or attaches a UCB, recorded by the UCB lane (SPEC-ucb.md B2) | key; what the request point did (`import`, `seed` or `attach`); the time of each part B2 lists, read from `CLOCK_MONOTONIC` (section 9.1); the total of the parts that count toward THREAD's installation bound and, apart, the total of those THREAD measures separately |
 | `install` | each `Installed` outcome | key; the total, the install function's thread CPU time from its start to the close of step 18, one pair of reads (section 9.1); the time of each step of SPEC-integrator.md section 7.2, each lane's call apart (image parse, image validation, baked facts, gate, `prepareImage`, `CBStateImport::prepare`, `prepareBaselineICs`, `seedLinkedState`, `seedCallLinkHistory`, `commit`, setup, `attachPropertyICState`, `finishCounter`, `installCode`), read with `CLOCK_MONOTONIC`; `bodyRelease`, the thread CPU time of dropping the function's reference to the body after the total closes, which unmaps the body when that reference is the last (SPEC-integrator.md IB1); the `CBCounterRestore` (`carried`, which says whether the import carried counter progress, `crossed`, `nativeSlice`, `slice`); the image section's code size and fixup count; whether per-VM support was generated during the install function (`supportGenerated`, section 9.3) |
-| `compile` | each finalize capture hook | key, or `null` without a record; the compilation's CPU time after its profile drain; the finalization's CPU time without relinking incoming calls; the code size; whether per-VM support was generated during the compilation or the finalization (`supportGenerated`) |
-| `capture` | each scored capture, at the finalize hook or in `delta` | trigger, key, and whether it was committed, beaten or deferred; the candidate's score fields, with `UCBRichness::exitSiteUnits` apart, and, when a saved body was scored, its score fields and the first field in `beats` order in which the two differ (SPEC-integrator.md IB10); the `hasPolymorphicSite` the glue passed to the CB lane; the CPU time of each lane's scoring call (`liveRichness`, `summarizeBaselineICs`, `scoreLive`) and of the scoring read with its `scoreSections`; the CPU time of each lane's build (`captureImage`, `buildSections` with `liveRichness`, `captureBaselineICs`, `CBStateCapture::capture`); the writer's stream time and size per section, and its reread and publish times |
+| `compile` | each finalize capture hook | the key the parent-key registry holds for the CB's UCB (`UCBRegistry::keyOf`), or `null` when it holds none, whether or not the code carries an image record; the compilation's CPU time after its profile drain; the finalization's CPU time without relinking incoming calls; the code size; whether per-VM support was generated during the compilation or the finalization (`supportGenerated`) |
+| `capture` | each scored capture, at the finalize hook or in `delta` | trigger, key, and whether it was committed, beaten or deferred; the candidate's score fields, with `UCBRichness::exitSiteUnits` apart, and, when a saved body was scored, its score fields and the first field in `beats` order in which the two differ (SPEC-integrator.md IB10); the `hasPolymorphicSite` the glue passed to the CB lane; the CPU time of each lane's scoring call (`liveRichness`, `summarizeBaselineICs`, `scoreLive`) and of the scoring read with its `scoreSections`; the CPU time of each lane's build (`captureImage`, `buildSections` with `liveRichness`, `captureBaselineICs`, `CBStateCapture::capture`); the writer's fields, from the `CommitTiming` the glue passes to `commit` when the report is open (SPEC-integrator.md section 6.3): each section's stream time beside its size, and the reread and publish times |
 | `delta` | each `delta` | CPU time of each phase, eligible keys, committed bodies and bytes, deferred keys |
 | `budget` | at each flush | limit, charged, peak |
 | `process` | at each flush | the process's peak resident set (`getrusage(RUSAGE_SELF)`, `ru_maxrss`) and the executable pool's committed bytes (`ExecutableAllocator::committedByteCount`), which HARNESS.md reports beside every bench number |
@@ -404,24 +438,66 @@ namespace JSC::JITCache {
 
 struct BenchField {
     ASCIILiteral name;   // a nested field joins its parts with '.', as "restore.carried"
-    std::variant<std::nullptr_t, bool, int64_t, uint64_t, double, String> value;   // a key as a lowercase hex String
+    Variant<std::nullptr_t, bool, int64_t, uint64_t, double, String> value;   // WTF's Variant, which WTF::switchOn visits; a key as a lowercase hex String
 };
 
 class BenchReport final {
+    WTF_MAKE_NONCOPYABLE(BenchReport);
+    WTF_MAKE_TZONE_ALLOCATED(BenchReport);
 public:
+    // start's step 3 (SPEC-integrator.md section 3.2): appends to path; null when the file cannot be opened. The report
+    // takes the process's next VM ordinal, which every line carries.
+    static std::unique_ptr<BenchReport> open(const String& path);
+    ~BenchReport();   // writes the lines still buffered, without the summary lines, and closes the file
+
     void record(ASCIILiteral event, std::initializer_list<BenchField>);   // VM thread; flushes past 1 MiB
-    void flush();                                   // VM thread: the buffered lines, then the lookup and budget lines
+    void flush();                                   // VM thread: the buffered lines, then the lookup, budget and process lines
     void addRelinkNanoseconds(uint64_t);            // VM thread: the relink accumulator of section 9.3
     uint64_t takeRelinkNanoseconds();               // VM thread: returns the accumulator and resets it
+
+    // VM thread. The budget whose limit, charged and peak bytes each budget line writes; the state hands it its producer
+    // budget, and a report without one writes zeros.
+    void setBudget(RefPtr<ProducerBudget>&&);
+
+    // VM thread. VMState::bodyVersion and VMState::openBody count each call and its CPU time here (SPEC-integrator.md
+    // section 6.2), and each flush writes the totals in the lookup line.
+    enum class Lookup : uint8_t { BodyVersionAbsent, BodyVersionPresent, OpenBodyFound, OpenBodyMissing, OpenBodyUnusable };
+    static constexpr unsigned numberOfLookups = 5;
+    void countLookup(Lookup, uint64_t nanoseconds);
+
+private:
+    BenchReport(int fd, unsigned vmOrdinal);
+
+    struct LookupTally { uint64_t count { 0 }; uint64_t nanoseconds { 0 }; };
+
+    const int m_fd;                                 // opened with O_APPEND
+    const int m_pid;
+    const unsigned m_vmOrdinal;
+    StringBuilder m_buffer;                         // the lines not yet written
+    uint64_t m_relinkNanoseconds { 0 };
+    RefPtr<ProducerBudget> m_budget;
+    std::array<LookupTally, numberOfLookups> m_lookups { };
 };
 
 BenchReport* benchReport(VM&);   // null when no report is open
 
+// Any thread: CLOCK_THREAD_CPUTIME_ID in nanoseconds, the CPU time of section 9.1.
+uint64_t benchThreadCPUNanoseconds();
+
+// A key as every event writes it: the lowercase hex of its 40 canonical bytes, its body file's name without ".bin".
+String bodyKeyHex(const BodyKey&);
+
 class RelinkTimer {
+    WTF_MAKE_NONCOPYABLE(RelinkTimer);
+    WTF_FORBID_HEAP_ALLOCATION;
 public:
     explicit RelinkTimer(VM&);   // reads the thread CPU clock when benchReport(vm) is non-null and
                                  // !vm.heap.currentThreadIsDoingGCWork(); otherwise measures nothing
     ~RelinkTimer();              // when it measured, adds the elapsed time to that report's relink accumulator
+
+private:
+    BenchReport* m_report { nullptr };   // null when it measures nothing
+    uint64_t m_startNanoseconds { 0 };
 };
 
 }

@@ -481,6 +481,8 @@ public:
 
 private:
     friend std::expected<PreparedBaselineICs, Invalid> prepareBaselineICs(std::span<const uint8_t>, const BaselineJITCode&, CodeBlock&, StrictChecks);
+    friend void seedCallLinkHistory(const PreparedBaselineICs&, CodeBlock&);     // both read m_codeBlock in their assertions
+    friend void attachPropertyICState(const PreparedBaselineICs&, CodeBlock&);
 
     std::span<const PropertyICRecord> m_propertyICs; // borrowed from the payload
     std::span<const CallLinkRecord> m_callLinks;     // borrowed from the payload, canonical order
@@ -852,7 +854,7 @@ Live C++ tests (T11 to T14) build their objects as follows. A test creates a glo
 
 ## 12. Bench obligations
 
-The lane sets no number for the bench to tune. The bench measures the default, strict off (THREAD Verification), where capture and prepare run no structural check (section 4.5).
+The lane sets no number for the bench to tune. The bench measures the default, strict off (THREAD Verification), where capture and prepare run no structural check (section 4.5). No task of section 14 owns these obligations: the bench loop that THREAD Execution runs after the implementation takes them ([history](SPEC-ics-history.md#no-task-owns-the-bench-obligations)).
 
 - B1. Capture cost: `captureBaselineICs` time per CB against its IC and call-link counts, at the end of `BaselineJITPlan::finalize` and in `delta`, reported as part of THREAD's capture pause.
 - B2. Install cost: `prepareBaselineICs`, `seedCallLinkHistory` and `attachPropertyICState` per body, reported inside the import cost THREAD's installation bound measures.
@@ -895,14 +897,13 @@ Manifest entries for `docs/JitCache/specs/INTEGRATE-ics.md`:
 
 ## 14. Tasks
 
-Ordered; each fits one implementation agent. A task that needs an integrator piece builds against the requirement's signature and lands when the integrator does.
+Ordered; each fits one implementation agent. A task that needs an integrator piece builds against the requirement's signature and lands when the integrator does. A header task adds declarations and never changes the signature of anything already defined, so the tree compiles after it.
 
 1. E2, E3 and E4: the native additions, no behavior change. Build `debug-local` and run the `JSTests/stress` tests whose names contain `megamorphic`, `instanceof` or `inline-cache`. T3 checks the E3 entries of the access types it drives onto their `*GaveUp` operation against live ICs (section 11.2).
 2. E1 and T1. Independent of the other tasks. Build and run T1 and the existing `JSTests/stress` tests whose names contain `super` or `class`.
 3. `ICSection` and `ICSites`: types, size, canonical positions, `parseSection` (A1 to A6 under strict), `readBaselineICsSummary`, `isPolymorphicPropertyIC`, the derivation and recapture functions (section 6.1), the walkers, and T7's format, derivation, round-trip and `isPolymorphicPropertyIC` parts.
-4. `ICCapture`: section 5, after tasks 1 and 3. T12 items 1 and 2, and T14.
-5. `ICRestore`: sections 6.2 to 6.4, applying 6.1, after tasks 1 and 3. T7's A7, A8 and S1 parts, T12 items 1, 3 and 4.
+4. `ICCapture`: section 5, after tasks 1 and 3. T12 item 1's capture checks (the null table, the zero `callLinkSiteCounts`, the section size and the empty capture), item 2, and T14.
+5. `ICRestore`: sections 6.2 to 6.4, applying 6.1, after tasks 1 and 3. T7's A7, A8 and S1 parts; T12 item 1's restore checks (`checkNewbornCodeBlock`, `prepareBaselineICs` and `seedCallLinkHistory`), and items 3 and 4.
 6. `ICTwins` (snapshot, twin check, shell function), T11, which reads the snapshot, and T13, after tasks 2, 4 and 5 and the C++ test runner of R-INT-9 (SPEC-integrator.md task 1). The integrator's install glue calls `checkRestoredBaselineICs` in twins builds and its jsc host registers the shell function (SPEC-integrator.md tasks 8 and 12, R-INT-7), so this task needs neither and lands before both ([history](SPEC-ics-history.md#task-6-lands-before-the-integrators-glue)).
 7. `resources/ics.js`, T2 to T6, T8 and T10 on the integrator's runner, after task 6 and the integrator's capture and install glue, shell functions and runner (R-INT-2, R-INT-4 and R-INT-7; SPEC-integrator.md tasks 8, 9, 12 and 13).
 8. E5 and T9, after R-INT-6 lands (SPEC-integrator.md task 2); T9 is a runner sequence, so it also waits for the integrator's tasks 12 and 13, as task 7 does.
-9. B1 to B6 inside the integrator's bench loop.

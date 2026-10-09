@@ -21,6 +21,7 @@ struct Eviction {
     uint64_t bytes { 0 };
     uint64_t version { 0 };       // the envelope's commit identifier; 0 for a body whose envelope failed
     double score { 0 };           // (L + P) / B; -infinity for a body evicted as damaged or foreign
+    friend bool operator==(const Eviction&, const Eviction&) = default;   // Plan's comparison (section 4.4)
 };
 
 struct Plan {
@@ -57,9 +58,9 @@ JS_EXPORT_PRIVATE int runCommandLine(std::span<const CString> arguments, FILE* i
 
 ## 2. Independence from VMs
 
-The backend needs no VM and no `JSC::initialize`: it uses the filesystem, SHA-256 (SPEC-ucb.md section 3.8) and CRC32C (container sub-SPEC section 4.4), and runs synchronously on the calling thread. It does not compare the header with the running process, since the command line may run under another binary than the one that produced the artifact; it reads the header to check its CRC and structure (container sub-SPEC section 3.2) and to compute its digest. Bodies are judged by their envelopes alone (container sub-SPEC section 4.5, checks B1 to B5 in `Full` mode, with the file's own name as the key and the header's digest): maintenance decides what to evict rather than trusting what it reads, and has no strict switch. Planning therefore reads envelopes only and its memory grows with the number of bodies by one `Eviction`-sized record each, never with their sizes (THREAD Maintenance).
+The backend needs no VM and no `JSC::initialize`: it uses the filesystem, SHA-256 (SPEC-ucb.md section 3.8) and CRC32C (container sub-SPEC section 4.4), and runs synchronously on the calling thread. It does not compare the header with the running process, since the command line may run under another binary than the one that produced the artifact; it reads the header to check its CRC and structure (container sub-SPEC section 3.2) and to compute its digest. Bodies are judged by their envelopes alone, with `validateBodyEnvelope` (container sub-SPEC section 4.5, checks B1 to B5 in `Full` mode, with the file's own name as the key and the header's digest): maintenance decides what to evict rather than trusting what it reads, and has no strict switch. Planning therefore reads envelopes only and its memory grows with the number of bodies by one `Eviction`-sized record each, never with their sizes (THREAD Maintenance).
 
-Each call first opens `<parent>` and looks for `cache/` without taking the lock: a parent that does not exist or holds no `cache/` gives `NoArtifact`, so a call on a path without an artifact creates no lock file, and any other failure to open the parent gives `Failed` with `io`. Otherwise it takes the producer lock with `ProducerLock::tryAcquire` on that parent's descriptor, without blocking, and bumps the epoch through it when sections 3 and 4.5 say so (container sub-SPEC section 2). A lock another producer or maintenance holds gives `Busy` and changes nothing, and a `cache/` that went away before the lock was taken gives `NoArtifact`. Each listing of a directory opens it anew, as the container's listings do (container sub-SPEC section 6.2), so a second listing in one call reads the whole directory again. The call holds the lock for all its work and releases it before it returns; a plan that waits for confirmation is therefore never applied under the lock it was planned under, which section 4.4 accounts for.
+Off Linux each call returns `Failed` with `platform` and touches nothing (SPEC-integrator.md section 11). On Linux each call first opens `<parent>` and looks for `cache/` without taking the lock: a parent that does not exist or holds no `cache/` gives `NoArtifact`, so a call on a path without an artifact creates no lock file, and any other failure to open the parent gives `Failed` with `io`. Otherwise it takes the producer lock with `ProducerLock::tryAcquire` on that parent's descriptor, without blocking, and bumps the epoch through it when sections 3 and 4.5 say so (container sub-SPEC section 2). A lock another producer or maintenance holds gives `Busy` and changes nothing, and a `cache/` that went away before the lock was taken gives `NoArtifact`. Each listing of a directory opens it anew, as the container's listings do (container sub-SPEC section 6.2), so a second listing in one call reads the whole directory again. The call holds the lock for all its work and releases it before it returns; a plan that waits for confirmation is therefore never applied under the lock it was planned under, which section 4.4 accounts for.
 
 ## 3. `clean`
 
@@ -141,6 +142,7 @@ Bun runs it as `bun jitcache <command>`. `src/runtime/cli/mod.rs` gains `Tag::JI
 | `unlink-failed` | an `unlinkat` fails | the body stays; the outcome is still `Done`, except that a whole-artifact deletion keeps `header` and returns `Failed` (section 4.5) |
 | `rmdir-failed` | removing `bodies/` or `cache/` fails after `header` is gone | the bodiless remnant stays for the next Producer or `clean`; the outcome is still `Done` |
 | `io` | opening a directory (the parent's absence aside, section 2), opening the lock file, locking it with an error other than `busy`, or listing fails | `Failed` |
+| `platform` | the process does not run on Linux (section 2) | `Failed`, with nothing touched |
 
 ## 7. Tests
 
@@ -152,5 +154,18 @@ Bun runs it as `bun jitcache <command>`. `src/runtime/cli/mod.rs` gains `Tag::JI
 - M4. Confirmation: a plan confirmed after a commit, an eviction or a header change in between gives `PlanChanged` and evicts nothing; an unchanged one applies.
 - M5. Interruption: an apply stopped after each unlink (a test hook) leaves an artifact that the store's `open` and its index accept (container sub-SPEC section 7.2), with only whole bodies; one stopped after the header's unlink leaves a remnant that `clean` finishes.
 - M6. The command line: each exit code; the prompt with a terminal (a pseudo-terminal in the test), `y` and `n`; no prompt and no change without a terminal.
+
+M3 and M5 set two process-wide test hooks that `JITCacheMaintenanceTesting.h`, a private header, declares in twins builds; `JITCacheMaintenance.h` cannot hold them, since it is exported and declares nothing twins-only (SPEC-integrator.md section 3.5).
+
+```cpp
+#if ENABLE(JITCACHE_TWINS)
+namespace JSC::JITCache::Maintenance::Testing {
+void setFailingBodyUnlink(std::optional<uint64_t> n);   // each apply's n-th body unlink fails with EIO, as if unlinkat had returned it
+void setStopAfterUnlink(std::optional<uint64_t> n);     // each apply stops right after its n-th unlink of a body or of header
+}
+#endif
+```
+
+Both count from 1 within one call. A stopped apply removes nothing more, bumps no epoch and returns `Failed`; returning releases the lock, so the artifact is left as a process that died at that point would leave it.
 
 The JS tests run maintenance between runs of a sequence (harness sub-SPEC section 7.3), and the Bun tests run `bun jitcache` (SPEC-integrator.md section 15.3).
