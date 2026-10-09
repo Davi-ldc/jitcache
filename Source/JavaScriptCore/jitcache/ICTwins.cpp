@@ -34,6 +34,7 @@
 #include "CodeBlock.h"
 #include "ConcurrentJSLock.h"
 #include "DeferGC.h"
+#include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
 #include "ICCapture.h"
 #include "ICSection.h"
@@ -182,16 +183,6 @@ static void checkSeededCallLinks(const PreparedBaselineICs& prepared, const Base
     }
 }
 
-// The molds of the code the CB runs, from which setup built its ICs; empty when the CB runs no baseline code.
-static std::span<const BaselineUnlinkedPropertyInlineCache> installedMolds(CodeBlock& codeBlock)
-{
-    RefPtr jitCode = codeBlock.jitCode();
-    if (!jitCode || jitCode->jitType() != JITType::BaselineJIT)
-        return { };
-    // The CB keeps its code alive, so the span outlives the local reference.
-    return static_cast<BaselineJITCode&>(*jitCode).m_unlinkedPropertyInlineCaches.span();
-}
-
 // I4: every IC holds the learning fields its record derives, the fold bit ORed into its mold's, the *GaveUp operation
 // exactly when the site was given up, and, of the fields attach leaves alone, the access type of its record and the
 // shape and empty case list installation built.
@@ -199,7 +190,12 @@ static void checkAttachedPropertyICs(const PreparedBaselineICs& prepared, CodeBl
 {
     constexpr auto site = TwinMismatch::Site::PropertyIC;
     std::span<const PropertyICRecord> records = prepared.propertyICs();
-    std::span<const BaselineUnlinkedPropertyInlineCache> molds = installedMolds(codeBlock);
+    // The molds of the code the CB runs, from which setup built its ICs; none when the CB runs no baseline code.
+    // jitCode keeps that code alive while the loop reads the molds.
+    RefPtr jitCode = codeBlock.jitCode();
+    std::span<const BaselineUnlinkedPropertyInlineCache> molds;
+    if (jitCode && jitCode->jitType() == JITType::BaselineJIT)
+        molds = static_cast<BaselineJITCode&>(*jitCode).m_unlinkedPropertyInlineCaches.span();
     expectCount(mismatches, site, "propertyICCount"_s, records.size(), snapshot.propertyICs.size());
     for (size_t index = 0, count = std::min<size_t>(records.size(), snapshot.propertyICs.size()); index < count; ++index) {
         const PropertyICRecord& record = records[index];
