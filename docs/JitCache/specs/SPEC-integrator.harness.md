@@ -237,7 +237,7 @@ Each sequence gets a fresh temporary directory holding `artifact/`, the parent p
 
 ```text
 <jsc> --destroy-vm
-      [--jitcache=<artifact> --jitcache-role=<role> --jitcache-strict=1 --jitcache-producer-limit=max --jitcache-log]
+      [--jitcache=<artifact> --jitcache-role=<p, c or p-c for the run's role> --jitcache-strict=1 --jitcache-log]
       [twins mode: --useDollarVM=true --jitcache-describe-heap=<scratch>/run<i>.heap
                    --jitcache-twins-report=<scratch>/run<i>.twins
                    --jitcache-twins-record-layout=<scratch>/run<i>.layout

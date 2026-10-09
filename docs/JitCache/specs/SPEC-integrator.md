@@ -884,8 +884,8 @@ THREAD Session says when each host calls `start` and what the host decides.
 | flag | effect |
 |---|---|
 | `--jitcache=<path>` | configures the shell's main VM with `artifactPath = path` |
-| `--jitcache-role=consumer\|producer\|consumer-producer` | the role; `consumer` when absent |
-| `--jitcache-producer-limit=<bytes>\|max` | the producer limit, in bytes with an optional `K`, `M` or `G` suffix in powers of 1024; `max` is `SIZE_MAX` |
+| `--jitcache-role=c\|p\|p-c` | the role: `c` Consumer, `p` Producer, `p-c` ConsumerProducer; `c` when absent |
+| `--jitcache-producer-limit=<bytes>\|max` | the producer limit, in bytes with an optional `K`, `M` or `G` suffix in powers of 1024; `max`, which is also the limit when the flag is absent, is `SIZE_MAX` |
 | `--jitcache-strict[=0\|1]` | strictness: bare or `=1` turns it on, `=0` off; off when absent, the default THREAD Session gives |
 | `--jitcache-delta-at-exit` | calls `delta` once the scripts and the run loop have finished |
 | `--jitcache-log[=0\|1]` | bare or `=1` writes `toJSON` of the start result, of each `delta` result the shell gets and of the final `status` to stderr, one line each; `=0` writes nothing |
