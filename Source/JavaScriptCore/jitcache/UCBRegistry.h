@@ -30,6 +30,7 @@
 #include "SourceProvider.h"
 #include "UCBKeys.h"
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <variant>
@@ -226,7 +227,7 @@ private:
     mutable Lock m_lock;
     UncheckedKeyHashMap<const UnlinkedFunctionExecutable*, ChildIdentity> m_children WTF_GUARDED_BY_LOCK(m_lock);
     UncheckedKeyHashMap<const UnlinkedFunctionExecutable*, RootIdentity> m_roots WTF_GUARDED_BY_LOCK(m_lock);
-    UncheckedKeyHashMap<const UnlinkedCodeBlock*, UCBRecord> m_codeBlocks WTF_GUARDED_BY_LOCK(m_lock);
+    UncheckedKeyHashMap<const UnlinkedCodeBlock*, std::unique_ptr<UCBRecord>> m_codeBlocks WTF_GUARDED_BY_LOCK(m_lock); // boxed: WTF's HashTable refuses buckets above 150 bytes
     UncheckedKeyHashSet<SourceID> m_verifiedSuppliedDigests WTF_GUARDED_BY_LOCK(m_lock);
     UCBStatistics m_statistics; // not under m_lock: only the VM thread's engine and readers touch it
 };
