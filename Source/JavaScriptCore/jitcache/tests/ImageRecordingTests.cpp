@@ -1073,7 +1073,7 @@ JITCACHE_TEST(imageSharedHelpersRecordTheirReferences, Yes)
             JITCACHE_FAIL(makeString(name, " recorded "_s, recorded->fixups.size(), " fixups instead of "_s, expected.size()));
             return;
         }
-        Vector<bool> matched(expected.size(), false);
+        Vector<bool> matched(FillWith { }, expected.size(), false);
         for (auto& fixup : recorded->fixups) {
             auto decoded = decodeFixup(recorded->linked.bytes, fixup);
             bool found = false;
@@ -1340,7 +1340,7 @@ JITCACHE_TEST(imageStringSwitchRecordsRanks, Yes)
     std::sort(sortedKeys.begin(), sortedKeys.end());
     unsigned keyCount = keys.size();
 
-    Vector<unsigned> executions(keyCount, 0);
+    Vector<unsigned> executions(FillWith { }, keyCount, 0);
     auto recorded = recordCode(context, vm, *body->unlinkedCodeBlock, "the string switch"_s, [&](CCallHelpers& jit, ImageRecorder& recorder) {
         StringSwitchRecording recording(recorder, tableIndex);
         BinarySwitch binarySwitch(GPRInfo::regT0, keys.span(), BinarySwitch::IntPtr);
@@ -1365,8 +1365,8 @@ JITCACHE_TEST(imageStringSwitchRecordsRanks, Yes)
     for (unsigned rank = 0; rank < keyCount; ++rank)
         JITCACHE_CHECK(executions[rank] == 1);
 
-    Vector<unsigned> atomFixups(keyCount, 0);
-    Vector<unsigned> caseFixups(keyCount, 0);
+    Vector<unsigned> atomFixups(FillWith { }, keyCount, 0);
+    Vector<unsigned> caseFixups(FillWith { }, keyCount, 0);
     auto codeStart = reinterpret_cast<uintptr_t>(recorded->linked.bytes.data());
     auto codeEnd = codeStart + recorded->linked.bytes.size();
     for (auto& fixup : recorded->fixups) {
