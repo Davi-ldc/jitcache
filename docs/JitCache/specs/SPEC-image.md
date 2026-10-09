@@ -720,7 +720,7 @@ Comparison, `compareBakedFacts(const ImageSectionsView&, CodeBlock& newborn) -> 
 - Taint matches when `couldBeTainted()` equals the recorded value exactly.
 - Each scope fact matches when the CB's metadata for that instruction holds the same resolve type (`OpResolveScope::Metadata::m_resolveType` with `m_localScopeDepth` equal, or `m_getPutInfo.resolveType()`).
 
-The result is `Match` or `Mismatch` naming the first differing fact. Every fact names an instruction of its own opcode: the producer's recording writes it so, and under strict U4 rejects a section that does not before comparison runs. History: [Baked facts](SPEC-image-history.md#baked-facts).
+The result is `Match` or `Mismatch`: the install glue only branches on it (SPEC-integrator.md section 7.2, step 5), and nothing reads which fact differed. Every fact names an instruction of its own opcode: the producer's recording writes it so, and under strict U4 rejects a section that does not before comparison runs. History: [Baked facts](SPEC-image-history.md#baked-facts).
 
 ## 8. Sections
 
