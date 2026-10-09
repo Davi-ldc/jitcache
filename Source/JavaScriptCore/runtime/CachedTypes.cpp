@@ -998,10 +998,13 @@ private:
     UncheckedKeyHashMap<unsigned, Vector<std::pair<ptrdiff_t, size_t>, 1>, IntHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> m_arraysByHash;
 };
 
-Decoder::Decoder(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvider> provider)
+Decoder::Decoder(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvider> provider, Purpose purpose, RefPtr<TDZEnvironmentLink> startChain, bool validate)
     : m_vm(vm)
     , m_cachedBytecode(WTF::move(cachedBytecode))
     , m_provider(provider)
+    , m_purpose(purpose)
+    , m_startChain(WTF::move(startChain))
+    , m_validates(validate)
 {
 }
 
@@ -1015,9 +1018,9 @@ Decoder::~Decoder()
         finalizer();
 }
 
-Ref<Decoder> Decoder::create(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvider> provider)
+Ref<Decoder> Decoder::create(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvider> provider, Purpose purpose, RefPtr<TDZEnvironmentLink> startChain, bool validate)
 {
-    return adoptRef(*new Decoder(vm, WTF::move(cachedBytecode), WTF::move(provider)));
+    return adoptRef(*new Decoder(vm, WTF::move(cachedBytecode), WTF::move(provider), purpose, WTF::move(startChain), validate));
 }
 
 size_t Decoder::size() const

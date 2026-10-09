@@ -114,13 +114,6 @@ static constexpr std::array mustMatchOptionNames { JITCACHE_FOR_EACH_MUST_MATCH_
 #undef JITCACHE_MUST_MATCH_OPTION_NAME
 static_assert(mustMatchOptionNames.size() == numberOfMustMatchOptions);
 
-#define JITCACHE_FIXED_OPTION_ROW(name_, type_, requiredValue_) \
-    FixedOptionRow { #name_ ""_s, \
-        [] { return FixedOptionValue { WTF::InPlaceType<OptionsStorage::type_>, Options::name_() }; }, \
-        FixedOptionValue { WTF::InPlaceType<OptionsStorage::type_>, static_cast<OptionsStorage::type_>(requiredValue_) } },
-static constexpr FixedOptionRow fixedOptionTable[] = { JITCACHE_FOR_EACH_FIXED_OPTION(JITCACHE_FIXED_OPTION_ROW) };
-#undef JITCACHE_FIXED_OPTION_ROW
-
 } // namespace OptionsInternal
 
 ASCIILiteral mustMatchOptionName(unsigned index)
@@ -152,7 +145,15 @@ bool FixedOptionRow::holds() const
 
 std::span<const FixedOptionRow> fixedOptionRows()
 {
-    return std::span { OptionsInternal::fixedOptionTable };
+    // Built at the first call. WTF::Variant placement-news its alternative into a byte buffer, which constant
+    // evaluation rejects, so the rows cannot be constexpr; a table at namespace scope would initialize at load.
+#define JITCACHE_FIXED_OPTION_ROW(name_, type_, requiredValue_) \
+    FixedOptionRow { #name_ ""_s, \
+        [] { return FixedOptionValue { WTF::InPlaceType<OptionsStorage::type_>, Options::name_() }; }, \
+        FixedOptionValue { WTF::InPlaceType<OptionsStorage::type_>, static_cast<OptionsStorage::type_>(requiredValue_) } },
+    static const FixedOptionRow rows[] = { JITCACHE_FOR_EACH_FIXED_OPTION(JITCACHE_FIXED_OPTION_ROW) };
+#undef JITCACHE_FIXED_OPTION_ROW
+    return std::span { rows };
 }
 
 const FixedOptionRow* checkFixedOptions()
