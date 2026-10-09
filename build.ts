@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
 import { mkdirSync, realpathSync, statSync } from "node:fs";
-import { constants, homedir } from "node:os";
+import { availableParallelism, constants, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 
 const BUN_PIN = "744846f844374847c902b5e7fd59b4342a51ef99";
-const JOBS = 5;
 // Each target selects a Bun profile and a ninja target; without one, Bun builds its
 // default targets, the executable and its smoke test. Targets of one profile pass
 // identical config flags, so they share build.ninja, the build directory and its WebKit.
@@ -27,17 +26,27 @@ function fail(message: string, code = 125): never {
 
 const args = process.argv.slice(2);
 const archOption = args.find(arg => arg.startsWith("--arch="));
-const positional = args.filter(arg => arg !== archOption);
+const jobsOption = args.find(arg => arg.startsWith("--jobs="));
+const keepGoing = args.includes("--keep-going");
+const positional = args.filter(arg => arg !== archOption && arg !== jobsOption && arg !== "--keep-going");
 const requested = positional[0] || "debug";
 if (requested === "-h" || requested === "--help") {
-  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|twins|bun-twins] [--arch=aarch64]");
+  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|twins|bun-twins] [--arch=aarch64] [--jobs=N] [--keep-going]");
   console.log("Build WebKit/JSC with Bun's build system, from a Bun checkout based on the pin. Default: debug.");
   console.log("bun-debug builds the Bun executable against local WebKit in the debug build directory.");
   console.log("twins builds jsc and testjitcache with JITCache's test builds on (ENABLE_JITCACHE_TWINS);");
   console.log("bun-twins builds the Bun executable against that WebKit, in the same build directory.");
   console.log("--arch=aarch64 cross-compiles on an x86_64 host against the sysroot in JITCACHE_AARCH64_SYSROOT.");
+  console.log("--jobs=N sets the jobs of each level; the default is as many as memory holds, at most one per CPU.");
+  console.log("--keep-going reports every compile error in one build instead of stopping at the first.");
   process.exit(0);
 }
+// A debug translation unit with ASan takes up to about 3 GiB, so the default runs as many jobs as
+// memory holds, at most one per CPU.
+const JOBS = jobsOption
+  ? Number(jobsOption.slice("--jobs=".length))
+  : Math.max(1, Math.min(availableParallelism(), Math.floor(totalmem() / (3 * 2 ** 30))));
+if (!Number.isInteger(JOBS) || JOBS < 1) fail(`Invalid job count: ${jobsOption}`, 2);
 const target = TARGETS.get(requested);
 if (!target) fail(`Unknown target: ${requested}`, 2);
 if (positional.length > 1) fail("Expected at most one target argument.", 2);
@@ -105,17 +114,34 @@ env.CARGO_BUILD_JOBS = String(JOBS);
 env.BUN_WEBKIT_PATH = engineDir;
 const lockDir = resolve(process.env.XDG_CACHE_HOME || join(home, ".cache"), "jitcache");
 mkdirSync(lockDir, { recursive: true });
+const lock = ["--exclusive", "--no-fork", join(lockDir, "build.lock")];
+const exitCode = (run: ReturnType<typeof spawnSync>) =>
+  run.status ?? (run.signal ? 128 + constants.signals[run.signal] : 1);
 
 // flock waits for any other build and retains the lock while the builder runs.
 const result = spawnSync("flock", [
-  "--exclusive", "--no-fork", join(lockDir, "build.lock"),
+  ...lock,
   process.execPath, builder,
   `--profile=${target.profile}`,
   ...(cross ? [`--arch=${architecture}`, `--linux-sysroot=${sysroot}`] : []),
   "--webkit=local",
   ...(target.ninja ? [`--target=${target.ninja}`] : []),
   `-j${JOBS}`,
+  ...(keepGoing ? ["-k0"] : []),
   `--build-dir=${buildDir}`,
 ], { cwd: bunSource, env, stdio: "inherit" });
 if (result.error) fail(`Cannot launch Bun builder: ${result.error.message}`);
-process.exit(result.status ?? (result.signal ? 128 + constants.signals[result.signal] : 1));
+let status = exitCode(result);
+
+// The builder runs the nested WebKit build through `cmake --build`, whose Ninja stops at its first
+// failure; the outer -k0 does not reach it. After a failure, --keep-going runs that Ninja again with
+// -k 0, so one build reports every compile error.
+const nested = join(buildDir, "deps/WebKit");
+if (status !== 0 && keepGoing && statSync(join(nested, "build.ninja"), { throwIfNoEntry: false })?.isFile()) {
+  const nestedTargets = target.profile.endsWith("-twins") ? ["jsc", "testjitcache"] : ["jsc"];
+  const rerun = spawnSync("flock", [...lock, "ninja", "-C", nested, "-k", "0", `-j${JOBS}`, ...nestedTargets],
+    { env, stdio: "inherit" });
+  if (rerun.error) fail(`Cannot launch Ninja: ${rerun.error.message}`);
+  status = exitCode(rerun) || status;
+}
+process.exit(status);
