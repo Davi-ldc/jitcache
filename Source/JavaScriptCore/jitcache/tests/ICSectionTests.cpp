@@ -496,7 +496,7 @@ JITCACHE_TEST(icsRecordByteLayout, No)
 
     // The section start needs no alignment: parse it at every offset modulo 8.
     for (size_t offset = 0; offset < 8; ++offset) {
-        Vector<uint8_t> buffer(offset, 0);
+        Vector<uint8_t> buffer(FillWith { }, offset, 0);
         buffer.appendVector(bytes);
         std::span<const uint8_t> sectionBytes = buffer.span().subspan(offset);
         auto parsed = parseStrict(sectionBytes);
@@ -526,9 +526,9 @@ JITCACHE_TEST(icsRecordByteLayout, No)
 
     // Header and group words are little-endian: counts above 255 read back from their low byte first.
     TestSection wide;
-    wide.propertyICs.appendVector(Vector<ICs::PropertyICRecord>(0x102, propertyIC(AccessType::GetById, 0, 0, 0, 0, 0)));
+    wide.propertyICs.appendVector(Vector<ICs::PropertyICRecord>(FillWith { }, 0x102, propertyIC(AccessType::GetById, 0, 0, 0, 0, 0)));
     wide.groups.append(ICs::CallLinkGroup { OpCall::opcodeID, 0x103 });
-    wide.callLinks.appendVector(Vector<ICs::CallLinkRecord>(0x103, callLink(ICs::CallLinkModeCode::Init, 0, 0)));
+    wide.callLinks.appendVector(Vector<ICs::CallLinkRecord>(FillWith { }, 0x103, callLink(ICs::CallLinkModeCode::Init, 0, 0)));
     wide.propertyICCount = 0x102;
     wide.callLinkGroupCount = 1;
     wide.callLinkSiteCount = 0x103;
@@ -589,7 +589,7 @@ JITCACHE_TEST(icsParseSectionSectionSize, No)
     expectInvalid(context, "a section without its padding"_s, parseStrict(valid.span().first(validSectionPaddingOffset)), ICs::Check::SectionSize);
 
     Vector<uint8_t> trailing = valid;
-    trailing.appendVector(Vector<uint8_t>(8, 0));
+    trailing.appendVector(Vector<uint8_t>(FillWith { }, 8, 0));
     expectInvalid(context, "eight trailing zero bytes"_s, parseStrict(trailing.span()), ICs::Check::SectionSize);
 
     expectChangeInvalid(context, "15 call-link groups"_s, ICs::Check::SectionSize, 0, [](TestSection& section) {
