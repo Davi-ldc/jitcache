@@ -1,33 +1,9 @@
-/*
- * Copyright (C) 2026 Anthropic PBC. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY APPLE INC. ``AS IS'' AND ANY
- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL APPLE INC. OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
- * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "config.h"
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "ArithProfile.h"
+#include "BakedFacts.h"
 #include "BaselineJITPlan.h"
 #include "BaselineJITRegisters.h"
 #include "BinarySwitch.h"
@@ -36,11 +12,13 @@
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "Completion.h"
+#include "DeferGC.h"
 #include "DisallowMacroScratchRegisterUsage.h"
 #include "FunctionExecutable.h"
 #include "ImageEmission.h"
 #include "ImageRecord.h"
 #include "ImageRecorder.h"
+#include "ImageSection.h"
 #include "ImageTwins.h"
 #include "JIT.h"
 #include "JITCacheTest.h"
@@ -52,6 +30,8 @@
 #include "LinkBuffer.h"
 #include "ProducerBudget.h"
 #include "SourceCode.h"
+#include "SourceProvider.h"
+#include "TopExceptionScope.h"
 #include "UnlinkedCodeBlock.h"
 #include <algorithm>
 #include <wtf/text/MakeString.h>
@@ -1614,6 +1594,163 @@ JITCACHE_TEST(imageGetFromScopeKeysTheThunkTheNativeChainLinks, Yes)
         }
         if (calls != 1)
             JITCACHE_FAIL(makeString(reader.function, "'s recorded site holds "_s, calls, " Call fixups instead of one"_s));
+    }
+}
+
+// T9 (SPEC-image section 7, I13). counter and freshCounter have the same body text in one scope, so their UCBs share
+// bytecode offsets and resolve every scope access alike, as an import's UCB has the producer's index spaces (R-UCB-1).
+// A twin recorder compiles counter's CodeBlock, and the baked facts its record holds become the section. Each newborn
+// CodeBlock of freshCounter, linked by newCodeBlockFor and never installed or run, must match that section unchanged and
+// mismatch it once the test changes one fact: the executable's never-optimize flag set before linking, its source
+// provider's taint set before linking, or one scope fact's metadata written after linking. No comparison may memoize
+// the newborn's capability level.
+JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    NakedPtr<Exception> exception;
+    evaluate(globalObject, makeSource("var counter, freshCounter; (function makeCounters() { var count = 0; counter = function () { count = count + 1; return count; }; freshCounter = function () { count = count + 1; return count; }; })(); counter();"_s, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    if (exception) {
+        JITCACHE_FAIL("evaluating the counters threw"_s);
+        return;
+    }
+    auto* counter = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "counter"_s)));
+    auto* freshCounter = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "freshCounter"_s)));
+    CodeBlock* codeBlock = counter ? counter->jsExecutable()->codeBlockForCall() : nullptr;
+    if (!codeBlock || !freshCounter || freshCounter->jsExecutable()->codeBlockForCall()) {
+        JITCACHE_FAIL("counter has no CodeBlock, or freshCounter is missing or was called"_s);
+        return;
+    }
+
+    // The twin recorder is the one recorder a compilation outside production can have (T20). The counters have no switch
+    // and no strict equality, so it answers nothing from its seeds and inputs but the assembler's seed, and both outlive it.
+    RefPtr<BaselineJITCode> code;
+    {
+        TwinSeeds seeds { };
+        seeds.assembler = assemblerSeed;
+        TwinCompileInputs compileInputs { };
+        Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(codeBlock));
+        JIT jit(vm, plan.get(), codeBlock);
+        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, compileInputs);
+        code = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
+    }
+    auto* record = code ? code->m_jitCacheImageRecord.get() : nullptr;
+    if (!record || record->state() != RecordState::Complete) {
+        JITCACHE_FAIL(makeString("counter's record is missing or not complete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ", reason "_s, record ? static_cast<unsigned>(record->unrecordableReason()) : 0u, ')'));
+        return;
+    }
+
+    // The baked-facts section the record gives, and beside it the smallest image.baseline section that passes V1 to V6:
+    // four bytes of code and no fixup, call, mold, table, code-map entry or MathIC.
+    Vector<uint8_t> bakedFactsBytes;
+    auto append = [&](std::span<const uint8_t> bytes) {
+        bakedFactsBytes.append(bytes);
+        return true;
+    };
+    ImageSectionSink sink = append;
+    if (!writeBakedFactsSection(record->bakedFacts(), sink)) {
+        JITCACHE_FAIL("writing the baked facts failed"_s);
+        return;
+    }
+    ImageSectionHeader header;
+    header.codeSize = 4;
+    Vector<uint8_t> imageBytes(FillWith { }, static_cast<size_t>(ImageSectionSize(header).bytes()), 0);
+    auto encodedHeader = encodeImageSectionHeader(header);
+    memcpySpan(imageBytes.mutableSpan(), std::span<const uint8_t> { encodedHeader });
+
+    auto facts = parseBakedFactsSection(bakedFactsBytes.span(), true);
+    // Strict parsing of the image would also run the twins checks of section 11.2, which this pair has no section for.
+    auto view = parseImageSections(ImageSectionSpans { .image = imageBytes.span(), .bakedFacts = bakedFactsBytes.span() }, false);
+    if (!facts || !view) {
+        JITCACHE_FAIL(makeString("the sections do not parse: "_s, description(!facts ? facts.error() : view.error())));
+        return;
+    }
+    if (facts->capabilityLevel() == DFG::CannotCompile || facts->couldBeTainted()) {
+        JITCACHE_FAIL("counter compiled as CannotCompile or tainted, so neither flag can make a newborn differ"_s);
+        return;
+    }
+    auto hasFact = [&](ScopeOpcode opcode) {
+        for (unsigned index = 0; index < facts->scopeFactCount(); ++index) {
+            if (facts->scopeFact(index).opcode == opcode)
+                return true;
+        }
+        return false;
+    };
+    JITCACHE_CHECK(hasFact(ScopeOpcode::ResolveScope));
+    JITCACHE_CHECK(hasFact(ScopeOpcode::GetFromScope));
+    JITCACHE_CHECK(hasFact(ScopeOpcode::PutToScope));
+
+    // Runs change, then the comparison, on a newborn CB of freshCounter, used only inside the deferral scope that created
+    // it. None is ever installed, so each is the executable's first CB for calls.
+    FunctionExecutable* freshExecutable = freshCounter->jsExecutable();
+    auto compareNewborn = [&](ASCIILiteral name, BakedFactsResult expected, const auto& change) {
+        DeferGCForAWhile deferGC(vm);
+        auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+        CodeBlock* newborn = freshExecutable->newCodeBlockFor(CodeSpecializationKind::CodeForCall, freshCounter, freshCounter->scope());
+        if (scope.exception()) {
+            scope.clearException();
+            JITCACHE_FAIL(makeString(name, ": newCodeBlockFor threw"_s));
+            return;
+        }
+        if (!newborn || newborn->jitType() != JITType::None) {
+            JITCACHE_FAIL(makeString(name, ": newCodeBlockFor gave no newborn CB"_s));
+            return;
+        }
+        if (newborn->capabilityLevelState() != DFG::CapabilityLevelNotSet) {
+            JITCACHE_FAIL(makeString(name, ": linking memoized the capability level"_s));
+            return;
+        }
+        change(*newborn);
+        if (compareBakedFacts(*view, *newborn) != expected)
+            JITCACHE_FAIL(makeString(name, ": compareBakedFacts gives the wrong result"_s));
+        if (newborn->capabilityLevelState() != DFG::CapabilityLevelNotSet)
+            JITCACHE_FAIL(makeString(name, ": the comparison memoized the capability level"_s));
+    };
+    auto unchanged = [](CodeBlock&) { };
+
+    compareNewborn("an unchanged newborn"_s, BakedFactsResult::Match, unchanged);
+
+    // computeCapabilityLevel reads the flag, which makes every CB of the executable CannotCompile.
+    freshExecutable->setNeverOptimize(true);
+    compareNewborn("a never-optimize executable"_s, BakedFactsResult::Mismatch, unchanged);
+    freshExecutable->setNeverOptimize(false);
+
+    // The CodeBlock constructor takes couldBeTainted from the provider.
+    SourceProvider* provider = freshExecutable->source().provider();
+    SourceTaintedOrigin originalTaint = provider->sourceTaintedOrigin();
+    provider->setSourceTaintedOrigin(SourceTaintedOrigin::KnownTainted);
+    compareNewborn("a tainted provider"_s, BakedFactsResult::Mismatch, unchanged);
+    provider->setSourceTaintedOrigin(originalTaint);
+
+    // Each scope fact's resolve type becomes GlobalVar, which no baked fact has. The collector reads a resolve_scope
+    // entry's cell union whatever its type, and skips the structure-or-watchpoint union of a GlobalVar get_from_scope or
+    // put_to_scope entry (CodeBlock::reconcileLLIntInlineCachesAtGCEnd), so the newborn stays safe to collect.
+    for (unsigned index = 0; index < facts->scopeFactCount(); ++index) {
+        ScopeFact fact = facts->scopeFact(index);
+        compareNewborn("a changed scope type"_s, BakedFactsResult::Mismatch, [&](CodeBlock& newborn) {
+            auto instruction = newborn.instructions().at(BytecodeIndex(fact.bytecodeOffset));
+            switch (fact.opcode) {
+            case ScopeOpcode::ResolveScope:
+                instruction->as<OpResolveScope>().metadata(&newborn).m_resolveType = GlobalVar;
+                return;
+            case ScopeOpcode::GetFromScope: {
+                auto& metadata = instruction->as<OpGetFromScope>().metadata(&newborn);
+                metadata.m_getPutInfo = GetPutInfo(metadata.m_getPutInfo.resolveMode(), GlobalVar, metadata.m_getPutInfo.initializationMode(), metadata.m_getPutInfo.ecmaMode());
+                return;
+            }
+            case ScopeOpcode::PutToScope: {
+                auto& metadata = instruction->as<OpPutToScope>().metadata(&newborn);
+                metadata.m_getPutInfo = GetPutInfo(metadata.m_getPutInfo.resolveMode(), GlobalVar, metadata.m_getPutInfo.initializationMode(), metadata.m_getPutInfo.ecmaMode());
+                return;
+            }
+            }
+        });
+        // A resolve_scope of type ClosureVar also bakes its depth.
+        if (fact.opcode == ScopeOpcode::ResolveScope && fact.resolveType == ClosureVar) {
+            compareNewborn("a changed scope depth"_s, BakedFactsResult::Mismatch, [&](CodeBlock& newborn) {
+                newborn.instructions().at(BytecodeIndex(fact.bytecodeOffset))->as<OpResolveScope>().metadata(&newborn).m_localScopeDepth = fact.localScopeDepth + 1;
+            });
+        }
     }
 }
 

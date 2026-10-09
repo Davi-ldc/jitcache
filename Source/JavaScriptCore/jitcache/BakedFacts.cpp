@@ -1,35 +1,15 @@
-/*
- * Copyright (C) 2026 The JITCache Authors. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS''
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- * THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include "config.h"
 #include "BakedFacts.h"
 
 #if ENABLE(JIT)
 
+#include "BytecodeStructs.h"
+#include "CodeBlock.h"
+#include "ImageSection.h"
+#include "JSCInlines.h"
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <utility>
 
 namespace JSC::JITCache {
@@ -109,6 +89,31 @@ static bool passesV7(std::span<const uint8_t> section)
             return false;
     }
     return true;
+}
+
+// Whether the CB's metadata for the fact's instruction holds what the compilation baked (section 7). Only the depth of a
+// resolve_scope of type ClosureVar is baked; the other baked kinds read their depth from the metadata at run time.
+static bool scopeFactHolds(const ScopeFact& fact, CodeBlock& codeBlock)
+{
+    auto& instructions = codeBlock.instructions();
+    ASSERT(fact.bytecodeOffset < instructions.size());
+    auto instruction = instructions.at(BytecodeIndex(fact.bytecodeOffset));
+    switch (fact.opcode) {
+    case ScopeOpcode::ResolveScope: {
+        ASSERT(instruction->is<OpResolveScope>());
+        auto& metadata = instruction->as<OpResolveScope>().metadata(&codeBlock);
+        if (metadata.m_resolveType != fact.resolveType)
+            return false;
+        return fact.resolveType != ClosureVar || metadata.m_localScopeDepth == fact.localScopeDepth;
+    }
+    case ScopeOpcode::GetFromScope:
+        ASSERT(instruction->is<OpGetFromScope>());
+        return instruction->as<OpGetFromScope>().metadata(&codeBlock).m_getPutInfo.resolveType() == fact.resolveType;
+    case ScopeOpcode::PutToScope:
+        ASSERT(instruction->is<OpPutToScope>());
+        return instruction->as<OpPutToScope>().metadata(&codeBlock).m_getPutInfo.resolveType() == fact.resolveType;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 } // namespace BakedFactsInternal
@@ -242,6 +247,25 @@ std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const
     view.m_couldBeTainted = !!section[taintOffset];
     view.m_scopeFactCount = count;
     return view;
+}
+
+BakedFactsResult compareBakedFacts(const ImageSectionsView& view, CodeBlock& newborn)
+{
+    using namespace BakedFactsInternal;
+    const BakedFactsView& facts = view.bakedFacts();
+    // capabilityLevel() would memoize into m_capabilityLevelState, which this comparison must leave as linking left it.
+    DFG::CapabilityLevel level = newborn.capabilityLevelState();
+    if (level == DFG::CapabilityLevelNotSet)
+        level = newborn.computeCapabilityLevel();
+    if ((facts.capabilityLevel() == DFG::CannotCompile) != (level == DFG::CannotCompile))
+        return BakedFactsResult::Mismatch;
+    if (facts.couldBeTainted() != newborn.couldBeTainted())
+        return BakedFactsResult::Mismatch;
+    for (unsigned index = 0; index < facts.scopeFactCount(); ++index) {
+        if (!scopeFactHolds(facts.scopeFact(index), newborn))
+            return BakedFactsResult::Mismatch;
+    }
+    return BakedFactsResult::Match;
 }
 
 } // namespace JSC::JITCache

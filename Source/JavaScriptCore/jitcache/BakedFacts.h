@@ -1,28 +1,3 @@
-/*
- * Copyright (C) 2026 The JITCache Authors. All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS''
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- * THE POSSIBILITY OF SUCH DAMAGE.
- */
-
 #pragma once
 
 #if ENABLE(JIT)
@@ -37,10 +12,15 @@
 
 // The facts a baseline compilation read from its CB and turned into unguarded code: the capability class, the taint,
 // and the kind and depth of every unguarded scope access (SPEC-image.md section 7), with the codec of the
-// baked-facts.baseline section (section 8.3). compareBakedFacts, which an install runs on a newborn CB, lives with the
-// preparation (ImagePrepare.h).
+// baked-facts.baseline section (section 8.3) and the comparison an install runs on a newborn CB.
+
+namespace JSC {
+class CodeBlock;
+}
 
 namespace JSC::JITCache {
+
+class ImageSectionsView;
 
 // The opcode byte of a scope fact.
 enum class ScopeOpcode : uint8_t {
@@ -133,6 +113,20 @@ private:
 // Locates the section. A section shorter than its header or its counted entries cannot be located and fails V7 in either
 // mode. Under strict it runs V7 (SPEC-image.md section 8.5); with strict off, debug builds ASSERT what V7 checks.
 std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const uint8_t>, bool strict);
+
+enum class BakedFactsResult : uint8_t {
+    Match,
+    Mismatch,
+};
+
+// The comparison of SPEC-image.md section 7, on the VM thread, on a linked CB that has not run. It writes nothing to
+// the CB: its capability class comes from capabilityLevelState() when set and otherwise from computeCapabilityLevel(),
+// which does not memoize. The class matches when both sides agree on DFG::CannotCompile, the one test the code depends
+// on (N13); the taint matches when couldBeTainted() equals the recorded value; a scope fact matches when the CB's
+// metadata for its instruction holds the same resolve type, and for a resolve_scope of type ClosureVar the same depth.
+// Every fact names an instruction of its own opcode, which recording guarantees and U4 checks under strict. The install
+// glue only branches on the result, so nothing reports which fact differed.
+BakedFactsResult compareBakedFacts(const ImageSectionsView&, CodeBlock& newborn);
 
 } // namespace JSC::JITCache
 
