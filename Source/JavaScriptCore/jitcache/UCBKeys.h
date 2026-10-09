@@ -34,8 +34,8 @@
 #include <optional>
 #include <span>
 #include <type_traits>
-#include <variant>
 #include <wtf/OptionSet.h>
+#include <wtf/Variant.h>
 #include <wtf/text/StringView.h>
 
 namespace JSC {
@@ -119,7 +119,7 @@ struct BodyContextInputs { // FunctionConstructor, Builtin, Child; a root's hold
 struct DirectEvalContext {
     std::optional<Digest256> digest; // the digest its request computed, if it computed one
 };
-using RecordedContext = std::variant<GlobalContextInputs, BodyContextInputs, DirectEvalContext>;
+using RecordedContext = Variant<GlobalContextInputs, BodyContextInputs, DirectEvalContext>;
 // The context digest of a record whose key has the given identity kind: globalContextDigest or executableBodyContextDigest
 // of the inputs, with rootHolderDigest for a FunctionConstructor or Builtin body, or a direct eval's stored digest. Empty
 // for a direct eval that stored none and for a root body passed no holder digest.

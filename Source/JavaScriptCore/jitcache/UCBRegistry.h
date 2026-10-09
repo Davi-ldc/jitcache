@@ -33,7 +33,6 @@
 #include <memory>
 #include <optional>
 #include <span>
-#include <variant>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
@@ -42,6 +41,7 @@
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/ThreadSafeRefCounted.h>
+#include <wtf/Variant.h>
 #include <wtf/Vector.h>
 
 namespace JSC {
@@ -116,7 +116,7 @@ struct RootIdentity { // FunctionConstructor or Builtin
     RefPtr<SourceProvider> suppliedDigestProvider;
 };
 
-using ExecutableIdentity = std::variant<ChildIdentity, RootIdentity>;
+using ExecutableIdentity = Variant<ChildIdentity, RootIdentity>;
 
 // Pending imports (section 6.4). One lives in its UCB's record from the moment the request point records it until the
 // install glue resolves it, and otherwise goes with the UCB. It never enters UnlinkedCodeBlock::m_unlinkedBaselineCode.
