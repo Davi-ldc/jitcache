@@ -16,10 +16,10 @@ unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
 Then run:
 
 ```sh
-bun --jitcache=./.jitcache --jitcache-role=producer --jitcache-producer-limit=max run server.ts
+bun --jitcache=./.jitcache --jitcache-role=p/c/p-c --jitcache-producer-limit=max run server.ts
 ```
 
-A `producer` saves each function's baseline code as it is compiled, and needs `--jitcache-producer-limit` (`max` sets no limit). A `consumer`, the default, runs from what a producer saved, and a `consumer-producer` uses the saved functions and keeps updating them when it learns more[^1].
+`p` saves each function's baseline code as it is compiled. A `consumer`, the default, runs from what a producer saved, and a `consumer-producer` uses the saved functions and keeps updating them when it learns more[^1].
 
 ```sh
 bun --jitcache=./.jitcache run server.ts
@@ -58,12 +58,6 @@ auto started = JSC::JITCache::start(vm, config); // Created, Opened, Busy, Rejec
 
 On `Busy`, another process is producing, and the host can call `start` again as a `Consumer`. `status(vm)` reports the session's state, progress and faults without doing any work. JITCache never saves on its own at exit, so a producing host chooses when to call `delta(vm)`, which saves what each function learned since its compile, usually when the instance is idle or about to stop; it calls it holding the API lock and no JSC-internal lock. The API returns results and never calls back, and `toJSON` turns any result into a log line. `JavaScriptCore/JITCacheMaintenance.h` declares `clean` and `compact`. The jsc shell takes the same flags as Bun, plus `--jitcache-delta-at-exit`.
 
-### How it works
-
-A producer records each function's baseline code while JavaScriptCore compiles it, marking every byte that depends on an address, and right after the compile saves it to a file of its own, with the function's bytecode and what the engine learned about it: type profiles, counters, and what each inline cache and call site has seen. Every write is atomic, so a crash never leaves half a function behind, and only one process produces at a time while any number consume. When the producer exits, Bun walks the live functions and saves each one again if it learned more since it compiled.
-
-A consumer that needs a function's bytecode reads it from the cache instead of parsing and generating it. At the function's first call, JITCache copies the saved code into executable memory, patches every recorded byte to this process's addresses, puts the saved profiles and counters back, and runs the function in baseline code from that call on. DFG and FTL, the optimizing tiers, still compile in each process, but they start from the producer's warm state, so they arrive sooner. Only baseline code is saved today; DFG and FTL code come next. A function whose source, options or binary differ misses and runs as it would without JITCache, and a damaged cache turns JITCache off for the process.
-
 ## Why
 
 JavaScript engines like JavaScriptCore and V8 have some of the best compiler tech in the world. To get close to high-performance statically typed languages like C, the engine records information about the types (and internal structures) while interpreting your code, and after a certain threshold it compiles progressively more optimized code (divided in 4 tiers), speculating that the types will stay stable.
@@ -76,11 +70,19 @@ The mechanism is incredible, but it was designed to serve the browser with ephem
 
 <img src="docs/images/sisifo.jpg" alt="Sisyphus pushing a boulder up a slope" width="50%">
 
-## How it was made
+## How 
+
+### it was made
 
 Claude doesn't know much about WebKit's internals, and a lot of what it assumes is wrong. So I took a month to study JSC and its JIT and documented everything in Portuguese (skills/reference/pt/), then cut the parts only a human needs, translated the rest to English (skills/reference/) and gave each doc its own agent to drain the reports other agents file against it, always keeping each one under 40,000 bytes. Then, heavily inspired by [Jarred's threads PR](https://github.com/oven-sh/WebKit/pull/249), I discussed the core design with Claude and serialized the conversation into THREAD.md. Them:
 
 ![The thread-prep workflow](docs/images/thread-prep.svg)
+
+### it works
+
+A producer records each function's baseline code while JavaScriptCore compiles it, marking every byte that depends on an address, and right after the compile saves it to a file of its own, with the function's bytecode and what the engine learned about it: type profiles, counters, and what each inline cache and call site has seen. Every write is atomic, so a crash never leaves half a function behind, and only one process produces at a time while any number consume. When the producer exits, Bun walks the live functions and saves each one again if it learned more since it compiled.
+
+A consumer that needs a function's bytecode reads it from the cache instead of parsing and generating it. At the function's first call, JITCache copies the saved code into executable memory, patches every recorded byte to this process's addresses, puts the saved profiles and counters back, and runs the function in baseline code from that call on. DFG and FTL, the optimizing tiers, still compile in each process, but they start from the producer's warm state, so they arrive sooner. Only baseline code is saved today; DFG and FTL code come next. A function whose source, options or binary differ misses and runs as it would without JITCache, and a damaged cache turns JITCache off for the process.
 
 ## FAQ
 
