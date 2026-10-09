@@ -137,7 +137,7 @@ Ref<ValidatedBody> ValidatedBody::createForTesting(const BodyKey& key, uint64_t 
         RELEASE_ASSERT(!previousKind || *previousKind < kind);
         previousKind = kind;
         CheckedSize aligned = bufferSize;
-        aligned += 7;
+        aligned += static_cast<size_t>(7);
         RELEASE_ASSERT(!aligned.hasOverflowed());
         offsets[i] = aligned.value() & ~static_cast<size_t>(7);
         CheckedSize end = offsets[i];
