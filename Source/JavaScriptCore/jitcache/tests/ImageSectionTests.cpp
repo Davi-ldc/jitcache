@@ -32,6 +32,7 @@
 #include "CallMode.h"
 #include "CodeBlock.h"
 #include "Completion.h"
+#include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
 #include "ImageSection.h"
 #include "ImageSupport.h"
@@ -504,7 +505,7 @@ static std::optional<Body> makeBody(TestContext& context, VM& vm)
         JITCACHE_FAIL("evaluating the test body threw"_s);
         return std::nullopt;
     }
-    auto* function = jsDynamicCast<JSFunction*>(globalObject->get(globalObject, Identifier::fromString(vm, "jitcacheImageSectionBody"_s)));
+    auto* function = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "jitcacheImageSectionBody"_s)));
     auto* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
     if (!codeBlock) {
         JITCACHE_FAIL("the test body has no CodeBlock"_s);
