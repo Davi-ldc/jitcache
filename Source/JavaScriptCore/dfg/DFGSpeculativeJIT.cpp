@@ -176,6 +176,8 @@ void SpeculativeJIT::compile()
 
     LinkBuffer linkBuffer(*this, m_codeBlock, LinkBuffer::Profile::DFG, JITCompilationCanFail);
     if (linkBuffer.didFailToAllocate()) {
+        // JITCache: Plan::finalize raises the executable-allocation fault this records (SPEC-integrator.md section 9).
+        m_graph.m_plan.noteExecutableAllocationFailure();
         m_graph.m_plan.setFinalizer(makeUnique<FailedFinalizer>(m_graph.m_plan));
         return;
     }
@@ -283,6 +285,8 @@ void SpeculativeJIT::compileFunction()
     // === Link ===
     LinkBuffer linkBuffer(*this, m_codeBlock, LinkBuffer::Profile::DFG, JITCompilationCanFail);
     if (linkBuffer.didFailToAllocate()) {
+        // JITCache: Plan::finalize raises the executable-allocation fault this records (SPEC-integrator.md section 9).
+        m_graph.m_plan.noteExecutableAllocationFailure();
         m_graph.m_plan.setFinalizer(makeUnique<FailedFinalizer>(m_graph.m_plan));
         return;
     }

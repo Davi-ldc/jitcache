@@ -77,6 +77,7 @@
 #include "DFGValueRepReductionPhase.h"
 #include "DFGVarargsForwardingPhase.h"
 #include "DFGVirtualRegisterAllocationPhase.h"
+#include "JITCacheFaults.h"
 #include "JSCJSValueInlines.h"
 #include "OperandsInlines.h"
 #include "ProfilerDatabase.h"
@@ -491,13 +492,16 @@ Plan::CompilationPath Plan::compileInThreadImpl()
         }
         
         if (state.allocationFailed) {
+            // JITCache: B3's link buffer, or Bun's FFI invoke thunk during lowering, found no executable memory.
+            noteExecutableAllocationFailure();
             FTL::fail(state);
             return FTLPath;
         }
 
         FTL::link(state);
-        
+
         if (state.allocationFailed) {
+            noteExecutableAllocationFailure();
             FTL::fail(state);
             return FTLPath;
         }
@@ -633,6 +637,22 @@ CompilationResult Plan::finalize()
 
     // We will establish new references from the code block to things. So, we need a barrier.
     m_vm->writeBarrier(m_codeBlock);
+
+    // JITCache: the callback writes the failure's effects (the baseline counter's deferral and the quick tier-up bit), so
+    // the executable-allocation fault comes first (SPEC-integrator.md section 9). A plan that failed for any other reason
+    // records nothing.
+    if (result == CompilationResult::CompilationFailed && m_failedForLackOfExecutableMemory)
+        JITCache::didFailExecutableAllocation(*m_vm, isFTL() ? JITCache::ExecutableAllocationSite::FTLPlan : JITCache::ExecutableAllocationSite::DFGPlan);
+#if ENABLE(JITCACHE_TWINS)
+    // Twins builds: one optimizing compile of the plan's tier for the body (SPEC-integrator.harness.md section 10.1).
+    if (result == CompilationResult::CompilationSuccessful) {
+        JITCache::BodyEventCounts& counts = m_codeBlock->unlinkedCodeBlock()->jitCacheEventCounts();
+        if (isFTL())
+            ++counts.ftlCompiles;
+        else
+            ++counts.dfgCompiles;
+    }
+#endif
 
     m_callback->compilationDidComplete(m_codeBlock, m_profiledDFGCodeBlock, result);
 

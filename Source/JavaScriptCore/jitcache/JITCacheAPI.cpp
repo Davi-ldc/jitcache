@@ -29,6 +29,7 @@
 #include "ArtifactStore.h"
 #include "ArtifactWriter.h"
 #include "JITCacheBench.h"
+#include "JITCacheBodyEvents.h"
 #include "JITCacheContainer.h"
 #include "JITCacheGlue.h"
 #include "JITCacheOptions.h"
@@ -833,6 +834,12 @@ void willDestroyVM(VM& vm)
 
 void didFinalizeHeap(VM& vm)
 {
+#if ENABLE(JITCACHE_TWINS)
+    // The UCBs lastChanceToFinalize destroyed retired their counts into the VM's totals, which no dump reads any more.
+    // They go for every VM, configured or not, so a later VM at this address starts from zero (harness sub-SPEC section
+    // 10.3).
+    forgetRetiredBodyEvents(vm);
+#endif
     VMState* state = vm.jitCacheState();
     if (!state)
         return;

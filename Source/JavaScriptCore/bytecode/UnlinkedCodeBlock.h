@@ -51,6 +51,28 @@
 #include <wtf/Vector.h>
 #include <wtf/text/UniquedStringImpl.h>
 
+#if ENABLE(JITCACHE_TWINS)
+namespace JSC::JITCache {
+
+// What this process did with one body (SPEC-integrator.harness.md section 10.1): every UCB starts at zero, whether
+// generated, decoded or imported, and no section carries the counts. Each writer runs on the VM thread or while it is
+// stopped, and every reader on the VM thread, so the counters are plain integers.
+struct BodyEventCounts {
+    uint64_t llintInstructions { 0 }; // offset 0, where the LLInt adds
+    uint64_t baselineCompiles { 0 };
+    uint64_t dfgCompiles { 0 };
+    uint64_t ftlCompiles { 0 };
+    uint64_t osrExits { 0 };
+    uint64_t jettisons { 0 };
+    uint64_t reoptimizations { 0 };
+};
+// countJITCacheInstruction (llint/LowLevelInterpreter.asm) adds at UnlinkedCodeBlock::m_jitCacheEventCounts, so
+// llintInstructions stays first.
+static_assert(!offsetof(BodyEventCounts, llintInstructions));
+
+} // namespace JSC::JITCache
+#endif
+
 namespace JSC {
 
 class BytecodeLivenessAnalysis;
@@ -483,6 +505,12 @@ public:
 
     BaselineExecutionCounter& llintExecuteCounter() LIFETIME_BOUND { return m_llintExecuteCounter; }
 
+#if ENABLE(JITCACHE_TWINS)
+    // JITCache twins builds: this body's event counts (SPEC-integrator.harness.md section 10.1).
+    JITCache::BodyEventCounts& jitCacheEventCounts() LIFETIME_BOUND { return m_jitCacheEventCounts; }
+    const JITCache::BodyEventCounts& jitCacheEventCounts() const LIFETIME_BOUND { return m_jitCacheEventCounts; }
+#endif
+
 private:
     using OutOfLineJumpTargets = UncheckedKeyHashMap<JSInstructionStream::Offset, int>;
 
@@ -497,6 +525,11 @@ private:
 #if ASSERT_ENABLED
     Lock m_cachedIdentifierUidsLock;
     UncheckedKeyHashSet<UniquedStringImpl*> m_cachedIdentifierUids;
+#endif
+
+#if ENABLE(JITCACHE_TWINS)
+    // The last data member (SPEC-integrator.md M10). The LLInt adds to its first field through LLIntOffsetsExtractor.
+    JITCache::BodyEventCounts m_jitCacheEventCounts;
 #endif
 
 protected:

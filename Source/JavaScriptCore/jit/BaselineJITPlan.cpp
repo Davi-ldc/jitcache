@@ -27,6 +27,7 @@
 #include "BaselineJITPlan.h"
 #include "LOLJIT.h"
 
+#include "JITCacheFaults.h"
 #include "JITCacheVMState.h"
 #include "JITSafepoint.h"
 #include "ProducerBudget.h"
@@ -112,6 +113,9 @@ CompilationResult BaselineJITPlan::finalize()
     CompilationResult result = JIT::finalizeOnMainThread(m_codeBlock, *this, m_jitCode);
     switch (result) {
     case CompilationResult::CompilationFailed:
+        // JITCache: a baseline plan fails only for lack of executable memory (JIT::link returns null only when its
+        // LinkBuffer failed to allocate), so the fault comes before the effects below (SPEC-integrator.md section 9).
+        JITCache::didFailExecutableAllocation(*m_vm, JITCache::ExecutableAllocationSite::BaselinePlan);
         CODEBLOCK_LOG_EVENT(m_codeBlock, "delayJITCompile", ("compilation failed"));
         dataLogLnIf(Options::verboseOSR(), "    JIT compilation failed.");
         m_codeBlock->dontJITAnytimeSoon();

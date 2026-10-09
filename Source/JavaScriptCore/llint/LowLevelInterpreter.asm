@@ -1097,7 +1097,20 @@ macro restoreStackPointerAfterCall()
     end
 end
 
+# JITCache twins builds: the frame's body begins one more LLInt instruction. It adds at offset 0 of
+# UnlinkedCodeBlock::m_jitCacheEventCounts, which is llintInstructions (SPEC-integrator.harness.md section 10.1). Its
+# callers are the points where the native tracer, or the slow path call_direct_eval calls next, makes a C call, so no
+# caller-saved register is live there and t0 is free.
+macro countJITCacheInstruction()
+    if JITCACHE_TWINS
+        loadp CodeBlock[cfr], t0
+        loadp CodeBlock::m_unlinkedCode[t0], t0
+        addq 1, UnlinkedCodeBlock::m_jitCacheEventCounts[t0]
+    end
+end
+
 macro traceExecution()
+    countJITCacheInstruction()
     if TRACING
         callSlowPath(_llint_trace)
     end
@@ -2586,7 +2599,9 @@ end)
 # and a PC to call, and that PC may be a dummy thunk that just
 # returns the JS value that the eval returned.
 
+# These three labels go straight to the slow path without traceExecution, so each counts its instruction itself.
 _llint_op_call_direct_eval:
+    countJITCacheInstruction()
     slowPathForCommonCall(
         op_call_direct_eval,
         narrow,
@@ -2596,6 +2611,7 @@ _llint_op_call_direct_eval:
         prepareForRegularCall)
 
 _llint_op_call_direct_eval_wide16:
+    countJITCacheInstruction()
     slowPathForCommonCall(
         op_call_direct_eval,
         wide16,
@@ -2605,6 +2621,7 @@ _llint_op_call_direct_eval_wide16:
         prepareForRegularCall)
 
 _llint_op_call_direct_eval_wide32:
+    countJITCacheInstruction()
     slowPathForCommonCall(
         op_call_direct_eval,
         wide32,

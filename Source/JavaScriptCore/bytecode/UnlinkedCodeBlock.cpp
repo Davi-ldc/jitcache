@@ -33,6 +33,7 @@
 #include "ClassInfo.h"
 #include "ExecutableInfo.h"
 #include "InstructionStream.h"
+#include "JITCacheBodyEvents.h"
 #include "JSCJSValueInlines.h"
 #include "UCBRequests.h"
 #include "UnlinkedMetadataTableInlines.h"
@@ -226,6 +227,11 @@ bool UnlinkedCodeBlock::typeProfilerExpressionInfoForBytecodeOffset(unsigned byt
 UnlinkedCodeBlock::~UnlinkedCodeBlock()
 {
     JITCache::unlinkedCodeBlockWillBeDestroyed(*this);
+#if ENABLE(JITCACHE_TWINS)
+    // The body's event counts join its VM's retired totals, which the body-event dump adds to the live UCBs' counts
+    // (SPEC-integrator.harness.md section 10.3). Retiring reads no registry entry, so it is independent of the hook above.
+    JITCache::retireBodyEventCounts(*this);
+#endif
     if (Options::returnEarlyFromInfiniteLoopsForFuzzing()) [[unlikely]] {
         if (auto* instructions = m_instructions.get()) {
             VM& vm = this->vm();

@@ -2546,6 +2546,12 @@ void CodeBlock::jettison(Profiler::JettisonReason reason, ReoptimizationMode mod
             }
         }
     }
+#if ENABLE(JITCACHE_TWINS)
+    // JITCache twins builds: past the early returns for a block already invalidated, the jettison counts against the
+    // body (SPEC-integrator.harness.md section 10.1). The UCB is still allocated in a collection's End phase, which
+    // sweeps nothing.
+    ++unlinkedCodeBlock()->jitCacheEventCounts().jettisons;
+#endif
     if (DFG::shouldDumpDisassembly())
         dataLog("    Did invalidate ", *this, "\n");
 
@@ -2554,6 +2560,9 @@ void CodeBlock::jettison(Profiler::JettisonReason reason, ReoptimizationMode mod
         // FIXME: Maybe this should call alternative().
         // https://bugs.webkit.org/show_bug.cgi?id=123677
         baselineAlternative()->countReoptimization();
+#if ENABLE(JITCACHE_TWINS)
+        ++unlinkedCodeBlock()->jitCacheEventCounts().reoptimizations;
+#endif
         if (DFG::shouldDumpDisassembly())
             dataLog("    Did count reoptimization for ", *this, "\n");
     }
