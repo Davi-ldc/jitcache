@@ -33,6 +33,8 @@
 #include "BinarySwitch.h"
 #include "BytecodeGenerator.h"
 #include "Exception.h"
+#include "ImageEmission.h"
+#include "ImageRecorder.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "JSCast.h"
@@ -56,7 +58,12 @@ void JIT::emit_op_mov(const JSInstruction* currentInstruction)
 
     if (src.isConstant()) {
         if (m_profiledCodeBlock->isConstantOwnedByUnlinkedCodeBlock(src)) {
-            storeValue(m_unlinkedCodeBlock->getConstant(src), addressFor(dst));
+            // JITCache: a cell the UCB owns is a reference; any other constant is a literal (census C1).
+            JSValue value = m_unlinkedCodeBlock->getConstant(src);
+            if (value && value.isCell())
+                JITCache::storeReferenceValue(*this, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, src), addressFor(dst), JITCache::StoreValueKind::Value);
+            else
+                storeValue(value, addressFor(dst));
         } else {
             loadCodeBlockConstant(src, regT0);
             storeValue(regT0, addressFor(dst));
@@ -107,7 +114,7 @@ void JIT::emitSlow_op_new_object(const JSInstruction* currentInstruction, Vector
 
     auto bytecode = currentInstruction->as<OpNewObject>();
     VirtualRegister dst = bytecode.m_dst;
-    callOperationNoExceptionCheck(operationNewObject, TrustedImmPtr(&vm()), structureReg);
+    callOperationNoExceptionCheck(operationNewObject, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), structureReg);
     emitPutVirtualRegister(dst, returnValueGPR);
 }
 
@@ -394,7 +401,7 @@ void JIT::emit_op_jfalse(const JSInstruction* currentInstruction)
     isNotInt32.link(this);
     addJump(branchIfOther(valueGPR, scratch1GPR), target);
 
-    nearCallThunk(CodeLocationLabel { vm().getCTIStub(valueIsFalseyGenerator).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::ValueIsFalsey));
     addJump(branchTest32(NonZero, regT0), target);
     fallThrough.link(this);
 }
@@ -570,7 +577,7 @@ void JIT::emit_op_jtrue(const JSInstruction* currentInstruction)
     isNotInt32.link(this);
     fallThrough.append(branchIfOther(valueGPR, scratch1GPR));
 
-    nearCallThunk(CodeLocationLabel { vm().getCTIStub(valueIsTruthyGenerator).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::ValueIsTruthy));
     addJump(branchTest32(NonZero, regT0), target);
     fallThrough.link(this);
 }
@@ -635,7 +642,7 @@ void JIT::emit_op_throw(const JSInstruction* currentInstruction)
 
     emitGetVirtualRegister(bytecode.m_value, thrownValueGPR);
     move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-    jumpThunk(CodeLocationLabel { vm().getCTIStub(op_throw_handlerGenerator).retaggedCode<NoPtrTag>() });
+    JITCache::jumpSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::OpThrowHandler));
 }
 
 MacroAssemblerCodeRef<JITThunkPtrTag> JIT::op_throw_handlerGenerator(VM& vm)
@@ -733,7 +740,8 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         return string;
     };
 
-    auto emitStringConstantFastPath = [&](GPRReg stringGPR, GPRReg knownStringGPR, JSString* string) {
+    // JITCache: atomConstant is the operand tryGetAtomStringConstant chose, and its atom is a reference (census C6).
+    auto emitStringConstantFastPath = [&](GPRReg stringGPR, GPRReg knownStringGPR, VirtualRegister atomConstant) {
         JumpList fallThrough;
         JumpList equals;
         moveTrustedValue(jsBoolean(!std::is_same_v<Op, OpStricteq>), regT2);
@@ -744,7 +752,7 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         fallThrough.append(branchIfNotString(stringGPR));
         loadPtr(Address(stringGPR, JSString::offsetOfValue()), regT5);
         addSlowCase(branchIfNotAtomStringImpl(stringGPR, regT5));
-        fallThrough.append(branchPtr(NotEqual, regT5, TrustedImmPtr(string->tryGetValueImpl())));
+        fallThrough.append(JITCache::branchPtrWithReference(*this, NotEqual, regT5, JITCache::ImageReference::ucbConstantAtom(vm(), *m_unlinkedCodeBlock, atomConstant)));
 
         equals.link(this);
         moveTrustedValue(jsBoolean(std::is_same_v<Op, OpStricteq>), regT2);
@@ -753,13 +761,13 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         emitPutVirtualRegister(dst, regT2);
     };
 
-    if (auto* string = tryGetAtomStringConstant(src1)) {
-        emitStringConstantFastPath(regT1, regT0, string);
+    if (tryGetAtomStringConstant(src1)) {
+        emitStringConstantFastPath(regT1, regT0, src1);
         return;
     }
 
-    if (auto* string = tryGetAtomStringConstant(src2)) {
-        emitStringConstantFastPath(regT0, regT1, string);
+    if (tryGetAtomStringConstant(src2)) {
+        emitStringConstantFastPath(regT0, regT1, src2);
         return;
     }
 
@@ -909,8 +917,10 @@ void JIT::compileOpStrictEqJump(const JSInstruction* currentInstruction)
         return string;
     };
 
-    auto emitStringConstantFastPath = [&](GPRReg stringGPR, GPRReg knownStringGPR, JSString* string) {
+    // JITCache: atomConstant is the operand tryGetAtomStringConstant chose, and its atom is a reference (census C7).
+    auto emitStringConstantFastPath = [&](GPRReg stringGPR, GPRReg knownStringGPR, VirtualRegister atomConstant) {
         JumpList fallThrough;
+        auto atom = JITCache::ImageReference::ucbConstantAtom(vm(), *m_unlinkedCodeBlock, atomConstant);
         if constexpr (std::is_same_v<Op, OpJstricteq>) {
             addJump(branch64(Equal, stringGPR, knownStringGPR), target);
             fallThrough.append(branchIfNotCell(stringGPR));
@@ -919,7 +929,7 @@ void JIT::compileOpStrictEqJump(const JSInstruction* currentInstruction)
             loadPtr(Address(stringGPR, JSString::offsetOfValue()), regT2);
             addSlowCase(branchIfRopeStringImpl(regT2));
             addSlowCase(branchTest32(Zero, Address(regT2, StringImpl::flagsOffset()), TrustedImm32(StringImpl::flagIsAtom())));
-            addJump(branchPtr(Equal, regT2, TrustedImmPtr(string->tryGetValueImpl())), target);
+            addJump(JITCache::branchPtrWithReference(*this, Equal, regT2, atom), target);
         } else {
             fallThrough.append(branch64(Equal, stringGPR, knownStringGPR));
             addJump(branchIfNotCell(stringGPR), target);
@@ -928,18 +938,18 @@ void JIT::compileOpStrictEqJump(const JSInstruction* currentInstruction)
             loadPtr(Address(stringGPR, JSString::offsetOfValue()), regT2);
             addSlowCase(branchIfRopeStringImpl(regT2));
             addSlowCase(branchTest32(Zero, Address(regT2, StringImpl::flagsOffset()), TrustedImm32(StringImpl::flagIsAtom())));
-            addJump(branchPtr(NotEqual, regT2, TrustedImmPtr(string->tryGetValueImpl())), target);
+            addJump(JITCache::branchPtrWithReference(*this, NotEqual, regT2, atom), target);
         }
         fallThrough.link(this);
     };
 
-    if (auto* string = tryGetAtomStringConstant(src1)) {
-        emitStringConstantFastPath(regT1, regT0, string);
+    if (tryGetAtomStringConstant(src1)) {
+        emitStringConstantFastPath(regT1, regT0, src1);
         return;
     }
 
-    if (auto* string = tryGetAtomStringConstant(src2)) {
-        emitStringConstantFastPath(regT0, regT1, string);
+    if (tryGetAtomStringConstant(src2)) {
+        emitStringConstantFastPath(regT0, regT1, src2);
         return;
     }
 
@@ -1148,7 +1158,7 @@ void JIT::emit_op_catch(const JSInstruction* currentInstruction)
 
     restoreCalleeSavesFromEntryFrameCalleeSavesBuffer(vm().topEntryFrame);
 
-    move(TrustedImmPtr(m_vm), regT3);
+    JITCache::moveReference(*this, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), regT3);
     loadPtr(Address(regT3, VM::callFrameForCatchOffset()), callFrameRegister);
     storePtr(TrustedImmPtr(nullptr), Address(regT3, VM::callFrameForCatchOffset()));
 
@@ -1164,7 +1174,7 @@ void JIT::emit_op_catch(const JSInstruction* currentInstruction)
         loadPtr(Address(regT0, CodeBlock::offsetOfJITData()), GPRInfo::jitDataRegister);
     }
 
-    callOperationNoExceptionCheck(operationRetrieveAndClearExceptionIfCatchable, TrustedImmPtr(&vm()));
+    callOperationNoExceptionCheck(operationRetrieveAndClearExceptionIfCatchable, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM));
     Jump isCatchableException = branchTest32(NonZero, returnValueGPR);
     jumpToExceptionHandler(vm());
     isCatchableException.link(this);
@@ -1180,7 +1190,7 @@ void JIT::emit_op_catch(const JSInstruction* currentInstruction)
     // argument type proofs, storing locals to the buffer, etc
     // https://bugs.webkit.org/show_bug.cgi?id=175598
 
-    callOperationNoExceptionCheck(operationTryOSREnterAtCatchAndValueProfile, TrustedImmPtr(&vm()), m_bytecodeIndex.asBits());
+    callOperationNoExceptionCheck(operationTryOSREnterAtCatchAndValueProfile, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), m_bytecodeIndex.asBits());
     auto skipOSREntry = branchTestPtr(Zero, returnValueGPR);
     emitPutToCallFrameHeader(returnValueGPR2, CallFrameSlot::codeBlock);
     emitRestoreCalleeSaves();
@@ -1239,7 +1249,7 @@ void JIT::emit_op_switch_imm(const JSInstruction* currentInstruction)
         linkedTable.ensureCTITable(unlinkedTable);
         sub32(Imm32(unlinkedTable.m_min), regT0);
         addJump(branch32(AboveOrEqual, regT0, Imm32(linkedTable.m_ctiOffsets.size())), defaultOffset);
-        move(TrustedImmPtr(linkedTable.m_ctiOffsets.mutableSpan().data()), regT2);
+        JITCache::moveReference(*this, JITCache::ImageReference::switchTableBase(static_cast<unsigned>(tableIndex), linkedTable.m_ctiOffsets.mutableSpan().data()), regT2);
         loadPtr(BaseIndex(regT2, regT0, ScalePtr), regT2);
         farJump(regT2, JSSwitchPtrTag);
     }
@@ -1300,7 +1310,7 @@ void JIT::emit_op_switch_char(const JSInstruction* currentInstruction)
         linkedTable.ensureCTITable(unlinkedTable);
         sub32(Imm32(unlinkedTable.m_min), regT5);
         addJump(branch32(AboveOrEqual, regT5, Imm32(linkedTable.m_ctiOffsets.size())), defaultOffset);
-        move(TrustedImmPtr(linkedTable.m_ctiOffsets.mutableSpan().data()), regT2);
+        JITCache::moveReference(*this, JITCache::ImageReference::switchTableBase(static_cast<unsigned>(tableIndex), linkedTable.m_ctiOffsets.mutableSpan().data()), regT2);
         loadPtr(BaseIndex(regT2, regT5, ScalePtr), regT2);
         farJump(regT2, JSSwitchPtrTag);
     }
@@ -1350,9 +1360,21 @@ void JIT::emit_op_switch_string(const JSInstruction* currentInstruction)
         slowCases.append(branchIfNotString(scrutineeGPR));
         slowCases.append(loadCacheableIdentifierImpl(scrutineeGPR, scratch1GPR, /* propertyIsString */ true, /* propertyIsSymbol */ false));
 
+        // JITCache: the consumer keeps this tree and writes its own atoms into it by rank, so under a recorder every
+        // comparison against a key and every case jump carry a fixup of the key's rank (census C13, SPEC-image.md
+        // section 3.7). The recording outlives the switch that emits through it.
+        std::optional<JITCache::StringSwitchRecording> recording;
+        if (m_imageRecorder) [[unlikely]]
+            recording.emplace(*m_imageRecorder, static_cast<unsigned>(tableIndex));
         BinarySwitch binarySwitch(scratch1GPR, caseKeys.span(), BinarySwitch::IntPtr);
-        while (binarySwitch.advance(*this))
-            addJump(jump(), caseTargets[binarySwitch.caseIndex()]);
+        if (recording) [[unlikely]]
+            binarySwitch.setRankedComparisons(&*recording);
+        while (binarySwitch.advance(*this)) {
+            Jump caseJump = jump();
+            if (recording) [[unlikely]]
+                recording->recordCase(caseJump, binarySwitch.caseRank());
+            addJump(caseJump, caseTargets[binarySwitch.caseIndex()]);
+        }
         addJump(binarySwitch.fallThrough(), defaultOffset);
 
         slowCases.link(this);
@@ -1436,7 +1458,7 @@ void JIT::emitGetScope(VirtualRegister destination)
 
 void JIT::emitCheckTraps()
 {
-    addSlowCase(branchTest32(NonZero, AbsoluteAddress(m_vm->traps().trapBitsAddress()), TrustedImm32(VMTraps::AsyncEvents)));
+    addSlowCase(JITCache::branchTest32AtReference(*this, NonZero, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::TrapBits), TrustedImm32(VMTraps::AsyncEvents)));
 }
 
 void JIT::emit_op_enter(const JSInstruction*)
@@ -1455,7 +1477,7 @@ void JIT::emit_op_enter(const JSInstruction*)
     using BaselineJITRegisters::Enter::scratch3GPR;
 
     if (m_profiledCodeBlock->couldBeTainted())
-        store8(TrustedImm32(1), vm().addressOfMightBeExecutingTaintedCode());
+        JITCache::store8AtReference(*this, TrustedImm32(1), JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::MightBeExecutingTaintedCode));
 
     size_t startLocal = CodeBlock::llintBaselineCalleeSaveSpaceAsVirtualRegisters();
     int startOffset = virtualRegisterForLocal(startLocal).offset();
@@ -1730,7 +1752,7 @@ void JIT::emitSlow_op_loop_hint(const JSInstruction* currentInstruction, Vector<
 
         copyLLIntBaselineCalleeSavesFromFrameOrRegisterToEntryFrameCalleeSavesBuffer(vm().topEntryFrame);
 
-        callOperationNoExceptionCheck(operationOptimize, TrustedImmPtr(&vm()), m_bytecodeIndex.asBits());
+        callOperationNoExceptionCheck(operationOptimize, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::VM), m_bytecodeIndex.asBits());
         Jump noOptimizedEntry = branchTestPtr(Zero, returnValueGPR);
         if (ASSERT_ENABLED) {
             Jump ok = branchPtr(MacroAssembler::Above, returnValueGPR, TrustedImmPtr(std::bit_cast<void*>(static_cast<intptr_t>(1000))));
@@ -1759,18 +1781,25 @@ void JIT::emit_op_nop(const JSInstruction*)
 
 void JIT::emit_op_super_sampler_begin(const JSInstruction*)
 {
+    // JITCache: only builtin-mode parsing produces this opcode, and its counter is process data no target names
+    // (census C20).
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->markUnrecordable(JITCache::Unrecordable::SuperSamplerOpcode);
     add32(TrustedImm32(1), AbsoluteAddress(std::bit_cast<void*>(&g_superSamplerCount)));
 }
 
 void JIT::emit_op_super_sampler_end(const JSInstruction*)
 {
+    // JITCache: as in emit_op_super_sampler_begin (census C20).
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->markUnrecordable(JITCache::Unrecordable::SuperSamplerOpcode);
     sub32(TrustedImm32(1), AbsoluteAddress(std::bit_cast<void*>(&g_superSamplerCount)));
 }
 
 void JIT::emitSlow_op_enter(const JSInstruction*, Vector<SlowCaseEntry>::iterator& iter)
 {
     linkAllSlowCases(iter);
-    nearCallThunk(CodeLocationLabel { vm().getCTIStub(op_enter_handlerGenerator).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::OpEnterHandler));
 }
 
 void JIT::emitSlow_op_check_traps(const JSInstruction*, Vector<SlowCaseEntry>::iterator& iter)
@@ -1782,7 +1811,7 @@ void JIT::emitSlow_op_check_traps(const JSInstruction*, Vector<SlowCaseEntry>::i
     using BaselineJITRegisters::CheckTraps::bytecodeOffsetGPR;
 
     move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-    nearCallThunk(CodeLocationLabel { vm().getCTIStub(op_check_traps_handlerGenerator).retaggedCode<NoPtrTag>() });
+    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::OpCheckTrapsHandler));
 }
 
 MacroAssemblerCodeRef<JITThunkPtrTag> JIT::op_check_traps_handlerGenerator(VM& vm)
@@ -1818,7 +1847,8 @@ void JIT::emit_op_new_reg_exp(const JSInstruction* currentInstruction)
     VirtualRegister regexp = bytecode.m_regexp;
     GPRReg globalGPR = argumentGPR0;
     loadGlobalObject(globalGPR);
-    callOperation(operationNewRegExp, globalGPR, TrustedImmPtr(uncheckedDowncast<RegExp>(m_unlinkedCodeBlock->getConstant(regexp))));
+    ASSERT(is<RegExp>(m_unlinkedCodeBlock->getConstant(regexp)));
+    callOperation(operationNewRegExp, globalGPR, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, regexp));
     emitPutVirtualRegister(dst, returnValueGPR);
 }
 
@@ -1995,6 +2025,11 @@ void JIT::emit_op_create_cloned_arguments(const JSInstruction* currentInstructio
 void JIT::emit_op_profile_type(const JSInstruction* currentInstruction)
 {
     m_isShareable = false;
+    // JITCache: code other CodeBlocks may not share is never captured, and NotShareable says why. The record takes that
+    // reason here, before this template's pointer argument to operationProcessTypeProfilerLog meets the guard on pointer
+    // arguments and gives it another; the template itself stays native (census C24).
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->markUnrecordable(JITCache::Unrecordable::NotShareable);
 
     auto bytecode = currentInstruction->as<OpProfileType>();
     auto& metadata = bytecode.metadata(m_profiledCodeBlock);
@@ -2094,6 +2129,9 @@ void JIT::emit_op_log_shadow_chicken_tail(const JSInstruction* currentInstructio
 void JIT::emit_op_profile_control_flow(const JSInstruction* currentInstruction)
 {
     m_isShareable = false;
+    // JITCache: as in emit_op_profile_type (census C24).
+    if (m_imageRecorder) [[unlikely]]
+        m_imageRecorder->markUnrecordable(JITCache::Unrecordable::NotShareable);
 
     auto bytecode = currentInstruction->as<OpProfileControlFlow>();
     auto& metadata = bytecode.metadata(m_profiledCodeBlock);

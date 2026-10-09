@@ -64,6 +64,11 @@ namespace ImageRecordingTestsInternal {
 // immediate on x86_64) draws the same in both.
 static constexpr uint32_t assemblerSeed = 0x5eed1234;
 
+// A seed whose first two draws are 0 modulo MacroAssembler::BlindingModulus (64). On x86_64, MacroAssembler::shouldBlind
+// blinds an untrusted 64-bit cell pointer exactly when two draws are: one while it screens the pointer as a double, and
+// one after. So the first untrusted cell immediate an assembler seeded with this emits is blinded.
+static constexpr uint32_t blindingSeed = 0x5eefa81a;
+
 static ImageTarget makeTarget(TargetKind kind, uint32_t a = 0)
 {
     return ImageTarget { .kind = kind, .a = a, .b = 0, .payload = 0 };
@@ -361,18 +366,43 @@ static bool sameEmission(CCallHelpers& a, CCallHelpers& b)
 #endif
 }
 
-// I4: helper, without a recorder, emits exactly what native does, both starting from the same random seed.
+// I4: helper, without a recorder, emits exactly what native does, both starting from seed.
 template<typename Native, typename Helper>
-static void checkNativeEmission(TestContext& context, ASCIILiteral name, const Native& native, const Helper& helper)
+static void checkNativeEmission(TestContext& context, ASCIILiteral name, const Native& native, const Helper& helper, uint32_t seed = assemblerSeed)
 {
     CCallHelpers nativeJIT;
     CCallHelpers helperJIT;
-    nativeJIT.seedRandomForTwins(assemblerSeed);
-    helperJIT.seedRandomForTwins(assemblerSeed);
+    nativeJIT.seedRandomForTwins(seed);
+    helperJIT.seedRandomForTwins(seed);
     native(nativeJIT);
     helper(helperJIT);
     if (!sameEmission(nativeJIT, helperJIT))
         JITCACHE_FAIL(makeString("I4: "_s, name, " differs from the native sequence"_s));
+}
+
+// Whether native, started from seed, blinds: on x86_64, the one architecture that blinds, it must emit differently from
+// trusted, the same sequence with every immediate trusted, which never blinds and draws nothing. An I4 check from that
+// seed then fails a helper that emits the trusted form where native's immediate is untrusted. Elsewhere nothing blinds,
+// so there is nothing to assert.
+template<typename Native, typename Trusted>
+static void checkNativeSequenceBlinds(TestContext& context, ASCIILiteral name, uint32_t seed, const Native& native, const Trusted& trusted)
+{
+#if CPU(X86_64)
+    CCallHelpers nativeJIT;
+    CCallHelpers trustedJIT;
+    nativeJIT.seedRandomForTwins(seed);
+    trustedJIT.seedRandomForTwins(seed);
+    native(nativeJIT);
+    trusted(trustedJIT);
+    if (sameEmission(nativeJIT, trustedJIT))
+        JITCACHE_FAIL(makeString(name, ": the native sequence does not blind under the seed its I4 check starts from"_s));
+#else
+    UNUSED_PARAM(context);
+    UNUSED_PARAM(name);
+    UNUSED_PARAM(seed);
+    UNUSED_PARAM(native);
+    UNUSED_PARAM(trusted);
+#endif
 }
 
 struct RecordedCode {
@@ -473,19 +503,31 @@ JITCACHE_TEST(imageHelpersEmitNativeWithoutRecorder, Yes)
     });
     if (constant) {
         JSValue constantValue = unlinkedCodeBlock.getConstant(*constant);
-        check("storeReferenceValue(Value)"_s, [&] (CCallHelpers& jit) {
+        // The two helpers whose native sequence is an untrusted Imm64, which on x86_64 draws from the random source and
+        // may be blinded. Each check starts from the seed under which the native sequence blinds, so that a helper that
+        // emitted the trusted form, which draws nothing, would fail it. The second move shows the draws stay in step
+        // after a blinding.
+        auto nativeStore = [&] (CCallHelpers& jit) {
             jit.storeValue(constantValue, Address(regT1, 8));
-        }, [&] (CCallHelpers& jit) {
-            storeReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), Address(regT1, 8), StoreValueKind::Value);
+        };
+        checkNativeSequenceBlinds(context, "storeReferenceValue(Value)"_s, blindingSeed, nativeStore, [&] (CCallHelpers& jit) {
+            jit.storeTrustedValue(constantValue, Address(regT1, 8));
         });
-        // An untrusted Imm64, which on x86_64 draws from the random source and may be blinded, as the native move does.
-        check("moveReferenceValue"_s, [&] (CCallHelpers& jit) {
+        checkNativeEmission(context, "storeReferenceValue(Value)"_s, nativeStore, [&] (CCallHelpers& jit) {
+            storeReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), Address(regT1, 8), StoreValueKind::Value);
+        }, blindingSeed);
+        auto nativeMoves = [&] (CCallHelpers& jit) {
             jit.moveValue(constantValue, regT0);
             jit.moveValue(constantValue, regT2);
-        }, [&] (CCallHelpers& jit) {
+        };
+        checkNativeSequenceBlinds(context, "moveReferenceValue"_s, blindingSeed, nativeMoves, [&] (CCallHelpers& jit) {
+            jit.moveTrustedValue(constantValue, regT0);
+            jit.moveTrustedValue(constantValue, regT2);
+        });
+        checkNativeEmission(context, "moveReferenceValue"_s, nativeMoves, [&] (CCallHelpers& jit) {
             moveReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), regT0);
             moveReferenceValue(jit, ImageReference::ucbConstantCell(vm, unlinkedCodeBlock, *constant), regT2);
-        });
+        }, blindingSeed);
         check("branchPtrWithReference(atom)"_s, [&] (CCallHelpers& jit) {
             jit.branchPtr(CCallHelpers::Equal, regT2, TrustedImmPtr(asString(constantValue)->tryGetValueImpl())).link(&jit);
         }, [&] (CCallHelpers& jit) {

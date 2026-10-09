@@ -28,6 +28,7 @@
 #if ENABLE(JIT)
 #include "BytecodeOperandsForCheckpoint.h"
 #include "CommonSlowPathsInlines.h"
+#include "ImageEmission.h"
 #include "ImageTypes.h"
 #include "JIT.h"
 #include "JSCInlines.h"
@@ -54,6 +55,11 @@ constexpr JITCache::ImageTarget commonThunk(CommonJITThunkID thunk)
 constexpr JITCache::ImageTarget inlineCacheSlowPathThunk(AccessType accessType)
 {
     return JITCache::ImageTarget { .kind = JITCache::TargetKind::InlineCacheSlowPathThunk, .a = static_cast<uint32_t>(accessType), .b = 0, .payload = 0 };
+}
+
+constexpr JITCache::ImageTarget processThunk(JITCache::ProcessThunk thunk)
+{
+    return JITCache::ImageTarget { .kind = JITCache::TargetKind::ProcessThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
 }
 
 } // namespace JITCacheSupportKey
@@ -125,7 +131,7 @@ ALWAYS_INLINE MacroAssembler::Call JIT::appendCallWithExceptionCheck(const CodeP
     using ResultType = typename FunctionTraits<OperationType>::ResultType;
     if constexpr (isExceptionOperationResult<ResultType>) {
 #if ASSERT_ENABLED
-        Jump ok = branchPtr(Equal, AbsoluteAddress(vm().addressOfException()), operationExceptionRegister<ResultType>());
+        Jump ok = JITCache::branchPtrAtReference(*this, Equal, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::Exception), operationExceptionRegister<ResultType>());
         breakpoint();
         ok.link(this);
 #endif
@@ -143,7 +149,7 @@ ALWAYS_INLINE void JIT::appendCallWithExceptionCheck(Address function)
     using ResultType = typename FunctionTraits<OperationType>::ResultType;
     if constexpr (isExceptionOperationResult<ResultType>) {
 #if ASSERT_ENABLED
-        Jump ok = branchPtr(Equal, AbsoluteAddress(vm().addressOfException()), operationExceptionRegister<ResultType>());
+        Jump ok = JITCache::branchPtrAtReference(*this, Equal, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::Exception), operationExceptionRegister<ResultType>());
         breakpoint();
         ok.link(this);
 #endif
@@ -386,9 +392,14 @@ ALWAYS_INLINE void JIT::emitGetVirtualRegister(VirtualRegister src, GPRReg dst)
 {
     ASSERT(m_bytecodeIndex); // This method should only be called during hot/cold path generation, so that m_bytecodeIndex is set.
     if (src.isConstant()) {
-        if (m_profiledCodeBlock->isConstantOwnedByUnlinkedCodeBlock(src))
-            moveValue(m_unlinkedCodeBlock->getConstant(src), dst);
-        else
+        if (m_profiledCodeBlock->isConstantOwnedByUnlinkedCodeBlock(src)) {
+            // JITCache: a cell the UCB owns is a reference; any other constant is a literal (census B6).
+            JSValue value = m_unlinkedCodeBlock->getConstant(src);
+            if (value && value.isCell())
+                JITCache::moveReferenceValue(*this, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, src), dst);
+            else
+                moveValue(value, dst);
+        } else
             loadCodeBlockConstant(src, dst);
         return;
     }
@@ -675,7 +686,6 @@ auto JIT::mathICGeneratorFor(const UnlinkedCodeBlock& unlinkedCodeBlock, const J
         return Generator(leftOperand, rightOperand, resultGPR, leftGPR, rightGPR, fpRegT0, fpRegT1, scratchGPR);
     }
 }
-
 
 } // namespace JSC
 

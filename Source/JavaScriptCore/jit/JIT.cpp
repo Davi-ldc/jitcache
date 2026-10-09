@@ -716,8 +716,18 @@ void JIT::emitConsistencyCheck()
     m_consistencyCheckLabel = label();
     move(TrustedImm32(-stackPointerOffsetFor(m_unlinkedCodeBlock)), regT0);
     m_bytecodeIndex = BytecodeIndex(0);
-    nearTailCallThunk(CodeLocationLabel { vm().getCTIStub(consistencyCheckGenerator).retaggedCode<NoPtrTag>() });
+    JITCache::nearTailCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::ConsistencyCheck));
     m_bytecodeIndex = BytecodeIndex(); // Reset this, in order to guard its use with ASSERTs.
+}
+#endif
+
+#if ENABLE(JITCACHE_TWINS)
+void JIT::setJITCacheTwin(Ref<JITCache::ProducerBudget>&& budget, const JITCache::TwinSeeds& seeds, const JITCache::TwinCompileInputs& compileInputs)
+{
+    // Before the compilation, which then attaches this recorder instead of creating one, in any VM (SPEC-image.md
+    // section 4.1).
+    ASSERT(!m_imageRecorder);
+    m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, WTF::move(budget), seeds, compileInputs);
 }
 #endif
 
@@ -739,9 +749,10 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
         break;
     }
 
-    // JITCache: the compilation records its image when its plan says the UCB has a record and the VM still produces
-    // (SPEC-image.md section 4.1). The recorder is attached before anything is emitted, and takes the facts the code
-    // bakes from this CodeBlock without a guard: the capability class read above and the taint (section 7).
+    // JITCache: the compilation records its image when its plan says the UCB has a record and the VM still produces, or
+    // when setJITCacheTwin already gave it a twin recorder (SPEC-image.md section 4.1). The recorder is attached before
+    // anything is emitted, and takes the facts the code bakes from this CodeBlock without a guard: the capability class
+    // read above and the taint (section 7).
     if (!m_imageRecorder && m_plan.jitCacheRecordsImage()) {
         if (auto* context = JITCache::producerContext(vm()))
             m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, context->budget());
@@ -792,7 +803,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     int frameTopOffset = stackPointerOffsetFor(m_unlinkedCodeBlock) * sizeof(Register);
     addPtr(TrustedImm32(frameTopOffset), callFrameRegister, regT1);
     JumpList stackOverflow;
-    stackOverflow.append(branchPtr(GreaterThan, AbsoluteAddress(m_vm->addressOfSoftStackLimit()), regT1));
+    stackOverflow.append(JITCache::branchPtrAtReference(*this, GreaterThan, JITCache::ImageReference::vmAddress(vm(), JITCache::VMAddress::SoftStackLimit), regT1));
 
     move(regT1, stackPointerRegister);
     checkStackPointerAlignment();
@@ -855,7 +866,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
         tagPtr(NoPtrTag, linkRegister);
         move(linkRegister, GPRInfo::argumentGPR1);
 #endif
-        nearCallThunk(CodeLocationLabel { LLInt::arityFixup() });
+        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::processThunk(JITCache::ProcessThunk::ArityFixup));
 #if CPU(X86_64)
         push(GPRInfo::argumentGPR1);
 #else
@@ -874,7 +885,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     emitFunctionPrologue();
     m_bytecodeIndex = BytecodeIndex(0);
     stackOverflow.link(this);
-    jumpThunk(CodeLocationLabel(vm().getCTIStub(CommonJITThunkID::ThrowStackOverflowAtPrologue).retaggedCode<NoPtrTag>()));
+    JITCache::jumpSupport(*this, vm(), JITCacheSupportKey::commonThunk(CommonJITThunkID::ThrowStackOverflowAtPrologue));
 
     // JITCache: on ARM64, one veneer per target of the conditional jumps that leave the image, after all other code
     // (SPEC-image.md section 4.5). Nothing on x86_64.
@@ -1136,7 +1147,7 @@ Seconds JIT::totalCompileTime()
 
 void JIT::exceptionCheck(Jump jumpToHandler)
 {
-    JITCache::linkJumpToSupport(*this, vm(), jumpToHandler, JITCache::ImageTarget { .kind = JITCache::TargetKind::CommonThunk, .a = static_cast<uint32_t>(CommonJITThunkID::HandleException), .b = 0, .payload = 0 });
+    JITCache::linkJumpToSupport(*this, vm(), jumpToHandler, JITCacheSupportKey::commonThunk(CommonJITThunkID::HandleException));
 }
 
 void JIT::exceptionCheck()
