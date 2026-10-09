@@ -31,11 +31,11 @@
 #include <initializer_list>
 #include <memory>
 #include <stdint.h>
-#include <variant>
 #include <wtf/ForbidHeapAllocation.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
+#include <wtf/Variant.h>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/StringBuilder.h>
 #include <wtf/text/WTFString.h>
@@ -60,7 +60,7 @@ class BodyKey;
 
 struct BenchField {
     ASCIILiteral name; // a nested field joins its parts with '.', as "restore.carried"
-    std::variant<std::nullptr_t, bool, int64_t, uint64_t, double, String> value; // a key as a lowercase hex String
+    Variant<std::nullptr_t, bool, int64_t, uint64_t, double, String> value; // WTF's Variant, which WTF::switchOn visits; a key as a lowercase hex String
 };
 
 class BenchReport final {
