@@ -95,7 +95,7 @@ static std::optional<Body> makeBody(TestContext& context, VM& vm)
         JITCACHE_FAIL("evaluating the test body threw"_s);
         return std::nullopt;
     }
-    auto* function = jsDynamicCast<JSFunction*>(globalObject->get(globalObject, Identifier::fromString(vm, "f"_s)));
+    auto* function = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "f"_s)));
     auto* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
     if (!codeBlock) {
         JITCACHE_FAIL("the test body has no CodeBlock"_s);
@@ -1415,7 +1415,7 @@ JITCACHE_TEST_WITH_OPTIONS(imageNegateProfilesThroughICAfterRegeneration, Yes, "
 
     if (!run("function negate(x) { return -x; } negate(1); negate(1.5);"_s))
         return;
-    auto* function = jsDynamicCast<JSFunction*>(globalObject->get(globalObject, Identifier::fromString(vm, "negate"_s)));
+    auto* function = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "negate"_s)));
     CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
     if (!codeBlock || codeBlock->jitType() != JITType::BaselineJIT) {
         JITCACHE_FAIL("negate has no baseline CodeBlock"_s);
@@ -1491,7 +1491,7 @@ JITCACHE_TEST(imageGetFromScopeKeysTheThunkTheNativeChainLinks, Yes)
         ResolveType type;
     };
     for (auto& reader : { Reader { "readCaptured"_s, "captured"_s, ClosureVarWithVarInjectionChecks }, Reader { "readGlobalProperty"_s, "jitcacheGlobalProperty"_s, GlobalPropertyWithVarInjectionChecks } }) {
-        auto* function = jsDynamicCast<JSFunction*>(globalObject->get(globalObject, Identifier::fromString(vm, reader.function)));
+        auto* function = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, reader.function)));
         CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
         if (!codeBlock) {
             JITCACHE_FAIL(makeString(reader.function, " has no CodeBlock"_s));
