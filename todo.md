@@ -36,6 +36,12 @@ O LeakSanitizer não roda sob QEMU user mode, que recusa com EINVAL o `clone` do
 
 `bun build.ts ci-release --arch=aarch64`, com LTO, ainda não foi compilado.
 
+O build release aarch64 morre com SIGILL sob o modelo `cortex-a53` do QEMU: o mimalloc que o Bun embute compila com `-march=armv8.1-a` e executa `casal` em `mi_process_init`. É nativo e fora do escopo; os builds com ASan rodam sob todos os modelos.
+
+## Porte para macOS (baixa prioridade)
+
+Hoje o JITCache compila onde o Bun compila, com o código só de Linux atrás de guardas, e `start` rejeita fora do Linux. O porte precisa do UUID do Mach-O como build ID, do vetor de CPU via sysctl, de um índice sem inotify, de `MAP_JIT` e W^X ao instalar a imagem, e do posicionamento de endereços do harness.
+
 # Not planned (but might add)
 
 Callback C++ para notificação assíncrona de falhas do JITCache. A API atual usa resultados das chamadas, estado consultável da sessão e diagnóstico nativo; não inclui callbacks nem sua coordenação de thread/reentrada.

@@ -40,6 +40,9 @@ Run `bun build.ts` from the physical checkout root (`~/jitcache` here). It deleg
 | `bun build.ts release` | `release-local`; RelWithDebInfo, without LTO. |
 | `bun build.ts ci-release` | `ci-release` with local WebKit; LTO and target settings come from Bun. |
 | `bun build.ts bun-debug` | `debug-local`; builds the Bun executable `<build-root>/linux-<arch>-debug-local/bun-debug`, sharing its WebKit build with `bun build.ts`. |
+| `bun build.ts twins` | `debug-local-twins`: the debug build with JITCache's test builds on (`ENABLE_JITCACHE_TWINS`); builds `jsc` and `testjitcache`. |
+| `bun build.ts bun-twins` | `debug-local-twins`; builds the Bun executable against that WebKit, in the same build directory. |
+| `bun build.ts pin` | `debug-local` from the pinned webkitbun in `JITCACHE_PIN_SOURCE`, into `linux-<arch>-debug-local-pin`, for the pin comparison (integrator task 17 adds this target). |
 | `bun build.ts <target> --arch=aarch64` | The target's profile for aarch64, cross-compiled on an x86_64 host against `JITCACHE_AARCH64_SYSROOT` into `linux-aarch64-<profile>`. Run `jsc` with `qemu-aarch64 -L <sysroot>`; ASan builds run with `qemu-aarch64 -L ~/jitcachearm/arm64-glibc-root` and `ASAN_OPTIONS=detect_leaks=0`. That root's recipe is `~/jitcachearm/arm64-glibc-root.sh`. |
 
 Builds run one at a time: a lock serializes them across profiles. Each level runs as many jobs as memory holds at about 3 GiB per job, at most one per CPU (9 on this machine), and `--jobs=N` overrides it. The wrapper passes that count to the outer Ninja, the nested CMake (`CMAKE_BUILD_PARALLEL_LEVEL`) and cargo (`CARGO_BUILD_JOBS`); the `build.ninja` that Bun generates lets up to four nested builds (its `dep` pool) run at once, each with its own jobs. `--keep-going` reports every compile error of a build instead of stopping at the first. Manual Ninja/CMake/cargo invocations take the same count.
@@ -52,6 +55,7 @@ The builder requires LLVM 21.1.x, targeting 21.1.8, and a Bun checkout whose his
 | `JITCACHE_BUILD_ROOT` | `$HOME/collo-local/build/jitcache` |
 | `JITCACHE_LLVM_PREFIX` | `$HOME/collo-local/tools/llvm-21` |
 | `JITCACHE_AARCH64_SYSROOT` | `$HOME/collo-local/tools/linux-sysroot-glibc-arm64` |
+| `JITCACHE_PIN_SOURCE` | `<build-root>/webkit-pin`, a detached worktree of this repository at the pin |
 
 The local LLVM prefix uses the package layout `usr/lib/llvm-21/bin`; the wrapper adjusts `PATH` and `LD_LIBRARY_PATH`. It also adds `~/collo-local/tools/bin` to `PATH`, where this environment exposes NASM. Outputs live under `<build-root>/linux-<arch>-<profile>/deps/WebKit`, with `<arch>` equal to `x86_64` or `aarch64`; the executable is `bin/jsc`. Keep binaries, headers and libraries from the same profile, since sanitizers can change ABI.
 

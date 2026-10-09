@@ -59,7 +59,7 @@ Check `builtins/*.js` first before diving into C++. These get compiled to byteco
 1. Build with `bun build.ts debug`
 2. Run with lldb/gdb using the matching profile's binary: `lldb "$JSC"` (path above).
 3. Useful breakpoints:
-   - `jsDynamicCast` - type casting issues
+   - `dynamicDowncast` - type casting issues
    - `JSC::throwException` - where exceptions originate
    - `WTFCrash` - assertion failures
 
