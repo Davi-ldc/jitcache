@@ -14,7 +14,7 @@ Pins:
 
 PS: ARM = ARM64; we do not support arm32 or Windows ARM.
 
-For cpp work, check [reference/cpp/cpp-coding-standards.md](reference/cpp/cpp-coding-standards.md). Run `clang-format` and `Tools/Scripts/check-webkit-style`, run from inside the checkout because its paths only resolve from there — it carries far more rules than the doc does, and its categories are spelled out in `Tools/Scripts/webkitpy/style/checkers/cpp.py`. It fires on the engine's own sources too, so read a hit as a question to answer, not a verdict to obey.
+For cpp work, check [reference/cpp/cpp-coding-standards.md](reference/cpp/cpp-coding-standards.md). Run `clang-format` and `Tools/Scripts/check-webkit-style`, run from inside the checkout because its paths only resolve from there — it carries far more rules than the doc does, and its categories are spelled out in `Tools/Scripts/webkitpy/style/checkers/cpp.py`. It fires on the engine's own sources too, so read a hit as a question to answer, not a verdict to obey. JITCache's own files carry no header at all, no license and no copyright, only comments that explain code, so its `legal/copyright` hit does not apply to them.
 ---
 
 ## Scope
