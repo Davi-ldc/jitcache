@@ -42,6 +42,10 @@ namespace JSC {
 
 class LinkBuffer;
 
+namespace JITCache {
+class MathICRegeneration;
+}
+
 struct MathICGenerationState {
     WTF_MAKE_STRUCT_TZONE_ALLOCATED(MathICGenerationState);
     MacroAssembler::Label fastPathStart;
@@ -122,84 +126,10 @@ public:
         return false;
     }
 
-    void generateOutOfLine(CodeBlock* codeBlock, CodePtr<CFunctionPtrTag> callReplacement)
-    {
-        auto linkJumpToOutOfLineSnippet = [&] () {
-            CCallHelpers jit(codeBlock);
-            jit.jumpThunk(CodeLocationLabel<JITStubRoutinePtrTag>(m_code.code()));
-            RELEASE_ASSERT(jit.m_assembler.buffer().codeSize() <= static_cast<size_t>(MacroAssembler::differenceBetweenCodePtr(m_inlineStart, m_inlineEnd)));
-            LinkBuffer linkBuffer(jit, m_inlineStart, jit.m_assembler.buffer().codeSize(), LinkBuffer::Profile::InlineCache, JITCompilationMustSucceed);
-            RELEASE_ASSERT(linkBuffer.isValid());
-            FINALIZE_CODE(linkBuffer, NoPtrTag, nullptr, "JITMathIC: linking constant jump to out of line stub");
-        };
-
-        auto replaceCall = [&] () {
-            ftlThunkAwareRepatchCall(codeBlock, slowPathCallLocation().template retagged<JSInternalPtrTag>(), callReplacement);
-        };
-
-        bool shouldEmitProfiling = !JSC::JITCode::isOptimizingJIT(codeBlock->jitType());
-
-        if (m_generateFastPathOnRepatch) {
-
-            CCallHelpers jit(codeBlock);
-            MathICGenerationState generationState;
-            bool generatedInline = generateInline(jit, generationState, shouldEmitProfiling);
-
-            // We no longer want to try to regenerate the fast path.
-            m_generateFastPathOnRepatch = false;
-
-            if (generatedInline) {
-                jit.jumpThunk(doneLocation());
-                generationState.slowPathJumps.linkThunk(slowPathStartLocation(), &jit);
-
-                LinkBuffer linkBuffer(jit, codeBlock, LinkBuffer::Profile::InlineCache, JITCompilationCanFail);
-                if (!linkBuffer.didFailToAllocate()) {
-                    m_code = FINALIZE_CODE_FOR(codeBlock, linkBuffer, JITStubRoutinePtrTag, nullptr, "JITMathIC: generating out of line fast IC snippet");
-
-                    if (!generationState.shouldSlowPathRepatch) {
-                        // We won't need to regenerate, so we can wire the slow path call
-                        // to a non repatching variant.
-                        replaceCall();
-                    }
-
-                    linkJumpToOutOfLineSnippet();
-
-                    return;
-                }
-            }
-            
-            // We weren't able to generate an out of line fast path.
-            // We just generate the snippet in its full generality.
-        }
-
-        // We rewire to the alternate regardless of whether or not we can allocate the out of line path
-        // because if we fail allocating the out of line path, we don't want to waste time trying to
-        // allocate it in the future.
-        replaceCall();
-
-        {
-            CCallHelpers jit(codeBlock);
-
-            MacroAssembler::JumpList endJumpList; 
-            MacroAssembler::JumpList slowPathJumpList; 
-
-            bool emittedFastPath = m_generator.generateFastPath(jit, endJumpList, slowPathJumpList, m_arithProfile, shouldEmitProfiling);
-            if (!emittedFastPath)
-                return;
-            endJumpList.append(jit.jump());
-            endJumpList.linkThunk(doneLocation(), &jit);
-            slowPathJumpList.linkThunk(slowPathStartLocation(), &jit);
-
-            LinkBuffer linkBuffer(jit, codeBlock, LinkBuffer::Profile::InlineCache, JITCompilationCanFail);
-            if (linkBuffer.didFailToAllocate())
-                return;
-
-
-            m_code = FINALIZE_CODE_FOR(codeBlock, linkBuffer, JITStubRoutinePtrTag, nullptr, "JITMathIC: generating out of line IC snippet");
-        }
-
-        linkJumpToOutOfLineSnippet();
-    }
+    // Both are defined, with their explicit instantiations for the four ICs below, in JITMathIC.cpp. Every native caller
+    // uses the first, which builds the regeneration JITCache records through; only JITCache's twin replay passes its own.
+    void generateOutOfLine(CodeBlock*, CodePtr<CFunctionPtrTag> callReplacement);
+    void generateOutOfLine(CodeBlock*, CodePtr<CFunctionPtrTag> callReplacement, JITCache::MathICRegeneration&);
 
     void finalizeInlineCode(const MathICGenerationState& state, LinkBuffer& linkBuffer)
     {

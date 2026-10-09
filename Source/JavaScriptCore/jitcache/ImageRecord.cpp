@@ -28,9 +28,15 @@
 
 #if ENABLE(JIT)
 
+#include "BaselineJITCode.h"
+#include "CCallHelpers.h"
+#include "CodeBlock.h"
+#include "ImageRecorder.h"
 #include "ImageSection.h"
 #include "ImageSupport.h"
+#include "JITCacheFaults.h"
 #include "JITMathIC.h"
+#include "LinkBuffer.h"
 #include <algorithm>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -331,6 +337,138 @@ void ImageRecord::didRewriteInlineStart(unsigned index)
     auto position = static_cast<size_t>(std::ranges::upper_bound(m_fixups, entry, precedesInFootprintOrder) - m_fixups.begin());
     m_fixups.insert(position, entry);
     ASSERT(m_chargedBytes == heldBytes());
+}
+
+MathICRegeneration::MathICRegeneration(CodeBlock* codeBlock, const void* mathIC, CodePtr<CFunctionPtrTag> callReplacement, uint16_t profileBitsAtEntry)
+{
+    UNUSED_PARAM(callReplacement);
+    UNUSED_PARAM(profileBitsAtEntry);
+    ASSERT(codeBlock);
+
+    // A VM with no JITCache state, or one that does not produce, pays this one test.
+    VM& vm = codeBlock->vm();
+    if (!producerContext(vm)) [[likely]]
+        return;
+    // DFG and FTL MathICs share this class and never record.
+    if (codeBlock->jitType() != JITType::BaselineJIT)
+        return;
+    RefPtr<JSC::JITCode> jitCode = codeBlock->jitCode();
+    ImageRecord* record = static_cast<BaselineJITCode&>(*jitCode).m_jitCacheImageRecord.get();
+    if (!record || record->state() != RecordState::Complete)
+        return;
+
+    // A Complete record lists every MathIC of its code, the record an import rebuilds included.
+    auto index = record->mathICIndex(mathIC);
+    if (!index) {
+        ASSERT_NOT_REACHED();
+        record->markUnrecordable(Unrecordable::InconsistentRecord);
+        return;
+    }
+    m_record = record;
+    m_mathICIndex = *index;
+}
+
+MathICRegeneration::~MathICRegeneration()
+{
+    retireRecorder();
+}
+
+uint32_t MathICRegeneration::imageOffset(CodeLocationLabel<JSInternalPtrTag> location) const
+{
+    if (!m_record || m_record->state() != RecordState::Complete)
+        return 0;
+    // The done and slow-path-start locations lie in the IC's own image.
+    auto offset = m_record->offsetInImage(location.untaggedPtr());
+    if (!offset) {
+        ASSERT_NOT_REACHED();
+        m_record->markUnrecordable(Unrecordable::InconsistentRecord);
+        return 0;
+    }
+    return *offset;
+}
+
+void MathICRegeneration::attach(CCallHelpers& jit)
+{
+    retireRecorder();
+    // A record that stopped records nothing more, so the snippet links natively.
+    if (!m_record || m_record->state() != RecordState::Complete)
+        return;
+    // The snippet's profile writes name the arithmetic profiles of the UCB of the CodeBlock it is emitted for, which
+    // every CodeBlock sharing the image shares.
+    CodeBlock* codeBlock = jit.codeBlock();
+    ASSERT(codeBlock);
+    m_recorder = makeUnique<ImageRecorder>(RecordingScope::MathICSnippet, codeBlock->vm(), *codeBlock->unlinkedCodeBlock(), m_record->budget());
+    m_recorder->attachTo(jit);
+}
+
+void MathICRegeneration::emitVeneers(CCallHelpers& jit)
+{
+    if (!m_recorder)
+        return;
+    ASSERT(jit.jitCacheRecorder() == m_recorder.get());
+    m_recorder->emitVeneers(jit);
+}
+
+void MathICRegeneration::didLinkSnippet(LinkBuffer& linkBuffer, const MacroAssemblerCodeRef<JITStubRoutinePtrTag>& code)
+{
+    if (!m_recorder)
+        return;
+    auto provenance = m_recorder->finishSnippet(linkBuffer);
+    if (!provenance) {
+        // The recorder stopped, so the record cannot describe the snippet m_code now holds.
+        stopRecordLikeRecorder();
+        return;
+    }
+    // The provenance covers the allocation m_code holds up to its linked size, which the handle's size can exceed (N20).
+    ASSERT_UNUSED(code, provenance->start == code.code().untaggedPtr());
+    ASSERT(provenance->size <= code.size());
+    size_t provenanceBytes = ImageRecord::storageBytes(*provenance);
+    m_record->didGenerateSnippet(m_mathICIndex, WTF::move(*provenance));
+    m_recorder->handChargeToRecord(provenanceBytes);
+}
+
+void MathICRegeneration::didRewriteInlineStart()
+{
+    if (m_record)
+        m_record->didRewriteInlineStart(m_mathICIndex);
+}
+
+void MathICRegeneration::didReplaceSlowCall(CodePtr<CFunctionPtrTag> replacement)
+{
+    if (m_record)
+        m_record->didReplaceSlowCall(m_mathICIndex, replacement);
+}
+
+void MathICRegeneration::didFailToAllocate(VM& vm)
+{
+    // Raised inside the operation, before the native fallback writes anything (SPEC-integrator.md section 4.5).
+    didFailExecutableAllocation(vm, ExecutableAllocationSite::MathICSnippet);
+}
+
+void MathICRegeneration::stopRecordLikeRecorder()
+{
+    ASSERT(m_record && m_recorder);
+    switch (m_recorder->state()) {
+    case RecordState::Complete:
+        return;
+    case RecordState::Incomplete:
+        m_record->markIncomplete();
+        return;
+    case RecordState::Unrecordable:
+        m_record->markUnrecordable(m_recorder->unrecordableReason());
+        return;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+void MathICRegeneration::retireRecorder()
+{
+    if (!m_recorder)
+        return;
+    // A recorder that stopped before its snippet was linked, or whose snippet never was, still stops the record: a
+    // refused charge or an unrecordable path holds for the rest of the regeneration (section 4.8).
+    stopRecordLikeRecorder();
+    m_recorder = nullptr;
 }
 
 } // namespace JSC::JITCache

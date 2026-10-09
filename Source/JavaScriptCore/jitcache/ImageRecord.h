@@ -29,10 +29,13 @@
 
 #include "BakedFacts.h"
 #include "ImageTypes.h"
+#include "JSCPtrTag.h"
 #include "ProducerBudget.h"
+#include <memory>
 #include <optional>
 #include <span>
 #include <wtf/CodePtr.h>
+#include <wtf/ForbidHeapAllocation.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/PtrTag.h>
 #include <wtf/Ref.h>
@@ -40,10 +43,24 @@
 #include <wtf/Vector.h>
 
 // The image record (SPEC-image.md section 5): the provenance a recording compilation leaves on its BaselineJITCode, and
-// the hooks through which a MathIC regeneration keeps it describing the code. No header JSC exports includes this one;
-// BaselineJITCode.h only forward-declares the class.
+// the hooks through which a MathIC regeneration keeps it describing the code, which MathICRegeneration calls (section
+// 6.2). No header JSC exports includes this one; BaselineJITCode.h and JITMathIC.h only forward-declare the classes.
+
+namespace JSC {
+
+class CCallHelpers;
+class CodeBlock;
+class LinkBuffer;
+class VM;
+
+template<PtrTag> class CodeLocationLabel;
+template<PtrTag> class MacroAssemblerCodeRef;
+
+} // namespace JSC
 
 namespace JSC::JITCache {
+
+class ImageRecorder;
 
 // The footprint order of SPEC-image.md section 3.2: by site, and at a shared site the Call first. Only on ARM64 can two
 // fixups share a site, a Call whose bl ends there and the Pointer or Jump whose first word starts there.
@@ -103,6 +120,10 @@ public:
     const Vector<MathICRecord>& mathICs() const LIFETIME_BOUND { return m_mathICs; } // in emission order; index = MathIC index
     const BakedFacts& bakedFacts() const LIFETIME_BOUND { return m_bakedFacts; }
     size_t chargedBytes() const { return m_chargedBytes; }
+    // The budget the record is charged to, which a regeneration's snippet recorders charge too (section 4.8).
+    Ref<ProducerBudget> budget() const { return m_budget.copyRef(); }
+    // The offset of a location in the image, inside [0, codeSize]; nullopt outside it and once the record has stopped.
+    std::optional<uint32_t> offsetInImage(const void*) const;
 
     // The regeneration hooks of SPEC-image.md section 6.2, on the VM thread inside a JIT operation. Each keeps a Complete
     // record complete, or makes it Incomplete when a charge is refused or Unrecordable when the code no longer matches
@@ -132,7 +153,6 @@ private:
     bool chargeForGrowth(size_t bytes);
     size_t heldBytes() const;
     std::span<const uint8_t> imageCode() const;
-    std::optional<uint32_t> offsetInImage(const void*) const; // inside [0, codeSize]
 
     Ref<ProducerBudget> m_budget;
     size_t m_chargedBytes { 0 };
@@ -143,6 +163,55 @@ private:
     Vector<ImageFixup> m_fixups;
     Vector<MathICRecord> m_mathICs;
     BakedFacts m_bakedFacts;
+};
+
+// What one JITMathIC::generateOutOfLine tells the record of the code it patches (SPEC-image.md section 6.2), on the VM
+// thread inside the JIT operation that regenerates, holding the API lock and no CodeBlock::m_lock.
+//
+// A native regeneration is active exactly when it records (section 4.1): its CodeBlock runs BaselineJIT, its VM's
+// production is active, and the CodeBlock's BaselineJITCode carries a Complete record, which lists every MathIC of its
+// code. Otherwise, as for every DFG and FTL MathIC and in every VM that does not record, each member does nothing and
+// returns 0, except didFailToAllocate, which reports the failure from every tier and VM.
+//
+// Each attach gives one snippet assembler a recorder of its own, charged to the record's budget, which lives until the
+// next attach or the regeneration's end. Both come after that assembler is gone, since generateOutOfLine's assemblers
+// are block locals of its body and the regeneration outlives the body. A recorder that stops makes the record stop in
+// the same state, so no capture reads a record that lacks a snippet the code jumps to.
+class MathICRegeneration {
+    WTF_MAKE_NONCOPYABLE(MathICRegeneration);
+    WTF_FORBID_HEAP_ALLOCATION;
+public:
+    // profileBitsAtEntry and callReplacement feed only the twins builds' regeneration log (section 11.1).
+    MathICRegeneration(CodeBlock*, const void* mathIC, CodePtr<CFunctionPtrTag> callReplacement, uint16_t profileBitsAtEntry);
+    ~MathICRegeneration(); // Destroys the last recorder it attached, whose assembler is already gone.
+
+    bool isActive() const { return !!m_record; }
+    unsigned mathICIndex() const { return m_mathICIndex; } // 0 when inactive
+    // The offset in the image of the IC's done or slow-path-start location, the target of an ImageOffset fixup; 0 while
+    // nothing records, which the helpers ignore without a recorder.
+    uint32_t imageOffset(CodeLocationLabel<JSInternalPtrTag>) const;
+
+    // Right after the snippet's assembler is created, before it emits: a MathICSnippet recorder, through
+    // ImageRecorder::attachTo, while the record is still Complete.
+    void attach(CCallHelpers&);
+    // Before the snippet's LinkBuffer: the veneers of the conditional jumps the recorder deferred (section 4.5).
+    void emitVeneers(CCallHelpers&);
+    // After the snippet's FINALIZE_CODE_FOR: stores the snippet's provenance, with its linked size, in the record in place
+    // of any earlier one, and gives back what the recorder charged beyond what the provenance holds (section 4.8).
+    void didLinkSnippet(LinkBuffer&, const MacroAssemblerCodeRef<JITStubRoutinePtrTag>&);
+    void didRewriteInlineStart(); // ImageRecord::didRewriteInlineStart, after the inline start's FINALIZE_CODE
+    void didReplaceSlowCall(CodePtr<CFunctionPtrTag>); // ImageRecord::didReplaceSlowCall, after the repatch
+    // At each failed snippet allocation, before the native fallback continues: the executable-allocation fault.
+    void didFailToAllocate(VM&);
+
+private:
+    // Makes the record stop in the state the current recorder stopped in, if it did.
+    void stopRecordLikeRecorder();
+    void retireRecorder();
+
+    ImageRecord* m_record { nullptr }; // Non-null exactly while active. Owned by the CodeBlock's BaselineJITCode.
+    unsigned m_mathICIndex { 0 };
+    std::unique_ptr<ImageRecorder> m_recorder;
 };
 
 } // namespace JSC::JITCache
