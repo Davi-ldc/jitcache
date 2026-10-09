@@ -186,8 +186,9 @@ bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& reco
     UCBRegistryInternal::CriticalSectionMark mark;
     Locker locker { m_lock };
     // A UCB keeps the key it was recorded under (THREAD Identity). The functor runs only when the map inserts, so a refused
-    // record stays with the caller, which drops it after this returns.
-    if (!m_codeBlocks.ensure(&codeBlock, [&] { return WTF::move(record); }).isNewEntry)
+    // record stays with the caller, which drops it after this returns. Boxing it mallocs under the lock, which section 6.3
+    // allows; UCBRecord is the plain struct of section 6.1, without the TZone allocation makeUnique requires.
+    if (!m_codeBlocks.ensure(&codeBlock, [&] { return makeUniqueWithoutFastMallocCheck<UCBRecord>(WTF::move(record)); }).isNewEntry)
         return false;
     for (unsigned i = 0; i < children.size(); ++i) {
         const UnlinkedFunctionExecutable* child = children[i];
@@ -211,7 +212,7 @@ auto UCBRegistry::recordOf(const UnlinkedCodeBlock& codeBlock) const -> std::opt
     auto iterator = m_codeBlocks.find(&codeBlock);
     if (iterator == m_codeBlocks.end())
         return std::nullopt;
-    const UCBRecord& record = iterator->value;
+    const UCBRecord& record = *iterator->value;
     return RecordView {
         record.key,
         record.context,
@@ -231,7 +232,7 @@ std::optional<BodyKey> UCBRegistry::keyOf(const UnlinkedCodeBlock& codeBlock) co
     auto iterator = m_codeBlocks.find(&codeBlock);
     if (iterator == m_codeBlocks.end())
         return std::nullopt;
-    return iterator->value.key;
+    return iterator->value->key;
 }
 
 void UCBRegistry::setMissedBodyVersion(const UnlinkedCodeBlock& codeBlock, uint64_t indexToken)
@@ -239,7 +240,7 @@ void UCBRegistry::setMissedBodyVersion(const UnlinkedCodeBlock& codeBlock, uint6
     UCBRegistryInternal::CriticalSectionMark mark;
     Locker locker { m_lock };
     if (auto iterator = m_codeBlocks.find(&codeBlock); iterator != m_codeBlocks.end())
-        iterator->value.missedBodyVersion = indexToken;
+        iterator->value->missedBodyVersion = indexToken;
 }
 
 void UCBRegistry::setMatchedBodyVersion(const UnlinkedCodeBlock& codeBlock, uint64_t commitIdentifier)
@@ -247,7 +248,7 @@ void UCBRegistry::setMatchedBodyVersion(const UnlinkedCodeBlock& codeBlock, uint
     UCBRegistryInternal::CriticalSectionMark mark;
     Locker locker { m_lock };
     if (auto iterator = m_codeBlocks.find(&codeBlock); iterator != m_codeBlocks.end())
-        iterator->value.matchedBodyVersion = commitIdentifier;
+        iterator->value->matchedBodyVersion = commitIdentifier;
 }
 
 bool UCBRegistry::attachPendingImport(const UnlinkedCodeBlock& codeBlock, Ref<PendingImport>&& import, std::optional<Vector<uint8_t>>&& generatedButterflyMap)
@@ -259,9 +260,9 @@ bool UCBRegistry::attachPendingImport(const UnlinkedCodeBlock& codeBlock, Ref<Pe
     Locker locker { m_lock };
     auto iterator = m_codeBlocks.find(&codeBlock);
     // A refused import stays with the caller, which drops it after this returns.
-    if (iterator == m_codeBlocks.end() || iterator->value.pendingImport)
+    if (iterator == m_codeBlocks.end() || iterator->value->pendingImport)
         return false;
-    UCBRecord& record = iterator->value;
+    UCBRecord& record = *iterator->value;
     record.pendingImport = WTF::move(import);
     record.matchedBodyVersion = commitIdentifier;
     // Replaces the kept map, an empty argument included (section 7.3.4, step 7); freeing the old one is allowed here.
@@ -274,9 +275,9 @@ bool UCBRegistry::copyGeneratedButterflyMap(const UnlinkedCodeBlock& codeBlock, 
     UCBRegistryInternal::CriticalSectionMark mark;
     Locker locker { m_lock };
     auto iterator = m_codeBlocks.find(&codeBlock);
-    if (iterator == m_codeBlocks.end() || !iterator->value.generatedButterflyMap)
+    if (iterator == m_codeBlocks.end() || !iterator->value->generatedButterflyMap)
         return false;
-    const Vector<uint8_t>& map = *iterator->value.generatedButterflyMap;
+    const Vector<uint8_t>& map = *iterator->value->generatedButterflyMap;
     // Both are ceil(N / 8) bytes for the UCB's N constants (section 8.2). A map of another size would not describe these
     // constants, so the capture writes the maps its own constants give instead.
     ASSERT(map.size() == out.size());
@@ -293,7 +294,7 @@ RefPtr<PendingImport> UCBRegistry::pendingImport(const UnlinkedCodeBlock& codeBl
     auto iterator = m_codeBlocks.find(&codeBlock);
     if (iterator == m_codeBlocks.end())
         return nullptr;
-    return iterator->value.pendingImport;
+    return iterator->value->pendingImport;
 }
 
 void UCBRegistry::resolvePendingImport(const UnlinkedCodeBlock& codeBlock, const PendingImport& import, ImportResolution resolution)
@@ -304,13 +305,13 @@ void UCBRegistry::resolvePendingImport(const UnlinkedCodeBlock& codeBlock, const
         UCBRegistryInternal::CriticalSectionMark mark;
         Locker locker { m_lock };
         auto iterator = m_codeBlocks.find(&codeBlock);
-        if (iterator == m_codeBlocks.end() || iterator->value.pendingImport.get() != &import)
+        if (iterator == m_codeBlocks.end() || iterator->value->pendingImport.get() != &import)
             return;
-        detached = WTF::move(iterator->value.pendingImport);
+        detached = WTF::move(iterator->value->pendingImport);
         // The shouldJIT gate would drop the import again, so the record skips this body until the index lists another at
         // its key (section 6.4).
         if (resolution == ImportResolution::DroppedByGate)
-            iterator->value.missedBodyVersion = import.indexToken();
+            iterator->value->missedBodyVersion = import.indexToken();
     }
     if (resolution == ImportResolution::DroppedByGate)
         ++m_statistics.gateDrops;
@@ -333,11 +334,11 @@ void UCBRegistry::markSuppliedDigestVerified(SourceID provider)
 void UCBRegistry::unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock* codeBlock)
 {
     // Declared before the lock, so the record's pending import and provider go after it is released (section 6.3).
-    std::optional<UCBRecord> removed;
+    std::unique_ptr<UCBRecord> removed;
     {
         UCBRegistryInternal::CriticalSectionMark mark;
         Locker locker { m_lock };
-        removed = m_codeBlocks.takeOptional(codeBlock);
+        removed = m_codeBlocks.take(codeBlock);
     }
 }
 
@@ -360,8 +361,8 @@ auto UCBRegistry::counts() const -> Counts
     UCBRegistryInternal::CriticalSectionMark mark;
     Locker locker { m_lock };
     size_t pendingImports = 0;
-    for (const UCBRecord& record : m_codeBlocks.values()) {
-        if (record.pendingImport)
+    for (auto& record : m_codeBlocks.values()) {
+        if (record->pendingImport)
             ++pendingImports;
     }
     return Counts { m_children.size(), m_roots.size(), m_codeBlocks.size(), pendingImports };
