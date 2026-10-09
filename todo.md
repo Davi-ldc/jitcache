@@ -30,6 +30,8 @@ Depois, pensar em como fazer o corte sem parar as outras VMs: hoje ele suspende 
 
 Otimizar o strict. Hoje ele valida a estrutura inteira do que o JITCache lê e as suposições que ele faz, por isso é lento e fica desligado por padrão; o modo normal só confere a integridade (header, chaves e checksums). Todo teste roda com ele ligado, e o bench mede o padrão.
 
+O decode estrito de um core deve falhar no segundo alcance de um registro que ele lê no lugar (constantes, `CachedOptional` e o rare data que `CachedVariableEnvironment` e `CachedSymbolTable` leem direto), como já falha para os registros do cache de offsets. Hoje esses registros decodificam a cada alcance, como no decode nativo, e um core forjado que nomeia um deles de muitos slots pode esgotar a memória dentro do `DeferGC` do decode.
+
 ## Cross-compilação aarch64
 
 O LeakSanitizer não roda sob QEMU user mode, que recusa com EINVAL o `clone` do tracer dele, então as checagens de vazamento em aarch64 ficam para hardware ARM64 real.
