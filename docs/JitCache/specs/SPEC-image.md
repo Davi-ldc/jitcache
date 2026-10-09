@@ -254,7 +254,7 @@ A compilation's record becomes `Unrecordable` with a reason, and is never captur
 
 | reason | where |
 |---|---|
-| `NotShareable` | `JIT::link` finds `m_isShareable` false, which only the profiler opcodes cause (N29, census C24) |
+| `NotShareable` | `JIT::emit_op_profile_type` or `JIT::emit_op_profile_control_flow` clears `m_isShareable`, the only cause (N29, census C24); `finishBaselineCompile` also marks a record whose `m_isShareable` is false (section 4.7) |
 | `SuperSamplerOpcode` | `JIT::emit_op_super_sampler_begin`, `JIT::emit_op_super_sampler_end`, whose opcodes only builtin-mode parsing produces while `exposePrivateIdentifiers` stays fixed off (options.md; census C20) |
 | `UnannotatedSupportLink` | the guard of section 4.4 |
 | `UnannotatedPointerArgument` | the guard of section 4.4 |
