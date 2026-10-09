@@ -144,6 +144,17 @@ Bun runs it as `bun jitcache <command>`. `src/runtime/cli/mod.rs` gains `Tag::JI
 | `io` | opening a directory (the parent's absence aside, section 2), opening the lock file, locking it with an error other than `busy`, or listing fails | `Failed` |
 | `platform` | the process does not run on Linux (section 2) | `Failed`, with nothing touched |
 
+The cases the sections above leave open read as follows, with no outcome or code beyond the table's:
+
+- A `<parent>` or `cache/` that is a file rather than a directory (`ENOTDIR`) counts as absent, as `ENOENT` does: `NoArtifact`, and no lock file is created, since an artifact exists exactly when `cache/header` does (container sub-SPEC section 1.2).
+- A `header` that exists but cannot be opened or read fails its checks: `bad-header`, with the error in the detail.
+- While planning, an envelope that cannot be opened, examined with `fstat` or read makes `compact` return `Failed` with `io` before anything is removed: a plan without that body would be wrong, and evicting it would delete a sound body over a transient error. A body name that vanished after the listing (`ENOENT`) is left out of the plan.
+- A body name that is not a regular file fails B1 (`damaged-body`) with 0 bytes. Envelopes are opened with `O_NONBLOCK`, so a FIFO cannot stop the call.
+- A temporary whose `fstatat` or `unlinkat` fails with anything but `ENOENT` is reported as `unlink-failed` and stays, without changing the outcome; one already gone is skipped without a diagnostic. An evicted body or `header` whose `unlinkat` gives `ENOENT` counts as gone, without bytes, and does not stop a whole-artifact deletion.
+- A whole-artifact deletion whose `unlinkat` of `header` fails reports `unlink-failed`, keeps the directories and returns `Failed`, as when a body's unlink fails (section 4.5).
+- Names are judged per directory, by container sub-SPEC section 1.1: `header`, `bodies` and temporaries are known in `cache/`, and body names in `bodies/`. Any other name, a temporary-shaped name in `bodies/` included, is `unknown-file`, which clean's step 4 leaves in place.
+- A call whose `CompactOptions` carry a `confirmedPlan` compares the new plan with it first: a plan that differs gives `PlanChanged` whatever the answer, and an equal plan follows the answer as a first call would (section 4.4).
+
 ## 7. Tests
 
 `tests/MaintenanceTests.cpp`, on temporary directories with bodies the writer produced:
