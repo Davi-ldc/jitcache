@@ -16,22 +16,22 @@ unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
 Then run:
 
 ```sh
-bun --jitcache=./.jitcache --jitcache-role=p/c/p-c --jitcache-producer-limit=max run server.ts
+bun --jitcache=./.jitcache --jitcache-mode=p run server.ts
 ```
 
-`p` saves each function's baseline code as it is compiled. A `consumer`, the default, runs from what a producer saved, and a `consumer-producer` uses the saved functions and keeps updating them when it learns more[^1].
+`p` creates the cache and saves each function's JIT code as it is compiled. Then, to use the cached code (each function is checked against its source, so one you edited compiles as usual), run:
 
 ```sh
 bun --jitcache=./.jitcache run server.ts
 ```
 
-Any number of consumers can read one cache at once. A producer only creates a new cache; to keep improving an existing one while serving, use `--jitcache-role=consumer-producer`, which reads what is there and saves what it learns while no other process is producing. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
+`c`, the default, only reads the cache. `p-c` reads and writes: it runs from the saved functions and keeps updating them when it learns more[^1], which is how a server keeps improving a cache, since `p` only creates new ones. Every write is atomic, so any number of processes can read a cache while one writes to it; a `p-c` that finds another process writing runs as `c`. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
 
 | Flag | Values |
 |---|---|
 | `--jitcache=<dir>` | the cache's directory; JITCache is off without it |
-| `--jitcache-role=<role>` | `consumer` (default), `producer` or `consumer-producer` |
-| `--jitcache-producer-limit=<bytes>` | the memory a producer may spend on its own work, in bytes (with a `K`, `M` or `G` suffix) or `max` |
+| `--jitcache-mode=<mode>` | `c` (default), `p` or `p-c` |
+| `--jitcache-max-memory=<bytes>` | the memory `p` and `p-c` may spend on recording, in bytes (with a `K`, `M` or `G` suffix) or `unlimited`, the default |
 | `--jitcache-strict` | validates everything the cache holds and every assumption JITCache makes; slower, and off by default |
 | `--jitcache-log` | prints JITCache's status to stderr at start and at exit |
 

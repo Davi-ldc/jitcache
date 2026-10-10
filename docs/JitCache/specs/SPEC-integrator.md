@@ -958,8 +958,8 @@ JITCache runs only on Linux (THREAD's opening), but its code compiles wherever B
 | flag | effect |
 |---|---|
 | `--jitcache=<path>` | configures the shell's main VM with `artifactPath = path` |
-| `--jitcache-role=c\|p\|p-c` | the role: `c` Consumer, `p` Producer, `p-c` ConsumerProducer; `c` when absent |
-| `--jitcache-producer-limit=<bytes>\|max` | the producer limit, in bytes with an optional `K`, `M` or `G` suffix in powers of 1024; `max`, which is also the limit when the flag is absent, is `SIZE_MAX` |
+| `--jitcache-mode=c\|p\|p-c` | the role: `c` Consumer, `p` Producer, `p-c` ConsumerProducer; `c` when absent |
+| `--jitcache-max-memory=<bytes>\|unlimited` | the producer limit, in bytes with an optional `K`, `M` or `G` suffix in powers of 1024; `unlimited`, which is also the limit when the flag is absent, is `SIZE_MAX` |
 | `--jitcache-strict[=0\|1]` | strictness: bare or `=1` turns it on, `=0` off; off when absent, the default THREAD Session gives |
 | `--jitcache-delta-at-exit` | calls `delta` once the scripts and the run loop have finished |
 | `--jitcache-log[=0\|1]` | bare or `=1` writes `toJSON` of the start result, of each `delta` result the shell gets and of the final `status` to stderr, one line each; `=0` writes nothing |
