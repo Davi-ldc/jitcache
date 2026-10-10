@@ -1788,8 +1788,9 @@ static bool collectSection(Vector<uint8_t>& bytes, const Write& write)
 // T21's import and check, in a frame of their own so that the test's frame never holds the twin. producerBody's
 // CodeBlock compiles under a twin recorder, the one recorder a compilation outside production can have (T20), is
 // installed and is captured with strict on. importBody, the same text in the same scope, so that its UCB has the
-// producer's index spaces (R-UCB-1), gets a newborn CodeBlock, which takes the prepared image as the install glue gives
-// it, through native setup and installCode (SPEC-integrator.md section 7.2), before Twins::checkImage checks it.
+// producer's index spaces (R-UCB-1) and its scope accesses resolve alike, gets a newborn CodeBlock, which takes the
+// prepared image as the install glue gives it, through native setup and installCode (SPEC-integrator.md section 7.2),
+// before Twins::checkImage checks it.
 static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& producerFunction, JSFunction& importFunction)
 {
     CodeBlock* producer = producerFunction.jsExecutable()->codeBlockForCall();
@@ -1914,13 +1915,16 @@ static NEVER_INLINE void imageClearDeadStack()
 
 // T21 (SPEC-image.md section 11.3, step 2; N18). The image check's twin CodeBlock is registered as long as it lives,
 // dies in the first full collection after the check, since nothing reaches it, and writes no didOptimize as it dies,
-// while a CodeBlock of the same body linked natively and left unreachable the same way writes False.
+// while a CodeBlock of the same body linked natively and left unreachable the same way writes False. A dying CodeBlock
+// writes didOptimize only through its metadata table, and UnlinkedMetadataTable::link() gives none to a body with no
+// metadata entry or value profile, such as `return a + b`. The bodies read a captured variable, whose resolve_scope and
+// get_from_scope give them a table, so that a write by the twin would show.
 JITCACHE_TEST_WITH_OPTIONS(imageTwinDiesWithoutWritingDidOptimize, Yes, "--useConcurrentJIT=false")
 {
     VM& vm = *context.vm();
     auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
     NakedPtr<Exception> exception;
-    evaluate(globalObject, makeSource("var producerBody, importBody; (function makeBodies() { producerBody = function (a, b) { return a + b; }; importBody = function (a, b) { return a + b; }; })(); producerBody(1, 2);"_s, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    evaluate(globalObject, makeSource("var producerBody, importBody; (function makeBodies() { var captured = 3; producerBody = function (a, b) { return a + b + captured; }; importBody = function (a, b) { return a + b + captured; }; })(); producerBody(1, 2);"_s, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
     if (exception) {
         JITCACHE_FAIL("evaluating the bodies threw"_s);
         return;
