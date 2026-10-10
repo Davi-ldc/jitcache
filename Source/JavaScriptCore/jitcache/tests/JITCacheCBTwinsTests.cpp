@@ -348,7 +348,8 @@ class ScratchReport {
 public:
     static std::unique_ptr<ScratchReport> create(TestContext& context)
     {
-        String path = FileSystem::createTemporaryFile("jitcache-cb-twins"_s, ".jsonl"_s);
+        // No suffix: the POSIX openTemporaryFile asserts that it gets none, since mkostemp takes none.
+        String path = FileSystem::createTemporaryFile("jitcache-cb-twins"_s);
         if (path.isEmpty()) {
             JITCACHE_FAIL("cannot create a temporary file for the twin report"_s);
             return nullptr;
