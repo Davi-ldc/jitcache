@@ -34,6 +34,7 @@
 #include "GlobalExecutable.h"
 #include "IsoCellSetInlines.h"
 #include "JIT.h"
+#include "JITCacheGlue.h"
 #include "JSCellInlines.h"
 #include "JSGlobalObjectInlines.h"
 #include "JSObjectInlines.h"
@@ -408,6 +409,7 @@ void ScriptExecutable::prepareForExecutionImpl(VM& vm, JSFunction* function, JSS
         codeBlock->validate();
 
     bool installedUnlinkedBaselineCode = false;
+    bool installedByJITCache = false;
 #if ENABLE(JIT)
     if (RefPtr<BaselineJITCode> baselineRef = codeBlock->unlinkedCodeBlock()->m_unlinkedBaselineCode) {
         codeBlock->setupWithUnlinkedBaselineCode(baselineRef.releaseNonNull());
@@ -415,13 +417,24 @@ void ScriptExecutable::prepareForExecutionImpl(VM& vm, JSFunction* function, JSS
     }
 #endif
     if (!installedUnlinkedBaselineCode) {
-        if (Options::useLLInt())
-            setupLLInt(codeBlock);
-        else
+        if (Options::useLLInt()) {
+#if ENABLE(JIT)
+            // JITCache: an imported body's first CB installs here. The install function calls installCode itself,
+            // last in THREAD Restoration's order.
+            installedByJITCache = JITCache::installAtNewbornCodeBlock(vm, *codeBlock, JITCache::InstallPoint::BeforeSetupLLInt)
+                == JITCache::InstallOutcome::Installed;
+#endif
+            if (!installedByJITCache)
+                setupLLInt(codeBlock);
+        } else
             setupJIT(vm, codeBlock);
     }
 
-    installCode(vm, codeBlock, codeBlock->codeType(), codeBlock->specializationKind(), Profiler::JettisonReason::NotJettisoned);
+    if (!installedByJITCache)
+        installCode(vm, codeBlock, codeBlock->codeType(), codeBlock->specializationKind(), Profiler::JettisonReason::NotJettisoned);
+#if ENABLE(JITCACHE_TWINS)
+    JITCache::didFinishPrepareForExecution(vm, *codeBlock, scope); // harness sub-SPEC section 3
+#endif
 }
 
 ScriptExecutable* ScriptExecutable::topLevelExecutable()

@@ -37,6 +37,7 @@
 #include "ImageEmission.h"
 #include "ImageRecord.h"
 #include "ImageRecorder.h"
+#include "JITCacheGlue.h"
 #include "JITInlines.h"
 #include "JITOperations.h"
 #include "JITSizeStatistics.h"
@@ -1094,6 +1095,10 @@ CompilationResult JIT::compileSync(VM&, CodeBlock* codeBlock, JITCompilationEffo
     // Must be constructed before we allocate anything using SequesteredArenaMalloc
     ArenaLifetime saLifetime;
 #endif
+    // JITCache: with the LLInt off, an imported body's first CB installs here.
+    if (!Options::useLLInt()
+        && JITCache::installAtNewbornCodeBlock(codeBlock->vm(), *codeBlock, JITCache::InstallPoint::CompileSync) == JITCache::InstallOutcome::Installed)
+        return CompilationResult::CompilationSuccessful;
     auto plan = adoptRef(*new BaselineJITPlan(codeBlock));
     plan->compileSync(effort);
     return plan->finalize();

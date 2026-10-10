@@ -366,7 +366,7 @@ static FunctionAllowlist& ensureGlobalJITAllowlist()
     return baselineAllowlist;
 }
 
-static inline bool shouldJIT(CodeBlock* codeBlock)
+bool shouldJIT(CodeBlock* codeBlock)
 {
     if (!Options::bytecodeRangeToJITCompile().isInRange(codeBlock->instructionsSize())
         || !ensureGlobalJITAllowlist().contains(codeBlock))

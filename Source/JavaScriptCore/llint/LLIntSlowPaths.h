@@ -32,9 +32,16 @@
 namespace JSC {
 
 class CallFrame;
+class CodeBlock;
 struct ProtoCallFrame;
 
 namespace LLInt {
+
+#if ENABLE(JIT)
+// The gate the LLInt's tier-up applies before baseline code: bytecodeRangeToJITCompile, the jitAllowlist and
+// useBaselineJIT. JITCache's install function applies it too (SPEC-integrator.md section 7.1).
+bool shouldJIT(CodeBlock*);
+#endif
 
 extern "C" UGPRPair SYSV_ABI llint_trace_operand(CallFrame*, const JSInstruction*, int fromWhere, int operand) REFERENCED_FROM_ASM WTF_INTERNAL;
 extern "C" UGPRPair SYSV_ABI llint_trace_value(CallFrame*, const JSInstruction*, int fromWhere, VirtualRegister operand) REFERENCED_FROM_ASM WTF_INTERNAL;
