@@ -103,13 +103,13 @@ const COMMIT_LOCK = '~/.cache/jitcache/commit.lock'
 const INBOX = 'inbox'
 const parkedDiff = t => `${RUN_DIR}/${t.id}-parked.diff`
 
-// Every agent runs on Opus 5.5 with its 1M-token context. The opus agent type pins
-// claude-opus-5-5 without the [1m] suffix, so the model is set here, as in thread-prep.
+// Every agent runs on Opus 5.5 with its 1M-token context, as the default workflow agent with the
+// model set here: a custom agent type exists only in the configuration that defines it.
 const MODEL = 'claude-opus-5-5[1m]'
-const WRITER = { agentType: 'opus', model: MODEL, effort: 'xhigh' }
-const AGENT = { agentType: 'opus', model: MODEL, effort: 'max' }
-const BUILDER = { agentType: 'opus', model: MODEL, effort: 'medium' }
-const CLERK = { agentType: 'opus', model: MODEL, effort: 'low' }
+const WRITER = { model: MODEL, effort: 'xhigh' }
+const AGENT = { model: MODEL, effort: 'max' }
+const BUILDER = { model: MODEL, effort: 'medium' }
+const CLERK = { model: MODEL, effort: 'low' }
 
 // PARTS mirrors THREAD's Execution, in its order, then the integrator; rewrite it when the
 // lanes change. A part's tasks come from its SPEC, never from here.
