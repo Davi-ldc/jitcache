@@ -2222,7 +2222,7 @@ private:
     // The checked restore of section 5 of SPEC-ucb.codec.md. A deleted bucket is refused before it is restored: the one map
     // the codec transports, VariableEnvironment::Map, never removes an entry, and its PackedRefPtr key cannot hold the
     // deleted value (T*)-1 its key traits give. Any failure records InconsistentMapLayout and leaves the map empty.
-    void decodeHashedLayout(Decoder& decoder, Map& map, SourceType<decltype(m_entries)>&& decodedEntries) const
+    void decodeHashedLayout(Decoder& decoder, Map& map, SourceType<CachedVector<CachedPair<Key, Value>>>&& decodedEntries) const
     {
         Vector<uint32_t> slots;
         m_slots.decode(decoder, slots);
