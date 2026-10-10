@@ -3,6 +3,7 @@
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "BakedFacts.h"
+#include "BytecodeStructs.h"
 #include "CPU.h"
 #include "CallMode.h"
 #include "CodeBlock.h"
