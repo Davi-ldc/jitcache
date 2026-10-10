@@ -1,12 +1,12 @@
 export const meta = {
   name: 'thread-implement',
-  description: 'JITCache step 2: implement every task of the five SPECs as soon as its dependencies pass and its files are free, review each until a clean pass and commit it, build the committed tree whenever something new lands, then build everything and run the tests, sending each failure back to the code that caused it',
-  whenToUse: 'After thread-prep and spec-compaction, with THREAD and the SPECs sealed and committed. args: { landed: the tasks earlier runs committed, as { id, summary } (the last result gives them) or bare ids; planCache: the last result\'s planCache; reentry: { <task>: diff path, or { diff, answer } }; first: ids to admit first; buildOnly: build and fix the landed tasks and stop; runDir: where logs and diffs go }.',
+  description: 'JITCache step 2: implement every task of the five SPECs as soon as its dependencies pass and its files are free, review each until a clean pass and commit it, build the committed tree and run its unit tests and smoke whenever something new lands, then build everything and verify by a ladder, sending each failure back to the code that caused it',
+  whenToUse: 'After thread-prep and spec-compaction, with THREAD and the SPECs sealed and committed. args: { landed: the tasks earlier runs committed, as { id, summary } (the last result gives them) or bare ids; planCache: the last result\'s planCache; reentry: { <task>: diff path, or { diff, answer, findings } }; first: ids to admit first; buildOnly: build and fix the landed tasks and stop; runDir: where logs and diffs go }.',
   phases: [
     { title: 'Plan', detail: 'The task graph from the five task lists, verbatim, cached per SPEC and re-extracted only where a task list changed; an unresolved or unknown dependency, a cycle or a gap stops the run' },
-    { title: 'Implement', detail: 'Each task starts when its dependencies have passed and its files are free: write -> 3 adversarial reviewers -> amend, until a clean pass, then one commit; a design conflict waits in the run for its answer. The committed tree builds whenever something new lands' },
+    { title: 'Implement', detail: 'Each task starts when its dependencies have passed and its files are free: write -> 3 adversarial reviewers -> amend, until a clean pass, then one commit; a design conflict waits in the run for its answer. Whenever something new lands, the committed tree builds and runs its unit tests and, once the jsc host has landed, a Producer-then-Consumer smoke, which the test tasks wait for' },
     { title: 'Build', detail: 'The full build of the committed tree: twins, plain debug and Bun twins, then aarch64 once x86 is green; per round, a fix proposal per file -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
-    { title: 'Verify', detail: 'HARNESS.md end-of-task checks, QEMU included -> an item per failure, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
+    { title: 'Verify', detail: 'A ladder that stops at its first failing rung (build, unit tests, smoke, pin comparison, corpora, QEMU) -> an item per failure of that rung, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
   ],
 }
 
@@ -30,7 +30,9 @@ export const meta = {
 //   ends the run.
 // - Tasks that landed in earlier runs come back through args.landed with their summaries, so their
 //   dependents read them as in the run that landed them; the result's landed list is the next run's
-//   args.landed, and its planCache the next run's args.planCache.
+//   args.landed, and its planCache the next run's args.planCache. A task that re-enters from a run
+//   that stopped (args.reentry) continues from its saved diff, with the human's answer if it had
+//   one and its last review's open findings, which its implementer verifies as reviewers' findings.
 // - The task graph is the SPECs' task lists, verbatim. One agent extracts it; the script truncates
 //   nothing and stops on an unresolved or unknown dependency, a cycle, a gap in a list or an unsafe
 //   path. The result caches each SPEC's tasks under a hash of its task list, and a later run
@@ -44,18 +46,29 @@ export const meta = {
 //   or clean. A failed task blocks its dependents, and its files go back to HEAD. Each task commits
 //   its own files as soon as it passes: one line, "checkpoint: <two to five words>", with no task
 //   id, no body and no trailer. Commits queue.
-// - The build runs whenever something new has landed, in the build snapshot: a sparse git worktree
-//   that holds the committed tree only, so no file an implementer is still writing reaches it. Each
-//   time, an incremental x86 twins build, plus aarch64 while what landed holds ARM64-only code that
-//   has not built clean, and a short fix loop. An error that only a task not yet landed can remove
-//   waits for that task. Once every task has ended, the Build phase builds everything: twins, plain
-//   debug and Bun twins, then aarch64 once x86 is green. args.buildOnly runs that phase alone over
-//   the landed tasks. Verify then runs HARNESS.md's end-of-task checks and the QEMU runs; the
-//   concurrency family and the benches wait for the milestones. A failure goes back to the code
-//   that caused it: a cause in another file moves the failure there, never into a workaround where
-//   it shows. A fix lands only when a majority of its three reviewers approves it; a rejected fix
-//   is never replaced by an unreviewed one, and its objections go to the next proposer. Bugs that
-//   survive these scoped fixes are for the bughunter, a later workflow.
+// - Code runs as soon as it can. Jarred compiled once and verified at the end because he had an
+//   oracle and a passing corpus before he began; we had neither, so an execution failure would
+//   otherwise first show in Verify, far from the task that caused it. Whenever something new has
+//   landed, a cycle builds in the build snapshot, a sparse git worktree that holds the committed
+//   tree only, so no file an implementer is still writing reaches it: an incremental x86 twins
+//   build, plus aarch64 while what landed holds ARM64-only code that has not built clean, Bun's
+//   twins build while Bun code that landed has not, and a short fix loop. A twins build that links
+//   runs every testjitcache test in a process of its own, plus the UCB self-test once the jsc host
+//   (SMOKE_HOST) has landed; a failing test is fixed as an error of the file that defines it. When
+//   they pass, the smoke runs one trivial script through a producer, a consumer and the JITCache-off
+//   oracle, and its failures are fixed as Verify's are. The test tasks (SMOKE_GATED) start only
+//   once the smoke has passed; cycles go on while they wait, and after MAX_SMOKE_CYCLES cycles
+//   without a green smoke they are blocked by it and the run goes on. An error that only a task not
+//   yet landed can remove waits for that task.
+// - Once every task has ended, the Build phase builds everything: twins, plain debug and Bun twins,
+//   then aarch64 once x86 is green. args.buildOnly runs that phase alone over the landed tasks.
+//   Verify is a ladder that stops at its first failing rung (build, unit tests, smoke, pin
+//   comparison, corpora in twins then plain mode, QEMU), and a round fixes only that rung's
+//   failures; the concurrency family and the benches wait for the milestones. A failure goes back
+//   to the code that caused it: a cause in another file moves the failure there, never into a
+//   workaround where it shows. A fix lands only when a majority of its three reviewers approves
+//   it; a rejected fix is never replaced by an unreviewed one, and its objections go to the next
+//   proposer. Bugs that survive these scoped fixes are for the bughunter, a later workflow.
 // - JITCache's files carry no header: no license and no copyright, only comments that explain code.
 // - The run waits for the human only where an answer is due. It ends early only when its own
 //   machinery fails (the task graph, a commit, the build runner or the verifier) or when it nears
@@ -72,7 +85,8 @@ const LANDED = ((args && args.landed) || []).map(x => typeof x === 'string' ? { 
 const BUILD_ONLY = !!(args && args.buildOnly)
 const FIRST = (args && args.first) || []
 const REENTRY = Object.fromEntries(Object.entries((args && args.reentry) || {})
-  .map(([id, v]) => [id, typeof v === 'string' ? { diff: v, answer: null } : { diff: v.diff, answer: v.answer || null }]))
+  .map(([id, v]) => [id, typeof v === 'string' ? { diff: v, answer: null, findings: [] }
+    : { diff: v.diff, answer: v.answer || null, findings: v.findings || [] }]))
 const PLAN_CACHE_IN = (args && args.planCache) || null
 const MAX_TASK_PASSES = 3
 const MAX_CYCLE_ROUNDS = 3
@@ -83,6 +97,12 @@ const FINDINGS_PROMPT_LIMIT = 30000
 const AGENT_CAP = 1000
 const COMMIT_RESERVE = 10
 const WAIT_MINUTES = 60
+const MAX_SMOKE_CYCLES = 3
+
+// The smoke, a Producer-then-Consumer run of one trivial script, needs only the jsc host. The
+// tasks that write only tests wait until it passes. Rewrite both when the task lists change.
+const SMOKE_HOST = 'integrator.12'
+const SMOKE_GATED = ['ucb.11', 'image.12', 'cb.7', 'ics.7', 'integrator.15']
 
 // Builds compile the committed tree only, in the build snapshot, a sparse worktree of this
 // repository with its own build root: the build directories under the main build root belong to
@@ -90,6 +110,8 @@ const WAIT_MINUTES = 60
 const SNAPSHOT = '~/collo-local/build/jitcache-snapshot/webkit'
 const SNAPSHOT_ROOT = '~/collo-local/build/jitcache-snapshot/build'
 const PIN_SOURCE = '~/collo-local/build/jitcache/webkit-pin'
+const TWINS_BIN = `${SNAPSHOT_ROOT}/linux-x86_64-debug-local-twins/deps/WebKit/bin`
+const SYMBOLIZER = '~/collo-local/tools/llvm-21/usr/lib/llvm-21/bin/llvm-symbolizer'
 
 // The configurations whose code differs: the twins build the tests run on, the plain debug
 // build, Bun against the twins build, and the aarch64 twins build, which alone compiles ARM64
@@ -219,9 +241,10 @@ const FINGERPRINTS = {
 
 const BUILD = {
   type: 'object',
-  required: ['success', 'fileErrors', 'notBuilt'],
+  required: ['success', 'twinsBuilt', 'fileErrors', 'notBuilt'],
   properties: {
     success: { type: 'boolean' },
+    twinsBuilt: { type: 'boolean', description: 'true when the twins target compiled and linked, whatever the other targets did' },
     commit: { type: 'string', description: 'the commit the build snapshot held' },
     errorLogPath: { type: 'string', description: 'where the full raw error log was saved' },
     notBuilt: { type: 'array', items: { type: 'string' }, description: 'the targets build.ts does not know' },
@@ -234,6 +257,28 @@ const BUILD = {
         properties: {
           file: { type: 'string' },
           errors: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    note: { type: 'string' },
+  },
+}
+
+const TESTS = {
+  type: 'object',
+  required: ['ran', 'failures'],
+  properties: {
+    ran: { type: 'integer', description: 'how many tests ran' },
+    failures: {
+      type: 'array',
+      description: 'one entry per test that did not pass',
+      items: {
+        type: 'object',
+        required: ['test', 'file', 'output'],
+        properties: {
+          test: { type: 'string' },
+          file: { type: 'string', description: 'the source file that defines the test, from the repository\'s root' },
+          output: { type: 'string', description: 'its failure messages, assertion or sanitizer report, with the first frames' },
         },
       },
     },
@@ -274,6 +319,31 @@ const APPLIED = {
   },
 }
 
+// A failure the smoke or a Verify rung found: its evidence, a file scope no other item shares, and
+// the task whose code it lies in.
+const FIX_ITEM = {
+  type: 'object',
+  required: ['id', 'task', 'symptom', 'evidence', 'scope'],
+  properties: {
+    id: { type: 'string' },
+    task: { type: 'string', description: 'the task whose code the failure lies in' },
+    symptom: { type: 'string' },
+    evidence: { type: 'string' },
+    scope: { type: 'array', items: { type: 'string' } },
+    suspectedCause: { type: 'string' },
+  },
+}
+
+const SMOKE = {
+  type: 'object',
+  required: ['green', 'items'],
+  properties: {
+    green: { type: 'boolean' },
+    items: { type: 'array', description: 'independent fix items with DISJOINT file scopes', items: FIX_ITEM },
+    note: { type: 'string' },
+  },
+}
+
 const VERIFY = {
   type: 'object',
   required: ['allGreen', 'rungs', 'items'],
@@ -294,19 +364,11 @@ const VERIFY = {
     },
     items: {
       type: 'array',
-      description: 'independent fix items with DISJOINT file scopes',
+      description: 'independent fix items with DISJOINT file scopes, each naming its rung',
       items: {
-        type: 'object',
-        required: ['id', 'rung', 'task', 'symptom', 'evidence', 'scope'],
-        properties: {
-          id: { type: 'string' },
-          rung: { type: 'string' },
-          task: { type: 'string', description: 'the task whose code the failure lies in' },
-          symptom: { type: 'string' },
-          evidence: { type: 'string' },
-          scope: { type: 'array', items: { type: 'string' } },
-          suspectedCause: { type: 'string' },
-        },
+        ...FIX_ITEM,
+        required: [...FIX_ITEM.required, 'rung'],
+        properties: { ...FIX_ITEM.properties, rung: { type: 'string' } },
       },
     },
   },
@@ -433,6 +495,16 @@ const release = holder => {
 
 let haltReason = null     // why no new work starts: a git step or the build loop failed
 
+// The smoke gates the test tasks: they start once it has passed, and are blocked when it has not
+// passed after MAX_SMOKE_CYCLES cycles in which they waited.
+let smokeGreen = false    // once it has passed, the gate stays open
+let smokeGaveUp = false
+let smokeCycles = 0
+let smokePrevious = null  // the last failing smoke's items, with what became of each
+const smokeDue = () => isPassed(SMOKE_HOST)
+const gatedReady = () => SMOKE_GATED.some(id => byId.has(id) && !state.has(id) && byId.get(id).deps.every(d => isPassed(d.id)))
+const waitingOnSmoke = () => smokeDue() && !smokeGreen && !smokeGaveUp && gatedReady()
+
 function report(status, extra) {
   const tasks = { passed: [], parked: [], running: [], failed: [], blocked: [], notStarted: [] }
   for (const t of order) {
@@ -455,6 +527,7 @@ function report(status, extra) {
     parks: PARKS,
     timeline: TIMELINE,
     builds: BUILDS,
+    smoke: { green: smokeGreen, gaveUp: smokeGaveUp, cyclesWaited: smokeCycles },
     verify: VERIFY_REPORT,
     notRun: [...NOT_RUN, ...VERIFY_REPORT.rungs.filter(r => r.status === 'notRun').map(r => `${r.rung}: ${r.detail || ''}`)],
     minorFindings: MINOR,
@@ -577,7 +650,16 @@ const doneBlock = t => t.deps.length
   ? fence('completed_tasks', t.deps.map(d => ({ task: d.id, done: state.get(d.id).summary })), Infinity)
   : 'none: this task depends on no other.'
 
-const implementPrompt = (t, answer) => `${CONTEXT}${authority([t.part], 'in full')}
+// A task that re-enters from a run that stopped brings that run's open review findings, which are
+// reviewers' findings and not the human's decisions.
+const openFindingsBlock = findings => findings && findings.length ? `
+The run that stopped left these open findings from this task's last review, filed against the code
+now in your files. They are reviewers' findings, not the human's decisions: verify each against the
+code, THREAD and the SPEC, fix the real ones, and refute the others in refuted with file:line
+evidence.
+${fence('open_findings', findings, FINDINGS_PROMPT_LIMIT)}` : ''
+
+const implementPrompt = (t, answer, openFindings) => `${CONTEXT}${authority([t.part], 'in full')}
 ${RULES}
 Do NOT build, run jsc, or execute any slow command — other tasks are being written in
 parallel and the build compiles only what has been committed. Be rigorous about
@@ -587,7 +669,7 @@ ${taskBlock(t)}
 You OWN exactly these files, plus ${conflictDir(t)} for your spec conflicts — write ONLY them
 (other agents own the rest of the tree), and new reports under report/ as skills/SKILL.md allows:
 ${JSON.stringify(t.files)}
-Code already in them is earlier work on this task: build on it.${answerBlock(answer)}
+Code already in them is earlier work on this task: build on it.${answerBlock(answer)}${openFindingsBlock(openFindings)}
 Tasks this one depends on (their code is LANDED — read it, build on it, do not redo it):
 ${doneBlock(t)}
 Implement this task COMPLETELY per its SPEC. Record each spec conflict as one file in
@@ -738,7 +820,67 @@ Group every compile error by source file (attribute errors in headers to the hea
 attribute link errors to the .cpp owning the missing symbol), each path from the repository's
 root, without the snapshot's directory, or under ${BUN_REPO}/ for Bun's files, and start each
 error of an aarch64 build with "[aarch64]". Return success=true only on a fully clean
-build+link of every target that ran.`
+build+link of every target that ran, and twinsBuilt=true when the twins target compiled and
+linked, whatever the others did.`
+
+// The unit tests: every testjitcache test, each in a process of its own so a crash ends only that
+// test, and, once the jsc host has landed, the UCB self-test, which only $vm reaches.
+const UNIT_TESTS = `Run every test \`${TWINS_BIN}/testjitcache --list\` lists, each in a process of its own, so a
+crash ends only its own test: \`timeout 900 ${TWINS_BIN}/testjitcache --group=<its options> --filter=<its name>\`,
+with ASAN_SYMBOLIZER_PATH=${SYMBOLIZER} and its shared libraries exposed, as CLAUDE.md says. A test
+passes when its process prints the line "PASS <name>" and no sanitizer report; a filter matches by
+substring, so read only the test's own verdict line. A failing test's file is the one whose
+JITCACHE_TEST registration names it, under Source/JavaScriptCore/jitcache.`
+
+const UCB_SELF_TEST = `Then run the UCB self-test, which $vm reaches, once per configuration in the order of the
+self-test.js row of SPEC-ucb.md section 13.3, on one fresh artifact: each run is
+\`${TWINS_BIN}/jsc --destroy-vm --useDollarVM=true --useConcurrentJIT=false <the JITCache flags of
+SPEC-integrator.md section 11.1 for that configuration> -e '<that call of $vm.jitCacheUCBSelfTest>'\`,
+the last one with --jitcache-log so its final status shows the fault the row expects. A run whose
+call throws or whose expectation fails is a failing test "ucb-self-test:<configuration>" in
+Source/JavaScriptCore/jitcache/UCBSelfTest.cpp, with the message as its output.`
+
+const testsPrompt = tag => `Repo: ${REPO}. You run the unit tests of build ${tag}, which just built the twins target in the build
+snapshot ${SNAPSHOT}. Read skills/SKILL.md only, plus the SPEC sections named below. Run nothing but
+the tests, from ${SNAPSHOT}; no git, no build, and fix nothing.
+${UNIT_TESTS}${smokeDue() ? `\n${UCB_SELF_TEST}` : ''}
+${LONG_COMMANDS} Report how many tests ran and every one that did not pass, with its file from the
+repository's root and its failure output: the messages, the assertion or sanitizer report and its
+first frames.`
+
+// The smoke: one trivial script through a producer, a consumer and the JITCache-off oracle, which
+// shows the whole pipeline works before the test tasks build on it.
+const SMOKE_SCRIPT = `function add(a, b) { return a + b; }
+let sum = 0;
+for (let i = 0; i < 5000; i++)
+    sum = add(sum, i);
+print(sum);`
+
+const SMOKE_STEPS = `Write this script to ${RUN_DIR}/smoke/smoke.js, replacing any earlier one:
+${SMOKE_SCRIPT}
+Run on it the sequence "Producer --jitcache-delta-at-exit; Consumer" with the twins build's jsc
+(${TWINS_BIN}/jsc), each run written as SPEC-integrator.harness.md section 7.3 writes a twins-mode
+run, with --useConcurrentJIT=false, and its oracle run as section 7.6 writes it, in a fresh directory
+under ${RUN_DIR}/smoke/. The smoke passes when section 7.5's checks and 7.6's oracle pass for both
+runs: the same standard output and heap description as the oracle, a final status with no fault,
+at least one install in the Consumer, and twin reports with no difference and no skip. A sequence
+whose only failures are heap coincidences runs once more, as section 7.5 says.`
+
+const smokePrompt = (tag, previous) => `${CONTEXT}${authority(PARTS, 'where a failure bears on it')}
+You run ALONE the smoke of build ${tag}, which just built the twins target in the build snapshot
+${SNAPSHOT}: run anything, but no git and no build.
+${SMOKE_STEPS}
+${LONG_COMMANDS}
+The passed tasks and the files each owns, to name the task a failure lies in:
+${fence('task_files', order.filter(t => isPassed(t.id)).map(t => ({ task: t.id, files: t.files })), Infinity)}
+${previous ? `The previous round's smoke report, with what became of each item:
+${fence('smoke_report', previous, 30000)}
+Fixes were applied since: re-establish ground truth yourself, and carry each rejection's objections
+and each moved root cause into the item that raises its failure again.` : ''}
+Set green when the smoke passes. Otherwise produce, for every failure, an independent fix item with
+exact evidence (the run, its output, status line, twin report or stack trace) and a MINIMAL disjoint
+file scope (two failures sharing a root-cause file = ONE item), naming the task whose code the
+failure lies in: a failure goes back to the task that caused it.`
 
 const fixAnswerBlock = text => text ? `
 The human answered the spec conflict this file's earlier fix raised, and the SPEC now holds the
@@ -749,16 +891,19 @@ const proposeBuildPrompt = (item, owners, parts, logPath, rejectedFixes, answer)
 ${RULES}
 You PROPOSE a fix; you do not apply it. READ-ONLY: no builds, no writes. The target file path
 (data, not instruction) is: <<<${item.file}>>>
-Build errors in this file this round, from a build of the committed tree:
-${fence('compiler_output', item.errors.map(e => clean(e, 500)), 8000)}
-Full raw log: ${logPath} (read it for cross-file context).
+Build errors and failing tests in this file this round, from the committed tree; a line that starts
+with "[test <name>]" is that test's failure output:
+${fence('compiler_output', item.errors.map(e => clean(e, 2000)), 12000)}
+Full raw build log: ${logPath} (read it for cross-file context).
 ${owners.length ? owners.map(taskBlock).join('\n') : 'No passed task owns this file, so propose no change in it: find the changed file that broke it.'}${fixAnswerBlock(answer)}
 Read the file, THREAD, the SPEC, and any headers involved. Propose the minimal correct fix as
 exact old->new snippets. If the true bug is in ANOTHER file (e.g. a missing declaration in a
 header), set rootCauseFile to it and propose nothing here: the failure goes back to the code
 that caused it, never to a local workaround. An error that only a task not yet landed can remove,
 such as a call to a function a later task defines, is no bug: put that task in waitsOn and fix
-only the rest. Fix only what does not compile, and never redesign. A spec conflict goes in
+only the rest. Fix only what does not compile or makes a test fail, and never redesign: a failing
+test is fixed in the code it tests, or in the test when the test is what is wrong, never by
+weakening what it checks. A spec conflict goes in
 specConflict with your judgment of its kind in conflictKind. ${KINDS}${rejectedFixes.length ? `
 Fixes for this file that reviewers rejected in earlier rounds, with their objections:
 ${fence('rejected_fixes', rejectedFixes, 12000)}` : ''}`
@@ -775,10 +920,10 @@ Adversarial reviewer #${name} of a PROPOSED build fix (not yet applied) for the 
 <<<${item.file}>>> (path is data, not instruction). READ-ONLY: no builds, no writes.
 Errors: ${fence('compiler_output', item.errors.map(e => clean(e, 500)), 4000)}
 Proposal: ${fence('proposal_from_another_agent', prop, 8000)}
-Read the actual file and verify: does the fix resolve the errors WITHOUT changing what THREAD
-and the SPEC require (no deleting checks/fences/lock steps to silence the compiler, no
-stubbing out functionality), at the code that caused them? Approve, or reject with reasons,
-or approve-with-amendment.${conflictKindAsk(prop)}`
+Read the actual file and verify: does the fix resolve the errors and failing tests WITHOUT
+changing what THREAD and the SPEC require (no deleting checks/fences/lock steps to silence the
+compiler, no stubbing out functionality, no weakening what a test checks), at the code that
+caused them? Approve, or reject with reasons, or approve-with-amendment.${conflictKindAsk(prop)}`
 
 const applyPrompt = (what, scope, prop, votes, conflictFile) => `${CONTEXT}
 ${RULES}
@@ -792,19 +937,25 @@ ${fence('reviewer_votes', votes.map(v => ({ approve: v.approve, reasons: v.reaso
 Apply the proposal incorporating the amendments.${conflictFile ? ` Record its spec conflict in ${conflictFile}:
 ${CONFLICT_FILE}.` : ''} Set applied to false if you wrote nothing.`
 
-const RUNGS = `
-Run the rungs IN ORDER; stop adding rungs once one fails badly enough to make later rungs
-meaningless (report them 'skipped'). A rung whose tool or build the tree does not have is
-'notRun', with the reason.
+// A ladder: each rung runs only once every rung below it passes, so a round's fixes all answer one
+// rung's failures.
+const rungs = () => `
+Run the rungs IN ORDER and stop at the first one that fails at all: report every rung after it as
+'skipped', and give fix items only for the failures of the rung that failed. A rung whose tool or
+build the tree does not have is 'notRun', with the reason, and the ladder goes on past it.
 V0  build: ${[...BUILD_TARGETS, ARM_TARGET].join(', ')}, all green.
-V1  every check the passed tasks name in their own text, listed below.
-V2  the runner (Tools/Scripts/run-jitcache-tests) in twins mode on the twins build, with Bun's
-    twins executable: every directory and every C++ test, with the JITCache-off oracle and the
-    twin reports.
-V3  the pin comparison: V2's run given --pin and the pin build (target pin).
-V4  the runner in plain mode on the debug build: every directory.
-V5  the runner in twins mode on the aarch64 twins build under QEMU, as its command line allows:
-    every directory.
+V1  unit: ${UNIT_TESTS}${smokeDue() ? `\n${UCB_SELF_TEST}` : ''}
+    Then every check the passed tasks name in their own text, listed below.
+V2  smoke: ${smokeDue() ? SMOKE_STEPS : `notRun, since the jsc host (${SMOKE_HOST}) has not landed.`}
+V3  pin: the runner (Tools/Scripts/run-jitcache-tests) in twins mode on the twins build, with
+    Bun's twins executable and --pin with the pin build (target pin): its pin comparison of
+    every script.
+V4  corpora: that same run's sequences, every directory and every C++ test, with the
+    JITCache-off oracle and the twin reports; then the runner in plain mode on the debug build,
+    every directory. V3 and V4 come from one run of the runner: report its pin comparison as V3
+    and the rest as V4.
+V5  QEMU: the runner in twins mode on the aarch64 twins build under QEMU, as its command line
+    allows: every directory.
 ${LONG_COMMANDS} Keep every log under ${RUN_DIR}/verify-r<round>/. The builds live under ${SNAPSHOT_ROOT};
 run the runner, the checks and the tests from ${SNAPSHOT}.
 Crashes: collect stack traces (debug build asserts are evidence, paste them).`
@@ -815,7 +966,7 @@ const verifyPrompt = (round, previous) => {
   return `${CONTEXT}${authority(PARTS, 'where a failure bears on it')}
 You run ALONE — build and run anything; no git but the snapshot's checkout. Verify round ${round}.
 ${SNAPSHOT_STEP}
-${RUNGS}
+${rungs()}
 V1's checks: ${fence('task_checks', checks, Infinity)}
 The passed tasks and the files each owns, to name the task a failure lies in:
 ${fence('task_files', passed.map(t => ({ task: t.id, files: t.files })), Infinity)}
@@ -911,17 +1062,17 @@ function buildGraph(raw) {
 // One attempt at a task: the implementer writes, then review passes and amendments alternate until
 // a pass finds nothing serious. The last pass is always a review, so a task that runs out of passes
 // fails with its open findings. A conflict two reviewers call design parks the task.
-async function implementTask(t, answer, attempt) {
+async function implementTask(t, answer, attempt, openFindings) {
   const sfx = attempt > 1 ? `:a${attempt}` : ''
   const fail = (reason, extra) => {
     const why = capReached ? `${reason} (the agent cap was reached)` : reason
     log(`${t.id}: failed, ${why}`)
     return { status: 'failed', reason: why, ...extra }
   }
-  let latest = await run(implementPrompt(t, answer), { label: `impl:${t.id}${sfx}`, phase: 'Implement', schema: RESULT, ...WRITER })
+  let latest = await run(implementPrompt(t, answer, openFindings), { label: `impl:${t.id}${sfx}`, phase: 'Implement', schema: RESULT, ...WRITER })
   if (!latest) return fail('the implementer returned no result')
   const forHuman = [...(latest.forHuman || [])]
-  const refuted = []
+  const refuted = (latest.refuted || []).map(r => ({ pass: 0, ...r }))
   const reports = []
   const minor = []
   const perPass = []
@@ -1094,13 +1245,99 @@ function decide(file, ownerId, phaseName) {
   })
 }
 
+// One round of fixes for the items the smoke or a Verify rung found: each item names the task its
+// failure lies in and a scope of landed tasks' files. An item whose scope another item, a running
+// task or a fix holds, or a pending decision covers, waits for the next round; the others settle as
+// build fixes do, and the applied fixes commit once per owning task.
+async function fixItems(raws, tag, phaseName, kind, unresolved) {
+  const holder = `items:${tag}`
+  const items = []
+  for (const raw of raws) {
+    const it = {
+      id: (clean(raw.id, 64).match(/[\w-]+/g) || ['item']).join('-'),
+      rung: clean(raw.rung || 'smoke', 16),
+      task: clean(raw.task, 64),
+      symptom: raw.symptom,
+      evidence: raw.evidence,
+      suspectedCause: raw.suspectedCause,
+      scope: (raw.scope || []).map(normalize),
+    }
+    const owners = order.filter(t => isPassed(t.id) && it.scope.some(f => ownedBy(t.files, f)))
+    const unowned = it.scope.filter(f => !isSafePath(f) || !owners.some(t => ownedBy(t.files, f)))
+    if (!isPassed(it.task) || !it.scope.length || unowned.length) {
+      unresolved.push({ tag, item: it.id, task: it.task, symptom: clean(it.symptom, 600),
+        reason: !isPassed(it.task) ? 'it names no passed task' : `its scope holds files no passed task owns: ${unowned.join(', ')}` })
+      continue
+    }
+    if (it.scope.some(f => deciding.has(f))) continue
+    if (items.some(o => o.scope.some(f => it.scope.some(g => overlaps(f, g)))) || !isFree(it.scope, holder)) {
+      log(`${tag}: item ${it.id} overlaps another item's scope or files a running task or fix holds; it waits for the next round`)
+      continue
+    }
+    items.push({ ...it, owners })
+  }
+  claim(items.flatMap(it => it.scope), holder)
+  const outcomes = await parallel(items.map(it => async () => {
+    const tasks = unique([it.task, ...it.owners.map(t => t.id)]).map(id => byId.get(id))
+    const parts = unique(tasks.map(t => t.part))
+    const answer = it.scope.map(f => answers.get(f)).filter(Boolean).join('\n\n') || null
+    for (const f of it.scope) answers.delete(f)
+    const prop = await run(proposeVerifyPrompt(it, parts, tasks, answer),
+      { label: `propose:${tag}:${it.id}`, phase: phaseName, schema: PROPOSAL, ...AGENT })
+    if (!prop) return { outcome: 'unresolved', reason: 'the proposer returned no result' }
+    return settle({
+      prop, owners: it.owners, phase: phaseName, where: `${tag}, item ${it.id} (${it.task})`,
+      scope: it.scope, what: `item ${it.id}`, label: `${tag}:${it.id}`,
+      lenses: VERIFY_LENSES, votePrompt: voteVerifyPrompt(it, prop, parts),
+    })
+  }))
+  const itemReport = items.map((it, i) => {
+    const o = outcomes[i] || { outcome: 'unresolved', reason: 'its agents threw' }
+    if (o.outcome === 'decision') for (const f of it.scope) decide(f, o.owner, phaseName)
+    if (!['applied', 'moved', 'rejected', 'decision'].includes(o.outcome))
+      unresolved.push({ tag, item: it.id, task: it.task, symptom: clean(it.symptom, 600), outcome: o.outcome, reason: o.reason })
+    return { id: it.id, task: it.task, symptom: clean(it.symptom, 600), outcome: o.outcome, movedTo: o.target, rationale: o.rationale, objections: o.objections, reason: o.reason }
+  })
+  const applied = outcomes.flatMap(o => o && o.outcome === 'applied' ? o.files : [])
+  if (items.length) log(`${tag}: ${itemReport.filter(r => r.outcome === 'applied').length} of ${items.length} item fix(es) applied`)
+  const committed = !applied.length || await commitFixes(applied, kind, phaseName, tag)
+  release(holder)
+  return { items, itemReport, committed, changed: itemReport.some(r => ['applied', 'moved', 'rejected'].includes(r.outcome)) }
+}
+
+// After a twins build, a cycle runs the unit tests and, once the jsc host has landed and they all
+// pass, the smoke. A test that fails becomes an error of the file that defines it.
+async function testAndSmoke(tag, phaseName, loop, round) {
+  const tests = await runSolo(testsPrompt(tag), { label: `tests:${tag}`, phase: phaseName, schema: TESTS, ...BUILDER })
+  if (!tests) return { stopped: `the test runner of ${tag} returned no result` }
+  loop.tests.push({ round, ran: tests.ran, failed: tests.failures.map(f => clean(f.test, 200)) })
+  if (tests.failures.length) log(`Build ${tag}: ${tests.failures.length} of ${tests.ran} unit test(s) failed`)
+  if (tests.failures.length || !smokeDue()) return { failures: tests.failures, smoke: null }
+  const smoke = await runSolo(smokePrompt(tag, smokePrevious), { label: `smoke:${tag}`, phase: phaseName, schema: SMOKE, ...AGENT })
+  if (!smoke) return { stopped: `the smoke of ${tag} returned no result` }
+  loop.smoke.push({ round, green: smoke.green, items: smoke.items.length })
+  if (smoke.green) {
+    smokePrevious = null
+    if (!smokeGreen) {
+      smokeGreen = true
+      TIMELINE.push('smoke:green')
+      log('Smoke green: the test tasks may start')
+      notify()
+    }
+  }
+  return { failures: [], smoke }
+}
+
 // One build loop: a build of the committed tree, then per failing file a fix proposal, three votes
 // and an apply, until the build is green, the rounds run out or no later round could change
-// anything. A file whose errors wait on a task not yet landed, on a decision or on a running task
-// that holds it is left for later; the Build phase waits for decisions, a cycle leaves them to the
-// next cycle, which an answer starts.
-async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForDecisions) {
-  const loop = { name, targets, green: false, rounds: 0, commit: null, notBuilt: [], waiting: [], deferred: [], unresolved: [] }
+// anything. With withTests, the cycles' loops, a twins build that links also runs the unit tests
+// and, once the jsc host has landed, the smoke: a failing test is fixed as an error of the file
+// that defines it, and the smoke's items as Verify's are, so the loop is green only when the
+// build, the tests and a due smoke all pass. A file whose errors wait on a task not yet landed, on
+// a decision or on a running task that holds it is left for later; the Build phase waits for
+// decisions, a cycle leaves them to the next cycle, which an answer starts.
+async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForDecisions, withTests) {
+  const loop = { name, targets, green: false, rounds: 0, commit: null, notBuilt: [], tests: [], smoke: [], waiting: [], deferred: [], unresolved: [] }
   BUILDS.push(loop)
   for (let round = 1; round <= maxRounds && !capReached && !gitFailure; round++) {
     loop.rounds = round
@@ -1109,9 +1346,15 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
     if (!build) return { ...loop, stopped: `the build runner of ${tag} returned no result` }
     loop.notBuilt = build.notBuilt
     loop.commit = build.commit || null
-    if (build.success) {
+    const tested = withTests && build.twinsBuilt
+    const checked = tested ? await testAndSmoke(tag, phaseName, loop, round) : { failures: [], smoke: null }
+    if (checked.stopped) return { ...loop, stopped: checked.stopped }
+    const { failures, smoke } = checked
+    const smokeFailed = !!smoke && !smoke.green
+    if (build.success && (!withTests || (tested && !failures.length && (smoke ? smoke.green : !smokeDue())))) {
       loop.green = true
-      log(`Build ${name} green after ${round} round(s)`)
+      carried.clear()
+      log(`Build ${name} green after ${round} round(s)${tested ? `, its unit tests${smoke ? ' and the smoke' : ''} passing` : ''}`)
       return loop
     }
 
@@ -1127,10 +1370,20 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
       if (isSafePath(file)) add(file, fe.errors.map(String))
       else unnamed.push(fe.file)
     }
+    for (const f of failures) {
+      const file = normalize(f.file)
+      if (isSafePath(file)) add(file, [`[test ${clean(f.test, 200)}] ${f.output}`])
+      else unnamed.push(f.file)
+    }
     for (const [file, errors] of carried) add(file, errors)
     carried.clear()
-    if (unnamed.length) log(`Build ${tag}: ${unnamed.length} error entries name no file of either repository; they stay in the log`)
-    if (!byFile.size) return { ...loop, stopped: `${tag} failed with no file to fix`, detail: build.note }
+    if (unnamed.length) log(`Build ${tag}: ${unnamed.length} error or test entries name no file of either repository; they stay in the log`)
+    if (!byFile.size && !smokeFailed) {
+      if (!build.success) return { ...loop, stopped: `${tag} failed with no file to fix`, detail: build.note }
+      loop.stalled = `${tag}: unit tests failed in files no one named`
+      log(`Build ${name}: ${loop.stalled}`)
+      return loop
+    }
     const items = []
     for (const item of byFile.values()) {
       if (deciding.has(item.file) || isWaiting(item.file)) continue
@@ -1140,7 +1393,7 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
       }
       items.push(item)
     }
-    if (!items.length) {
+    if (!items.length && !smokeFailed) {
       if (waitForDecisions && deciding.size) {
         log(`Build ${tag}: every error left waits on the human's answer; waiting`)
         await Promise.race([...deciding.values()])
@@ -1151,7 +1404,7 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
     }
     const batch = items.slice(0, MAX_FILES_PER_ROUND)
     if (items.length > batch.length) log(`Build ${tag}: ${items.length - batch.length} more file(s) with errors wait for the next round`)
-    log(`Build ${tag}: ${batch.length} file(s) with errors`)
+    if (batch.length) log(`Build ${tag}: ${batch.length} file(s) with errors${failures.length ? ' or failing unit tests' : ''}`)
     claim(batch.map(i => i.file), `fix:${tag}`)
 
     const logPath = build.errorLogPath || buildLog(tag)
@@ -1184,11 +1437,15 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
       else if (o.outcome === 'rejected') rejected.set(item.file, [...(rejected.get(item.file) || []), { fix: o.fix, objections: o.objections }])
       else if (o.outcome !== 'applied') loop.unresolved.push({ round, file: item.file, outcome: o.outcome, reason: o.reason })
     })
-    log(`Build ${tag}: ${applied.length} file(s) fixed, ${carried.size} error set(s) moved to the file that caused them, ${deciding.size} waiting on the human`)
-    const committed = !applied.length || await commitFixes(applied, 'fixes compile errors', phaseName, tag)
+    if (batch.length) log(`Build ${tag}: ${applied.length} file(s) fixed, ${carried.size} error set(s) moved to the file that caused them, ${deciding.size} waiting on the human`)
+    const committed = !applied.length || await commitFixes(applied, failures.length ? 'fixes compile errors and failing unit tests' : 'fixes compile errors', phaseName, tag)
     release(`fix:${tag}`)
     if (!committed) return { ...loop, stopped: `${tag}'s commit failed` }
-    const changed = applied.length || carried.size || outcomes.some(o => o && o.outcome === 'rejected')
+    // The smoke's items go after the file fixes, so no item meets a file those fixes hold.
+    const smokeFixes = smokeFailed ? await fixItems(smoke.items, `${tag}-smoke`, phaseName, 'fixes what the smoke found', loop.unresolved) : null
+    if (smokeFixes && !smokeFixes.committed) return { ...loop, stopped: `${tag}'s commit failed` }
+    if (smokeFixes && smokeFixes.itemReport.length) smokePrevious = { items: smokeFixes.itemReport }
+    const changed = applied.length || carried.size || outcomes.some(o => o && o.outcome === 'rejected') || (smokeFixes && smokeFixes.changed)
     const deferredNow = loop.deferred.some(d => d.round === round)
     if (!changed && items.length === batch.length && !deferredNow) {
       if (waitForDecisions && deciding.size) continue
@@ -1204,17 +1461,20 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
 // saved diff, with the answer in the implementer's prompt.
 async function runTask(t) {
   let answer = null
+  let openFindings = []
   const entry = REENTRY[t.id]
   if (entry) {
-    if (await reapply(t, entry.diff, [], `reapply:${t.id}`)) answer = entry.answer
-    else log(`${t.id}: its diff ${entry.diff} did not apply; the task starts from scratch`)
+    if (await reapply(t, entry.diff, [], `reapply:${t.id}`)) {
+      answer = entry.answer
+      openFindings = entry.findings
+    } else log(`${t.id}: its diff ${entry.diff} did not apply; the task starts from scratch`)
   }
   const forHuman = []
   const minor = []
   const reports = []
   let wroteConflicts = false
   for (let attempt = 1; ; attempt++) {
-    const outcome = (await implementTask(t, answer, attempt)) || { status: 'failed', reason: 'its agents threw' }
+    const outcome = (await implementTask(t, answer, attempt, attempt === 1 ? openFindings : [])) || { status: 'failed', reason: 'its agents threw' }
     forHuman.push(...(outcome.forHuman || []))
     minor.push(...(outcome.minor || []))
     reports.push(...(outcome.reports || []))
@@ -1290,6 +1550,8 @@ if (graph.problems.length && stale.length < PARTS.length) {
 }
 order = graph.sorted
 byId = graph.ids
+for (const id of [SMOKE_HOST, ...SMOKE_GATED])
+  if (!byId.has(id)) graph.problems.push(`the smoke's constants name ${id}, which is no task: rewrite SMOKE_HOST and SMOKE_GATED with the task lists`)
 if (graph.problems.length) return report('stopped', { where: 'Plan', reason: 'the task graph is invalid', problems: graph.problems })
 if (haveFingerprints)
   PLAN_CACHE = { parts: Object.fromEntries(PARTS.map(p => [p, { fingerprint: fingerprints[p], tasks: raw.filter(t => t.part === p) }])) }
@@ -1316,6 +1578,7 @@ for (const { id, summary } of LANDED) state.set(id, { status: 'passed', summary:
 const running = new Set()
 let landings = 0
 let armLanded = false
+let bunLanded = false
 let tasksOver = BUILD_ONLY
 let daemonStopped = null
 
@@ -1339,6 +1602,7 @@ function startTask(t) {
     if (outcome.status === 'passed') {
       landings++
       armLanded = armLanded || !!outcome.arm64
+      bunLanded = bunLanded || t.files.some(f => f.startsWith('~/bun/'))
     }
     running.delete(t.id)
     release(t.id)
@@ -1351,34 +1615,52 @@ function markBlocked() {
     if (state.has(t.id)) continue
     const by = t.deps.map(d => d.id).filter(id => ['failed', 'blocked'].includes((state.get(id) || {}).status))
     if (by.length) state.set(t.id, { status: 'blocked', by })
+    else if (smokeGaveUp && SMOKE_GATED.includes(t.id)) state.set(t.id, { status: 'blocked', by: ['the smoke'] })
   }
 }
-const readyTasks = () => order.filter(t => !state.has(t.id) && t.deps.every(d => isPassed(d.id)))
+// A test task waits for the smoke even once its dependencies have passed.
+const readyTasks = () => order.filter(t => !state.has(t.id) && t.deps.every(d => isPassed(d.id)) && (smokeGreen || !SMOKE_GATED.includes(t.id)))
   .sort((a, b) => ((FIRST.indexOf(a.id) + 1 || Infinity) - (FIRST.indexOf(b.id) + 1 || Infinity)) || (weight(b) - weight(a)))
 
-// The committed tree builds whenever something new has landed or an answer has come for a fix
-// that waited on one: an incremental x86 twins build, plus aarch64 while ARM64-only code that
-// landed has not built clean, and a short fix loop.
+// The committed tree builds whenever something new has landed, an answer has come for a fix that
+// waited on one, or the test tasks wait for the smoke: an incremental x86 twins build with its
+// unit tests and the smoke, plus aarch64 while ARM64-only code that landed has not built clean,
+// Bun's twins build while Bun code that landed has not, and a short fix loop. After
+// MAX_SMOKE_CYCLES cycles that the test tasks waited through without a green smoke, they are
+// blocked by the smoke and the run goes on.
 async function buildDaemon() {
   let built = 0
   let armDirty = false
+  let bunDirty = false
   for (let cycle = 1; ; ) {
     const seen = events
     if (gitFailure || capReached) return
-    if (landings > built || answersPending) {
+    const smokeWait = waitingOnSmoke()
+    if (landings > built || answersPending || smokeWait) {
       built = landings
       answersPending = false
       armDirty = armDirty || armLanded
+      bunDirty = bunDirty || bunLanded
       armLanded = false
+      bunLanded = false
       TIMELINE.push(`build:c${cycle}`)
-      const loop = await buildLoop(`c${cycle}`, armDirty ? ['twins', ARM_TARGET] : ['twins'], true, MAX_CYCLE_ROUNDS, 'Implement', false)
+      const targets = ['twins', ...(armDirty ? [ARM_TARGET] : []), ...(bunDirty ? ['bun-twins'] : [])]
+      const loop = await buildLoop(`c${cycle}`, targets, true, MAX_CYCLE_ROUNDS, 'Implement', false, true)
       cycle++
       if (loop.stopped) {
         daemonStopped = loop.stopped
         notify()
         return
       }
-      if (loop.green) armDirty = false
+      if (loop.green) {
+        armDirty = false
+        bunDirty = false
+      }
+      if (smokeWait && !smokeGreen && ++smokeCycles >= MAX_SMOKE_CYCLES) {
+        smokeGaveUp = true
+        TIMELINE.push('smoke:gave-up')
+        log(`Smoke not green after ${smokeCycles} cycles: the test tasks that wait on it are blocked`)
+      }
       notify()
       continue
     }
@@ -1396,7 +1678,8 @@ while (!BUILD_ONLY) {
   if (!haltReason && !capReached)
     for (const t of readyTasks())
       if (isFree([...t.files, conflictDir(t)], t.id)) startTask(t)
-  if (!running.size) break
+  // With nothing running, the run still waits while the test tasks wait for the smoke.
+  if (!running.size && (haltReason || capReached || !waitingOnSmoke())) break
   await nextEvent(seen)
 }
 tasksOver = true
@@ -1413,7 +1696,7 @@ if (!order.some(t => isPassed(t.id))) return report('complete', { note: 'no task
 
 phase('Build')
 for (const [name, targets] of [['x86', BUILD_TARGETS], ['aarch64', [ARM_TARGET]]]) {
-  const loop = await buildLoop(name, targets, false, MAX_BUILD_ROUNDS, 'Build', true)
+  const loop = await buildLoop(name, targets, false, MAX_BUILD_ROUNDS, 'Build', true, false)
   if (loop.stopped) return report('stopped', { where: 'Build', reason: loop.stopped })
   if (gitFailure) return report('stopped', { where: 'Build', reason: `${gitFailure} did not complete` })
   if (capReached) return report('agent-cap')
@@ -1438,33 +1721,16 @@ for (let round = 1; round <= MAX_VERIFY_ROUNDS && !capReached; round++) {
     break
   }
 
-  const items = []
-  for (const raw of verify.items) {
-    const it = {
-      id: (clean(raw.id, 64).match(/[\w-]+/g) || ['item']).join('-'),
-      rung: clean(raw.rung, 16),
-      task: clean(raw.task, 64),
-      symptom: raw.symptom,
-      evidence: raw.evidence,
-      suspectedCause: raw.suspectedCause,
-      scope: raw.scope.map(normalize),
-    }
-    const owners = order.filter(t => isPassed(t.id) && it.scope.some(f => ownedBy(t.files, f)))
-    const unowned = it.scope.filter(f => !isSafePath(f) || !owners.some(t => ownedBy(t.files, f)))
-    if (!isPassed(it.task) || !it.scope.length || unowned.length) {
-      VERIFY_REPORT.unresolved.push({ round, item: it.id, task: it.task, symptom: clean(it.symptom, 600),
-        reason: !isPassed(it.task) ? 'it names no passed task' : `its scope holds files no passed task owns: ${unowned.join(', ')}` })
-      continue
-    }
-    if (it.scope.some(f => deciding.has(f))) continue
-    if (items.some(o => o.scope.some(f => it.scope.some(g => overlaps(f, g))))) {
-      log(`Verify round ${round}: item ${it.id} overlaps an earlier item's scope and waits for the next round`)
-      continue
-    }
-    items.push({ ...it, owners })
-  }
-  log(`Verify round ${round}: ${verify.rungs.map(r => `${r.rung}:${r.status}`).join(' ')}; ${items.length} item(s)`)
-  if (!items.length) {
+  // A ladder: a round fixes only the first failing rung's items, and the rungs above it run again
+  // once it passes.
+  const rungOf = name => (String(name).match(/V\d/) || [String(name)])[0]
+  const failing = verify.rungs.find(r => r.status === 'fail')
+  const raws = failing ? verify.items.filter(it => rungOf(it.rung) === rungOf(failing.rung)) : verify.items
+  log(`Verify round ${round}: ${verify.rungs.map(r => `${r.rung}:${r.status}`).join(' ')}; ${raws.length} item(s)`)
+  if (raws.length < verify.items.length) log(`Verify round ${round}: ${verify.items.length - raws.length} item(s) of other rungs wait until ${failing.rung} passes`)
+  const fixed = await fixItems(raws, `verify-r${round}`, 'Verify', 'fixes failing tests', VERIFY_REPORT.unresolved)
+  if (!fixed.committed) return report('stopped', { where: 'Verify', reason: `verify round ${round}'s commit failed` })
+  if (!fixed.items.length) {
     if (deciding.size) {
       log(`Verify round ${round}: every failure left waits on the human's answer; waiting`)
       await Promise.race([...deciding.values()])
@@ -1473,36 +1739,7 @@ for (let round = 1; round <= MAX_VERIFY_ROUNDS && !capReached; round++) {
     VERIFY_REPORT.stalled = `round ${round}: not green, and no failure had an item a passed task owns`
     break
   }
-
-  const outcomes = await parallel(items.map(it => async () => {
-    const tasks = unique([it.task, ...it.owners.map(t => t.id)]).map(id => byId.get(id))
-    const parts = unique(tasks.map(t => t.part))
-    const answer = it.scope.map(f => answers.get(f)).filter(Boolean).join('\n\n') || null
-    for (const f of it.scope) answers.delete(f)
-    const prop = await run(proposeVerifyPrompt(it, parts, tasks, answer),
-      { label: `propose:r${round}:${it.id}`, phase: 'Verify', schema: PROPOSAL, ...AGENT })
-    if (!prop) return { outcome: 'unresolved', reason: 'the proposer returned no result' }
-    return settle({
-      prop, owners: it.owners, phase: 'Verify', where: `verify round ${round}, item ${it.id} (${it.task})`,
-      scope: it.scope, what: `item ${it.id}`, label: `r${round}:${it.id}`,
-      lenses: VERIFY_LENSES, votePrompt: voteVerifyPrompt(it, prop, parts),
-    })
-  }))
-
-  previous = {
-    rungs: verify.rungs,
-    items: items.map((it, i) => {
-      const o = outcomes[i] || { outcome: 'unresolved', reason: 'its agents threw' }
-      if (o.outcome === 'decision') for (const f of it.scope) decide(f, o.owner, 'Verify')
-      if (!['applied', 'moved', 'rejected', 'decision'].includes(o.outcome))
-        VERIFY_REPORT.unresolved.push({ round, item: it.id, task: it.task, symptom: clean(it.symptom, 600), outcome: o.outcome, reason: o.reason })
-      return { id: it.id, task: it.task, symptom: clean(it.symptom, 600), outcome: o.outcome, movedTo: o.target, rationale: o.rationale, objections: o.objections, reason: o.reason }
-    }),
-  }
-  const applied = items.filter((_, i) => outcomes[i] && outcomes[i].outcome === 'applied')
-  log(`Verify round ${round}: ${applied.length} fix(es) applied`)
-  if (applied.length && !(await commitFixes(outcomes.flatMap(o => o && o.outcome === 'applied' ? o.files : []), 'fixes failing tests', 'Verify', `verify-r${round}`)))
-    return report('stopped', { where: 'Verify', reason: `verify round ${round}'s commit failed` })
+  previous = { rungs: verify.rungs, items: fixed.itemReport }
 }
 
 return report(capReached ? 'agent-cap' : 'complete')
