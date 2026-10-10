@@ -2707,7 +2707,7 @@ static std::optional<InlineMapLayout<Map>> layoutOf(const Map& map)
 static std::optional<InlineMapLayout<RemovableMap>> directLayout(const Vector<Identifier>& keys, unsigned firstKey, unsigned capacity, unsigned count)
 {
     Vector<std::pair<unsigned, unsigned>> placed; // bucket, key index
-    Vector<bool> taken(capacity, false);
+    Vector<bool> taken(FillWith { }, capacity, false);
     for (unsigned i = firstKey; i < keys.size() && placed.size() < count; ++i) {
         unsigned bucket = IdentifierRepHash::hash(keys[i].impl()) & (capacity - 1);
         if (taken[bucket])
@@ -2786,7 +2786,7 @@ static bool testInlineMapTransport(VM& vm, SelfTestPart& u7)
     for (unsigned size : sizes) {
         WeakRandom random(size);
         RemovableMap map;
-        Vector<bool> present(keys.size(), false);
+        Vector<bool> present(FillWith { }, keys.size(), false);
         for (unsigned i = 0; i < size; ++i) {
             map.add(keys[i].impl(), declarationEntryFor(i));
             present[i] = true;
@@ -2813,7 +2813,7 @@ static bool testInlineMapTransport(VM& vm, SelfTestPart& u7)
     for (unsigned size : sizes) {
         WeakRandom random(size + 1);
         DeclarationMap map;
-        Vector<bool> present(keys.size(), false);
+        Vector<bool> present(FillWith { }, keys.size(), false);
         for (unsigned i = 0; i < size; ++i) {
             map.add(keys[i].impl(), declarationEntryFor(i));
             present[i] = true;
@@ -2852,7 +2852,7 @@ static bool testInlineMapTransport(VM& vm, SelfTestPart& u7)
         size_t nextEntry = 0;
         for (uint32_t slot : base.slots)
             buckets.append({ slot, (slot & 1) ? std::nullopt : std::optional<size_t> { nextEntry++ } });
-        Vector<bool> occupied(base.capacity, false);
+        Vector<bool> occupied(FillWith { }, base.capacity, false);
         for (uint32_t slot : base.slots)
             occupied[slot >> 1] = true;
         unsigned target = 0;
@@ -3276,18 +3276,18 @@ static bool testCodecChunksAndBudgets(VM& vm, SelfTestPart& u7)
 
     auto coreChunks = [&](UnlinkedCodeBlock& codeBlock, CoreEncodingBudget* budget, Vector<size_t>& sizes, CoreEncodeFailure& failure) {
         Vector<uint8_t> bytes;
-        failure = forEachUnlinkedCodeBlockCoreChunk(vm, codeBlock, nullptr, budget, scopedLambda<void(std::span<const uint8_t>)>([&](std::span<const uint8_t> chunk) {
+        failure = forEachUnlinkedCodeBlockCoreChunk(vm, codeBlock, nullptr, budget, [&](std::span<const uint8_t> chunk) {
             sizes.append(chunk.size());
             bytes.append(chunk);
-        }));
+        });
         return bytes;
     };
     auto descriptorChunks = [&](UnlinkedFunctionExecutable& executable, CoreEncodingBudget* budget, Vector<size_t>& sizes, CoreEncodeFailure& failure) {
         Vector<uint8_t> bytes;
-        failure = forEachUnlinkedFunctionExecutableDescriptorChunk(vm, executable, budget, scopedLambda<void(std::span<const uint8_t>)>([&](std::span<const uint8_t> chunk) {
+        failure = forEachUnlinkedFunctionExecutableDescriptorChunk(vm, executable, budget, [&](std::span<const uint8_t> chunk) {
             sizes.append(chunk.size());
             bytes.append(chunk);
-        }));
+        });
         return bytes;
     };
 
@@ -3570,7 +3570,7 @@ static ModuleChainFixture generateModuleChain(VM& vm, unsigned bindings)
 static std::optional<unsigned> countEachBindingOnce(std::span<const uint8_t> payload, unsigned bindings)
 {
     static constexpr std::array<uint8_t, 7> prefix { 'b', 'i', 'n', 'd', 'i', 'n', 'g' };
-    Vector<unsigned> occurrences(bindings, 0);
+    Vector<unsigned> occurrences(FillWith { }, bindings, 0);
     for (size_t i = 0; i + prefix.size() + 4 <= payload.size(); ++i) {
         if (!equalSpans(payload.subspan(i, prefix.size()), std::span<const uint8_t> { prefix }))
             continue;
@@ -3815,7 +3815,7 @@ static bool testCodecHeader(VM& vm, SelfTestPart& u7)
 
     // Section 3.
     uint32_t rootOffset = loadField<uint32_t>(valid.span(), 8);
-    Vector<uint8_t> misaligned(valid.size() + 8, 0);
+    Vector<uint8_t> misaligned(FillWith { }, valid.size() + 8, 0);
     memcpySpan(misaligned.mutableSpan().subspan(1, valid.size()), valid.span());
     CoreDecodeFailure failure = CoreDecodeFailure::None;
     bool misalignedFails = !decodeUnlinkedCodeBlockCore(vm, CachedBytecode::create(misaligned.mutableSpan().subspan(1, valid.size()), [](const void*) { }, { }), provider, UnlinkedCodeBlockCoreKind::Program, nullptr, false, failure)
@@ -4345,7 +4345,7 @@ static bool testAtomMapAttach(VM& vm, VMState& state, SelfTestPart& u8)
     if (!u8.check(state.tracksKeys() && statistics.attaches == before.attaches + 1 && record()->hasPendingImport && computedNoDigest(before, statistics), "a decoded UCB whose marked constants became atoms did not attach at the matched commit identifier"_s))
         return false;
     std::span<const uint8_t> bodyMap = butterflyMapOf(*body);
-    Vector<uint8_t> kept(bodyMap.size(), 0);
+    Vector<uint8_t> kept(FillWith { }, bodyMap.size(), 0);
     bool keeps = registry.copyGeneratedButterflyMap(*decoded.get(), kept.mutableSpan());
     return u8.check(keeps == state.productionActive() && (!keeps || equalSpans(kept.span(), bodyMap)), "an attach from a Generated body did not keep its butterfly map exactly when production is active"_s);
 }
@@ -4566,7 +4566,7 @@ static bool testProvenance(VM& vm, VMState& state, JSGlobalObject* globalObject,
         });
         auto view = registry.recordOf(*decoded.get());
         std::span<const uint8_t> bodyMap = butterflyMapOf(body);
-        Vector<uint8_t> kept(bodyMap.size(), 0);
+        Vector<uint8_t> kept(FillWith { }, bodyMap.size(), 0);
         bool keeps = registry.copyGeneratedButterflyMap(*decoded.get(), kept.mutableSpan());
         bool expectsMap = provenance == CoreProvenance::Generated && state.productionActive();
         return statistics.seededDecodes == seedBefore.seededDecodes + 1 && view && view->origin == UCBOrigin::Decoded && view->hasPendingImport
@@ -4650,7 +4650,7 @@ static bool testDecodedButterflyProvenance(VM& vm, VMState& state, JSGlobalObjec
         if (!view || view->origin != UCBOrigin::Decoded || !view->hasPendingImport || view->matchedBodyVersion != 5000)
             return false;
         std::span<const uint8_t> bodyMap = butterflyMapOf(*body);
-        Vector<uint8_t> kept(bodyMap.size(), 0);
+        Vector<uint8_t> kept(FillWith { }, bodyMap.size(), 0);
         if (registry.copyGeneratedButterflyMap(*slot, kept.mutableSpan()) != expectsMap)
             return false;
 
@@ -4906,7 +4906,7 @@ static bool testSuppliedDigestInvalidMaterial(VM& vm, String& failure)
     auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get()), CoreProvenance::Generated) : std::nullopt;
     if (!u8.check(!!body, "the wrong-digest program's body could not be built"_s))
         return false;
-    TestBody undecodable { body->identity, Vector<uint8_t>(body->core.size(), 0), brokenMagic(body->feedback) };
+    TestBody undecodable { body->identity, Vector<uint8_t>(FillWith { }, body->core.size(), 0), brokenMagic(body->feedback) };
     artifact.list(key, 71, undecodable.validated(key, 8000));
     UCBStatistics before = statistics;
     unsigned differencesBeforeImport = differences();
