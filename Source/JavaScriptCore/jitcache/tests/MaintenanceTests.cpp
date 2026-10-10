@@ -855,7 +855,7 @@ JITCACHE_TEST(maintenanceCompactOrdersByScoreThenKey, No)
     JITCACHE_CHECK(plan.targetBytes == plan.postCleanBytes);
     JITCACHE_CHECK(plan.evictedBytes == bodiesBytes);
     JITCACHE_CHECK(plan.deletesArtifact);
-    JITCACHE_CHECK(equalSpans(std::span { plan.headerDigest }, std::span { artifact->headerDigest() }));
+    JITCACHE_CHECK(plan.headerDigest == artifact->headerDigest());
     JITCACHE_CHECK(report.diagnostics.isEmpty());
     JITCACHE_CHECK(artifact->bodiesInBodies() == 5 && artifact->exists("cache/header"));
 }
