@@ -8,6 +8,7 @@
 #include "Completion.h"
 #include "ConcurrentJSLock.h"
 #include "Debugger.h"
+#include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
 #include "JITCacheAPI.h"
 #include "JITCacheContainer.h"
@@ -1529,7 +1530,7 @@ JITCACHE_TEST(integratorJSONLines, No)
     JITCACHE_CHECK(json.contains("\"installs\":5"_s));
     JITCACHE_CHECK(json.contains("\"refused\":true}}"_s));
 
-    JITCACHE_CHECK(FaultReport { FaultClass::InvalidMaterial, { }, "container.io"_s, { } }.stepName() == "container.io"_s);
+    JITCACHE_CHECK((FaultReport { FaultClass::InvalidMaterial, { }, "container.io"_s, { } }.stepName() == "container.io"_s));
     JITCACHE_CHECK(name(StartOutcome::Busy) == "busy"_s);
     JITCACHE_CHECK(name(FaultClass::ExecutableMemory) == "executable-memory"_s);
     for (Role role : { Role::Consumer, Role::Producer, Role::ConsumerProducer })
