@@ -44,6 +44,8 @@
 #include "InitializeThreading.h"
 #include "Interpreter.h"
 #include "JIT.h"
+#include "JITCacheAPI.h"
+#include "JITCacheMaintenance.h"
 #include "JITOperationList.h"
 #include "JITSizeStatistics.h"
 #include "JSArray.h"
@@ -116,6 +118,11 @@
 #include <wtf/text/StringToIntegerConversion.h>
 #include <wtf/threads/BinarySemaphore.h>
 #include <wtf/threads/Signals.h>
+
+#if ENABLE(JITCACHE_TWINS)
+#include "ICTwins.h"
+#include "JITCacheTwinsHarness.h"
+#endif
 
 #if OS(WINDOWS)
 #include <direct.h>
@@ -522,7 +529,29 @@ public:
     bool m_canBlockIsFalse { false };
     bool m_reprl { false }; // Set to true to use Fuzzilli.
 
+    // JITCache (SPEC-integrator.md section 11.1). The path is set when --jitcache configures the main VM.
+    std::optional<String> m_jitCachePath;
+    JITCache::Role m_jitCacheRole { JITCache::Role::Consumer };
+    size_t m_jitCacheMaxMemory { SIZE_MAX };
+    bool m_jitCacheStrict { false };
+    bool m_jitCacheDeltaAtExit { false };
+    bool m_jitCacheLog { false };
+    bool m_jitCacheMaintenance { false };
+    String m_jitCacheBenchReport;
+#if ENABLE(JITCACHE_TWINS)
+    // The test builds' flags that runJSC and jscmain read (harness sub-SPEC section 5.1); the flags that set
+    // process-wide hooks hand them to JITCacheTwinsHarness while they are parsed.
+    String m_jitCacheTwinsReport;
+    String m_jitCacheRecordLayout;
+    Vector<String> m_jitCacheAvoidLayouts;
+    bool m_jitCacheFixedHeapProbes { false };
+    String m_jitCacheDescribeHeap;
+    String m_jitCacheBodyEvents;
+#endif
+
     void parseArguments(int, char**, int start = 1);
+    // Whether arg is one of JITCache's flags; malformed when its value is not one the flag takes.
+    bool parseJITCacheArgument(const char* arg, bool& malformed);
 };
 static LazyNeverDestroyed<CommandLine> mainCommandLine;
 
@@ -884,6 +913,24 @@ private:
 
 #if ENABLE(FUZZILLI)
         addFunction(vm, "fuzzilli"_s, functionFuzzilli, 2);
+#endif
+
+#if ENABLE(JITCACHE_TWINS)
+        // JITCache's shell functions (harness sub-SPEC section 5.2), with bun:jsc's jitcacheUCBStatistics under the
+        // name both hosts give it (section 5.3). Plain builds register none of them (SPEC-integrator.md R-ALL-4).
+#if ENABLE(JIT)
+        addFunction(vm, "jitcacheICsSnapshot"_s, JITCache::ICs::functionSnapshotBaselineICs, 2);
+#endif
+        addFunction(vm, "jitcacheDelta"_s, JITCache::functionJITCacheDelta, 0);
+        addFunction(vm, "jitcacheStatus"_s, JITCache::functionJITCacheStatus, 0);
+        addFunction(vm, "jitcacheStartOutcome"_s, JITCache::functionJITCacheStartOutcome, 0);
+        addFunction(vm, "jitcacheProgress"_s, JITCache::functionJITCacheProgress, 0);
+        addFunction(vm, "jitcacheBodyKey"_s, JITCache::functionJITCacheBodyKey, 2);
+        addFunction(vm, "jitcacheBodyEvents"_s, JITCache::functionJITCacheBodyEvents, 2);
+        addFunction(vm, "jitcacheReadSection"_s, JITCache::functionJITCacheReadSection, 2);
+        addFunction(vm, "jitcacheRewriteSection"_s, JITCache::functionJITCacheRewriteSection, 4);
+        addFunction(vm, "jitcacheDescribeHeap"_s, JITCache::functionJITCacheDescribeHeap, 1);
+        addFunction(vm, "jitcacheUCBStatistics"_s, JITCache::functionJITCacheUCBStatistics, 1);
 #endif
 
         if (Options::exposeCustomSettersOnGlobalObjectForTesting()) {
@@ -4406,6 +4453,29 @@ static void runInteractive(GlobalObject* globalObject)
     fprintf(stderr, "  --singleStringSubArgList=<args>   Parse args as a space separated list of arguments. (For VSCode debuggers to pass arguments).\n");
     fprintf(stderr, "  --wasm-debugger[=port]        Enable WebAssembly debugging server (default port 1234)\n");
     fprintf(stderr, "\n");
+    fprintf(stderr, "  --jitcache[=<path>]                Configures the main VM's JITCache over the artifact at path (./.jitcache by default)\n");
+    fprintf(stderr, "  --jitcache-mode=c|p|p-c            JITCache's role: consumer (the default), producer or consumer-producer\n");
+    fprintf(stderr, "  --jitcache-max-memory=<bytes>|unlimited  The producer's working-memory limit, with an optional K, M or G suffix (unlimited by default)\n");
+    fprintf(stderr, "  --jitcache-strict[=0|1]            Validates the full structure of what JITCache reads and assumes (off by default)\n");
+    fprintf(stderr, "  --jitcache-delta-at-exit           Calls JITCache's delta once the scripts and the run loop have finished\n");
+    fprintf(stderr, "  --jitcache-log[=0|1]               Writes JITCache's start result, delta results and final status to stderr as JSON lines\n");
+    fprintf(stderr, "  --jitcache-bench-report=<path>     Appends JITCache's bench report to path\n");
+    fprintf(stderr, "  --jitcache-maintenance -- <command>  Runs JITCache maintenance and exits: clean [<path>] or compact <ratio> [<path>] [--yes | --no]\n");
+#if ENABLE(JITCACHE_TWINS)
+    fprintf(stderr, "  --jitcache-twins-report=<path>     Appends JITCache's twin report to path\n");
+    fprintf(stderr, "  --jitcache-twins-record-layout=<path>  Records the executable pool, the structure reservation and the heap probes in path\n");
+    fprintf(stderr, "  --jitcache-twins-avoid-layout=<path>[,<path>...]  Keeps the executable pool and the structure reservation out of the recorded ranges\n");
+    fprintf(stderr, "  --jitcache-test-fixed-heap-probes  Records fixed heap probes in place of the live ones\n");
+    fprintf(stderr, "  --jitcache-describe-heap=<path>    Writes the description of the heap JavaScript can reach to path at the end of the run\n");
+    fprintf(stderr, "  --jitcache-body-events=<path>      Writes the per-body event counts to path at the end of the run\n");
+    fprintf(stderr, "  --jitcache-test-writer-fault=<check>@<n>  Fails the writer's n-th commit at check\n");
+    fprintf(stderr, "  --jitcache-test-kill=<point>@<n>   Kills the process at point of the writer's n-th commit\n");
+    fprintf(stderr, "  --jitcache-test-force-blinding     Blinds every immediate the assembler considers for blinding (JITCache off only)\n");
+    fprintf(stderr, "  --jitcache-test-store-fault=openBody|scoring:EMFILE|ENFILE|ENOMEM|EIO[@<n>]  Fails the store's opens with that error\n");
+    fprintf(stderr, "  --jitcache-test-image-hook=<name>  Sets the image test hook: relocation-pairs, operation-pair, change-recorded-target or skip-patch\n");
+    fprintf(stderr, "  --jitcache-test-twin-entry=difference|skip|coincidence:<domain>  Writes a test entry to the twin report after start\n");
+#endif
+    fprintf(stderr, "\n");
     fprintf(stderr, "Files with a .mjs extension will always be evaluated as modules.\n");
     fprintf(stderr, "\n");
 
@@ -4456,6 +4526,204 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+
+// A JITCache flag as the command line gives it: the flag alone, or the value after its '='.
+struct JITCacheFlagValue {
+    bool bare;
+    const char* value;
+};
+
+static std::optional<JITCacheFlagValue> jitCacheFlagValue(const char* arg, const char* flag)
+{
+    size_t length = strlen(flag);
+    if (strncmp(arg, flag, length))
+        return std::nullopt;
+    if (!arg[length])
+        return JITCacheFlagValue { true, arg + length };
+    if (arg[length] != '=')
+        return std::nullopt;
+    return JITCacheFlagValue { false, arg + length + 1 };
+}
+
+// Bare or =1 turns the flag on, =0 off.
+static std::optional<bool> jitCacheBooleanFlag(const JITCacheFlagValue& flag)
+{
+    if (flag.bare || !strcmp(flag.value, "1"))
+        return true;
+    if (!strcmp(flag.value, "0"))
+        return false;
+    return std::nullopt;
+}
+
+// A path flag takes a non-empty path.
+static std::optional<String> jitCachePathFlag(const JITCacheFlagValue& flag)
+{
+    if (flag.bare || !*flag.value)
+        return std::nullopt;
+    return String::fromUTF8WithLatin1Fallback(unsafeSpan(flag.value));
+}
+
+// Bytes with an optional K, M or G suffix in powers of 1024, or unlimited, which is SIZE_MAX.
+static std::optional<size_t> jitCacheMemoryLimit(const JITCacheFlagValue& flag)
+{
+    if (flag.bare)
+        return std::nullopt;
+    StringView text = StringView::fromLatin1(flag.value);
+    if (text == "unlimited"_s)
+        return SIZE_MAX;
+    size_t multiplier = 1;
+    if (!text.isEmpty()) {
+        switch (text[text.length() - 1]) {
+        case 'K':
+            multiplier = 1024;
+            break;
+        case 'M':
+            multiplier = 1024 * 1024;
+            break;
+        case 'G':
+            multiplier = 1024 * 1024 * 1024;
+            break;
+        default:
+            break;
+        }
+        if (multiplier != 1)
+            text = text.left(text.length() - 1);
+    }
+    if (text.isEmpty())
+        return std::nullopt;
+    for (auto character : text.codeUnits()) {
+        if (!isASCIIDigit(character))
+            return std::nullopt;
+    }
+    auto bytes = parseInteger<uint64_t>(text);
+    if (!bytes || *bytes > SIZE_MAX / multiplier)
+        return std::nullopt;
+    return static_cast<size_t>(*bytes) * multiplier;
+}
+
+bool CommandLine::parseJITCacheArgument(const char* arg, bool& malformed)
+{
+    malformed = false;
+    if (strncmp(arg, "--jitcache", strlen("--jitcache")))
+        return false;
+
+    // SPEC-integrator.md section 11.1. The last occurrence of a flag wins.
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache")) {
+        m_jitCachePath = flag->bare || !*flag->value ? String { JITCache::defaultArtifactPath } : String::fromUTF8WithLatin1Fallback(unsafeSpan(flag->value));
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-mode")) {
+        std::optional<JITCache::Role> role;
+        if (!flag->bare && !strcmp(flag->value, "c"))
+            role = JITCache::Role::Consumer;
+        else if (!flag->bare && !strcmp(flag->value, "p"))
+            role = JITCache::Role::Producer;
+        else if (!flag->bare && !strcmp(flag->value, "p-c"))
+            role = JITCache::Role::ConsumerProducer;
+        if (role)
+            m_jitCacheRole = *role;
+        malformed = !role;
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-max-memory")) {
+        auto limit = jitCacheMemoryLimit(*flag);
+        if (limit)
+            m_jitCacheMaxMemory = *limit;
+        malformed = !limit;
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-strict")) {
+        auto strict = jitCacheBooleanFlag(*flag);
+        if (strict)
+            m_jitCacheStrict = *strict;
+        malformed = !strict;
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-delta-at-exit")) {
+        if (flag->bare)
+            m_jitCacheDeltaAtExit = true;
+        malformed = !flag->bare;
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-log")) {
+        auto logsResults = jitCacheBooleanFlag(*flag);
+        if (logsResults)
+            m_jitCacheLog = *logsResults;
+        malformed = !logsResults;
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-bench-report")) {
+        auto path = jitCachePathFlag(*flag);
+        if (path)
+            m_jitCacheBenchReport = WTF::move(*path);
+        malformed = !path;
+        return true;
+    }
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-maintenance")) {
+        if (flag->bare)
+            m_jitCacheMaintenance = true;
+        malformed = !flag->bare;
+        return true;
+    }
+
+#if ENABLE(JITCACHE_TWINS)
+    // Harness sub-SPEC section 5.1. Parsing runs in jscmain before JSC::initialize, which is where the forced blinding and
+    // the image hook must be set.
+    auto pathFlag = [&](const char* name, String& field) -> bool {
+        auto flag = jitCacheFlagValue(arg, name);
+        if (!flag)
+            return false;
+        auto path = jitCachePathFlag(*flag);
+        if (path)
+            field = WTF::move(*path);
+        malformed = !path;
+        return true;
+    };
+    auto valueFlag = [&](const char* name, bool (*set)(const char*)) -> bool {
+        auto flag = jitCacheFlagValue(arg, name);
+        if (!flag)
+            return false;
+        malformed = flag->bare || !set(flag->value);
+        return true;
+    };
+    auto bareFlag = [&](const char* name, const auto& set) -> bool {
+        auto flag = jitCacheFlagValue(arg, name);
+        if (!flag)
+            return false;
+        if (flag->bare)
+            set();
+        malformed = !flag->bare;
+        return true;
+    };
+
+    if (pathFlag("--jitcache-twins-report", m_jitCacheTwinsReport)
+        || pathFlag("--jitcache-twins-record-layout", m_jitCacheRecordLayout)
+        || pathFlag("--jitcache-describe-heap", m_jitCacheDescribeHeap)
+        || pathFlag("--jitcache-body-events", m_jitCacheBodyEvents)
+        || valueFlag("--jitcache-test-writer-fault", JITCache::setWriterFaultFlag)
+        || valueFlag("--jitcache-test-kill", JITCache::setKillFlag)
+        || valueFlag("--jitcache-test-store-fault", JITCache::setStoreFaultFlag)
+        || valueFlag("--jitcache-test-image-hook", JITCache::setImageTestHookNamed)
+        || valueFlag("--jitcache-test-twin-entry", JITCache::setTwinEntryFlag)
+        || bareFlag("--jitcache-test-fixed-heap-probes", [&] { m_jitCacheFixedHeapProbes = true; })
+        || bareFlag("--jitcache-test-force-blinding", [] { JITCache::setForcesBlindingForTesting(true); }))
+        return true;
+
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-twins-avoid-layout")) {
+        // The runner passes the layouts of the sequence's earlier runs, none for its first run, so an empty value is an
+        // empty list; an empty path inside a list is malformed.
+        Vector<String> paths;
+        if (!flag->bare && *flag->value)
+            paths = String::fromUTF8WithLatin1Fallback(unsafeSpan(flag->value)).splitAllowingEmptyEntries(',');
+        malformed = flag->bare || paths.containsIf([](const String& path) { return path.isEmpty(); });
+        if (!malformed)
+            m_jitCacheAvoidLayouts = WTF::move(paths);
+        return true;
+    }
+#endif
+
+    return false;
+}
 
 void CommandLine::parseArguments(int argc, char** argv, int start)
 {
@@ -4714,6 +4982,14 @@ void CommandLine::parseArguments(int argc, char** argv, int start)
         }
 #endif
 
+        if (bool malformed = false; parseJITCacheArgument(arg, malformed)) {
+            if (malformed) {
+                hasBadJSCOptions = true;
+                dataLog("ERROR: invalid option: ", arg, "\n");
+            }
+            continue;
+        }
+
         // See if the -- option is a JSC VM option.
         if (strstr(arg, "--") == arg) {
             if (!JSC::Options::setOption(&arg[2], /* verify = */ false)) {
@@ -4755,6 +5031,78 @@ CommandLine::CommandLine(CommandLineForWorkersTag)
 {
 }
 
+// --jitcache-log's lines: toJSON of a result, one line each on stderr.
+static void printJITCacheLine(const String& line)
+{
+    SAFE_FPRINTF(stderr, "%s\n", line.utf8());
+}
+
+// SPEC-integrator.md section 11.1: the main VM's JITCache, right after VM::create and before the first GlobalObject;
+// the $262.agent workers' VMs are not configured.
+static void startJITCache(VM& vm, const CommandLine& options)
+{
+    JSLockHolder locker(vm);
+#if ENABLE(JITCACHE_TWINS)
+    // Harness sub-SPEC section 4, with or without --jitcache.
+    if (!options.m_jitCacheRecordLayout.isNull())
+        JITCache::recordVMLayout(vm, options.m_jitCacheRecordLayout, options.m_jitCacheFixedHeapProbes ? JITCache::HeapProbes::Fixed : JITCache::HeapProbes::Live);
+#endif
+    if (!options.m_jitCachePath)
+        return;
+
+    JITCache::Config config;
+    config.artifactPath = *options.m_jitCachePath;
+    config.role = options.m_jitCacheRole;
+    config.producerLimitBytes = options.m_jitCacheMaxMemory;
+    config.strict = options.m_jitCacheStrict;
+    config.benchReportPath = options.m_jitCacheBenchReport;
+#if ENABLE(JITCACHE_TWINS)
+    config.twinReportPath = options.m_jitCacheTwinsReport;
+#endif
+    JITCache::StartResult result = JITCache::start(vm, config);
+    if (options.m_jitCacheLog)
+        printJITCacheLine(JITCache::toJSON(result));
+#if ENABLE(JITCACHE_TWINS)
+    JITCache::didStartShellVM(vm, result.outcome, options.m_jitCacheLog);
+#endif
+}
+
+// SPEC-integrator.md section 11.1: the end of the main VM's iteration, once its run loop has returned or it ended on a
+// termination, while its GlobalObject is in hand. A script that calls quit() exits before this.
+static void finishJITCacheRun(VM& vm, GlobalObject* globalObject, const CommandLine& options)
+{
+    JSLockHolder locker(vm);
+    if (options.m_jitCacheDeltaAtExit) {
+        JITCache::DeltaResult result = JITCache::delta(vm);
+        if (options.m_jitCacheLog)
+            printJITCacheLine(JITCache::toJSON(result));
+    }
+#if ENABLE(JITCACHE_TWINS)
+    if (!options.m_jitCacheBodyEvents.isNull())
+        JITCache::writeBodyEvents(vm, options.m_jitCacheBodyEvents);
+    // After delta, so its full collection changes no capture, and after the body-event dump, whose live UCBs it would
+    // retire.
+    if (!options.m_jitCacheDescribeHeap.isNull())
+        JITCache::writeReachableHeapDescription(*globalObject, options.m_jitCacheDescribeHeap);
+#else
+    UNUSED_PARAM(globalObject);
+#endif
+    if (options.m_jitCacheLog)
+        printJITCacheLine(JITCache::toJSON(JITCache::status(vm)));
+    // So that a run without --destroy-vm keeps its bench events.
+    JITCache::flushBenchReport(vm);
+}
+
+// SPEC-integrator.md section 11.1 and maintenance sub-SPEC section 5: the command line after --.
+static int runJITCacheMaintenance(const Vector<String>& arguments)
+{
+    // The shell keeps argv's bytes as Latin-1 strings (CommandLine::parseArguments), which latin1() gives back unchanged.
+    Vector<CString> bytes = arguments.map([](const String& argument) {
+        return argument.latin1();
+    });
+    return JITCache::Maintenance::runCommandLine(bytes.span(), stdin, stdout, stderr);
+}
+
 template<typename Func>
 int runJSC(const CommandLine& options, bool isWorker, const Func& func)
 {
@@ -4762,6 +5110,8 @@ int runJSC(const CommandLine& options, bool isWorker, const Func& func)
     VM& vm = VM::create(HeapType::Large).leakRef();
     if (!isWorker && options.m_canBlockIsFalse)
         vm.m_typedArrayController = adoptRef(new JSC::SimpleTypedArrayController(false));
+    if (!isWorker)
+        startJITCache(vm, options);
 
     int result;
     bool success;
@@ -4809,6 +5159,9 @@ int runJSC(const CommandLine& options, bool isWorker, const Func& func)
                     runInteractive(globalObject);
             }
         }
+
+        if (!isWorker)
+            finishJITCacheRun(vm, globalObject, options);
 
         result = success && (asyncTestExpectedPasses == asyncTestPasses) ? 0 : 3;
 
@@ -4922,6 +5275,11 @@ int jscmain(int argc, char** argv)
     // comes first.
     mainCommandLine.construct(argc, argv);
 
+    // JITCache maintenance needs no VM: it runs before JSC::initialize and exits with its code (SPEC-integrator.md
+    // section 11.1).
+    if (mainCommandLine->m_jitCacheMaintenance)
+        return runJITCacheMaintenance(mainCommandLine->m_arguments);
+
 #if OS(WINDOWS)
     // Needed for complex.yaml tests.
     if (char* tz = getenv("TZ"))
@@ -4933,7 +5291,17 @@ int jscmain(int argc, char** argv)
         processConfigFile(Options::configFile(), "jsc");
     }
 
+#if ENABLE(JITCACHE_TWINS)
+    // Harness sub-SPEC section 4: placeholders over the earlier processes' recorded ranges keep this process's executable
+    // pool and structure reservation out of them.
+    JITCache::placeholdersBeforeInitialize(mainCommandLine->m_jitCacheAvoidLayouts);
+#endif
     JSC::initialize();
+#if ENABLE(JITCACHE_TWINS)
+    JITCache::releasePlaceholdersAfterInitialize();
+    if (!mainCommandLine->m_jitCacheRecordLayout.isNull())
+        JITCache::recordLayout(mainCommandLine->m_jitCacheRecordLayout);
+#endif
 #if ENABLE(JIT_OPERATION_VALIDATION)
     JSC::JITOperationList::populatePointersInEmbedder(&startOfJITOperationsInShell, &endOfJITOperationsInShell);
 #endif
