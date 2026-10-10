@@ -711,6 +711,14 @@ runs out first, return answered false.`
 
 const buildLog = tag => `${RUN_DIR}/build-${tag}.log`
 
+// A background job dies with the turn of the agent that started it, so an agent that ends its turn
+// to wait for a notification loses its build and never returns.
+const LONG_COMMANDS = `A build or a run outlasts one command's timeout, and a background job dies when your
+turn ends. Start it in the background as \`<command> > <log> 2>&1; echo "EXIT $?" >> <log>\`, then
+stay in your turn and poll with commands that each end within 9 minutes, such as
+\`timeout 540 bash -c 'until grep -q "^EXIT" <log>; do sleep 30; done'\`, until the EXIT line
+appears. Never end your turn, or wait for a notification, while it runs.`
+
 const SNAPSHOT_STEP = `The build snapshot ${SNAPSHOT} is a sparse git worktree of this repository that holds
 the committed tree only, so no file an implementer is still writing reaches a build. Bring it to the
 latest commit first, with \`flock ${COMMIT_LOCK} git -C ${SNAPSHOT} checkout --detach --quiet public\`,
@@ -724,9 +732,8 @@ const buildPrompt = (targets, everyOne, tag) => `Repo: ${REPO}. You are the buil
 Build ${tag}. Read skills/SKILL.md only: this task needs neither its references, THREAD nor any SPEC.
 ${SNAPSHOT_STEP} Report the commit it holds in commit.
 Run, in this order, ${everyOne ? 'every one even after one fails' : 'stopping at the first that fails'}: ${targets.map(t => `${t} --keep-going`).join('; ')}.
-A target build.ts does not know goes in notBuilt and is no failure. A build outlasts one
-command's timeout: run it in the background and wait for it to exit. Save the FULL raw error
-output to ${buildLog(tag)} (so fixers can read the complete context). Do not fix anything.
+A target build.ts does not know goes in notBuilt and is no failure. ${LONG_COMMANDS} Save the
+FULL raw error output to ${buildLog(tag)} (so fixers can read the complete context). Do not fix anything.
 Group every compile error by source file (attribute errors in headers to the header file;
 attribute link errors to the .cpp owning the missing symbol), each path from the repository's
 root, without the snapshot's directory, or under ${BUN_REPO}/ for Bun's files, and start each
@@ -798,8 +805,7 @@ V3  the pin comparison: V2's run given --pin and the pin build (target pin).
 V4  the runner in plain mode on the debug build: every directory.
 V5  the runner in twins mode on the aarch64 twins build under QEMU, as its command line allows:
     every directory.
-Builds and runs outlast one command's timeout: run each in the background, its output in a log
-under ${RUN_DIR}/verify-r<round>/, and wait for it to exit. The builds live under ${SNAPSHOT_ROOT};
+${LONG_COMMANDS} Keep every log under ${RUN_DIR}/verify-r<round>/. The builds live under ${SNAPSHOT_ROOT};
 run the runner, the checks and the tests from ${SNAPSHOT}.
 Crashes: collect stack traces (debug build asserts are evidence, paste them).`
 
