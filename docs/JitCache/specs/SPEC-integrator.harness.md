@@ -175,14 +175,14 @@ The walk is breadth-first and iterative. A primitive is written where it is met:
 | cell | the cell's line | its edges, in order |
 |---|---|---|
 | symbol | its description; its `Symbol.for` key when registered; whether it is private | none |
-| any object | `JSCell::classInfo()->className`; callable; constructor; extensible as its structure says (`isStructureExtensible`), so no trap runs | the prototype (`getPrototypeDirect`); the own properties in the order `getOwnPropertyNames` gives them, private names included (`PropertyNameArrayBuilder` with `PropertyNameMode::StringsAndSymbols` and `PrivateSymbolMode::Include`); then the internal state the rows below add; then the private brands its structure carries (`BrandedStructure`), in the order they were added |
+| any object | `JSCell::classInfo()->className`; callable; constructor; extensible as its structure says (`isStructureExtensible`), so no trap runs | the prototype (`getPrototypeDirect`); the own properties in the order `getOwnPropertyNames` gives them, private names included (`PropertyNameArrayBuilder` with `PropertyNameMode::StringsAndSymbols` and `PrivateSymbolMode::Include`); then the internal state the rows below add; then the private brands its structure carries: each private symbol the walk reached, its weak edges included, that `BrandedStructure::checkBrand` accepts, in their ordinal order |
 | `JSFunction` with a `FunctionExecutable` | the provider's URL and the executable's start and end offsets, or a builtin's name | the scope (`JSCallee::scope()`) |
 | `JSFunction` with a `NativeExecutable`, `InternalFunction` | its name | |
 | `JSBoundFunction` | | target, bound this, bound arguments |
 | `ProxyObject` | | target and handler (`null` once revoked), in place of the prototype and own properties, which only traps could read |
 | `JSModuleNamespaceObject` | | in place of the own properties, each export by name, read from the binding it resolves to, so nothing is materialized and an empty binding writes `<empty>` |
-| a `JSSymbolTableObject` scope: lexical, module or global lexical environment | the scope kind | each variable its symbol table places in the scope, sorted by name, with its value; then the next scope (`JSScope::next()`) |
-| `JSWithScope` | | the object; the next scope |
+| a `JSSymbolTableObject` scope: lexical, module or global lexical environment | the scope kind, in place of the any-object line | each variable its symbol table places in the scope, sorted by name, with its value; then the next scope (`JSScope::next()`); in place of the any-object edges |
+| `JSWithScope` | the scope kind, in place of the any-object line | the object; the next scope; in place of the any-object edges |
 | `JSMap`, `JSSet` | | the entries in iteration order |
 | `JSWeakMap`, `JSWeakSet`, `JSWeakObjectRef`, `JSFinalizationRegistry` | | the weak edges of section 6.3 |
 | `JSPromise` | its status | its result; not its reactions (below) |
@@ -194,7 +194,7 @@ The walk is breadth-first and iterative. A primitive is written where it is met:
 | `JSArrayBufferView` | type, byte offset, length | the buffer, in place of the indexed own properties |
 | any other cell, such as an engine cell an internal field holds | `JSCell::classInfo()->className` | none |
 
-The rows below "any object" add to what an object writes, except where a row says it replaces a part. Each own property is read with a `PropertySlot` of type `VMInquiry`, which calls no getter, trap or host accessor. Its line gives the key, the attributes, and the value or the getter and setter; a custom value or accessor writes `<custom>`, and a property the inquiry cannot read writes `<opaque>`. An object of a class the table does not name contributes what any object does.
+The rows below "any object" add to what an object writes, except where a row says it replaces a part. A scope replaces all of it: its own properties follow its symbol table's hash order, which an imported UCB's table need not share with the JITCache-off run's, and JavaScript cannot observe them. The global object is no scope these rows name, so it writes what any object does. `BrandedStructure` exposes its brands only through `checkBrand`, so brands are tested once the walk has ended and give no cell an ordinal. A class keeps its brand in a variable of its class scope (`BytecodeGenerator::emitCreatePrivateBrand`), so the walk reaches every brand a reachable function can check. Each own property is read with a `PropertySlot` of type `VMInquiry`, which calls no getter, trap or host accessor. Its line gives the key, the attributes, and the value or the getter and setter; a custom value or accessor writes `<custom>`, and a property the inquiry cannot read writes `<opaque>`. An object of a class the table does not name contributes what any object does.
 
 A pending promise's reactions are left out: JavaScript observes them only through what they run once the promise settles, which the rest of the output and the final description show.
 
