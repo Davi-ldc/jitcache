@@ -1220,42 +1220,52 @@ JITCACHE_TEST_WITH_OPTIONS(cbImportFinishCounterRestoresTheCapturedCounter, Yes,
 // U7: in a fresh realm that has created no Map and no Set, seedLinkedState with an iterator_open record holding FastMap
 // (FastSet), inside a DeferGC as the install function's deferral surrounds it, leaves the realm's lazy entries (values)
 // function materialized, and a later new Map (new Set) installs that same function; with neither bit, both stay null
-// (I14).
+// (I14). One realm brings iterate to baseline for all three cases: the VM's CodeCache gives every realm that evaluates
+// iterateSource the same UCBs, so in a later realm iterate's first call would install the baseline code the first
+// compile parked in its UCB's sharing slot. The realm step reads only the seeded CB's realm, so each case seeds a
+// newborn CB of iterateTwin in a realm of its own.
 JITCACHE_TEST(cbImportRealmStepMaterializesTheIteratorFunction, Yes)
 {
     VM& vm = *context.vm();
+    JSGlobalObject* producerRealm = createRealm(context, vm, iterateSource);
+    if (!producerRealm)
+        return;
+    JSFunction* iterate = globalFunction(context, producerRealm, "iterate"_s);
+    auto array = globalObjectValue(context, producerRealm, "array"_s);
+    if (!iterate || !array)
+        return;
+    CodeBlock* producer = bringToBaseline(context, producerRealm, iterate, { *array });
+    if (!producer)
+        return;
+    auto captured = captureState(context, *producer);
+    if (!captured || !hasEntries(context, *captured, CBFormat::iteratorOpenIterationModesFamily, 1, "the realm step"_s))
+        return;
+    size_t modesIndex = recordIndex(*captured, CBFormat::iteratorOpenIterationModesFamily, 0);
+    uint16_t mapAndSet = iterationModeBit(IterationMode::FastMap) | iterationModeBit(IterationMode::FastSet);
+    if (captured->iterationModes[modesIndex] & mapAndSet) {
+        JITCACHE_FAIL("the producer recorded a map or set iteration over an array"_s);
+        return;
+    }
+
     enum class Seeded : uint8_t { FastMap, FastSet, Neither };
     for (Seeded seeded : { Seeded::FastMap, Seeded::FastSet, Seeded::Neither }) {
         JSGlobalObject* globalObject = createRealm(context, vm, iterateSource);
         if (!globalObject)
             return;
-        JSFunction* iterate = globalFunction(context, globalObject, "iterate"_s);
         JSFunction* twin = globalFunction(context, globalObject, "iterateTwin"_s);
-        auto array = globalObjectValue(context, globalObject, "array"_s);
-        if (!iterate || !twin || !array)
-            return;
-        CodeBlock* producer = bringToBaseline(context, globalObject, iterate, { *array });
-        if (!producer)
-            return;
-        auto image = captureState(context, *producer);
-        if (!image || !hasEntries(context, *image, CBFormat::iteratorOpenIterationModesFamily, 1, "the realm step"_s))
+        if (!twin)
             return;
         if (globalObject->mapProtoEntriesFunctionConcurrently() || globalObject->setProtoValuesFunctionConcurrently()) {
             JITCACHE_FAIL("the fresh realm created a Map or a Set before the seed"_s);
             return;
         }
 
-        uint16_t mapAndSet = iterationModeBit(IterationMode::FastMap) | iterationModeBit(IterationMode::FastSet);
-        uint16_t& modes = image->iterationModes[recordIndex(*image, CBFormat::iteratorOpenIterationModesFamily, 0)];
-        if (modes & mapAndSet) {
-            JITCACHE_FAIL("the producer recorded a map or set iteration over an array"_s);
-            return;
-        }
+        StateImage image = *captured;
         if (seeded == Seeded::FastMap)
-            modes |= iterationModeBit(IterationMode::FastMap);
+            image.iterationModes[modesIndex] |= iterationModeBit(IterationMode::FastMap);
         else if (seeded == Seeded::FastSet)
-            modes |= iterationModeBit(IterationMode::FastSet);
-        auto words = encodeState(context, *image);
+            image.iterationModes[modesIndex] |= iterationModeBit(IterationMode::FastSet);
+        auto words = encodeState(context, image);
         if (!words)
             return;
 
