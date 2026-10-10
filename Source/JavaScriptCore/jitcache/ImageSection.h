@@ -4,6 +4,8 @@
 
 #include "BakedFacts.h"
 #include "BytecodeIndex.h"
+#include "ImageSupport.h"
+#include "ImageTwins.h"
 #include "ImageTypes.h"
 #include <array>
 #include <bit>
@@ -16,7 +18,8 @@
 
 // The image.baseline section (SPEC-image.md section 8.2): its fixed-footprint encodings (section 3.2), its entry codecs,
 // the writer capture streams it through with every footprint canonical (section 8.4), the view an import reads it
-// through, and the checks V1 to V6 and U1 to U7 (section 8.5). The baked-facts.baseline codec and V7 live in BakedFacts.h.
+// through, and the checks V1 to V6 and U1 to U7 (section 8.5). The baked-facts.baseline codec and V7 live in BakedFacts.h,
+// and the image-twins.baseline codec with W1 to W4 in ImageTwins.h.
 
 namespace JSC {
 
@@ -71,6 +74,16 @@ bool isCanonicalFootprint(FixupForm, std::span<const uint8_t> footprint);
 // footprint's own address. Nullopt when the bytes do not hold the form's instruction (table 3.2 opcodes, the same Xd
 // across an ARM64 Pointer's three words). Jump islands are the caller's to follow.
 std::optional<uintptr_t> decodeFootprint(FixupForm, std::span<const uint8_t> footprint, uintptr_t footprintAddress);
+// Whether a footprint of executable memory at footprintAddress holds its form's instruction and reaches expected: a
+// Pointer holds it, and a Call or a Jump branches to it, on ARM64 through the unconditional b of each jump island on the
+// way, at most the pool's size divided by half of MacroAssembler::nearJumpRange, rounded up, which bounds the chains
+// FixedVMPoolExecutableAllocator::islandForJumpLocation builds for any pool size (section 9, S1).
+bool footprintReaches(FixupForm, std::span<const uint8_t> footprint, uintptr_t footprintAddress, uintptr_t expected);
+// Whether every fixup of the code at start, up to its linked size, decodes as its form to the resolution of its target in
+// the context: S1 and S2 at capture, S5 after patching, and each side of the twin check's decodes (section 11.4). Fixups
+// is a Vector<ImageFixup> or an ImageFixupArray, in footprint order.
+template<typename Fixups>
+bool fixupsReachTargets(const void* start, size_t linkedSize, const Fixups&, const ResolutionContext&);
 
 // The site of the Operation fixup of the far call whose return point is callReturnOffset (N2): the offset minus
 // REPATCH_OFFSET_CALL_R11 on x86_64, minus (NUMBER_OF_ADDRESS_ENCODING_INSTRUCTIONS + 1) * 4 on ARM64. Nullopt when the
@@ -294,7 +307,8 @@ struct ImageSectionSpans {
 #endif
 };
 
-// Spans into the borrowed payload, valid while it lives. Under strict, a view passed V1 to V7.
+// Spans into the borrowed payload, valid while it lives. Under strict, a view passed V1 to V7, and in twins builds W1 to
+// W3.
 class ImageSectionsView {
 public:
     const ImageSectionHeader& header() const { return m_header; }
@@ -314,7 +328,8 @@ public:
     template<typename Functor> void forEachSnippet(const Functor&) const;
     const BakedFactsView& bakedFacts() const { return m_bakedFacts; }
 #if ENABLE(JITCACHE_TWINS)
-    std::span<const uint8_t> twinsSection() const { return m_twins; }
+    // The parsed image-twins.baseline, which a twins build always receives (section 11.2).
+    const ImageTwinsView& twins() const LIFETIME_BOUND { return m_twins; }
 #endif
 
     // Two views of the same regions of the same bytes.
@@ -358,21 +373,39 @@ private:
     Layout m_layout;
     BakedFactsView m_bakedFacts;
 #if ENABLE(JITCACHE_TWINS)
-    std::span<const uint8_t> m_twins;
+    ImageTwinsView m_twins;
 #endif
 };
 
-// Locates the regions of image.baseline and baked-facts.baseline. A section whose regions do not fit inside its span
-// cannot be located and fails V1, or V7 for the baked facts, in either mode. Under strict it then runs V1 to V7; with
-// strict off it trusts what capture wrote, and debug builds ASSERT what those checks verify (section 8.5).
+// Locates the regions of image.baseline and baked-facts.baseline, and in twins builds image-twins.baseline. A section
+// whose regions do not fit inside its span cannot be located and fails V1, V7 or W1 in either mode. Under strict it then
+// runs V1 to V7 and W1 to W3; with strict off it trusts what capture wrote, and debug builds ASSERT what those checks
+// verify (sections 8.5 and 11.2).
 std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&, bool strict);
 
-// U1 to U7 against the import's UCB, which exists once the import's request point produced it (section 8.5). The glue
-// calls it only under strict (R-INT-3); in twins builds ImageTwins adds W4.
+// U1 to U7 against the import's UCB, which exists once the import's request point produced it (section 8.5), and in
+// twins builds W4 (section 11.2). The glue calls it only under strict (R-INT-3).
 std::expected<void, ImageCheck> validateImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
-// With strict off, debug builds ASSERT what U1 to U7 verify; preparation calls this once the import's UCB exists.
-// Nothing in other builds.
+// With strict off, debug builds ASSERT what U1 to U7, and W4 in twins builds, verify; preparation calls this once the
+// import's UCB exists. Nothing in other builds.
 void assertImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
+
+template<typename Fixups>
+bool fixupsReachTargets(const void* start, size_t linkedSize, const Fixups& fixups, const ResolutionContext& context)
+{
+    auto code = unsafeMakeSpan(static_cast<const uint8_t*>(start), linkedSize);
+    auto codeStart = reinterpret_cast<uintptr_t>(start);
+    for (size_t index = 0; index < fixups.size(); ++index) {
+        ImageFixup fixup = fixups[index];
+        auto footprint = fixupFootprint(fixup.form, fixup.site, code);
+        if (!footprint)
+            return false;
+        auto expected = reinterpret_cast<uintptr_t>(resolveTarget(context, fixup.target));
+        if (!footprintReaches(fixup.form, code.subspan(footprint->begin, footprint->size()), codeStart + footprint->begin, expected))
+            return false;
+    }
+    return true;
+}
 
 template<typename Functor>
 void ImageSectionsView::forEachSimpleSwitchTable(const Functor& functor) const

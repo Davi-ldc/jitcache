@@ -7,7 +7,9 @@
 
 #include "BaselineJITCode.h"
 #include "BytecodeConventions.h"
+#include "ExecutableAllocator.h"
 #include "ImageSupport.h"
+#include "ImageTwins.h"
 #include "InlineCacheHandler.h"
 #include "JSCInlines.h"
 #include "JSTemplateObjectDescriptor.h"
@@ -601,6 +603,10 @@ static std::optional<ImageCheck> firstFailureAgainst(const ImageSectionsView& vi
         return ImageCheck::U6;
     if (!passesU7(view, unlinkedCodeBlock))
         return ImageCheck::U7;
+#if ENABLE(JITCACHE_TWINS)
+    if (auto failure = firstTwinsFailureAgainst(view, unlinkedCodeBlock))
+        return failure;
+#endif
     return std::nullopt;
 }
 
@@ -827,6 +833,39 @@ std::optional<uintptr_t> decodeFootprint(FixupForm form, std::span<const uint8_t
     UNUSED_PARAM(footprintAddress);
     return std::nullopt;
 #endif
+}
+
+bool footprintReaches(FixupForm form, std::span<const uint8_t> footprint, uintptr_t footprintAddress, uintptr_t expected)
+{
+    auto decoded = decodeFootprint(form, footprint, footprintAddress);
+    if (!decoded)
+        return false;
+    uintptr_t target = *decoded;
+    if (target == expected)
+        return true;
+    if (form == FixupForm::Pointer)
+        return false;
+#if ENABLE(JUMP_ISLANDS)
+    // An island is one unconditional b in the pool, and a chain crosses each region at most once.
+    constexpr size_t islandSize = 4;
+    auto poolStart = startOfFixedExecutableMemoryPool<uintptr_t>();
+    auto poolEnd = endOfFixedExecutableMemoryPool<uintptr_t>();
+    if (poolEnd < poolStart || poolEnd - poolStart < islandSize)
+        return false;
+    constexpr size_t halfRange = MacroAssembler::nearJumpRange / 2;
+    size_t maximumIslands = (poolEnd - poolStart + halfRange - 1) / halfRange;
+    for (size_t island = 0; island < maximumIslands; ++island) {
+        if (target < poolStart || target > poolEnd - islandSize || target % islandSize)
+            return false;
+        auto next = decodeFootprint(FixupForm::Jump, unsafeMakeSpan(reinterpret_cast<const uint8_t*>(target), islandSize), target);
+        if (!next)
+            return false;
+        target = *next;
+        if (target == expected)
+            return true;
+    }
+#endif
+    return false;
 }
 
 std::optional<uint32_t> farCallPointerSite(uint32_t callReturnOffset)
@@ -1151,7 +1190,7 @@ bool operator==(const ImageSectionsView& a, const ImageSectionsView& b)
     bool equal = a.m_image.data() == b.m_image.data() && a.m_image.size() == b.m_image.size()
         && a.m_header == b.m_header && a.m_layout == b.m_layout && a.m_bakedFacts == b.m_bakedFacts;
 #if ENABLE(JITCACHE_TWINS)
-    equal = equal && a.m_twins.data() == b.m_twins.data() && a.m_twins.size() == b.m_twins.size();
+    equal = equal && a.m_twins == b.m_twins;
 #endif
     return equal;
 }
@@ -1539,7 +1578,16 @@ std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSecti
         return std::unexpected(bakedFacts.error());
     view.m_bakedFacts = *bakedFacts;
 #if ENABLE(JITCACHE_TWINS)
-    view.m_twins = spans.twins;
+    // A twins build always receives the section, so a body without it cannot be located and is invalid material there.
+    auto twins = ImageTwinsView::locate(spans.twins);
+    if (!twins)
+        return std::unexpected(ImageCheck::W1);
+    view.m_twins = *twins;
+    if (strict) {
+        if (auto failure = firstTwinsStructureFailure(view))
+            return std::unexpected(*failure);
+    } else
+        ASSERT(!firstTwinsStructureFailure(view));
 #endif
     return view;
 }

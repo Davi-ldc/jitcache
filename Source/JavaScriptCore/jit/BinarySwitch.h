@@ -36,6 +36,12 @@
 
 namespace JSC {
 
+#if ENABLE(JITCACHE_TWINS)
+namespace JITCache {
+class ImageRecorder;
+}
+#endif
+
 // The BinarySwitch class makes it easy to emit a switch statement over either
 // 32-bit integers or pointers, where the switch uses a tree of branches
 // rather than a jump table. This makes it particularly useful if the case
@@ -78,6 +84,12 @@ public:
     };
 
     BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type);
+#if ENABLE(JITCACHE_TWINS)
+    // The baseline JIT's switches in JITCache twins builds: the constructor draws as it builds the tree, so a recorder
+    // records the seed this switch draws, and a twin recorder gives it the producer's instead (SPEC-image.md section
+    // 11.1). A null recorder draws as the constructor above does.
+    BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type, JITCache::ImageRecorder*);
+#endif
     // Contiguous unsigned key runs: each entry is (firstKey, length). firstKey of run 0 must be 0,
     // and each subsequent run must start immediately after the previous (no holes).
     BinarySwitch(GPRReg value, std::span<const std::tuple<uint32_t, size_t>> runs);
@@ -106,6 +118,8 @@ private:
 
     MacroAssembler::Jump branchPtrToCase(MacroAssembler&, MacroAssembler::RelationalCondition, unsigned rank);
 
+    // Sorts the cases and builds the tree, drawing from m_weakRandom.
+    void buildCases(std::span<const int64_t> cases);
     void build(unsigned start, bool hardStart, unsigned end);
     void buildCheckRuns(unsigned start, unsigned end);
     

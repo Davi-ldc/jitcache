@@ -41,6 +41,21 @@ static MathICLocations locationsOf(const MathIC& mathIC)
     };
 }
 
+template<typename MathIC>
+static MathICCodeState codeStateOf(const MathIC& mathIC)
+{
+    return MathICCodeState {
+        .generateFastPathOnRepatch = mathIC.m_generateFastPathOnRepatch,
+        .snippetStart = mathIC.m_code ? mathIC.m_code.code().untaggedPtr() : nullptr,
+        .snippetHandleSize = mathIC.m_code.size(),
+    };
+}
+
+#if ENABLE(JITCACHE_TWINS)
+// The fast-path snippet's assembler and the full snippet's (JITMathIC::generateOutOfLine).
+static constexpr size_t maximumRegenerationAttaches = 2;
+#endif
+
 } // namespace ImageRecordInternal
 
 std::optional<size_t> findFixupIndex(std::span<const ImageFixup> fixups, uint32_t site, FixupForm form)
@@ -65,6 +80,22 @@ MathICLocations mathICLocations(MathICKind kind, const void* mathIC)
         return locationsOf(*static_cast<const JITMulIC*>(mathIC));
     case MathICKind::Negate:
         return locationsOf(*static_cast<const JITNegIC*>(mathIC));
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+MathICCodeState mathICCodeState(MathICKind kind, const void* mathIC)
+{
+    using namespace ImageRecordInternal;
+    switch (kind) {
+    case MathICKind::Add:
+        return codeStateOf(*static_cast<const JITAddIC*>(mathIC));
+    case MathICKind::Sub:
+        return codeStateOf(*static_cast<const JITSubIC*>(mathIC));
+    case MathICKind::Mul:
+        return codeStateOf(*static_cast<const JITMulIC*>(mathIC));
+    case MathICKind::Negate:
+        return codeStateOf(*static_cast<const JITNegIC*>(mathIC));
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -121,7 +152,11 @@ size_t ImageRecord::heldBytes() const
         if (mathIC.snippet)
             snippetFixupCapacity += mathIC.snippet->fixups.capacity();
     }
-    return storageBytes(m_fixups.capacity(), m_mathICs.capacity(), snippetFixupCapacity, m_bakedFacts.scopeFacts.capacity());
+    size_t bytes = storageBytes(m_fixups.capacity(), m_mathICs.capacity(), snippetFixupCapacity, m_bakedFacts.scopeFacts.capacity());
+#if ENABLE(JITCACHE_TWINS)
+    bytes += twinDataStorageBytes(m_twinData);
+#endif
+    return bytes;
 }
 
 std::span<const uint8_t> ImageRecord::imageCode() const
@@ -151,6 +186,9 @@ void ImageRecord::stop(RecordState state, Unrecordable reason)
     m_fixups = { };
     m_mathICs = { };
     m_bakedFacts = { };
+#if ENABLE(JITCACHE_TWINS)
+    m_twinData = { };
+#endif
     size_t objectBytes = sizeof(ImageRecord);
     ASSERT(m_chargedBytes >= objectBytes);
     if (m_chargedBytes > objectBytes) {
@@ -314,10 +352,72 @@ void ImageRecord::didRewriteInlineStart(unsigned index)
     ASSERT(m_chargedBytes == heldBytes());
 }
 
+#if ENABLE(JITCACHE_TWINS)
+void ImageRecord::adoptTwinData(TwinData&& data, size_t chargedBytes)
+{
+    ASSERT(m_state == RecordState::Complete);
+    ASSERT(!twinDataStorageBytes(m_twinData));
+    ASSERT(chargedBytes == twinDataStorageBytes(data));
+    m_twinData = WTF::move(data);
+    m_chargedBytes += chargedBytes;
+    ASSERT(m_chargedBytes == heldBytes());
+}
+
+std::optional<size_t> ImageRecord::appendTwinRegeneration(TwinRegeneration&& regeneration)
+{
+    if (m_state != RecordState::Complete)
+        return std::nullopt;
+    auto& log = m_twinData.regenerations;
+    if (log.size() == log.capacity()) {
+        size_t newCapacity = std::max<size_t>(4, log.capacity() * 2);
+        if (!chargeForGrowth((newCapacity - log.capacity()) * sizeof(TwinRegeneration)))
+            return std::nullopt;
+        log.reserveCapacity(newCapacity);
+    }
+    log.append(WTF::move(regeneration));
+    ASSERT(m_chargedBytes == heldBytes());
+    return log.size() - 1;
+}
+
+void ImageRecord::addTwinRegenerationSlot(size_t entry)
+{
+    using namespace ImageRecordInternal;
+    if (m_state != RecordState::Complete)
+        return;
+    RELEASE_ASSERT(entry < m_twinData.regenerations.size());
+    // The slots live in the entry's inline storage, which holds every attach a regeneration makes, so no charge is due.
+    auto& slots = m_twinData.regenerations[entry].assemblerSeeds;
+    if (slots.size() >= maximumRegenerationAttaches) {
+        markInconsistent();
+        return;
+    }
+    slots.append(std::nullopt);
+    ASSERT(m_chargedBytes == heldBytes());
+}
+
+void ImageRecord::setTwinRegenerationSeed(size_t entry, std::optional<uint32_t> seed)
+{
+    if (m_state != RecordState::Complete)
+        return;
+    RELEASE_ASSERT(entry < m_twinData.regenerations.size());
+    auto& slots = m_twinData.regenerations[entry].assemblerSeeds;
+    RELEASE_ASSERT(!slots.isEmpty());
+    slots.last() = seed;
+}
+
+void ImageRecord::setFixupTargetForTesting(size_t index, const ImageTarget& target)
+{
+    RELEASE_ASSERT(index < m_fixups.size());
+    m_fixups[index].target = target;
+}
+#endif
+
 MathICRegeneration::MathICRegeneration(CodeBlock* codeBlock, const void* mathIC, CodePtr<CFunctionPtrTag> callReplacement, uint16_t profileBitsAtEntry)
 {
+#if !ENABLE(JITCACHE_TWINS)
     UNUSED_PARAM(callReplacement);
     UNUSED_PARAM(profileBitsAtEntry);
+#endif
     ASSERT(codeBlock);
 
     // A VM with no JITCache state, or one that does not produce, pays this one test.
@@ -341,7 +441,44 @@ MathICRegeneration::MathICRegeneration(CodeBlock* codeBlock, const void* mathIC,
     }
     m_record = record;
     m_mathICIndex = *index;
+
+#if ENABLE(JITCACHE_TWINS)
+    // The regeneration log (section 11.1): one entry whatever then happens to the snippets, so that a twin replays this
+    // regeneration from the same entry bits with the same replacement.
+    auto replacement = CodeSymbol::of(callReplacement.untaggedPtr());
+    if (!replacement) {
+        record->markUnrecordable(Unrecordable::ForeignCodeSymbol);
+        m_record = nullptr;
+        return;
+    }
+    m_logEntry = record->appendTwinRegeneration(TwinRegeneration {
+        .mathICIndex = m_mathICIndex,
+        .profileBitsAtEntry = profileBitsAtEntry,
+        .replacement = *replacement,
+        .assemblerSeeds = { },
+    });
+    if (!m_logEntry)
+        m_record = nullptr;
+#endif
 }
+
+#if ENABLE(JITCACHE_TWINS)
+MathICRegeneration::MathICRegeneration(TwinReplay& replay, ImageRecord& twinRecord, const void* mathIC)
+    : m_replay(&replay)
+{
+    // A twin regeneration records in any VM, into its twin compile's record, which lists every MathIC of the twin.
+    if (twinRecord.state() != RecordState::Complete)
+        return;
+    auto index = twinRecord.mathICIndex(mathIC);
+    if (!index) {
+        ASSERT_NOT_REACHED();
+        twinRecord.markUnrecordable(Unrecordable::InconsistentRecord);
+        return;
+    }
+    m_record = &twinRecord;
+    m_mathICIndex = *index;
+}
+#endif
 
 MathICRegeneration::~MathICRegeneration()
 {
@@ -365,6 +502,14 @@ uint32_t MathICRegeneration::imageOffset(CodeLocationLabel<JSInternalPtrTag> loc
 void MathICRegeneration::attach(CCallHelpers& jit)
 {
     retireRecorder();
+#if ENABLE(JITCACHE_TWINS)
+    // A twin assembler starts from the seed the producer's assembler drew at this attach, before anything is emitted, and
+    // stays unseeded where the producer's drew none.
+    if (m_replay) {
+        if (auto seed = m_replay->takeAttachSeed())
+            jit.seedRandomForTwins(*seed);
+    }
+#endif
     // A record that stopped records nothing more, so the snippet links natively.
     if (!m_record || m_record->state() != RecordState::Complete)
         return;
@@ -374,6 +519,10 @@ void MathICRegeneration::attach(CCallHelpers& jit)
     ASSERT(codeBlock);
     m_recorder = makeUnique<ImageRecorder>(RecordingScope::MathICSnippet, codeBlock->vm(), *codeBlock->unlinkedCodeBlock(), m_record->budget());
     m_recorder->attachTo(jit);
+#if ENABLE(JITCACHE_TWINS)
+    if (m_logEntry)
+        m_record->addTwinRegenerationSlot(*m_logEntry);
+#endif
 }
 
 void MathICRegeneration::emitVeneers(CCallHelpers& jit)
@@ -416,6 +565,13 @@ void MathICRegeneration::didReplaceSlowCall(CodePtr<CFunctionPtrTag> replacement
 
 void MathICRegeneration::didFailToAllocate(VM& vm)
 {
+#if ENABLE(JITCACHE_TWINS)
+    // The twin check reports the failure instead, so it never faults the VM it runs in.
+    if (m_replay) {
+        m_replay->markFailed();
+        return;
+    }
+#endif
     // Raised inside the operation, before the native fallback writes anything (SPEC-integrator.md section 4.5).
     didFailExecutableAllocation(vm, ExecutableAllocationSite::MathICSnippet);
 }
@@ -443,6 +599,11 @@ void MathICRegeneration::retireRecorder()
     // A recorder that stopped before its snippet was linked, or whose snippet never was, still stops the record: a
     // refused charge or an unrecordable path holds for the rest of the regeneration (section 4.8).
     stopRecordLikeRecorder();
+#if ENABLE(JITCACHE_TWINS)
+    // The attach's assembler is gone, so the seed it drew, if any, is final.
+    if (m_logEntry)
+        m_record->setTwinRegenerationSeed(*m_logEntry, m_recorder->assemblerSeed());
+#endif
     m_recorder = nullptr;
 }
 

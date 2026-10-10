@@ -98,6 +98,10 @@
 #include "FTLJITCode.h"
 #endif
 
+#if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
+#include "ImageTwins.h"
+#endif
+
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
@@ -891,6 +895,13 @@ void CodeBlock::setupWithUnlinkedBaselineCode(Ref<BaselineJITCode> jitCode)
 
 CodeBlock::~CodeBlock()
 {
+#if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
+    // JITCache twins builds: a twin of the image check leaves the registry before anything else, so that no later CB at
+    // its address answers as one, and writes no didOptimize, since natively no such CB exists (SPEC-image.md section
+    // 11.3, step 2).
+    bool isImageTwin = JITCache::forgetImageTwin(*this);
+#endif
+
     auto& cc = checker();
     if (cc.isEnabled) {
         RELEASE_ASSERT(cc.get(CrashChecker::This) == cc.hash(this),
@@ -953,7 +964,11 @@ CodeBlock::~CodeBlock()
     if (vm.m_perBytecodeProfiler) [[unlikely]]
         vm.m_perBytecodeProfiler->notifyDestruction(this);
 
-    if (!vm.heap.isShuttingDown()) [[likely]] {
+    bool writesDidOptimize = !vm.heap.isShuttingDown();
+#if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
+    writesDidOptimize = writesDidOptimize && !isImageTwin;
+#endif
+    if (writesDidOptimize) [[likely]] {
         // FIXME: This check should really not be necessary, see https://webkit.org/b/272787
         ASSERT(!m_metadata || m_metadata->unlinkedMetadata());
         if (m_metadata && !m_metadata->isDestroyed()) {

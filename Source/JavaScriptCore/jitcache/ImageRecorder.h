@@ -4,6 +4,7 @@
 
 #include "BakedFacts.h"
 #include "BytecodeIndex.h"
+#include "ImageTwins.h"
 #include "ImageTypes.h"
 #include "MacroAssembler.h"
 #include "ProducerBudget.h"
@@ -27,12 +28,6 @@ using FarCallRecord = CallRecord<OperationPtrTag>;
 namespace JITCache {
 
 class ImageRecord;
-
-#if ENABLE(JITCACHE_TWINS)
-struct TwinCompileInputs;
-struct TwinSeeds;
-enum class StrictEqualityAtomOperand : uint8_t;
-#endif
 
 // The recorder charges the producer budget in steps of this many bytes, which keeps charges off the per-fixup path.
 constexpr size_t kRecordChargeStep = 4 * KB;
@@ -103,9 +98,11 @@ public:
 #if ENABLE(JITCACHE_TWINS)
     void didInitializeRandom(uint32_t seed); // From AbstractMacroAssemblerBase::initializeRandom: the assembler's seed.
     uint32_t binarySwitchSeed(uint32_t drawn); // Records and returns drawn; a twin returns the producer's next seed.
-    void recordCompileInputs(TwinCompileInputs&&); // BaselineCompile only, at compile start.
+    // BaselineCompile only, at compile start: the snapshot of section 11.1, already allocated at its exact size, whose
+    // bytes the recorder charges as it takes them over.
+    void recordCompileInputs(TwinCompileInputs&&);
     // BaselineCompile only, from the strict-equality templates: records chosen as the instruction's compile input and
-    // returns it; a twin recorder returns the producer's input for the instruction instead.
+    // returns it; a twin recorder returns the producer's input for the instruction instead, and records that.
     StrictEqualityAtomOperand strictEqualityAtomOperand(BytecodeIndex, StrictEqualityAtomOperand chosen);
     // The seed the attached assembler drew or was given, which a MathIC regeneration logs for its attach slot.
     std::optional<uint32_t> assemblerSeed() const { return m_assemblerSeed; }
@@ -166,6 +163,11 @@ private:
     // Step 3 of section 4.7, on fixups in footprint order: one entry per noted MathIC, with the site of its slow call's
     // Operation fixup when it has inline code. Empty once the recorder stops.
     Vector<MathICRecord> buildMathICRecords(std::span<const uint8_t> linkedCode);
+#if ENABLE(JITCACHE_TWINS)
+    // The twin data the record keeps (section 11.1): the seeds, and the snapshot's inputs with the strict-equality inputs
+    // merged in by bytecode offset. Nullopt once a refused charge stopped the recorder.
+    std::optional<TwinData> finishTwinData();
+#endif
 
     RecordingScope m_scope;
     RecordState m_state { RecordState::Complete };
@@ -188,6 +190,8 @@ private:
 #if ENABLE(JITCACHE_TWINS)
     std::optional<uint32_t> m_assemblerSeed;
     Vector<uint32_t> m_binarySwitchSeeds;
+    TwinCompileInputs m_compileInputs; // the snapshot, charged once received
+    Vector<CompileInput> m_strictEqualityInputs; // kind 8, in bytecode order, as the main pass asks
     const TwinSeeds* m_twinSeeds { nullptr };
     const TwinCompileInputs* m_twinCompileInputs { nullptr };
     size_t m_nextTwinBinarySwitchSeed { 0 };

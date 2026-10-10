@@ -31,6 +31,10 @@
 #include <numeric>
 #include <wtf/ListDump.h>
 
+#if ENABLE(JITCACHE_TWINS)
+#include "ImageRecorder.h"
+#endif
+
 namespace JSC {
 
 namespace BinarySwitchInternal {
@@ -45,7 +49,23 @@ BinarySwitch::BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type ty
     , m_value(value)
     , m_totalCases(cases.size())
 {
-    RELEASE_ASSERT(type == Int32 || type == IntPtr);
+    buildCases(cases);
+}
+
+#if ENABLE(JITCACHE_TWINS)
+BinarySwitch::BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type type, JITCache::ImageRecorder* recorder)
+    : m_weakRandom(recorder ? recorder->binarySwitchSeed(globalCounter++) : globalCounter++)
+    , m_type(type)
+    , m_value(value)
+    , m_totalCases(cases.size())
+{
+    buildCases(cases);
+}
+#endif
+
+void BinarySwitch::buildCases(std::span<const int64_t> cases)
+{
+    RELEASE_ASSERT(m_type == Int32 || m_type == IntPtr);
 
     if (cases.empty())
         return;

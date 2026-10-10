@@ -760,6 +760,12 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     if (m_imageRecorder) {
         m_imageRecorder->attachTo(*this);
         m_imageRecorder->bakedFacts().setCodeBlockFacts(level, m_profiledCodeBlock->couldBeTainted());
+#if ENABLE(JITCACHE_TWINS)
+        // Twins builds also record, before the main pass reads them, the values emission reads from mutable state, and
+        // whether this thread holds the API lock, which makes them what emission reads (section 11.1).
+        if (m_imageRecorder->isRecording())
+            m_imageRecorder->recordCompileInputs(JITCache::snapshotCompileInputs(*m_profiledCodeBlock));
+#endif
     }
 
     if (m_unlinkedCodeBlock->numberOfUnlinkedSwitchJumpTables() || m_unlinkedCodeBlock->numberOfUnlinkedStringSwitchJumpTables()) {

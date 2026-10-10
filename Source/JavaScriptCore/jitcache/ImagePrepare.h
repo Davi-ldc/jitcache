@@ -70,16 +70,11 @@ private:
 // statistics (I11). The UCB is the import's, with the producer's index spaces (R-UCB-1); it is not const because the
 // MathICs and the UCB targets take its arithmetic profiles through accessors with no const overload. Under strict the
 // glue has already validated the sections; with strict off, debug builds ASSERT U1 to U7 here. A non-null budget, given
-// exactly in a ConsumerProducer VM whose production is active, rebuilds the image's record; a refused charge leaves the
-// image without one, and the budget raises the recording fault (R-INT-2). The borrowed payload need live only until the
-// call returns: the prepared image keeps copies of everything it reads.
+// exactly in a ConsumerProducer VM whose production is active, rebuilds the image's record, in twins builds with the twin
+// data of the twins section; a refused charge leaves the image without one, and the budget raises the recording fault
+// (R-INT-2). The borrowed payload need live only until the call returns: the prepared image keeps copies of everything it
+// reads. In twins builds the SkipPatch test hook makes it skip its first patch, so S5 fails (T7).
 std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict);
-
-// Whether a footprint of executable memory, at footprintAddress, holds its form's instruction and reaches expected: a
-// Pointer holds it, and a Call or a Jump branches to it, on ARM64 through the unconditional b of each jump island on the
-// way, at most the pool's size divided by half of MacroAssembler::nearJumpRange, rounded up (section 9, S1). S5 reads
-// every patched footprint this way.
-bool footprintReaches(FixupForm, std::span<const uint8_t> footprint, uintptr_t footprintAddress, uintptr_t expected);
 
 } // namespace JITCache
 } // namespace JSC

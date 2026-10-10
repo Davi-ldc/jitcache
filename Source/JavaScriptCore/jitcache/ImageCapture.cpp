@@ -7,7 +7,6 @@
 #include "BaselineJITCode.h"
 #include "CacheableIdentifierInlines.h"
 #include "CodeBlock.h"
-#include "ExecutableAllocator.h"
 #include "ImageRecord.h"
 #include "ImageSupport.h"
 #include "JITCodeMap.h"
@@ -22,6 +21,11 @@
 #include <functional>
 #include <utility>
 #include <wtf/StdLibExtras.h>
+
+#if ENABLE(JITCACHE_TWINS)
+#include "ImageTwins.h"
+#include "JITThunks.h"
+#endif
 
 namespace JSC::JITCache {
 
@@ -74,38 +78,6 @@ static std::optional<uint32_t> offsetInCode(const void* start, uint32_t size, co
     if (address < base || address - base > size)
         return std::nullopt;
     return static_cast<uint32_t>(address - base);
-}
-
-// What capture reads from a MathIC besides its locations: the regeneration flag and the snippet m_code holds.
-struct MathICCode {
-    bool generateFastPathOnRepatch { false };
-    const void* snippetStart { nullptr }; // null without m_code
-    size_t snippetHandleSize { 0 }; // m_code.size(), the handle's size, which can exceed the linked size (N20)
-};
-
-template<typename MathIC>
-static MathICCode codeOf(const MathIC& mathIC)
-{
-    return MathICCode {
-        .generateFastPathOnRepatch = mathIC.m_generateFastPathOnRepatch,
-        .snippetStart = mathIC.m_code ? mathIC.m_code.code().untaggedPtr() : nullptr,
-        .snippetHandleSize = mathIC.m_code.size(),
-    };
-}
-
-static MathICCode mathICCode(MathICKind kind, const void* mathIC)
-{
-    switch (kind) {
-    case MathICKind::Add:
-        return codeOf(*static_cast<const JITAddIC*>(mathIC));
-    case MathICKind::Sub:
-        return codeOf(*static_cast<const JITSubIC*>(mathIC));
-    case MathICKind::Mul:
-        return codeOf(*static_cast<const JITMulIC*>(mathIC));
-    case MathICKind::Negate:
-        return codeOf(*static_cast<const JITNegIC*>(mathIC));
-    }
-    RELEASE_ASSERT_NOT_REACHED();
 }
 
 template<typename MathIC>
@@ -199,8 +171,8 @@ private:
     Vector<Entry> m_entries;
 };
 
-// The capturing VM's resolution context (section 9, step 7): the image start, the record's MathICs, the dense switch
-// tables' storage, the string tables JIT::link filled, the snippets' starts and the UCB's string switch ranks.
+// The capturing VM's resolution context (section 9, steps 6 and 7): the image start, the record's MathICs, the dense
+// switch tables' storage, the string tables JIT::link filled, the snippets' starts and the UCB's string switch ranks.
 // storageBytes is what its arrays take, which the caller charges before constructing it.
 class ProducerResolution {
     WTF_MAKE_NONCOPYABLE(ProducerResolution);
@@ -266,57 +238,6 @@ private:
     ResolutionContext m_context;
 };
 
-// S1 and S2 for one footprint at footprintAddress: it holds its form's instruction (table 3.2) and reaches expected. A
-// Pointer holds it; a Call or a Jump branches to it, on ARM64 through the unconditional b of each jump island on the
-// way, at most the pool's size divided by half of MacroAssembler::nearJumpRange, rounded up, which bounds the chains
-// FixedVMPoolExecutableAllocator::islandForJumpLocation builds for any pool size.
-static bool footprintReachesTarget(FixupForm form, std::span<const uint8_t> footprint, uintptr_t footprintAddress, uintptr_t expected)
-{
-    auto decoded = decodeFootprint(form, footprint, footprintAddress);
-    if (!decoded)
-        return false;
-    uintptr_t target = *decoded;
-    if (target == expected)
-        return true;
-    if (form == FixupForm::Pointer)
-        return false;
-#if ENABLE(JUMP_ISLANDS)
-    constexpr size_t islandSize = 4; // one b
-    auto poolStart = startOfFixedExecutableMemoryPool<uintptr_t>();
-    auto poolEnd = endOfFixedExecutableMemoryPool<uintptr_t>();
-    if (poolEnd < poolStart || poolEnd - poolStart < islandSize)
-        return false;
-    constexpr size_t halfRange = MacroAssembler::nearJumpRange / 2;
-    size_t maximumIslands = (poolEnd - poolStart + halfRange - 1) / halfRange;
-    for (size_t island = 0; island < maximumIslands; ++island) {
-        if (target < poolStart || target > poolEnd - islandSize || target % islandSize)
-            return false;
-        auto next = decodeFootprint(FixupForm::Jump, bytesAt(reinterpret_cast<const void*>(target), islandSize), target);
-        if (!next)
-            return false;
-        target = *next;
-        if (target == expected)
-            return true;
-    }
-#endif
-    return false;
-}
-
-// S1 over the image, S2 over a snippet: every fixup decodes as its form to the producer's resolution of its target.
-static bool fixupsReachTargets(std::span<const uint8_t> code, std::span<const ImageFixup> fixups, const ResolutionContext& context)
-{
-    auto codeStart = reinterpret_cast<uintptr_t>(code.data());
-    for (auto& fixup : fixups) {
-        auto footprint = fixupFootprint(fixup.form, fixup.site, code);
-        if (!footprint)
-            return false;
-        auto expected = reinterpret_cast<uintptr_t>(resolveTarget(context, fixup.target));
-        if (!footprintReachesTarget(fixup.form, code.subspan(footprint->begin, footprint->size()), codeStart + footprint->begin, expected))
-            return false;
-    }
-    return true;
-}
-
 // S3: the holder owns as many ICs of each kind as the record lists.
 static bool holderMatchesRecord(const BaselineJITCode& code, const ImageRecord& record)
 {
@@ -378,36 +299,75 @@ static bool pointersLieInImage(BaselineJITCode& code, const ImageRecord& record)
                 return false;
             continue;
         }
-        auto liveCode = mathICCode(mathIC.kind, mathIC.mathIC);
+        auto liveCode = mathICCodeState(mathIC.kind, mathIC.mathIC);
         if (!locations.areAllNull() || liveCode.snippetStart || liveCode.generateFastPathOnRepatch)
             return false;
     }
     return true;
 }
 
-// Step 7: S1 to S4, in order. The resolution S1 and S2 compare against is charged while it lives.
-static std::optional<CaptureFailure> firstStrictFailure(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, BaselineJITCode& code, const ImageRecord& record, ProducerBudget& budget)
+// Step 7: S1 to S4, in order, S1 and S2 against the producer's resolution of every target: each fixup decodes as its
+// form, jump islands followed, to it.
+static std::optional<ImageCheck> firstStrictFailure(BaselineJITCode& code, const ImageRecord& record, const ResolutionContext& context)
 {
-    Charge charge(budget);
-    if (!charge.add(ProducerResolution::storageBytes(unlinkedCodeBlock, code, record)))
-        return CaptureFailure { CaptureOutcome::ChargeRefused, ImageCheck::None };
-    ProducerResolution resolution(vm, unlinkedCodeBlock, code, record);
-
-    if (!fixupsReachTargets(bytesAt(code.start(), record.codeSize()), record.fixups().span(), resolution.context()))
-        return CaptureFailure { CaptureOutcome::RecordingFault, ImageCheck::S1 };
+    if (!fixupsReachTargets(code.start(), record.codeSize(), record.fixups(), context))
+        return ImageCheck::S1;
     for (auto& mathIC : record.mathICs()) {
         if (!hasSnippet(mathIC))
             continue;
         auto& snippet = *mathIC.snippet;
-        if (!fixupsReachTargets(bytesAt(snippet.start, snippet.size), snippet.fixups.span(), resolution.context()))
-            return CaptureFailure { CaptureOutcome::RecordingFault, ImageCheck::S2 };
+        if (!fixupsReachTargets(snippet.start, snippet.size, snippet.fixups, context))
+            return ImageCheck::S2;
     }
     if (!holderMatchesRecord(code, record))
-        return CaptureFailure { CaptureOutcome::RecordingFault, ImageCheck::S3 };
+        return ImageCheck::S3;
     if (!pointersLieInImage(code, record))
-        return CaptureFailure { CaptureOutcome::RecordingFault, ImageCheck::S4 };
+        return ImageCheck::S4;
     return std::nullopt;
 }
+
+#if ENABLE(JITCACHE_TWINS)
+// Step 6: what every fixup's target resolves to in the capturing VM, the image's in footprint order and then each
+// snippet's in MathIC index order, as region 6 of the twins section lists them.
+static size_t producerValueCount(const ImageRecord& record)
+{
+    size_t count = record.fixups().size();
+    for (auto& mathIC : record.mathICs()) {
+        if (hasSnippet(mathIC))
+            count += mathIC.snippet->fixups.size();
+    }
+    return count;
+}
+
+static void appendProducerValues(Vector<uint64_t>& values, const ImageRecord& record, const ResolutionContext& context)
+{
+    auto append = [&](const Vector<ImageFixup>& fixups) {
+        for (auto& fixup : fixups)
+            values.append(reinterpret_cast<uintptr_t>(resolveTarget(context, fixup.target)));
+    };
+    append(record.fixups());
+    for (auto& mathIC : record.mathICs()) {
+        if (hasSnippet(mathIC))
+            append(mathIC.snippet->fixups);
+    }
+}
+
+// The ChangeRecordedTarget test hook (T7): another valid target for the fixup's form, which resolves elsewhere, so that
+// S1 finds the footprint does not reach it. A Pointer names another VM field; a Call or a Jump the thunk every baseline
+// compilation links for a stack overflow at its prologue, or the exception handler where it already names that one.
+static ImageTarget changedTargetForTesting(const ImageFixup& fixup)
+{
+    if (fixup.form == FixupForm::Pointer) {
+        bool namesVM = fixup.target.kind == TargetKind::VMAddress && fixup.target.a == static_cast<uint32_t>(VMAddress::VM);
+        auto field = namesVM ? VMAddress::SoftStackLimit : VMAddress::VM;
+        return ImageTarget { .kind = TargetKind::VMAddress, .a = static_cast<uint32_t>(field), .b = 0, .payload = 0 };
+    }
+    auto thunk = CommonJITThunkID::ThrowStackOverflowAtPrologue;
+    if (fixup.target.kind == TargetKind::CommonThunk && fixup.target.a == static_cast<uint32_t>(thunk))
+        thunk = CommonJITThunkID::HandleException;
+    return ImageTarget { .kind = TargetKind::CommonThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+}
+#endif
 
 } // namespace ImageCaptureInternal
 
@@ -417,15 +377,26 @@ bool isImageCapturable(const BaselineJITCode& code)
     return record && record->state() == RecordState::Complete;
 }
 
+#if ENABLE(JITCACHE_TWINS)
+ImageCapture::ImageCapture(BaselineJITCode& code, ProducerBudget& budget, size_t chargedBytes, const ImageSectionHeader& header, Vector<MoldIdentifier>&& moldIdentifiers, Vector<uint64_t>&& producerValues)
+#else
 ImageCapture::ImageCapture(BaselineJITCode& code, ProducerBudget& budget, size_t chargedBytes, const ImageSectionHeader& header, Vector<MoldIdentifier>&& moldIdentifiers)
+#endif
     : m_code(code)
     , m_budget(budget)
     , m_chargedBytes(chargedBytes)
     , m_imageStart(code.start())
     , m_header(header)
     , m_moldIdentifiers(WTF::move(moldIdentifiers))
+#if ENABLE(JITCACHE_TWINS)
+    , m_producerValues(WTF::move(producerValues))
+#endif
 {
+#if ENABLE(JITCACHE_TWINS)
+    ASSERT(m_chargedBytes == m_moldIdentifiers.capacity() * sizeof(MoldIdentifier) + m_producerValues.capacity() * sizeof(uint64_t));
+#else
     ASSERT(m_chargedBytes == m_moldIdentifiers.capacity() * sizeof(MoldIdentifier));
+#endif
 }
 
 ImageCapture::ImageCapture(ImageCapture&& other)
@@ -435,6 +406,9 @@ ImageCapture::ImageCapture(ImageCapture&& other)
     , m_imageStart(other.m_imageStart)
     , m_header(other.m_header)
     , m_moldIdentifiers(WTF::move(other.m_moldIdentifiers))
+#if ENABLE(JITCACHE_TWINS)
+    , m_producerValues(WTF::move(other.m_producerValues))
+#endif
 {
 }
 
@@ -468,7 +442,7 @@ ImageMathICEntry ImageCapture::mathICEntryOf(const MathICRecord& mathIC) const
     entry.inlineEnd = imageOffsetOf(locations.inlineEnd);
     entry.slowPathStart = imageOffsetOf(locations.slowPathStart);
     entry.slowPathCall = imageOffsetOf(locations.slowPathCall);
-    if (mathICCode(mathIC.kind, mathIC.mathIC).generateFastPathOnRepatch)
+    if (mathICCodeState(mathIC.kind, mathIC.mathIC).generateFastPathOnRepatch)
         entry.flags |= ImageMathICFlags::generateFastPathOnRepatch;
     if (hasSnippet(mathIC)) {
         entry.flags |= ImageMathICFlags::hasSnippet;
@@ -627,6 +601,20 @@ bool ImageCapture::writeImageSection(const ImageSectionSink& sink) const
     return true;
 }
 
+#if ENABLE(JITCACHE_TWINS)
+size_t ImageCapture::twinsSectionSize() const
+{
+    return static_cast<size_t>(JITCache::twinsSectionSize(m_code->m_jitCacheImageRecord->twinData(), m_producerValues.size()));
+}
+
+bool ImageCapture::writeTwinsSection(const ImageSectionSink& sink) const
+{
+    // The record's twin data, which a later regeneration could extend only while JS runs, the producer values of step 6
+    // and the token of this process, which captured the body.
+    return JITCache::writeTwinsSection(m_code->m_jitCacheImageRecord->twinData(), m_producerValues.span(), captureProcessToken(), sink);
+}
+#endif
+
 std::expected<ImageCapture, CaptureFailure> captureImage(VM& vm, CodeBlock& codeBlock, BaselineJITCode& code, ProducerBudget& budget, bool strict)
 {
     using namespace ImageCaptureInternal;
@@ -696,7 +684,7 @@ std::expected<ImageCapture, CaptureFailure> captureImage(VM& vm, CodeBlock& code
     for (auto& mathIC : record.mathICs()) {
         if (!mathIC.slowCallPointerSite)
             continue;
-        auto liveCode = mathICCode(mathIC.kind, mathIC.mathIC);
+        auto liveCode = mathICCodeState(mathIC.kind, mathIC.mathIC);
         bool provenanceMatches = mathIC.snippet
             ? liveCode.snippetStart == mathIC.snippet->start && mathIC.snippet->size <= liveCode.snippetHandleSize
             : !liveCode.snippetStart;
@@ -720,18 +708,53 @@ std::expected<ImageCapture, CaptureFailure> captureImage(VM& vm, CodeBlock& code
         .fullnessRateBits = std::bit_cast<uint64_t>(code.fullnessRate()),
     };
 
+    // Strict's S1 and S2 and, in twins builds, step 6 resolve targets in this VM's context, whose arrays are charged
+    // while it lives. A support lookup takes JITThunks::m_lock, and every support target already exists, since the
+    // compilation generated it.
+#if ENABLE(JITCACHE_TWINS)
+    constexpr bool resolvesInTwinsBuilds = true;
+#else
+    constexpr bool resolvesInTwinsBuilds = false;
+#endif
+    Charge resolutionCharge(budget);
+    std::optional<ProducerResolution> resolution;
+    if (strict || resolvesInTwinsBuilds) {
+        if (!resolutionCharge.add(ProducerResolution::storageBytes(unlinkedCodeBlock, code, record)))
+            return chargeRefused();
+        resolution.emplace(vm, unlinkedCodeBlock, code, record);
+    }
+
+#if ENABLE(JITCACHE_TWINS)
+    // Step 6: the producer values the twins section carries for the relocation clause (sections 11.1 and 11.4), kept
+    // for the writes and charged for as long as the capture lives.
+    size_t valueCount = producerValueCount(record);
+    if (!keptCharge.add(valueCount * sizeof(uint64_t)))
+        return chargeRefused();
+    Vector<uint64_t> producerValues;
+    producerValues.reserveInitialCapacity(valueCount);
+    appendProducerValues(producerValues, record, resolution->context());
+
+    // The ChangeRecordedTarget test hook (T7) changes the record's first fixup before S1 runs.
+    if (imageTestHook() == ImageTestHook::ChangeRecordedTarget && !record.fixups().isEmpty()) [[unlikely]]
+        record.setFixupTargetForTesting(0, changedTargetForTesting(record.fixups()[0]));
+#endif
+
     // Step 7. Each check guards a capture, so a failure is a recording fault (THREAD Session). With strict off, capture
-    // trusts that JIT::link and the MathIC hooks left what the record says, and debug builds assert the checks that need
-    // no allocation, so the budget sees the same charges in every build.
+    // trusts that JIT::link and the MathIC hooks left what the record says, and debug builds assert the checks that
+    // need no allocation, so debug and release builds of one kind see the same charges.
     if (strict) {
-        if (auto failure = firstStrictFailure(vm, unlinkedCodeBlock, code, record, budget))
-            return std::unexpected(*failure);
+        if (auto check = firstStrictFailure(code, record, resolution->context()))
+            return std::unexpected(CaptureFailure { CaptureOutcome::RecordingFault, *check });
     } else {
         ASSERT(holderMatchesRecord(code, record));
         ASSERT(pointersLieInImage(code, record));
     }
 
+#if ENABLE(JITCACHE_TWINS)
+    return ImageCapture(code, budget, keptCharge.take(), header, WTF::move(moldIdentifiers), WTF::move(producerValues));
+#else
     return ImageCapture(code, budget, keptCharge.take(), header, WTF::move(moldIdentifiers));
+#endif
 }
 
 } // namespace JSC::JITCache

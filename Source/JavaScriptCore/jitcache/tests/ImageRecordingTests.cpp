@@ -14,8 +14,11 @@
 #include "Completion.h"
 #include "DeferGC.h"
 #include "DisallowMacroScratchRegisterUsage.h"
+#include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
+#include "ImageCapture.h"
 #include "ImageEmission.h"
+#include "ImagePrepare.h"
 #include "ImageRecord.h"
 #include "ImageRecorder.h"
 #include "ImageSection.h"
@@ -32,8 +35,10 @@
 #include "SourceCode.h"
 #include "SourceProvider.h"
 #include "TopExceptionScope.h"
+#include "TwinReport.h"
 #include "UnlinkedCodeBlock.h"
 #include <algorithm>
+#include <array>
 #include <wtf/text/MakeString.h>
 
 namespace JSC::JITCache::Tests {
@@ -1641,7 +1646,7 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
     }
 
     // The baked-facts section the record gives, and beside it the smallest image.baseline section that passes V1 to V6:
-    // four bytes of code and no fixup, call, mold, table, code-map entry or MathIC.
+    // four zero bytes of code and no fixup, call, mold, table, code-map entry or MathIC.
     Vector<uint8_t> bakedFactsBytes;
     auto append = [&](std::span<const uint8_t> bytes) {
         bakedFactsBytes.append(bytes);
@@ -1658,9 +1663,21 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
     auto encodedHeader = encodeImageSectionHeader(header);
     memcpySpan(imageBytes.mutableSpan(), std::span<const uint8_t> { encodedHeader });
 
+    // A twins build parses the twins section beside them (section 11.2): the record's twin data, with no producer value,
+    // since the image holds no fixup.
+    Vector<uint8_t> twinsBytes;
+    auto appendTwins = [&](std::span<const uint8_t> bytes) {
+        twinsBytes.append(bytes);
+        return true;
+    };
+    ImageSectionSink twinsSink = appendTwins;
+    if (!writeTwinsSection(record->twinData(), { }, captureProcessToken(), twinsSink)) {
+        JITCACHE_FAIL("writing the twins section failed"_s);
+        return;
+    }
+
     auto facts = parseBakedFactsSection(bakedFactsBytes.span(), true);
-    // Strict parsing of the image would also run the twins checks of section 11.2, which this pair has no section for.
-    auto view = parseImageSections(ImageSectionSpans { .image = imageBytes.span(), .bakedFacts = bakedFactsBytes.span() }, false);
+    auto view = parseImageSections(ImageSectionSpans { .image = imageBytes.span(), .bakedFacts = bakedFactsBytes.span(), .twins = twinsBytes.span() }, true);
     if (!facts || !view) {
         JITCACHE_FAIL(makeString("the sections do not parse: "_s, description(!facts ? facts.error() : view.error())));
         return;
@@ -1752,6 +1769,187 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
             });
         }
     }
+}
+
+namespace ImageRecordingTestsInternal {
+
+// One section of a capture, in a buffer of its own, which starts 8-byte aligned as the container hands sections over.
+template<typename Write>
+static bool collectSection(Vector<uint8_t>& bytes, const Write& write)
+{
+    auto append = [&](std::span<const uint8_t> data) {
+        bytes.append(data);
+        return true;
+    };
+    ImageSectionSink sink = append;
+    return write(sink);
+}
+
+// T21's import and check, in a frame of their own so that the test's frame never holds the twin. producerBody's
+// CodeBlock compiles under a twin recorder, the one recorder a compilation outside production can have (T20), is
+// installed and is captured with strict on. importBody, the same text in the same scope, so that its UCB has the
+// producer's index spaces (R-UCB-1), gets a newborn CodeBlock, which takes the prepared image as the install glue gives
+// it, through native setup and installCode (SPEC-integrator.md section 7.2), before Twins::checkImage checks it.
+static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& producerFunction, JSFunction& importFunction)
+{
+    CodeBlock* producer = producerFunction.jsExecutable()->codeBlockForCall();
+    if (!producer || JITCode::isJIT(producer->jitType())) {
+        JITCACHE_FAIL("producerBody has no CodeBlock in the LLInt"_s);
+        return false;
+    }
+
+    TwinSeeds seeds { };
+    seeds.assembler = assemblerSeed;
+    TwinCompileInputs noInputs { };
+    RefPtr<BaselineJITCode> producerCode;
+    {
+        Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(producer));
+        JIT jit(vm, plan.get(), producer);
+        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, noInputs);
+        producerCode = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
+        if (!producerCode || JIT::finalizeOnMainThread(producer, plan.get(), producerCode) != CompilationResult::CompilationSuccessful) {
+            JITCACHE_FAIL("the producer's compilation failed"_s);
+            return false;
+        }
+    }
+    producer->ownerExecutable()->installCode(producer);
+
+    Vector<uint8_t> imageBytes;
+    Vector<uint8_t> bakedFactsBytes;
+    Vector<uint8_t> twinsBytes;
+    {
+        Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
+        auto capture = captureImage(vm, *producer, *producerCode, budget.get(), true);
+        if (!capture) {
+            JITCACHE_FAIL(makeString("the capture failed with outcome "_s, static_cast<unsigned>(capture.error().outcome), " at "_s, description(capture.error().check)));
+            return false;
+        }
+        bool written = collectSection(imageBytes, [&](const ImageSectionSink& sink) { return capture->writeImageSection(sink); })
+            && collectSection(bakedFactsBytes, [&](const ImageSectionSink& sink) { return capture->writeBakedFactsSection(sink); })
+            && collectSection(twinsBytes, [&](const ImageSectionSink& sink) { return capture->writeTwinsSection(sink); });
+        if (!written) {
+            JITCACHE_FAIL("writing the captured sections failed"_s);
+            return false;
+        }
+        JITCACHE_CHECK(imageBytes.size() == capture->imageSectionSize());
+        JITCACHE_CHECK(bakedFactsBytes.size() == capture->bakedFactsSectionSize());
+        JITCACHE_CHECK(twinsBytes.size() == capture->twinsSectionSize());
+    }
+
+    // The install function's deferral keeps the newborn alive until installCode publishes it.
+    DeferGCForAWhile deferGC(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    FunctionExecutable* importExecutable = importFunction.jsExecutable();
+    CodeBlock* newborn = importExecutable->newCodeBlockFor(CodeSpecializationKind::CodeForCall, &importFunction, importFunction.scope());
+    if (scope.exception() || !newborn) {
+        scope.clearException();
+        JITCACHE_FAIL("newCodeBlockFor gave importBody no newborn CodeBlock"_s);
+        return false;
+    }
+    UnlinkedCodeBlock& unlinkedCodeBlock = *newborn->unlinkedCodeBlock();
+
+    auto view = parseImageSections(ImageSectionSpans { .image = imageBytes.span(), .bakedFacts = bakedFactsBytes.span(), .twins = twinsBytes.span() }, true);
+    if (!view) {
+        JITCACHE_FAIL(makeString("the captured sections fail "_s, description(view.error())));
+        return false;
+    }
+    if (auto valid = validateImageSectionsAgainst(*view, unlinkedCodeBlock); !valid) {
+        JITCACHE_FAIL(makeString("the captured sections fail "_s, description(valid.error()), " against importBody's UCB"_s));
+        return false;
+    }
+    if (compareBakedFacts(*view, *newborn) != BakedFactsResult::Match) {
+        JITCACHE_FAIL("the newborn's baked facts differ from the capture's"_s);
+        return false;
+    }
+    auto prepared = prepareImage(vm, unlinkedCodeBlock, *view, nullptr, true);
+    if (!prepared) {
+        JITCACHE_FAIL(makeString("preparing the image failed at "_s, description(prepared.error().check)));
+        return false;
+    }
+    Ref<BaselineJITCode> restored = WTF::move(*prepared).commit(vm, *newborn);
+    newborn->setupWithUnlinkedBaselineCode(restored.copyRef());
+    importExecutable->installCode(newborn);
+
+    auto report = TwinReport::open("/dev/null"_s);
+    if (!report) {
+        JITCACHE_FAIL("the twin report cannot be opened"_s);
+        return false;
+    }
+    Twins twins;
+    twins.checkImage(vm, *newborn, importFunction.scope(), restored.get(), *view, *report);
+    // The image is its own twin's: both preconditions hold, so nothing is skipped, and nothing differs.
+    if (report->differences() || report->skips())
+        JITCACHE_FAIL(makeString("the twin check reported "_s, report->differences(), " differences and "_s, report->skips(), " skips"_s));
+    // The check returned, dropping its hold, so nothing reaches the twin, but nothing has swept it yet.
+    JITCACHE_CHECK(imageTwinCountForTesting() == 1);
+    return true;
+}
+
+// A CodeBlock of importBody's UCB linked natively, never installed and left unreachable as the twin is.
+static NEVER_INLINE bool imageLinkUnreachableCodeBlock(TestContext& context, VM& vm, JSFunction& importFunction)
+{
+    DeferGCForAWhile deferGC(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    FunctionExecutable* executable = importFunction.jsExecutable();
+    auto* unlinkedCodeBlock = uncheckedDowncast<UnlinkedFunctionCodeBlock>(executable->codeBlockForCall()->unlinkedCodeBlock());
+    auto* codeBlock = FunctionCodeBlock::create(vm, executable, unlinkedCodeBlock, importFunction.scope());
+    if (scope.exception() || !codeBlock) {
+        scope.clearException();
+        JITCACHE_FAIL("linking a native CodeBlock of importBody failed"_s);
+        return false;
+    }
+    return true;
+}
+
+// Conservative scanning reads the frames a collection runs in, which reuse the stack the frames above left behind;
+// zeroing it first keeps a stale pointer there from holding a CodeBlock the test expects to die.
+static NEVER_INLINE void imageClearDeadStack()
+{
+    std::array<volatile uint8_t, 128 * KB> bytes;
+    for (auto& byte : bytes)
+        byte = 0;
+}
+
+} // namespace ImageRecordingTestsInternal
+
+// T21 (SPEC-image.md section 11.3, step 2; N18). The image check's twin CodeBlock is registered as long as it lives,
+// dies in the first full collection after the check, since nothing reaches it, and writes no didOptimize as it dies,
+// while a CodeBlock of the same body linked natively and left unreachable the same way writes False.
+JITCACHE_TEST_WITH_OPTIONS(imageTwinDiesWithoutWritingDidOptimize, Yes, "--useConcurrentJIT=false")
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    NakedPtr<Exception> exception;
+    evaluate(globalObject, makeSource("var producerBody, importBody; (function makeBodies() { producerBody = function (a, b) { return a + b; }; importBody = function (a, b) { return a + b; }; })(); producerBody(1, 2);"_s, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    if (exception) {
+        JITCACHE_FAIL("evaluating the bodies threw"_s);
+        return;
+    }
+    auto* producerFunction = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "producerBody"_s)));
+    auto* importFunction = dynamicDowncast<JSFunction>(globalObject->get(globalObject, Identifier::fromString(vm, "importBody"_s)));
+    if (!producerFunction || !importFunction || importFunction->jsExecutable()->codeBlockForCall()) {
+        JITCACHE_FAIL("a body is missing, or importBody was called"_s);
+        return;
+    }
+    JITCACHE_CHECK(!imageTwinCountForTesting());
+
+    if (!imageImportAndCheckTwin(context, vm, *producerFunction, *importFunction))
+        return;
+    UnlinkedCodeBlock* unlinkedCodeBlock = importFunction->jsExecutable()->codeBlockForCall()->unlinkedCodeBlock();
+    JITCACHE_CHECK(unlinkedCodeBlock->didOptimize() == TriState::Indeterminate);
+
+    // The collection sweeps synchronously, so the twin dies in it and leaves the registry without writing didOptimize.
+    imageClearDeadStack();
+    vm.heap.collectNow(Synchronousness::Sync, CollectionScope::Full);
+    JITCACHE_CHECK(!imageTwinCountForTesting());
+    JITCACHE_CHECK(unlinkedCodeBlock->didOptimize() == TriState::Indeterminate);
+
+    // The native CodeBlock's death writes False, so the check above would have seen a write by the twin.
+    if (!imageLinkUnreachableCodeBlock(context, vm, *importFunction))
+        return;
+    imageClearDeadStack();
+    vm.heap.collectNow(Synchronousness::Sync, CollectionScope::Full);
+    JITCACHE_CHECK(unlinkedCodeBlock->didOptimize() == TriState::False);
 }
 
 } // namespace JSC::JITCache::Tests

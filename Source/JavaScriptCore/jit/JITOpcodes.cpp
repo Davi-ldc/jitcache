@@ -761,12 +761,26 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         emitPutVirtualRegister(dst, regT2);
     };
 
-    if (tryGetAtomStringConstant(src1)) {
+    // JITCache: the choice of the operand compared by its atom, made once, here (SPEC-image.md N25). In twins builds it
+    // passes through the recorder, which records it, or in a twin compile answers with the producer's (section 11.1).
+    bool lhsIsAtom = !!tryGetAtomStringConstant(src1);
+    bool rhsIsAtom = !lhsIsAtom && tryGetAtomStringConstant(src2);
+#if ENABLE(JITCACHE_TWINS)
+    if (m_imageRecorder) {
+        using JITCache::StrictEqualityAtomOperand;
+        auto chosen = lhsIsAtom ? StrictEqualityAtomOperand::Lhs : rhsIsAtom ? StrictEqualityAtomOperand::Rhs : StrictEqualityAtomOperand::None;
+        chosen = m_imageRecorder->strictEqualityAtomOperand(m_bytecodeIndex, chosen);
+        lhsIsAtom = chosen == StrictEqualityAtomOperand::Lhs;
+        rhsIsAtom = chosen == StrictEqualityAtomOperand::Rhs;
+    }
+#endif
+
+    if (lhsIsAtom) {
         emitStringConstantFastPath(regT1, regT0, src1);
         return;
     }
 
-    if (tryGetAtomStringConstant(src2)) {
+    if (rhsIsAtom) {
         emitStringConstantFastPath(regT0, regT1, src2);
         return;
     }
@@ -943,12 +957,25 @@ void JIT::compileOpStrictEqJump(const JSInstruction* currentInstruction)
         fallThrough.link(this);
     };
 
-    if (tryGetAtomStringConstant(src1)) {
+    // JITCache: as in compileOpStrictEq.
+    bool lhsIsAtom = !!tryGetAtomStringConstant(src1);
+    bool rhsIsAtom = !lhsIsAtom && tryGetAtomStringConstant(src2);
+#if ENABLE(JITCACHE_TWINS)
+    if (m_imageRecorder) {
+        using JITCache::StrictEqualityAtomOperand;
+        auto chosen = lhsIsAtom ? StrictEqualityAtomOperand::Lhs : rhsIsAtom ? StrictEqualityAtomOperand::Rhs : StrictEqualityAtomOperand::None;
+        chosen = m_imageRecorder->strictEqualityAtomOperand(m_bytecodeIndex, chosen);
+        lhsIsAtom = chosen == StrictEqualityAtomOperand::Lhs;
+        rhsIsAtom = chosen == StrictEqualityAtomOperand::Rhs;
+    }
+#endif
+
+    if (lhsIsAtom) {
         emitStringConstantFastPath(regT1, regT0, src1);
         return;
     }
 
-    if (tryGetAtomStringConstant(src2)) {
+    if (rhsIsAtom) {
         emitStringConstantFastPath(regT0, regT1, src2);
         return;
     }
@@ -1241,7 +1268,13 @@ void JIT::emit_op_switch_imm(const JSInstruction* currentInstruction)
             jumps.append(target);
         }
 
+#if ENABLE(JITCACHE_TWINS)
+        // JITCache twins builds: a recorder records the seed the switch draws, and a twin recorder gives it the
+        // producer's (SPEC-image.md section 11.1).
+        BinarySwitch binarySwitch(regT0, cases.span(), BinarySwitch::Int32, m_imageRecorder.get());
+#else
         BinarySwitch binarySwitch(regT0, cases.span(), BinarySwitch::Int32);
+#endif
         while (binarySwitch.advance(*this))
             addJump(jump(), jumps[binarySwitch.caseIndex()]);
         addJump(binarySwitch.fallThrough(), defaultOffset);
@@ -1302,7 +1335,12 @@ void JIT::emit_op_switch_char(const JSInstruction* currentInstruction)
             jumps.append(target);
         }
 
+#if ENABLE(JITCACHE_TWINS)
+        // JITCache twins builds: as in emit_op_switch_imm.
+        BinarySwitch binarySwitch(regT5, cases.span(), BinarySwitch::Int32, m_imageRecorder.get());
+#else
         BinarySwitch binarySwitch(regT5, cases.span(), BinarySwitch::Int32);
+#endif
         while (binarySwitch.advance(*this))
             addJump(jump(), jumps[binarySwitch.caseIndex()]);
         addJump(binarySwitch.fallThrough(), defaultOffset);
@@ -1366,7 +1404,12 @@ void JIT::emit_op_switch_string(const JSInstruction* currentInstruction)
         std::optional<JITCache::StringSwitchRecording> recording;
         if (m_imageRecorder) [[unlikely]]
             recording.emplace(*m_imageRecorder, static_cast<unsigned>(tableIndex));
+#if ENABLE(JITCACHE_TWINS)
+        // JITCache twins builds: as in emit_op_switch_imm.
+        BinarySwitch binarySwitch(scratch1GPR, caseKeys.span(), BinarySwitch::IntPtr, m_imageRecorder.get());
+#else
         BinarySwitch binarySwitch(scratch1GPR, caseKeys.span(), BinarySwitch::IntPtr);
+#endif
         if (recording) [[unlikely]]
             binarySwitch.setRankedComparisons(&*recording);
         while (binarySwitch.advance(*this)) {

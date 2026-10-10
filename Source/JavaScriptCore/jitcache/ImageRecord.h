@@ -3,6 +3,7 @@
 #if ENABLE(JIT)
 
 #include "BakedFacts.h"
+#include "ImageTwins.h"
 #include "ImageTypes.h"
 #include "JSCPtrTag.h"
 #include "ProducerBudget.h"
@@ -64,6 +65,15 @@ struct MathICLocations {
 // The locations of a MathIC a record names: mathIC is the JITAddIC, JITSubIC, JITMulIC or JITNegIC its kind says.
 MathICLocations mathICLocations(MathICKind, const void* mathIC);
 
+// What capture and the twin check read from a MathIC besides its locations: its regeneration flag and the snippet its
+// m_code holds.
+struct MathICCodeState {
+    bool generateFastPathOnRepatch { false };
+    const void* snippetStart { nullptr }; // null without m_code
+    size_t snippetHandleSize { 0 }; // m_code.size(), the handle's size, which can exceed the linked size (N20)
+};
+MathICCodeState mathICCodeState(MathICKind, const void* mathIC);
+
 // What one BaselineJITCode's code and MathIC snippets embed, as fixups, and the facts its compilation baked. The recorder
 // builds it on the compiling thread; from the moment JIT::link attaches it, only the thread holding the VM's API lock
 // reads or writes it, and only its destructor runs elsewhere. It holds no cell, so GC never visits it.
@@ -119,6 +129,24 @@ public:
     void markUnrecordable(Unrecordable);
     void markIncomplete();
 
+#if ENABLE(JITCACHE_TWINS)
+    // The twin data of SPEC-image.md section 11.1: the compilation's seeds and compile inputs, and the regeneration log,
+    // charged like the rest of the record. A record that stops frees it.
+    const TwinData& twinData() const LIFETIME_BOUND { return m_twinData; }
+    // Once, right after construction, by the recorder that finished the compilation or by an import rebuilding the record
+    // from its twins section: takes over the data and chargedBytes, its twinDataStorageBytes.
+    void adoptTwinData(TwinData&&, size_t chargedBytes);
+    // An active native regeneration logs itself when it starts (section 11.1). Returns the entry's index, or nullopt when
+    // the record is no longer Complete or the log's growth could not be charged, which makes it Incomplete.
+    std::optional<size_t> appendTwinRegeneration(TwinRegeneration&&);
+    // Each attach of that regeneration adds an empty slot to its entry, and the attach's seed fills it once the assembler
+    // is gone, if it drew. Both do nothing on a record that stopped.
+    void addTwinRegenerationSlot(size_t entry);
+    void setTwinRegenerationSeed(size_t entry, std::optional<uint32_t> seed);
+    // The ChangeRecordedTarget test hook (T7): capture changes a fixup's target before S1 runs.
+    void setFixupTargetForTesting(size_t index, const ImageTarget&);
+#endif
+
 private:
     // Unrecordable and Incomplete are final. A record that reaches either is never captured, so it frees what it holds
     // and keeps the charge of the object alone.
@@ -138,6 +166,9 @@ private:
     Vector<ImageFixup> m_fixups;
     Vector<MathICRecord> m_mathICs;
     BakedFacts m_bakedFacts;
+#if ENABLE(JITCACHE_TWINS)
+    TwinData m_twinData;
+#endif
 };
 
 // What one JITMathIC::generateOutOfLine tells the record of the code it patches (SPEC-image.md section 6.2), on the VM
@@ -152,12 +183,20 @@ private:
 // next attach or the regeneration's end. Both come after that assembler is gone, since generateOutOfLine's assemblers
 // are block locals of its body and the regeneration outlives the body. A recorder that stops makes the record stop in
 // the same state, so no capture reads a record that lacks a snippet the code jumps to.
+//
+// In twins builds an active native regeneration also logs itself in the record's twin data (section 11.1): an entry when
+// it starts, and a slot per attach holding the seed that attach's assembler drew. A twin regeneration, which only the
+// twin check builds, always records, into its twin compile's record, seeds each attached assembler from its replay and
+// marks the replay failed where a native one raises the executable-allocation fault (section 11.3, step 5).
 class MathICRegeneration {
     WTF_MAKE_NONCOPYABLE(MathICRegeneration);
     WTF_FORBID_HEAP_ALLOCATION;
 public:
     // profileBitsAtEntry and callReplacement feed only the twins builds' regeneration log (section 11.1).
     MathICRegeneration(CodeBlock*, const void* mathIC, CodePtr<CFunctionPtrTag> callReplacement, uint16_t profileBitsAtEntry);
+#if ENABLE(JITCACHE_TWINS)
+    MathICRegeneration(TwinReplay&, ImageRecord& twinRecord, const void* mathIC); // the twin replay's
+#endif
     ~MathICRegeneration(); // Destroys the last recorder it attached, whose assembler is already gone.
 
     bool isActive() const { return !!m_record; }
@@ -187,6 +226,10 @@ private:
     ImageRecord* m_record { nullptr }; // Non-null exactly while active. Owned by the CodeBlock's BaselineJITCode.
     unsigned m_mathICIndex { 0 };
     std::unique_ptr<ImageRecorder> m_recorder;
+#if ENABLE(JITCACHE_TWINS)
+    TwinReplay* m_replay { nullptr }; // a twin regeneration's
+    std::optional<size_t> m_logEntry; // a native regeneration's entry in the record's regeneration log
+#endif
 };
 
 } // namespace JSC::JITCache

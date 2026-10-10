@@ -9,8 +9,11 @@
 #include "Completion.h"
 #include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
+#include "GetByIdMetadata.h"
+#include "GetPutInfo.h"
 #include "ImageSection.h"
 #include "ImageSupport.h"
+#include "ImageTwins.h"
 #include "InlineCacheHandler.h"
 #include "JITCacheTest.h"
 #include "JITThunks.h"
@@ -28,10 +31,11 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/MakeString.h>
 
-// T6 (SPEC-image.md section 16.1): a valid image.baseline and baked-facts.baseline, built for the build's architecture
-// against a live UCB, parse to the same view with strict on and off, and each mutation that violates exactly one of V1 to
-// V7 or U1 to U7 is rejected with that check. Every section is parsed from an allocation of exactly its size, so ASan
-// reports any read past its end. The footprint encodings of section 3.2 are checked on their own first.
+// T6 (SPEC-image.md section 16.1): a valid image.baseline, baked-facts.baseline and image-twins.baseline, built for the
+// build's architecture against a live UCB, parse to the same view with strict on and off, and each mutation that
+// violates exactly one of V1 to V7, U1 to U7 or W1 to W4 is rejected with that check; W4's cases include T18's
+// strict-equality inputs. Every section is parsed from an allocation of exactly its size, so ASan reports any read past
+// its end. The footprint encodings of section 3.2 are checked on their own first.
 
 namespace JSC::JITCache::Tests {
 
@@ -181,7 +185,22 @@ struct TestMathIC {
     std::optional<TestSnippet> snippet;
 };
 
-// A model of both sections, encoded field by field so that a mutation changes exactly what it names.
+// The image-twins.baseline a twins build always reads beside the other two (section 11.2). Its producer values are one
+// per fixup of the model, the image's and then each snippet's, as W3 counts them, plus extraProducerValues.
+struct TestTwins {
+    TestTwins()
+    {
+        data.seeds.assembler = 0x5eed;
+        data.compileInputs.compiledHoldingAPILock = true;
+        token[0] = 0x5a;
+    }
+
+    TwinData data;
+    std::array<uint8_t, captureProcessTokenSize> token { };
+    unsigned extraProducerValues { 0 };
+};
+
+// A model of the three sections, encoded field by field so that a mutation changes exactly what it names.
 struct TestSection {
     uint32_t arityEntryOffset { 0 };
     double livenessRate { 0.5 };
@@ -196,6 +215,7 @@ struct TestSection {
     Vector<ImageConstantPoolEntry> constantPool;
     Vector<TestMathIC> mathICs;
     BakedFacts bakedFacts;
+    TestTwins twins;
 };
 
 static ImageSectionHeader headerOf(const TestSection& section)
@@ -278,6 +298,62 @@ static Vector<uint8_t> encodeBakedFacts(const BakedFacts& facts)
     });
 }
 
+// One producer value per fixup of the model, in region 6's order, each a distinct made-up address.
+static Vector<uint64_t> producerValuesOf(const TestSection& section)
+{
+    size_t count = section.fixups.size() + section.twins.extraProducerValues;
+    for (auto& mathIC : section.mathICs) {
+        if (mathIC.entry.hasSnippet() && mathIC.snippet)
+            count += mathIC.snippet->fixups.size();
+    }
+    return Vector<uint64_t>(count, [](size_t index) {
+        return static_cast<uint64_t>(0x7f0000001000 + 8 * index);
+    });
+}
+
+static Vector<uint8_t> encodeTwins(const TestSection& section)
+{
+    auto producerValues = producerValuesOf(section);
+    return collect([&](const ImageSectionSink& sink) {
+        return writeTwinsSection(section.twins.data, producerValues.span(), section.twins.token, sink);
+    });
+}
+
+// Region offsets of the twins section, computed apart from the lane's own arithmetic, for mutations of its bytes.
+struct TwinsLayout {
+    size_t binarySwitchSeeds { 0 };
+    size_t inputs { 0 };
+    size_t binaryArithBits { 0 };
+    size_t unaryArithBits { 0 };
+    Vector<size_t> regenerations;
+    size_t producerValues { 0 };
+    Vector<size_t> boundaries; // every region's start and the section's end
+};
+
+static TwinsLayout twinsLayoutOf(const TestSection& section)
+{
+    auto& data = section.twins.data;
+    TwinsLayout layout;
+    size_t offset = imageTwinsHeaderSize;
+    auto region = [&](size_t& start, size_t bytes) {
+        start = offset;
+        layout.boundaries.append(offset);
+        offset += alignImageSectionOffset(bytes);
+    };
+    region(layout.binarySwitchSeeds, 4 * data.seeds.binarySwitches.size());
+    region(layout.inputs, 12 * data.compileInputs.inputs.size());
+    region(layout.binaryArithBits, 2 * data.compileInputs.binaryArithBits.size());
+    region(layout.unaryArithBits, 2 * data.compileInputs.unaryArithBits.size());
+    layout.boundaries.append(offset);
+    for (auto& regeneration : data.regenerations) {
+        layout.regenerations.append(offset);
+        offset += alignImageSectionOffset(16 + 4 * regeneration.assemblerSeeds.size());
+    }
+    region(layout.producerValues, 8 * producerValuesOf(section).size());
+    layout.boundaries.append(offset);
+    return layout;
+}
+
 static uint64_t sectionSize(const TestSection& section)
 {
     ImageSectionSize size(headerOf(section));
@@ -323,9 +399,15 @@ static size_t mathICOffset(const TestSection& section, size_t mathICIndex)
 
 // Copies of the sections in allocations of exactly their sizes.
 struct ExactSections {
-    ExactSections(std::span<const uint8_t> imageBytes, std::span<const uint8_t> bakedFactsBytes)
+    ExactSections(std::span<const uint8_t> imageBytes, std::span<const uint8_t> bakedFactsBytes, std::span<const uint8_t> twinsBytes)
         : image(imageBytes)
         , bakedFacts(bakedFactsBytes)
+        , twins(twinsBytes)
+    {
+    }
+
+    explicit ExactSections(const TestSection& section)
+        : ExactSections(encodeImage(section).span(), encodeBakedFacts(section.bakedFacts).span(), encodeTwins(section).span())
     {
     }
 
@@ -334,11 +416,13 @@ struct ExactSections {
         ImageSectionSpans spans;
         spans.image = image.span();
         spans.bakedFacts = bakedFacts.span();
+        spans.twins = twins.span();
         return spans;
     }
 
     Vector<uint8_t> image;
     Vector<uint8_t> bakedFacts;
+    Vector<uint8_t> twins;
 };
 
 template<typename Mutation>
@@ -365,9 +449,8 @@ static size_t footprintBegin(const TestSection& section, size_t fixupIndex)
     return fixupFootprint(fixup.form, fixup.site, section.code.span())->begin;
 }
 
-static void expectStructureFailure(TestContext& context, ASCIILiteral label, std::span<const uint8_t> image, std::span<const uint8_t> bakedFacts, ImageCheck expected)
+static void expectStructureFailure(TestContext& context, ASCIILiteral label, const ExactSections& sections, ImageCheck expected)
 {
-    ExactSections sections(image, bakedFacts);
     auto result = parseImageSections(sections.spans(), true);
     if (result) {
         JITCACHE_FAIL(makeString(label, ": parsed under strict, expected "_s, description(expected)));
@@ -379,34 +462,37 @@ static void expectStructureFailure(TestContext& context, ASCIILiteral label, std
 
 static void expectModelFailure(TestContext& context, ASCIILiteral label, const TestSection& section, ImageCheck expected)
 {
-    auto image = encodeImage(section);
-    auto bakedFacts = encodeBakedFacts(section.bakedFacts);
-    expectStructureFailure(context, label, image.span(), bakedFacts.span(), expected);
+    expectStructureFailure(context, label, ExactSections(section), expected);
 }
 
+// Each mutates one encoded section, which ExactSections then copies to an allocation of exactly its new size.
 template<typename Mutation>
 static void expectImageBytesFailure(TestContext& context, ASCIILiteral label, const TestSection& section, const Mutation& mutation, ImageCheck expected)
 {
     auto image = encodeImage(section);
-    auto bakedFacts = encodeBakedFacts(section.bakedFacts);
     mutation(image);
-    expectStructureFailure(context, label, image.span(), bakedFacts.span(), expected);
+    expectStructureFailure(context, label, ExactSections(image.span(), encodeBakedFacts(section.bakedFacts).span(), encodeTwins(section).span()), expected);
 }
 
 template<typename Mutation>
 static void expectBakedFactsBytesFailure(TestContext& context, ASCIILiteral label, const TestSection& section, const Mutation& mutation)
 {
-    auto image = encodeImage(section);
     auto bakedFacts = encodeBakedFacts(section.bakedFacts);
     mutation(bakedFacts);
-    expectStructureFailure(context, label, image.span(), bakedFacts.span(), ImageCheck::V7);
+    expectStructureFailure(context, label, ExactSections(encodeImage(section).span(), bakedFacts.span(), encodeTwins(section).span()), ImageCheck::V7);
+}
+
+template<typename Mutation>
+static void expectTwinsBytesFailure(TestContext& context, ASCIILiteral label, const TestSection& section, const Mutation& mutation, ImageCheck expected)
+{
+    auto twins = encodeTwins(section);
+    mutation(twins);
+    expectStructureFailure(context, label, ExactSections(encodeImage(section).span(), encodeBakedFacts(section.bakedFacts).span(), twins.span()), expected);
 }
 
 static void expectValid(TestContext& context, ASCIILiteral label, const TestSection& section)
 {
-    auto image = encodeImage(section);
-    auto bakedFacts = encodeBakedFacts(section.bakedFacts);
-    ExactSections sections(image.span(), bakedFacts.span());
+    ExactSections sections(section);
     auto strict = parseImageSections(sections.spans(), true);
     if (!strict) {
         JITCACHE_FAIL(makeString(label, ": a valid section failed "_s, description(strict.error())));
@@ -432,8 +518,10 @@ static void setU32(Vector<uint8_t>& bytes, size_t offset, uint32_t value)
     ImageBytes::write<uint32_t>(bytes.mutableSpan(), offset, value);
 }
 
-// The body the U checks run against: a closure variable read and written, the four MathIC kinds, a dense, a list and a
-// string switch, a regexp and a string constant, a function declaration and a function expression.
+// The body the U and W checks run against: a closure variable read and written, the four MathIC kinds, a dense, a list
+// and a string switch, a regexp and a string constant, a function declaration and a function expression, and three
+// strict equalities: one against an atom constant and one against a number, whose templates reach their atom test, and
+// one against null, whose template does not (SPEC-image.md N25).
 static constexpr ASCIILiteral bodySource =
     "var jitcacheImageSectionBody = (function () {\n"
     "    var captured = 0;\n"
@@ -446,13 +534,14 @@ static constexpr ASCIILiteral bodySource =
     "        switch (a) { case 0: a = 10; break; case 1: a = 11; break; case 2: a = 12; break; }\n"
     "        switch (b) { case 1: b = 10; break; case 5000: b = 11; break; case 100000: b = 12; break; }\n"
     "        switch (s) { case 'alpha': s = 1; break; case 'beta': s = 2; break; case 'gamma': s = 3; break; }\n"
-    "        return [a + b, a - b, a * b, -a, t.length, r, inner, e, captured];\n"
+    "        return [a + b, a - b, a * b, -a, t.length, r, inner, e, captured, s === 'delta', a === 7, b === null];\n"
     "    };\n"
     "})();\n"
     "jitcacheImageSectionBody(1, 5000, 'beta');\n"_s;
 
 struct Body {
     JSGlobalObject* globalObject { nullptr };
+    CodeBlock* codeBlock { nullptr };
     UnlinkedCodeBlock* unlinkedCodeBlock { nullptr };
     Vector<uint32_t> instructionStarts;
     uint32_t addOffset { 0 };
@@ -469,6 +558,10 @@ struct Body {
     uint32_t listTable { 0 };
     uint32_t inlineStringTable { 0 };
     uint32_t inlineStringKeyCount { 0 };
+    // The strict equalities against 'delta', 7 and null.
+    uint32_t atomEqualityOffset { 0 };
+    uint32_t numberEqualityOffset { 0 };
+    uint32_t nullEqualityOffset { 0 };
 };
 
 static std::optional<Body> makeBody(TestContext& context, VM& vm)
@@ -489,10 +582,11 @@ static std::optional<Body> makeBody(TestContext& context, VM& vm)
 
     Body body;
     body.globalObject = globalObject;
+    body.codeBlock = codeBlock;
     body.unlinkedCodeBlock = codeBlock->unlinkedCodeBlock();
     auto& unlinkedCodeBlock = *body.unlinkedCodeBlock;
 
-    std::optional<uint32_t> add, sub, mul, negate, resolveScope, getFromScope, putToScope;
+    std::optional<uint32_t> add, sub, mul, negate, resolveScope, getFromScope, putToScope, atomEquality, numberEquality, nullEquality;
     for (const auto& instruction : unlinkedCodeBlock.instructions()) {
         uint32_t offset = instruction.offset();
         body.instructionStarts.append(offset);
@@ -522,6 +616,19 @@ static std::optional<Body> makeBody(TestContext& context, VM& vm)
         case op_put_to_scope:
             remember(putToScope);
             break;
+        case op_stricteq: {
+            auto bytecode = instruction->as<OpStricteq>();
+            if (!bytecode.m_rhs.isConstant())
+                break;
+            JSValue value = unlinkedCodeBlock.getConstant(bytecode.m_rhs);
+            if (value.isString())
+                remember(atomEquality);
+            else if (value.isInt32() && value.asInt32() == 7)
+                remember(numberEquality);
+            else if (value.isNull())
+                remember(nullEquality);
+            break;
+        }
         default:
             break;
         }
@@ -559,6 +666,7 @@ static std::optional<Body> makeBody(TestContext& context, VM& vm)
     }
 
     if (!add || !sub || !mul || !negate || !resolveScope || !getFromScope || !putToScope || !regExp || !atom || !nonCell
+        || !atomEquality || !numberEquality || !nullEquality
         || !denseTable || !listTable || !inlineStringTable || body.instructionStarts.size() < 4
         || !unlinkedCodeBlock.numberOfIdentifiers() || !unlinkedCodeBlock.numberOfBinaryArithProfiles() || !unlinkedCodeBlock.numberOfUnaryArithProfiles()
         || unlinkedCodeBlock.functionDecls().empty() || unlinkedCodeBlock.functionExprs().empty()) {
@@ -579,11 +687,84 @@ static std::optional<Body> makeBody(TestContext& context, VM& vm)
     body.listTable = *listTable;
     body.inlineStringTable = *inlineStringTable;
     body.inlineStringKeyCount = unlinkedCodeBlock.unlinkedStringSwitchJumpTable(*inlineStringTable).m_offsetTable.size();
+    body.atomEqualityOffset = *atomEquality;
+    body.numberEqualityOffset = *numberEquality;
+    body.nullEqualityOffset = *nullEquality;
     return body;
 }
 
-// A section that passes V1 to V7 and, against the body's UCB, U1 to U7, with a fixup of every target kind, MathICs with
-// and without inline code and a snippet, and padding after its code and its snippet.
+// The left and right operands of a strict equality (stricteq, nstricteq, jstricteq, jnstricteq), or nullopt.
+static std::optional<std::pair<VirtualRegister, VirtualRegister>> strictEqualityOperandsOf(const JSInstruction* instruction)
+{
+    auto operands = [](auto bytecode) {
+        return std::pair { bytecode.m_lhs, bytecode.m_rhs };
+    };
+    switch (instruction->opcodeID()) {
+    case op_stricteq:
+        return operands(instruction->as<OpStricteq>());
+    case op_nstricteq:
+        return operands(instruction->as<OpNstricteq>());
+    case op_jstricteq:
+        return operands(instruction->as<OpJstricteq>());
+    case op_jnstricteq:
+        return operands(instruction->as<OpJnstricteq>());
+    default:
+        return std::nullopt;
+    }
+}
+
+// The twin data a recording compilation of the body would leave, as the producer's JIT reads it: the snapshot of
+// section 11.1 from the body's CodeBlock, and a strict-equality input at every strict equality whose template reaches
+// its atom test, naming the operand its tryGetAtomStringConstant would choose (N25). Its seeds and its regeneration log
+// are the test's own: three switch seeds, so that their region has padding, and two regenerations of MathICs with
+// inline code, one with two attaches, the second of which drew nothing, and one with a single attach, whose entry has
+// padding.
+static TwinData twinDataOf(const Body& body)
+{
+    auto& unlinkedCodeBlock = *body.unlinkedCodeBlock;
+    CodeBlock& codeBlock = *body.codeBlock;
+    TwinData data;
+    data.seeds.assembler = 0x5eed;
+    data.seeds.binarySwitches = Vector<uint32_t> { 0x11, 0x22, 0x33 };
+    data.compileInputs = snapshotCompileInputs(codeBlock);
+
+    auto isConstantOperand = [&](VirtualRegister operand) {
+        return operand.isConstant() && codeBlock.isConstantOwnedByUnlinkedCodeBlock(operand);
+    };
+    auto isBitwiseComparable = [&](VirtualRegister operand) {
+        if (!isConstantOperand(operand))
+            return false;
+        JSValue value = unlinkedCodeBlock.getConstant(operand);
+        return value.isUndefinedOrNull() || value.isBoolean();
+    };
+    auto isAtom = [&](VirtualRegister operand) {
+        if (!isConstantOperand(operand))
+            return false;
+        JSValue value = unlinkedCodeBlock.getConstant(operand);
+        auto* impl = value.isString() ? asString(value)->tryGetValueImpl() : nullptr;
+        return impl && impl->isAtom();
+    };
+    Vector<CompileInput> strictEqualities;
+    for (const auto& instruction : unlinkedCodeBlock.instructions()) {
+        auto operands = strictEqualityOperandsOf(instruction.ptr());
+        if (!operands || isBitwiseComparable(operands->first) || isBitwiseComparable(operands->second))
+            continue;
+        auto chosen = isAtom(operands->first) ? StrictEqualityAtomOperand::Lhs : isAtom(operands->second) ? StrictEqualityAtomOperand::Rhs : StrictEqualityAtomOperand::None;
+        strictEqualities.append(CompileInput { .bytecodeOffset = instruction.offset(), .kind = CompileInputKind::StrictEqualityAtomOperand, .value = static_cast<uint8_t>(chosen), .localScopeDepth = 0 });
+    }
+    data.compileInputs.inputs.appendVector(strictEqualities);
+    std::sort(data.compileInputs.inputs.begin(), data.compileInputs.inputs.end(), [](const CompileInput& a, const CompileInput& b) {
+        return a.bytecodeOffset < b.bytecodeOffset;
+    });
+
+    auto anchor = CodeSymbol { anchorSymbol() };
+    data.regenerations.append(TwinRegeneration { .mathICIndex = 0, .profileBitsAtEntry = 0x12, .replacement = anchor, .assemblerSeeds = { 0x44u, std::nullopt } });
+    data.regenerations.append(TwinRegeneration { .mathICIndex = 1, .profileBitsAtEntry = 0, .replacement = anchor, .assemblerSeeds = { std::nullopt } });
+    return data;
+}
+
+// Sections that pass V1 to V7 and W1 to W3 and, against the body's UCB, U1 to U7 and W4, with a fixup of every target
+// kind, MathICs with and without inline code and a snippet, and padding after its code and its snippet.
 static TestSection makeValidSection(const Body& body)
 {
     auto& unlinkedCodeBlock = *body.unlinkedCodeBlock;
@@ -711,6 +892,7 @@ static TestSection makeValidSection(const Body& body)
     std::sort(section.bakedFacts.scopeFacts.begin(), section.bakedFacts.scopeFacts.end(), [](const ScopeFact& a, const ScopeFact& b) {
         return a.bytecodeOffset < b.bytecodeOffset;
     });
+    section.twins.data = twinDataOf(body);
     return section;
 }
 
@@ -783,11 +965,65 @@ static void checkViewMatches(TestContext& context, const ImageSectionsView& view
         JITCACHE_CHECK(bakedFacts.scopeFact(index) == section.bakedFacts.scopeFacts[index]);
 }
 
+// The twins view reads back the model it was encoded from and decodes to the twin data the model holds.
+static void checkTwinsMatch(TestContext& context, const ImageTwinsView& twins, const TestSection& section)
+{
+    auto& data = section.twins.data;
+    auto producerValues = producerValuesOf(section);
+    auto& header = twins.header();
+    JITCACHE_CHECK(twins.compiledHoldingAPILock() == data.compileInputs.compiledHoldingAPILock);
+    JITCACHE_CHECK(header.assemblerSeed == data.seeds.assembler);
+    JITCACHE_CHECK(header.producerValueCount == producerValues.size());
+    JITCACHE_CHECK(equalSpans(twins.captureProcessToken(), std::span<const uint8_t> { section.twins.token }));
+    for (unsigned index = 0; index < std::min<size_t>(header.producerValueCount, producerValues.size()); ++index)
+        JITCACHE_CHECK(twins.producerValue(index) == producerValues[index]);
+
+    auto decoded = twins.twinData();
+    JITCACHE_CHECK(decoded.seeds.assembler == data.seeds.assembler);
+    JITCACHE_CHECK(decoded.seeds.binarySwitches == data.seeds.binarySwitches);
+    JITCACHE_CHECK(decoded.compileInputs.inputs == data.compileInputs.inputs);
+    JITCACHE_CHECK(decoded.compileInputs.binaryArithBits == data.compileInputs.binaryArithBits);
+    JITCACHE_CHECK(decoded.compileInputs.unaryArithBits == data.compileInputs.unaryArithBits);
+    JITCACHE_CHECK(decoded.compileInputs.compiledHoldingAPILock == data.compileInputs.compiledHoldingAPILock);
+    JITCACHE_CHECK(decoded.regenerations.size() == data.regenerations.size());
+    for (size_t index = 0; index < std::min(decoded.regenerations.size(), data.regenerations.size()); ++index) {
+        auto& read = decoded.regenerations[index];
+        auto& written = data.regenerations[index];
+        JITCACHE_CHECK(read.mathICIndex == written.mathICIndex && read.profileBitsAtEntry == written.profileBitsAtEntry);
+        JITCACHE_CHECK(read.replacement == written.replacement && read.assemblerSeeds == written.assemblerSeeds);
+    }
+    // A rebuilt record charges exactly what the decoded data holds (section 10.3, step 14).
+    JITCACHE_CHECK(twinDataStorageBytes(decoded) == twins.twinDataStorageBytes());
+}
+
+static size_t inputIndexAt(const Vector<CompileInput>& inputs, uint32_t bytecodeOffset)
+{
+    for (size_t index = 0; index < inputs.size(); ++index) {
+        if (inputs[index].bytecodeOffset == bytecodeOffset)
+            return index;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+static size_t inputIndexOfKind(const Vector<CompileInput>& inputs, CompileInputKind kind)
+{
+    for (size_t index = 0; index < inputs.size(); ++index) {
+        if (inputs[index].kind == kind)
+            return index;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+static void sortInputs(Vector<CompileInput>& inputs)
+{
+    std::sort(inputs.begin(), inputs.end(), [](const CompileInput& a, const CompileInput& b) {
+        return a.bytecodeOffset < b.bytecodeOffset;
+    });
+}
+
 static void expectUCBFailure(TestContext& context, ASCIILiteral label, const TestSection& section, const UnlinkedCodeBlock& unlinkedCodeBlock, ImageCheck expected)
 {
-    auto image = encodeImage(section);
-    auto bakedFacts = encodeBakedFacts(section.bakedFacts);
-    ExactSections sections(image.span(), bakedFacts.span());
+    ExactSections sections(section);
     auto view = parseImageSections(sections.spans(), true);
     if (!view) {
         JITCACHE_FAIL(makeString(label, ": failed "_s, description(view.error()), " before the UCB checks"_s));
@@ -923,10 +1159,11 @@ JITCACHE_TEST(imageSectionStructureChecks, Yes)
     Vector<size_t> imageBoundaries;
     auto image = encodeImage(valid, &imageBoundaries);
     auto bakedFacts = encodeBakedFacts(valid.bakedFacts);
+    auto twins = encodeTwins(valid);
     JITCACHE_CHECK(image.size() == sectionSize(valid));
     JITCACHE_CHECK(bakedFacts.size() == bakedFactsSectionSize(valid.bakedFacts));
     {
-        ExactSections sections(image.span(), bakedFacts.span());
+        ExactSections sections(image.span(), bakedFacts.span(), twins.span());
         auto strict = parseImageSections(sections.spans(), true);
         auto normal = parseImageSections(sections.spans(), false);
         JITCACHE_CHECK(strict && normal);
@@ -941,14 +1178,14 @@ JITCACHE_TEST(imageSectionStructureChecks, Yes)
     for (size_t boundary : imageBoundaries) {
         if (boundary >= image.size())
             continue;
-        ExactSections sections(image.span().first(boundary), bakedFacts.span());
+        ExactSections sections(image.span().first(boundary), bakedFacts.span(), twins.span());
         auto strict = parseImageSections(sections.spans(), true);
         auto normal = parseImageSections(sections.spans(), false);
         if (strict || normal)
             JITCACHE_FAIL(makeString("an image section truncated at "_s, boundary, " parsed"_s));
     }
     for (size_t boundary = 0; boundary < bakedFacts.size(); boundary += (boundary < bakedFactsHeaderSize ? 4 : bakedFactsEntrySize)) {
-        ExactSections sections(image.span(), bakedFacts.span().first(boundary));
+        ExactSections sections(image.span(), bakedFacts.span().first(boundary), twins.span());
         auto strict = parseImageSections(sections.spans(), true);
         auto normal = parseImageSections(sections.spans(), false);
         if (!strict && strict.error() != ImageCheck::V7)
@@ -1196,7 +1433,7 @@ JITCACHE_TEST(imageSectionStructureChecks, Yes)
     }), ImageCheck::V7);
 }
 
-// U1 to U7 (section 8.5) against the UCB the section was built from.
+// U1 to U7 (section 8.5) against the UCB the section was built from, and for the valid section W4 too.
 JITCACHE_TEST(imageSectionUCBChecks, Yes)
 {
     using namespace ImageSectionTestsInternal;
@@ -1208,9 +1445,7 @@ JITCACHE_TEST(imageSectionUCBChecks, Yes)
     auto& unlinkedCodeBlock = *body->unlinkedCodeBlock;
 
     {
-        auto image = encodeImage(valid);
-        auto bakedFacts = encodeBakedFacts(valid.bakedFacts);
-        ExactSections sections(image.span(), bakedFacts.span());
+        ExactSections sections(valid);
         auto view = parseImageSections(sections.spans(), true);
         JITCACHE_CHECK(view);
         if (view) {
@@ -1304,6 +1539,192 @@ JITCACHE_TEST(imageSectionUCBChecks, Yes)
     expectUCBFailure(context, "a constant atom target on a regexp"_s, mutated(valid, [&](TestSection& section) {
         section.fixups[fixupIndex(section.fixups, TargetKind::UCBConstantAtom)].target.a = body->regExpConstant;
     }), unlinkedCodeBlock, ImageCheck::U7);
+}
+
+// W1 to W4 (section 11.2) and truncation of image-twins.baseline, with strict on, W4 against the UCB the twin data was
+// taken from; with strict off a valid section parses to the view strict gives it. W4's strict-equality cases are T18's.
+JITCACHE_TEST(imageTwinsSectionChecks, Yes)
+{
+    using namespace ImageSectionTestsInternal;
+    VM& vm = *context.vm();
+    auto body = makeBody(context, vm);
+    if (!body)
+        return;
+    auto valid = makeValidSection(*body);
+    auto& unlinkedCodeBlock = *body->unlinkedCodeBlock;
+    auto layout = twinsLayoutOf(valid);
+    auto& validInputs = valid.twins.data.compileInputs.inputs;
+
+    // The snapshot and the strict-equality inputs the valid section carries: the producer compared 'delta' by its atom,
+    // 7 by the generic comparison, and its template never asked about null.
+    JITCACHE_CHECK(valid.twins.data.compileInputs.compiledHoldingAPILock);
+    JITCACHE_CHECK(validInputs[inputIndexAt(validInputs, body->atomEqualityOffset)].value == static_cast<uint8_t>(StrictEqualityAtomOperand::Rhs));
+    JITCACHE_CHECK(validInputs[inputIndexAt(validInputs, body->numberEqualityOffset)].value == static_cast<uint8_t>(StrictEqualityAtomOperand::None));
+    JITCACHE_CHECK(std::ranges::none_of(validInputs, [&](const CompileInput& input) { return input.bytecodeOffset == body->nullEqualityOffset; }));
+    JITCACHE_CHECK(validInputs[inputIndexOfKind(validInputs, CompileInputKind::ResolveScopeType)].bytecodeOffset == body->resolveScopeOffset);
+
+    // The valid section: the writer's size, both modes, and the view reading back the model.
+    auto image = encodeImage(valid);
+    auto bakedFacts = encodeBakedFacts(valid.bakedFacts);
+    auto twins = encodeTwins(valid);
+    JITCACHE_CHECK(twins.size() == twinsSectionSize(valid.twins.data, producerValuesOf(valid).size()));
+    JITCACHE_CHECK(twins.size() == layout.boundaries.last());
+    {
+        ExactSections sections(image.span(), bakedFacts.span(), twins.span());
+        auto strict = parseImageSections(sections.spans(), true);
+        auto normal = parseImageSections(sections.spans(), false);
+        JITCACHE_CHECK(strict && normal);
+        if (strict && normal) {
+            JITCACHE_CHECK(*strict == *normal);
+            checkTwinsMatch(context, strict->twins(), valid);
+        }
+    }
+
+    // A body without the section, and truncation at every region boundary and inside the header and each regeneration's
+    // fixed fields, in both modes: a section that cannot be located fails W1.
+    Vector<size_t> boundaries = layout.boundaries;
+    boundaries.append(0);
+    boundaries.append(imageTwinsHeaderSize - 1);
+    for (size_t offset : layout.regenerations)
+        boundaries.append(offset + imageTwinsRegenerationFixedSize - 1);
+    for (size_t boundary : boundaries) {
+        if (boundary >= twins.size())
+            continue;
+        ExactSections sections(image.span(), bakedFacts.span(), twins.span().first(boundary));
+        auto strict = parseImageSections(sections.spans(), true);
+        auto normal = parseImageSections(sections.spans(), false);
+        if (!strict && strict.error() != ImageCheck::W1)
+            JITCACHE_FAIL(makeString("a twins section truncated at "_s, boundary, " failed "_s, description(strict.error())));
+        if (strict || normal)
+            JITCACHE_FAIL(makeString("a twins section truncated at "_s, boundary, " parsed"_s));
+    }
+
+    // W1: reserved bytes and bits, the token, the size and padding.
+    expectTwinsBytesFailure(context, "a flag bit other than bit 0"_s, valid, [](Vector<uint8_t>& bytes) { bytes[0] |= 2; }, ImageCheck::W1);
+    expectTwinsBytesFailure(context, "a nonzero reserved header byte"_s, valid, [](Vector<uint8_t>& bytes) { bytes[3] = 1; }, ImageCheck::W1);
+    expectModelFailure(context, "an all-zero capture-process token"_s, mutated(valid, [](TestSection& section) {
+        section.twins.token = { };
+    }), ImageCheck::W1);
+    expectTwinsBytesFailure(context, "trailing bytes"_s, valid, [](Vector<uint8_t>& bytes) {
+        for (size_t index = 0; index < imageSectionAlignment; ++index)
+            bytes.append(0);
+    }, ImageCheck::W1);
+    expectTwinsBytesFailure(context, "nonzero padding after the switch seeds"_s, valid, [&](Vector<uint8_t>& bytes) {
+        bytes[layout.binarySwitchSeeds + 4 * valid.twins.data.seeds.binarySwitches.size()] = 1;
+    }, ImageCheck::W1);
+    expectTwinsBytesFailure(context, "a nonzero reserved field in an input"_s, valid, [&](Vector<uint8_t>& bytes) {
+        bytes[layout.inputs + 6] = 1;
+    }, ImageCheck::W1);
+    if (size_t unaryCount = valid.twins.data.compileInputs.unaryArithBits.size(); unaryCount % 4) {
+        expectTwinsBytesFailure(context, "nonzero padding after the unary arithmetic profile bits"_s, valid, [&](Vector<uint8_t>& bytes) {
+            bytes[layout.unaryArithBits + 2 * unaryCount] = 1;
+        }, ImageCheck::W1);
+    }
+    expectTwinsBytesFailure(context, "nonzero padding after a regeneration's seeds"_s, valid, [&](Vector<uint8_t>& bytes) {
+        bytes[layout.regenerations[1] + imageTwinsRegenerationFixedSize + 4] = 1;
+    }, ImageCheck::W1);
+
+    // W2: inputs.
+    size_t resolveScopeInput = inputIndexOfKind(validInputs, CompileInputKind::ResolveScopeType);
+    size_t getFromScopeInput = inputIndexOfKind(validInputs, CompileInputKind::GetFromScopeType);
+    size_t atomEqualityInput = inputIndexAt(validInputs, body->atomEqualityOffset);
+    size_t numberEqualityInput = inputIndexAt(validInputs, body->numberEqualityOffset);
+    auto mutatedInputs = [&](const auto& mutation) {
+        return mutated(valid, [&](TestSection& section) {
+            mutation(section.twins.data.compileInputs.inputs);
+        });
+    };
+    expectModelFailure(context, "inputs out of bytecode order"_s, mutatedInputs([](Vector<CompileInput>& inputs) {
+        std::swap(inputs[0], inputs[1]);
+    }), ImageCheck::W2);
+    expectModelFailure(context, "two inputs for one instruction"_s, mutatedInputs([](Vector<CompileInput>& inputs) {
+        inputs[1].bytecodeOffset = inputs[0].bytecodeOffset;
+    }), ImageCheck::W2);
+    expectModelFailure(context, "an input kind of 0"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[getFromScopeInput].kind = static_cast<CompileInputKind>(0);
+    }), ImageCheck::W2);
+    expectModelFailure(context, "an input kind of 9"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[getFromScopeInput].kind = static_cast<CompileInputKind>(9);
+    }), ImageCheck::W2);
+    expectModelFailure(context, "a resolve type past Dynamic"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[getFromScopeInput].value = static_cast<uint8_t>(Dynamic) + 1;
+    }), ImageCheck::W2);
+    expectModelFailure(context, "a get_by_id mode past the modes"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[getFromScopeInput].kind = CompileInputKind::GetByIdMode;
+        inputs[getFromScopeInput].value = static_cast<uint8_t>(GetByIdMode::ArrayLength) + 1;
+    }), ImageCheck::W2);
+    expectModelFailure(context, "an enumerator byte outside the flag bits"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[getFromScopeInput].kind = CompileInputKind::EnumeratorMetadata;
+        inputs[getFromScopeInput].value = 0x80;
+    }), ImageCheck::W2);
+    expectModelFailure(context, "a strict-equality operand past the right one"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[atomEqualityInput].value = static_cast<uint8_t>(StrictEqualityAtomOperand::Rhs) + 1;
+    }), ImageCheck::W2);
+    expectModelFailure(context, "a depth on a get_from_scope input"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[getFromScopeInput].localScopeDepth = 1;
+    }), ImageCheck::W2);
+
+    // W3: regenerations and the producer value count.
+    auto mutatedRegenerations = [&](const auto& mutation) {
+        return mutated(valid, [&](TestSection& section) {
+            mutation(section.twins.data.regenerations);
+        });
+    };
+    expectModelFailure(context, "a producer value too many"_s, mutated(valid, [](TestSection& section) {
+        section.twins.extraProducerValues = 1;
+    }), ImageCheck::W3);
+    expectModelFailure(context, "a regeneration of a MathIC past the MathICs"_s, mutatedRegenerations([&](Vector<TwinRegeneration>& regenerations) {
+        regenerations[0].mathICIndex = valid.mathICs.size();
+    }), ImageCheck::W3);
+    expectModelFailure(context, "a regeneration of a MathIC without inline code"_s, mutatedRegenerations([](Vector<TwinRegeneration>& regenerations) {
+        regenerations[0].mathICIndex = 2;
+    }), ImageCheck::W3);
+    expectModelFailure(context, "a regeneration that attached nothing"_s, mutatedRegenerations([](Vector<TwinRegeneration>& regenerations) {
+        regenerations[0].assemblerSeeds.clear();
+    }), ImageCheck::W3);
+    expectModelFailure(context, "a regeneration that attached three times"_s, mutatedRegenerations([](Vector<TwinRegeneration>& regenerations) {
+        regenerations[1].assemblerSeeds = { 1u, 2u, 3u };
+    }), ImageCheck::W3);
+    expectModelFailure(context, "a replacement outside the text segment"_s, mutatedRegenerations([](Vector<TwinRegeneration>& regenerations) {
+        regenerations[0].replacement = CodeSymbol { std::numeric_limits<int64_t>::max() };
+    }), ImageCheck::W3);
+    expectTwinsBytesFailure(context, "a seed mask bit past the attaches"_s, valid, [&](Vector<uint8_t>& bytes) {
+        bytes[layout.regenerations[0] + 7] |= 1 << 2;
+    }, ImageCheck::W3);
+    expectTwinsBytesFailure(context, "a seed where the mask has no bit"_s, valid, [&](Vector<uint8_t>& bytes) {
+        setU32(bytes, layout.regenerations[0] + imageTwinsRegenerationFixedSize + 4, 1);
+    }, ImageCheck::W3);
+
+    // W4: the inputs against the UCB's instructions, and the arithmetic profile counts.
+    expectUCBFailure(context, "an extra binary arithmetic profile"_s, mutated(valid, [](TestSection& section) {
+        section.twins.data.compileInputs.binaryArithBits.append(0);
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "a resolve_scope without its input"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs.removeAt(resolveScopeInput);
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "a resolve_scope with a get_from_scope input"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[resolveScopeInput].kind = CompileInputKind::GetFromScopeType;
+        inputs[resolveScopeInput].localScopeDepth = 0;
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "an input inside an instruction"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[resolveScopeInput].bytecodeOffset += 1;
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "an input at an instruction that asks none"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs.insert(0, CompileInput { .bytecodeOffset = body->instructionStarts[0], .kind = CompileInputKind::ResolveScopeType, .value = static_cast<uint8_t>(GlobalProperty), .localScopeDepth = 0 });
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "a strict-equality input naming an operand that is no constant"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[atomEqualityInput].value = static_cast<uint8_t>(StrictEqualityAtomOperand::Lhs);
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "a strict-equality input naming a number"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[numberEqualityInput].value = static_cast<uint8_t>(StrictEqualityAtomOperand::Rhs);
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "a strict-equality input moved to an equality with null"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs[numberEqualityInput].bytecodeOffset = body->nullEqualityOffset;
+        sortInputs(inputs);
+    }), unlinkedCodeBlock, ImageCheck::W4);
+    expectUCBFailure(context, "a strict equality without its input"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
+        inputs.removeAt(atomEqualityInput);
+    }), unlinkedCodeBlock, ImageCheck::W4);
 }
 
 } // namespace JSC::JITCache::Tests

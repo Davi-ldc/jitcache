@@ -11,6 +11,7 @@
 #include "GdbJIT.h"
 #include "ImageRecord.h"
 #include "ImageSupport.h"
+#include "ImageTwins.h"
 #include "JIT.h"
 #include "JITCodeMap.h"
 #include "JITInlines.h"
@@ -24,6 +25,7 @@
 #include "UnlinkedCodeBlock.h"
 #include <wtf/Atomics.h>
 #include <wtf/SimpleStats.h>
+#include <utility>
 #include <wtf/StdLibExtras.h>
 #include <wtf/StringPrintStream.h>
 
@@ -49,11 +51,6 @@ template<PtrTag tag>
 static CodeLocationLabel<tag> locationAt(const void* start, uint32_t offset)
 {
     return CodeLocationLabel<tag>(CodePtr<tag>::fromUntaggedPtr(const_cast<void*>(addressAt(start, offset))));
-}
-
-static std::span<const uint8_t> executableBytes(const void* start, size_t size)
-{
-    return unsafeMakeSpan(static_cast<const uint8_t*>(start), size);
 }
 
 // Writes the fixup's resolved value with its form's link writer (table 3.2). Each footprint holds its form's canonical
@@ -85,28 +82,15 @@ static void writeFixup(void* code, const ImageFixup& fixup, const void* value)
 }
 
 // Steps 8 and 9 for one allocation: each fixup's target resolved in the consumer's context and written at its site.
-static void patchFixups(void* code, const ImageFixupArray& fixups, const ResolutionContext& context)
+// skipsNextPatch is the SkipPatch test hook's, which leaves the first footprint of the import canonical (T7).
+static void patchFixups(void* code, const ImageFixupArray& fixups, const ResolutionContext& context, bool& skipsNextPatch)
 {
     for (size_t index = 0; index < fixups.size(); ++index) {
         ImageFixup fixup = fixups[index];
+        if (std::exchange(skipsNextPatch, false)) [[unlikely]]
+            continue;
         writeFixup(code, fixup, resolveTarget(context, fixup.target));
     }
-}
-
-// S5 for one allocation: each patched footprint decodes, islands followed, to the consumer's resolution of its target.
-static bool readsBackPatched(const void* start, size_t size, const ImageFixupArray& fixups, const ResolutionContext& context)
-{
-    auto code = executableBytes(start, size);
-    for (size_t index = 0; index < fixups.size(); ++index) {
-        ImageFixup fixup = fixups[index];
-        auto footprint = fixupFootprint(fixup.form, fixup.site, code);
-        if (!footprint)
-            return false;
-        auto expected = reinterpret_cast<uintptr_t>(resolveTarget(context, fixup.target));
-        if (!footprintReaches(fixup.form, code.subspan(footprint->begin, footprint->size()), reinterpret_cast<uintptr_t>(start) + footprint->begin, expected))
-            return false;
-    }
-    return true;
 }
 
 // Step 2: the MathIC of one entry, created as the emitter creates it, from the instruction the entry names.
@@ -193,7 +177,9 @@ static Vector<ImageFixup> fixupsOf(const ImageFixupArray& fixups)
 
 // Step 14: the record THREAD Capture describes, rebuilt from the sections, so that this image's later MathIC
 // regenerations record and a capture of it reproduces the imported sections (I9). Its exact bytes are charged before
-// anything is allocated, every container sized from the section's counts; a refusal gives no record.
+// anything is allocated, every container sized from the section's counts; a refusal gives no record. In twins builds the
+// record also takes the twin data of the twins section, the original compilation's seeds and inputs and every
+// regeneration logged since, to which this image's own regenerations append (section 11.1).
 static std::unique_ptr<ImageRecord> rebuildRecord(ProducerBudget& budget, const ImageSectionsView& view, const void* imageStart, std::span<void* const> mathICs, std::span<const void* const> snippetStarts)
 {
     const auto& header = view.header();
@@ -202,7 +188,12 @@ static std::unique_ptr<ImageRecord> rebuildRecord(ProducerBudget& budget, const 
     for (unsigned index = 0; index < header.mathICCount; ++index)
         snippetFixupCount += view.mathIC(index).snippetFixupCount;
     size_t recordBytes = ImageRecord::storageBytes(header.fixupCount, header.mathICCount, snippetFixupCount, bakedFactsView.scopeFactCount());
-    if (!budget.tryCharge(recordBytes))
+#if ENABLE(JITCACHE_TWINS)
+    size_t twinBytes = view.twins().twinDataStorageBytes();
+#else
+    size_t twinBytes = 0;
+#endif
+    if (!budget.tryCharge(recordBytes + twinBytes))
         return nullptr;
 
     Vector<MathICRecord> mathICRecords;
@@ -233,7 +224,11 @@ static std::unique_ptr<ImageRecord> rebuildRecord(ProducerBudget& budget, const 
     for (unsigned index = 0; index < bakedFactsView.scopeFactCount(); ++index)
         bakedFacts.scopeFacts.append(bakedFactsView.scopeFact(index));
 
-    return makeUnique<ImageRecord>(Ref { budget }, recordBytes, imageStart, header.codeSize, fixupsOf(view.fixups()), WTF::move(mathICRecords), WTF::move(bakedFacts));
+    auto record = makeUnique<ImageRecord>(Ref { budget }, recordBytes, imageStart, header.codeSize, fixupsOf(view.fixups()), WTF::move(mathICRecords), WTF::move(bakedFacts));
+#if ENABLE(JITCACHE_TWINS)
+    record->adoptTwinData(view.twins().twinData(), twinBytes);
+#endif
+    return record;
 }
 
 } // namespace ImagePrepareInternal
@@ -369,18 +364,23 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         .snippetStarts = snippetStarts.span(),
         .ranks = &ranks,
     };
+    bool skipsNextPatch = false;
+#if ENABLE(JITCACHE_TWINS)
+    skipsNextPatch = imageTestHook() == ImageTestHook::SkipPatch;
+#endif
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
-        patchFixups(const_cast<void*>(snippetStarts[index]), snippet.fixups, context);
+        patchFixups(const_cast<void*>(snippetStarts[index]), snippet.fixups, context, skipsNextPatch);
     });
-    patchFixups(imageStart, view.fixups(), context);
+    patchFixups(imageStart, view.fixups(), context, skipsNextPatch);
 
-    // Step 10: S5, which guards an installation, so a failure is invalid material.
+    // Step 10: S5, the read-back after patching: each patched footprint decodes, islands followed, to the consumer's
+    // resolution of its target. It guards an installation, so a failure is invalid material.
     if (strict) {
         bool readsBack = true;
         view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
-            readsBack = readsBack && readsBackPatched(snippetStarts[index], snippet.code.size(), snippet.fixups, context);
+            readsBack = readsBack && fixupsReachTargets(snippetStarts[index], snippet.code.size(), snippet.fixups, context);
         });
-        readsBack = readsBack && readsBackPatched(imageStart, header.codeSize, view.fixups(), context);
+        readsBack = readsBack && fixupsReachTargets(imageStart, header.codeSize, view.fixups(), context);
         if (!readsBack)
             return std::unexpected(PrepareFailure { PrepareOutcome::InvalidMaterial, ImageCheck::S5 });
     }
@@ -470,39 +470,6 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         jitCode->m_jitCacheImageRecord = rebuildRecord(*budget, view, imageStart, mathICs.span(), snippetStarts.span());
 
     return PreparedImage(WTF::move(jitCode), image.releaseNonNull());
-}
-
-bool footprintReaches(FixupForm form, std::span<const uint8_t> footprint, uintptr_t footprintAddress, uintptr_t expected)
-{
-    auto decoded = decodeFootprint(form, footprint, footprintAddress);
-    if (!decoded)
-        return false;
-    uintptr_t target = *decoded;
-    if (target == expected)
-        return true;
-    if (form == FixupForm::Pointer)
-        return false;
-#if ENABLE(JUMP_ISLANDS)
-    // An island is one unconditional b in the pool, and a chain crosses each region at most once.
-    auto poolStart = startOfFixedExecutableMemoryPool<uintptr_t>();
-    auto poolEnd = endOfFixedExecutableMemoryPool<uintptr_t>();
-    if (poolEnd <= poolStart)
-        return false;
-    constexpr size_t islandSize = 4;
-    size_t halfRange = MacroAssembler::nearJumpRange / 2;
-    size_t maximumIslands = (poolEnd - poolStart + halfRange - 1) / halfRange;
-    for (size_t island = 0; island < maximumIslands; ++island) {
-        if (target < poolStart || target > poolEnd - islandSize || target % islandSize)
-            return false;
-        auto next = decodeFootprint(FixupForm::Jump, ImagePrepareInternal::executableBytes(reinterpret_cast<const void*>(target), islandSize), target);
-        if (!next)
-            return false;
-        target = *next;
-        if (target == expected)
-            return true;
-    }
-#endif
-    return false;
 }
 
 } // namespace JSC::JITCache

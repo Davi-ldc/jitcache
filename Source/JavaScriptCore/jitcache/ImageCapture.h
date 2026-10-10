@@ -12,9 +12,10 @@
 #include <wtf/Vector.h>
 
 // The capture of a recorded image (SPEC-image.md section 9): what the capture glue writes as image.baseline and
-// baked-facts.baseline for an eligible CB. captureImage reads the BaselineJITCode, its record, its MathICs, its executable
-// memory up to the linked sizes and the UCB, keeps only what the writes cannot read again (each mold's identifier field),
-// and the write functions stream the sections from the live code and tables with no buffer of their own.
+// baked-facts.baseline for an eligible CB, and in twins builds image-twins.baseline. captureImage reads the
+// BaselineJITCode, its record, its MathICs, its executable memory up to the linked sizes and the UCB, keeps only what the
+// writes cannot read again (each mold's identifier field, and in twins builds the producer values), and the write
+// functions stream the sections from the live code and tables with no buffer of their own.
 
 namespace JSC {
 
@@ -62,7 +63,7 @@ public:
     [[nodiscard]] bool writeBakedFactsSection(const ImageSectionSink&) const;
 #if ENABLE(JITCACHE_TWINS)
     // The image-twins.baseline section (section 11.2): the record's twin data, the producer values of section 9, step 6,
-    // and this process's captureProcessToken(). Defined with that section's codec.
+    // and this process's captureProcessToken(), streamed through the section's writer in ImageTwins.h.
     size_t twinsSectionSize() const;
     [[nodiscard]] bool writeTwinsSection(const ImageSectionSink&) const;
 #endif
@@ -76,8 +77,12 @@ private:
         uint32_t value { 0 };
     };
 
-    // Takes over chargedBytes, the bytes of moldIdentifiers' storage.
+    // Takes over chargedBytes, the bytes of moldIdentifiers' storage and in twins builds of producerValues'.
+#if ENABLE(JITCACHE_TWINS)
+    ImageCapture(BaselineJITCode&, ProducerBudget&, size_t chargedBytes, const ImageSectionHeader&, Vector<MoldIdentifier>&&, Vector<uint64_t>&& producerValues);
+#else
     ImageCapture(BaselineJITCode&, ProducerBudget&, size_t chargedBytes, const ImageSectionHeader&, Vector<MoldIdentifier>&&);
+#endif
 
     // The offset of a code pointer of the side tables or a MathIC location in the image, which lies inside
     // [start, start + codeSize]: S4 checked it under strict, and JIT::link placed it there otherwise (debug builds ASSERT).
@@ -91,6 +96,11 @@ private:
     const void* m_imageStart { nullptr }; // the image's normal entry, offset 0
     ImageSectionHeader m_header; // the counts and fields of the section header, read at capture
     Vector<MoldIdentifier> m_moldIdentifiers; // in mold order
+#if ENABLE(JITCACHE_TWINS)
+    // What each fixup's target resolved to in the capturing VM: the image's in footprint order, then each snippet's in
+    // MathIC index order (section 9, step 6).
+    Vector<uint64_t> m_producerValues;
+#endif
 };
 
 // The capture of section 9, on the VM thread with the API lock and heap access, JS paused and no collector phase, on a
@@ -98,7 +108,8 @@ private:
 // other than JITThunks::m_lock, which the native support lookups of strict's S1 and S2 take; every target they resolve
 // already exists. Every byte it allocates is charged to the budget first. When it meets a reason of section 4.1 (an
 // unknown mold identifier, a MathIC snippet without matching provenance), it marks the record Unrecordable and returns
-// NotEligible; otherwise, under strict, it runs S1 to S4.
+// NotEligible; otherwise, under strict, it runs S1 to S4. In twins builds it first resolves every fixup for the producer
+// values, and the ChangeRecordedTarget test hook changes the record's first fixup before S1 runs (T7).
 std::expected<ImageCapture, CaptureFailure> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&, bool strict);
 
 } // namespace JITCache
