@@ -35,6 +35,7 @@
 #include "BuiltinNames.h"
 #include "BytecodeCacheError.h"
 #include "BytecodeLivenessAnalysis.h"
+#include "JITCacheSHA256.h"
 #include "JSCBytecodeCacheVersion.h"
 #include "JSCInlines.h"
 #include "JSCellButterfly.h"
@@ -43,6 +44,7 @@
 #include "SourceCodeKey.h"
 #include "SourceProvider.h"
 #include "SymbolTableInlines.h"
+#include "UCBRequests.h"
 #include "UnlinkedEvalCodeBlock.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedMetadataTableInlines.h"
@@ -50,13 +52,25 @@
 #include "UnlinkedProgramCodeBlock.h"
 #include "VariableEnvironmentInlines.h"
 #include <ranges>
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/FileHandle.h>
+#include <wtf/HashSet.h>
 #include <wtf/InlineMap.h>
 #include <wtf/MallocSpan.h>
 #include <wtf/Packed.h>
+#include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/UUID.h>
 #include <wtf/text/AtomStringImpl.h>
+#include <wtf/text/StringHasher.h>
+
+#if ENABLE(JITCACHE_TWINS)
+#include "CodeCache.h"
+#include "JSLock.h"
+#include "ParserError.h"
+#include "StrongInlines.h"
+#include <wtf/text/MakeString.h>
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -80,6 +94,9 @@ namespace JSC {
 
 bool Decoder::canBorrowPayload() const
 {
+    // JITCache: nothing decoded from a core points into the body file (SPEC-ucb.codec.md, E7).
+    if (m_purpose == Purpose::JITCacheCore)
+        return false;
 #if USE(BUN_JSC_ADDITIONS)
     return Options::useBorrowedBytecodeFromCache() && m_cachedBytecode->payloadIsPersistent();
 #else
@@ -103,6 +120,8 @@ public:
     void u8(uint8_t v) { m_bytes.append(v); }
     size_t size() const { return m_bytes.size(); }
     void copyTo(uint8_t* out) const { memcpy(out, m_bytes.span().data(), m_bytes.size()); }
+    // JITCache: the buffer a long tail spills out of its inline capacity, which an encode charges (SPEC-ucb.codec.md, E8).
+    size_t heapBytes() const { return m_bytes.capacity() > 128 ? m_bytes.capacity() : 0; }
 
 private:
     Vector<uint8_t, 128> m_bytes;
@@ -572,6 +591,13 @@ using SourceType = typename SourceTypeImpl<T>::type;
 static constexpr size_t encoderMaxAlignment = 8;
 static constexpr size_t encoderMinPageSize = 4 * KB;
 
+// JITCache: the bytes a vector holds on the heap, which a JITCacheCore encode charges (SPEC-ucb.codec.md, E8).
+template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
+static size_t encoderHeapBytes(const Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>& vector)
+{
+    return vector.capacity() > inlineCapacity ? vector.capacity() * sizeof(T) : 0;
+}
+
 class Encoder {
     WTF_MAKE_NONCOPYABLE(Encoder);
     WTF_FORBID_HEAP_ALLOCATION;
@@ -598,7 +624,13 @@ public:
     // A payload that gets appended to another one (CachedBytecode::addFunctionUpdate) is read by the same Decoder as its
     // base, so it leaves its strings unnumbered rather than collide with numbers the base already handed out.
     enum class NumberStrings : bool { No, Yes };
-    Encoder(VM& vm, FileSystem::FileHandle& fileHandle, NumberStrings numberStrings = NumberStrings::Yes, EncoderStringTable* externalStrings = nullptr, BytecodeCacheChecksums checksums = BytecodeCacheChecksums::Yes, BytecodeCacheUpdatable updatable = BytecodeCacheUpdatable::Yes)
+    // JITCache: the bytecode cache's own payloads, or a JITCache core (SPEC-ucb.codec.md, section 4).
+    using Purpose = Decoder::Purpose;
+
+    // A JITCacheCore encoder writes no external string, no checksum and no updatable field, and numbers its strings within
+    // its own payload. `budget` is charged for everything the encode allocates (E8); `startChain` is the TDZ chain that a
+    // start record stands for (E14).
+    Encoder(VM& vm, FileSystem::FileHandle& fileHandle, NumberStrings numberStrings = NumberStrings::Yes, EncoderStringTable* externalStrings = nullptr, BytecodeCacheChecksums checksums = BytecodeCacheChecksums::Yes, BytecodeCacheUpdatable updatable = BytecodeCacheUpdatable::Yes, Purpose purpose = Purpose::BytecodeCache, CoreEncodingBudget* budget = nullptr, const TDZEnvironmentLink* startChain = nullptr)
         : m_vm(vm)
         , m_fileHandle(fileHandle)
         , m_baseOffset(0)
@@ -607,8 +639,48 @@ public:
         , m_numberStrings(numberStrings == NumberStrings::Yes)
         , m_updatable(updatable == BytecodeCacheUpdatable::Yes)
         , m_checksums(m_updatable || checksums == BytecodeCacheChecksums::Yes)
+        , m_purpose(purpose)
+        , m_budget(budget)
+        , m_startChain(startChain)
     {
+        ASSERT(m_purpose == Purpose::BytecodeCache || (!m_externalStrings && !m_checksums && m_numberStrings));
+        ASSERT(m_purpose == Purpose::JITCacheCore || (!m_budget && !m_startChain));
         allocateNewPage();
+    }
+
+    Purpose purpose() const { return m_purpose; }
+    bool isCore() const { return m_purpose == Purpose::JITCacheCore; }
+    const TDZEnvironmentLink* startChain() const { return m_startChain; }
+
+    // Charges (SPEC-ucb.codec.md, E8). Without a budget both calls do nothing. A refused charge makes the refusal sticky
+    // and the allocation happens anyway, since an encode cannot unwind inside a record; every later charge counts as
+    // refused, so nothing more is charged, and the owner releases chargedBytes() once the encoder is gone.
+    bool budgetRefused() const { return m_budgetRefused; }
+    size_t chargedBytes() const { return m_chargedBytes; }
+    void chargeGrowth(size_t bytes)
+    {
+        if (!m_budget || !bytes || m_budgetRefused)
+            return;
+        if (!m_budget->charge(bytes)) {
+            m_budgetRefused = true;
+            return;
+        }
+        m_chargedBytes += bytes;
+    }
+    void releaseGrowth(size_t bytes)
+    {
+        // After a refusal a charge made before it stays held until the owner releases everything at once.
+        if (!m_budget || !bytes || m_budgetRefused)
+            return;
+        ASSERT(bytes <= m_chargedBytes);
+        m_budget->release(bytes);
+        m_chargedBytes -= bytes;
+    }
+    // A table of the encoder's grew from `capacityBefore` to `capacityAfter` entries of `entrySize` bytes.
+    void chargeTableGrowth(size_t capacityBefore, size_t capacityAfter, size_t entrySize)
+    {
+        if (capacityAfter > capacityBefore)
+            chargeGrowth((capacityAfter - capacityBefore) * entrySize);
     }
 
     EncoderStringTable* NODELETE externalStrings() { return m_externalStrings; }
@@ -629,9 +701,12 @@ public:
         }
         return std::nullopt;
     }
+    // `entries` keeps whatever charge its buffer already carries: the table now owns the buffer.
     void addSharedPrivateNameEnvironment(unsigned hash, Vector<std::pair<const UniquedStringImpl*, uint16_t>>&& entries, ptrdiff_t elements)
     {
+        size_t capacity = m_sharedPrivateNameEnvironments.capacity();
         m_sharedPrivateNameEnvironments.append({ hash, WTF::move(entries), elements });
+        chargeTableGrowth(capacity, m_sharedPrivateNameEnvironments.capacity(), sizeof(SharedPrivateNameEnvironment));
     }
 
     bool updatable() const { return m_updatable; }
@@ -747,7 +822,9 @@ public:
 
     void cachePtr(const void* ptr, ptrdiff_t offset)
     {
+        unsigned capacity = m_ptrToOffsetMap.capacity();
         m_ptrToOffsetMap.add(ptr, offset);
+        chargeTableGrowth(capacity, m_ptrToOffsetMap.capacity(), sizeof(typename decltype(m_ptrToOffsetMap)::KeyValuePairType));
     }
 
     // Byte-identical immutable arrays (instruction streams, expression info, jump tables of small functions repeat a lot)
@@ -766,7 +843,13 @@ public:
     }
     void registerArray(unsigned hash, ptrdiff_t offset, size_t size)
     {
-        m_arraysByHash.add(hash, Vector<std::pair<ptrdiff_t, size_t>, 1> { }).iterator->value.append({ offset, size });
+        unsigned capacity = m_arraysByHash.capacity();
+        auto& candidates = m_arraysByHash.add(hash, Vector<std::pair<ptrdiff_t, size_t>, 1> { }).iterator->value;
+        chargeTableGrowth(capacity, m_arraysByHash.capacity(), sizeof(typename decltype(m_arraysByHash)::KeyValuePairType));
+        // A hash shared by several arrays spills its candidates out of their inline slot.
+        size_t spilledBefore = encoderHeapBytes(candidates);
+        candidates.append({ offset, size });
+        chargeTableGrowth(spilledBefore, encoderHeapBytes(candidates), 1);
     }
 
     // Non-symbol strings decode to AtomStringImpl::add(characters), so two records with the same characters decode to the
@@ -784,7 +867,9 @@ public:
     {
         if (string.isSymbol() || !string.length())
             return;
+        unsigned capacity = m_stringsByContents.capacity();
         m_stringsByContents.add(String(const_cast<StringImpl*>(&string)), offset);
+        chargeTableGrowth(capacity, m_stringsByContents.capacity(), sizeof(typename decltype(m_stringsByContents)::KeyValuePairType));
     }
 
     std::optional<ptrdiff_t> cachedOffsetForPtr(const void* ptr)
@@ -804,8 +889,8 @@ public:
     // bodies follow breadth-first, and data that is only read on rare paths (expression info) goes after every body.
     // Decoding one block then reads one contiguous run of the payload rather than records scattered through every
     // descendant's subtree, so a mapped payload pages in only what is decoded.
-    void deferBody(Function<void()>&& encodeBody) { m_bodies.append(WTF::move(encodeBody)); }
-    void deferCold(Function<void()>&& encodeCold) { m_cold.append(WTF::move(encodeCold)); }
+    template<typename Callable> void deferBody(Callable&& encodeBody) { defer(m_bodies, m_bodiesCapacity, std::forward<Callable>(encodeBody)); }
+    template<typename Callable> void deferCold(Callable&& encodeCold) { defer(m_cold, m_coldCapacity, std::forward<Callable>(encodeCold)); }
     void encodeDeferred()
     {
         while (!m_bodies.isEmpty())
@@ -872,7 +957,37 @@ public:
         return CachedBytecode::create(WTF::move(buffer), WTF::move(m_leafExecutables));
     }
 
+    // The size release() would return, with the current page's end aligned as release() aligns it.
+    size_t releasedSize()
+    {
+        m_currentPage->alignEnd();
+        return m_baseOffset + m_currentPage->size();
+    }
+
+    // JITCache: each page's used span in payload order, the current page's end aligned as release() aligns it, so that the
+    // spans concatenate to the payload release() would assemble (SPEC-ucb.codec.md, E13).
+    void forEachPage(const ScopedLambda<void(std::span<const uint8_t>)>& functor)
+    {
+        m_currentPage->alignEnd();
+        for (const auto& page : m_pages)
+            functor(page.span());
+    }
+
 private:
+    // Deque::expandCapacity takes a deque from no buffer to 16 entries and then doubles it whenever an append finds it
+    // full, which a ring buffer is at one entry short of its capacity; the encoder follows it by counting entries (E8).
+    template<typename Callable>
+    void defer(Deque<Function<void()>>& deferred, size_t& capacity, Callable&& callable)
+    {
+        if (!capacity || deferred.size() + 1 == capacity) {
+            size_t newCapacity = std::max<size_t>(16, capacity * 2);
+            chargeTableGrowth(capacity, newCapacity, sizeof(Function<void()>));
+            capacity = newCapacity;
+        }
+        chargeGrowth(sizeof(WTF::Detail::CallableWrapper<std::decay_t<Callable>, void>));
+        deferred.append(Function<void()>(std::forward<Callable>(callable)));
+    }
+
     RefPtr<CachedBytecode> releaseMapped(BytecodeCacheError& error)
     {
         size_t size = m_baseOffset + m_currentPage->size();
@@ -964,13 +1079,19 @@ private:
             m_currentPage->alignEnd();
             m_baseOffset += m_currentPage->size();
         }
-        // Grow geometrically so offsetOf()/bytesAt(), which walk the page list, stay cheap on large payloads.
-        size_t preferred = minPageSize << std::min<size_t>(m_pages.size() + 4, 14);
+        // Grow geometrically so offsetOf()/bytesAt(), which walk the page list, stay cheap on large payloads. A JITCache core
+        // starts at one minimum page, since most cores are small and every encode zeroes its first page; the policy is part
+        // of the payload format, because a page boundary moves padding (SPEC-ucb.codec.md, E12).
+        size_t pageShift = m_pages.size() + (isCore() ? 0 : 4);
+        size_t preferred = minPageSize << std::min<size_t>(pageShift, 14);
         if (size < preferred)
             size = preferred;
         else
             size = roundUpToMultipleOf(minPageSize, size);
+        chargeGrowth(size);
+        size_t pagesCapacity = m_pages.capacity();
         m_pages.append(Page { size });
+        chargeTableGrowth(pagesCapacity, m_pages.capacity(), sizeof(Page));
         m_currentPage = &m_pages.last();
     }
 
@@ -991,11 +1112,38 @@ private:
     bool m_numberStrings;
     bool m_updatable;
     bool m_checksums;
+    const Purpose m_purpose;
+    CoreEncodingBudget* const m_budget;
+    const TDZEnvironmentLink* const m_startChain;
+    bool m_budgetRefused { false };
+    size_t m_chargedBytes { 0 };
+    size_t m_bodiesCapacity { 0 };
+    size_t m_coldCapacity { 0 };
     Vector<SharedPrivateNameEnvironment> m_sharedPrivateNameEnvironments;
     bool m_arraySharingEnabled { false };
     ptrdiff_t m_blockRegionStart { 0 };
     Vector<std::pair<ptrdiff_t, size_t>> m_blockExternalArrays;
     UncheckedKeyHashMap<unsigned, Vector<std::pair<ptrdiff_t, size_t>, 1>, IntHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> m_arraysByHash;
+};
+
+// JITCache: the scratch an encode builds and frees within one record (SPEC-ucb.codec.md, E8), charged from when it is
+// allocated until the scope that frees it ends.
+class EncoderScratchCharge {
+    WTF_MAKE_NONCOPYABLE(EncoderScratchCharge);
+    WTF_FORBID_HEAP_ALLOCATION;
+
+public:
+    EncoderScratchCharge(Encoder& encoder, size_t bytes)
+        : m_encoder(encoder)
+        , m_bytes(bytes)
+    {
+        encoder.chargeGrowth(bytes);
+    }
+    ~EncoderScratchCharge() { m_encoder.releaseGrowth(m_bytes); }
+
+private:
+    Encoder& m_encoder;
+    size_t m_bytes;
 };
 
 Decoder::Decoder(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvider> provider, Purpose purpose, RefPtr<TDZEnvironmentLink> startChain, bool validate)
@@ -1006,6 +1154,9 @@ Decoder::Decoder(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvid
     , m_startChain(WTF::move(startChain))
     , m_validates(validate)
 {
+    // Only a JITCache core is decoded fallibly, and only a fallible decode validates (SPEC-ucb.codec.md, section 4).
+    ASSERT(!m_validates || m_purpose == Purpose::JITCacheCore);
+    ASSERT(!m_startChain || m_purpose == Purpose::JITCacheCore);
 }
 
 Decoder::~Decoder()
@@ -1021,6 +1172,38 @@ Decoder::~Decoder()
 Ref<Decoder> Decoder::create(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvider> provider, Purpose purpose, RefPtr<TDZEnvironmentLink> startChain, bool validate)
 {
     return adoptRef(*new Decoder(vm, WTF::move(cachedBytecode), WTF::move(provider), purpose, WTF::move(startChain), validate));
+}
+
+Decoder::Purpose Decoder::purpose() const
+{
+    return m_purpose;
+}
+
+bool Decoder::isFallible() const
+{
+    return m_purpose == Purpose::JITCacheCore;
+}
+
+bool Decoder::validates() const
+{
+    return m_validates;
+}
+
+void Decoder::noteFailure(CoreDecodeFailure failure)
+{
+    ASSERT(isFallible() && failure != CoreDecodeFailure::None);
+    if (m_failure == CoreDecodeFailure::None)
+        m_failure = failure;
+}
+
+CoreDecodeFailure Decoder::failure() const
+{
+    return m_failure;
+}
+
+TDZEnvironmentLink* Decoder::startChain() const
+{
+    return m_startChain.get();
 }
 
 size_t Decoder::size() const
@@ -1070,6 +1253,9 @@ void Decoder::setHandleForTDZEnvironment(CompactTDZEnvironment* environment, con
 
 void Decoder::addLeafExecutable(const UnlinkedFunctionExecutable* executable, ptrdiff_t offset)
 {
+    // JITCache: a core's CachedBytecode dies with its decode, so no update ever appends to it (SPEC-ucb.codec.md, E7).
+    if (m_purpose == Purpose::JITCacheCore)
+        return;
 #if USE(BUN_JSC_ADDITIONS)
     // Only CachedBytecode::addFunctionUpdate reads this map, and Bun never calls it.
     if (Options::useLeanBytecodeCacheDecoder())
@@ -1087,6 +1273,90 @@ void Decoder::addFinalizer(const Functor& fn)
 RefPtr<SourceProvider> Decoder::provider() const
 {
     return m_provider;
+}
+
+// JITCache: the validating decode of a core (SPEC-ucb.codec.md, E15). A check that fails records Malformed, and the decode
+// takes the record as the empty value of its type and goes on, so that it finishes without reading outside the payload,
+// asserting or crashing; decodeUnlinkedCodeBlockCore then discards the UCB.
+
+// Whether `size` bytes at `address` lie inside the payload, aligned to `alignment`. Integers, so that an offset read from a
+// damaged payload makes no out-of-range pointer.
+static bool coreCodecHolds(Decoder& decoder, uintptr_t address, size_t size, size_t alignment)
+{
+    auto payload = decoder.payloadSpan();
+    uintptr_t begin = std::bit_cast<uintptr_t>(payload.data());
+    return !(address % alignment) && address >= begin && size <= payload.size() && address - begin <= payload.size() - size;
+}
+
+static bool coreCodecHolds(Decoder& decoder, const void* start, size_t size, size_t alignment)
+{
+    return coreCodecHolds(decoder, std::bit_cast<uintptr_t>(start), size, alignment);
+}
+
+// Records Malformed when `condition` is false, and returns it.
+static bool coreCodecCheck(Decoder& decoder, bool condition)
+{
+    if (!condition) [[unlikely]]
+        decoder.noteFailure(CoreDecodeFailure::Malformed);
+    return condition;
+}
+
+// A record type with a tail or tags of its own checks them in isWellFormed(Decoder&); the others are well formed once placed.
+template<typename T>
+static bool coreCodecIsWellFormed(Decoder& decoder, const T& record)
+{
+    if constexpr (requires { record.isWellFormed(decoder); })
+        return record.isWellFormed(decoder);
+    else
+        return true;
+}
+
+// HashTable::add and InlineMap::add assert against these keys, and a string key's hash dereferences it.
+template<typename KeyTraits, typename Key>
+static bool coreCodecIsEmptyOrDeletedKey(const Key& key)
+{
+    return WTF::isHashTraitsEmptyValue<KeyTraits>(key) || KeyTraits::isDeletedValue(key);
+}
+
+// JITCache: the pieces of the digests of SPEC-ucb.md section 3.4 that this file computes. Integers are little-endian.
+static void coreCodecHashU32(JITCache::SHA256& hasher, uint32_t value)
+{
+    std::array<uint8_t, 4> bytes { static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value >> 16), static_cast<uint8_t>(value >> 24) };
+    hasher.update(bytes);
+}
+
+// A canonical string (SPEC-ucb.md section 3.3): u8 encoding, u32 length, then the code units, one byte each (encoding 1)
+// exactly when every unit is at most 0xFF and UTF-16LE (encoding 2) otherwise; a null string is encoding 0 with length 0.
+static void coreCodecHashCanonicalString(JITCache::SHA256& hasher, const StringImpl* string)
+{
+    static_assert(std::endian::native == std::endian::little, "UTF-16 units are hashed as they lie in memory");
+    if (!string) {
+        uint8_t encoding = 0;
+        hasher.update(std::span { &encoding, 1 });
+        coreCodecHashU32(hasher, 0);
+        return;
+    }
+    bool isLatin1 = string->is8Bit() || WTF::charactersAreAllLatin1(string->span16());
+    uint8_t encoding = isLatin1 ? 1 : 2;
+    hasher.update(std::span { &encoding, 1 });
+    coreCodecHashU32(hasher, string->length());
+    if (string->is8Bit()) {
+        hasher.update(string->span8());
+        return;
+    }
+    std::span<const char16_t> units = string->span16();
+    if (!isLatin1) {
+        hasher.update(asBytes(units));
+        return;
+    }
+    std::array<uint8_t, 256> narrowed;
+    while (!units.empty()) {
+        size_t count = std::min(units.size(), narrowed.size());
+        for (size_t i = 0; i < count; ++i)
+            narrowed[i] = static_cast<uint8_t>(units[i]);
+        hasher.update(std::span { narrowed }.first(count));
+        units = units.subspan(count);
+    }
 }
 
 template<typename T>
@@ -1132,6 +1402,7 @@ class VariableLengthObject : public CachedObject<Source>, VariableLengthObjectBa
     template<typename, typename>
     friend class CachedPtr;
     friend struct CachedPtrOffsets;
+    friend struct CoreCodecSelfTestAccess;
 
 public:
     using typename VariableLengthObjectBase::Offset;
@@ -1164,6 +1435,8 @@ public:
         return true;
     }
     bool NODELETE hasInlineString() const { return (static_cast<uint32_t>(m_offset) & inlineStringTagMask) == inlineStringTag; }
+    // The encoder writes one to three characters inline, never none.
+    bool NODELETE hasWellFormedInlineString() const { return (static_cast<uint32_t>(m_offset) >> 2) & 3; }
     // The slot as a plain value, for owners whose kind byte says it holds one rather than an offset.
     uint32_t NODELETE rawSlot() const { return std::bit_cast<uint32_t>(m_offset); }
     void setRawSlot(uint32_t value) { m_offset = std::bit_cast<Offset>(value); }
@@ -1181,6 +1454,28 @@ public:
             return false;
         m_offset = std::bit_cast<Offset>(externalStringTag | ordinal << 2);
         return true;
+    }
+
+    // JITCache: what this slot points at when it is not empty and `count` elements of T there, a size computed with overflow
+    // checks, lie wholly inside the payload and are aligned for T; null otherwise. The validating decode reaches every
+    // record and array through it (SPEC-ucb.codec.md, E15).
+    template<typename T>
+    const T* placedTarget(Decoder& decoder, size_t count = 1) const
+    {
+        CheckedSize size = count;
+        size *= sizeof(T);
+        if (size.hasOverflowed())
+            return nullptr;
+        return std::bit_cast<const T*>(placedBytes(decoder, size.value(), alignof(T)));
+    }
+    const uint8_t* placedBytes(Decoder& decoder, size_t size, size_t alignment) const
+    {
+        if (isEmpty())
+            return nullptr;
+        uintptr_t address = std::bit_cast<uintptr_t>(this) + static_cast<intptr_t>(m_offset);
+        if (!coreCodecHolds(decoder, address, size, alignment))
+            return nullptr;
+        return std::bit_cast<const uint8_t*>(address);
     }
 
 protected:
@@ -1276,7 +1571,9 @@ public:
     {
         if (!size)
             return;
-        const T* buffer = this->template buffer<T>();
+        const T* buffer = decoder.validates() ? this->template placedTarget<T>(decoder, size) : this->template buffer<T>();
+        if (!coreCodecCheck(decoder, !!buffer))
+            return;
         for (unsigned i = 0; i < size; ++i)
             ::JSC::decode(decoder, buffer[i], array[i], args...);
     }
@@ -1304,6 +1601,75 @@ template<typename T> inline constexpr bool isCanonicalCachedType = requires { T:
 
 class CachedUniquedStringImpl;
 class CachedStringImpl;
+class CachedTDZEnvironmentLink;
+
+// JITCache: the validating decode's record cache, kept in the decoder's offset cache (SPEC-ucb.codec.md, E15). For each
+// record a slot reaches, it holds the type the record is decoded as, from the moment its decode starts, and the object the
+// decode gave, once it returns. The two keys, 2 * offset + 1 and 2 * offset + 2, are never 0 or -1, the empty and deleted
+// keys of the cache's table. Only a validating decode reaches these helpers, and it never takes the native path that
+// caches by plain offset.
+enum class CoreCodecRecordState : uint8_t {
+    Unvisited,
+    InProgress, // reached again from inside its own decode
+    Decoded,
+    OtherType,
+};
+
+// The record type a slot decodes. The two string slot types read one record, which the encoder shares between them by
+// content and which decodes alike through either.
+template<typename T> struct CoreCodecRecordType {
+    using type = T;
+};
+template<> struct CoreCodecRecordType<CachedStringImpl> {
+    using type = CachedUniquedStringImpl;
+};
+
+// One address per record type, in writable data, which no linker folds.
+template<typename T> struct CoreCodecRecordTag {
+    static inline char tag { 0 };
+};
+
+template<typename T>
+static void* coreCodecRecordTag()
+{
+    return &CoreCodecRecordTag<typename CoreCodecRecordType<T>::type>::tag;
+}
+
+static ptrdiff_t coreCodecObjectKey(ptrdiff_t offset) { return 2 * offset + 1; }
+static ptrdiff_t coreCodecTypeKey(ptrdiff_t offset) { return 2 * offset + 2; }
+
+// `object` is set only for Decoded, to what the record's decode returned, null when it failed.
+template<typename T>
+static CoreCodecRecordState coreCodecRecordState(Decoder& decoder, const void* record, void*& object)
+{
+    ptrdiff_t offset = decoder.offsetOf(record);
+    std::optional<void*> type = decoder.cachedPtrForOffset(coreCodecTypeKey(offset));
+    if (!type)
+        return CoreCodecRecordState::Unvisited;
+    if (*type != coreCodecRecordTag<T>())
+        return CoreCodecRecordState::OtherType;
+    std::optional<void*> decoded = decoder.cachedPtrForOffset(coreCodecObjectKey(offset));
+    if (!decoded)
+        return CoreCodecRecordState::InProgress;
+    object = *decoded;
+    return CoreCodecRecordState::Decoded;
+}
+
+// Before the record's decode starts.
+template<typename T>
+static void coreCodecMarkRecord(Decoder& decoder, const void* record)
+{
+    decoder.cacheOffset(coreCodecTypeKey(decoder.offsetOf(record)), coreCodecRecordTag<T>());
+}
+
+// Once the record's decode returns.
+static void coreCodecSetRecordObject(Decoder& decoder, const void* record, void* object)
+{
+    decoder.cacheOffset(coreCodecObjectKey(decoder.offsetOf(record)), object);
+}
+
+// A record the encoder writes once per owner (isSingleOwner), whose decoded object has that one owner.
+template<typename T> inline constexpr bool coreCodecHasSingleOwner = requires { T::isSingleOwner; };
 
 template<typename T, typename Source = SourceType<T>>
 class CachedPtr : public VariableLengthObject<Source*> {
@@ -1370,14 +1736,26 @@ public:
         }
         if constexpr (holdsString) {
             if (this->hasInlineString()) {
+                if (decoder.validates() && !coreCodecCheck(decoder, this->hasWellFormedInlineString())) {
+                    isNewAllocation = false;
+                    return nullptr;
+                }
                 isNewAllocation = true;
                 return static_cast<Source*>(&this->inlineString(decoder).leakRef());
             }
             if (this->hasExternalString()) {
+                // A JITCacheCore encoder never writes an external-string ordinal (SPEC-ucb.codec.md, E15).
+                if (decoder.validates() && !coreCodecCheck(decoder, false)) {
+                    isNewAllocation = false;
+                    return nullptr;
+                }
                 isNewAllocation = true;
                 return static_cast<Source*>(&decoder.atomForExternalString(this->externalStringOrdinal()).leakRef());
             }
         }
+
+        if (decoder.validates())
+            return decodeValidated(decoder, isNewAllocation, std::forward<Args>(args)...);
 
 #if USE(BUN_JSC_ADDITIONS)
         if constexpr (isSingleOwnerCachedType<T>) {
@@ -1405,6 +1783,41 @@ public:
     {
         bool unusedIsNewAllocation;
         return decode(decoder, unusedIsNewAllocation, std::forward<Args>(args)...);
+    }
+
+    // JITCache: the validating decode (SPEC-ucb.codec.md, E15). The record must lie inside the payload, aligned, and be well
+    // formed for its type, and it is checked and decoded once, through the record cache: a later slot naming it as the
+    // same type shares the object its decode gave, as the native decode shares, and fails when another type named it first,
+    // when its decode has not returned yet, which is a loop, or when the encoder writes the record once per owner, since
+    // sharing its object would give that object two owners. A failed record decodes as null, and isNewAllocation is set only
+    // for the non-null result of this slot's own decode.
+    template<typename... Args>
+    Source* decodeValidated(Decoder& decoder, bool& isNewAllocation, Args&&... args) const
+    {
+        isNewAllocation = false;
+        const T* record = this->template placedTarget<T>(decoder);
+        if (!coreCodecCheck(decoder, !!record))
+            return nullptr;
+        void* decoded = nullptr;
+        switch (coreCodecRecordState<T>(decoder, record, decoded)) {
+        case CoreCodecRecordState::Unvisited:
+            break;
+        case CoreCodecRecordState::Decoded:
+            if (!coreCodecCheck(decoder, !coreCodecHasSingleOwner<T>))
+                return nullptr;
+            return static_cast<Source*>(decoded);
+        case CoreCodecRecordState::InProgress:
+        case CoreCodecRecordState::OtherType:
+            decoder.noteFailure(CoreDecodeFailure::Malformed);
+            return nullptr;
+        }
+        coreCodecMarkRecord<T>(decoder, record);
+        Source* result = nullptr;
+        if (coreCodecCheck(decoder, coreCodecIsWellFormed(decoder, *record)))
+            result = record->decode(decoder, std::forward<Args>(args)...);
+        coreCodecSetRecordObject(decoder, record, result);
+        isNewAllocation = !!result;
+        return result;
     }
 
     const T* NODELETE operator->() const { return get(); }
@@ -1448,11 +1861,15 @@ public:
         encode(encoder, src.get());
     }
 
+    const CachedPtr<T, Source>& ptr() const { return m_ptr; }
+    CachedPtr<T, Source>& ptr() { return m_ptr; }
+
     RefPtr<Source, PtrTraits> decode(Decoder& decoder) const
     {
 #if USE(BUN_JSC_ADDITIONS)
         if constexpr (isCanonicalCachedType<T>) {
-            if (Options::useLeanBytecodeCacheDecoder()) {
+            // The validating decode checks the record CachedPtr::decode reaches (SPEC-ucb.codec.md, E15).
+            if (Options::useLeanBytecodeCacheDecoder() && !decoder.validates()) {
                 if (m_ptr.isEmpty())
                     return nullptr;
                 if constexpr (CachedPtr<T, Source>::holdsString) {
@@ -1552,8 +1969,11 @@ public:
     {
         if (!m_size)
             return;
+        // A count past the payload decodes as an empty container (SPEC-ucb.codec.md, E15).
+        const T* buffer = decoder.validates() ? this->template placedTarget<T>(decoder, m_size) : this->template buffer<T>();
+        if (!coreCodecCheck(decoder, !!buffer))
+            return;
         vector = VectorContainer(m_size);
-        const T* buffer = this->template buffer<T>();
         for (unsigned i = 0; i < m_size; ++i)
             ::JSC::decode(decoder, buffer[i], vector[i], args...);
     }
@@ -1617,6 +2037,8 @@ public:
     unsigned size() const { return m_size; }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     unsigned m_size;
 };
 
@@ -1670,6 +2092,8 @@ public:
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     First m_first;
     Second m_second;
 };
@@ -1685,6 +2109,7 @@ public:
     {
         Vector<const typename std::remove_reference_t<decltype(map)>::KeyValuePairType*> entries;
         entries.reserveInitialCapacity(map.size());
+        EncoderScratchCharge entriesCharge(encoder, encoderHeapBytes(entries));
         for (auto& entry : map)
             entries.append(&entry);
         EncodingOrder::sort(entries, [](auto* entry) -> const auto& { return entry->key; });
@@ -1698,17 +2123,23 @@ public:
     {
         Vector<std::pair<const UniquedStringImpl*, uint16_t>> entries;
         entries.reserveInitialCapacity(map.size());
+        // Scratch unless the encoder keeps the entries as a new shared environment, which then owns the buffer and its charge.
+        size_t entriesBytes = encoderHeapBytes(entries);
+        encoder.chargeGrowth(entriesBytes);
         for (const auto& it : map)
             entries.append({ it.key.get(), it.value.bits() });
         std::sort(entries.begin(), entries.end());
         unsigned hash = computeHash(entries);
         if (auto existing = encoder.sharedPrivateNameEnvironment(hash, entries)) {
             m_entries.shareElements(encoder, *existing, map.size());
+            encoder.releaseGrowth(entriesBytes);
             return;
         }
         encode(encoder, map);
         if (map.size())
             encoder.addSharedPrivateNameEnvironment(hash, WTF::move(entries), m_entries.elementsOffset(encoder));
+        else
+            encoder.releaseGrowth(entriesBytes);
     }
 
     template<WTF::ShouldValidateKey shouldValidateKey>
@@ -1719,11 +2150,17 @@ public:
         if (decodedEntries.isEmpty())
             return;
         map.reserveInitialCapacity(decodedEntries.size());
-        for (auto& pair : decodedEntries)
+        for (auto& pair : decodedEntries) {
+            // A malformed key decodes as the empty value, which the map cannot hold (SPEC-ucb.codec.md, E15).
+            if (decoder.validates() && !coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<KeyTraitsArg>(pair.first)))
+                continue;
             map.add(WTF::move(pair.first), WTF::move(pair.second));
+        }
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedVector<CachedPair<Key, Value>> m_entries;
 };
 
@@ -1740,23 +2177,73 @@ public:
     void encode(Encoder& encoder, const Map& map)
     {
         SourceType<decltype(m_entries)> entriesVector(map.size());
+        EncoderScratchCharge entriesCharge(encoder, encoderHeapBytes(entriesVector));
         unsigned i = 0;
         for (const auto& it : map)
             entriesVector[i++] = { it.key, it.value };
         m_entries.encode(encoder, entriesVector); // in the map's order (declaration order while inline): it is the order global vars are created in
+
+        // JITCache: a hashed map iterates in bucket order, which re-adding its entries does not reproduce, so a core also
+        // writes the layout (SPEC-ucb.codec.md, E4). The native cache writes none and keeps re-adding.
+        m_hashedCapacity = 0;
+        Vector<uint32_t> slots;
+        if (encoder.isCore() && map.usesHashedStorage()) {
+            m_hashedCapacity = map.hashedCapacity();
+            slots.reserveInitialCapacity(map.size());
+            map.forEachOccupiedBucket([&](unsigned index, bool isDeleted, const typename Map::Entry*) {
+                slots.append(index << 1 | static_cast<uint32_t>(isDeleted));
+            });
+        }
+        EncoderScratchCharge slotsCharge(encoder, encoderHeapBytes(slots));
+        m_slots.encode(encoder, slots);
     }
 
     void decode(Decoder& decoder, Map& map) const
     {
         SourceType<decltype(m_entries)> decodedEntries;
         m_entries.decode(decoder, decodedEntries);
+        // Only a core writes a layout; the native cache's capacity is always 0.
+        if (decoder.purpose() == Decoder::Purpose::JITCacheCore && m_hashedCapacity) {
+            decodeHashedLayout(decoder, map, WTF::move(decodedEntries));
+            return;
+        }
         map.reserveInitialCapacity(decodedEntries.size());
-        for (const auto& pair : decodedEntries)
+        for (const auto& pair : decodedEntries) {
+            // A malformed key decodes as the empty value, which the map cannot hold (SPEC-ucb.codec.md, E15).
+            if (decoder.validates() && !coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<KeyTraitsArg>(pair.first)))
+                continue;
             map.add(pair.first, pair.second);
+        }
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    // The checked restore of section 5 of SPEC-ucb.codec.md. A deleted bucket is refused before it is restored: the one map
+    // the codec transports, VariableEnvironment::Map, never removes an entry, and its PackedRefPtr key cannot hold the
+    // deleted value (T*)-1 its key traits give. Any failure records InconsistentMapLayout and leaves the map empty.
+    void decodeHashedLayout(Decoder& decoder, Map& map, SourceType<decltype(m_entries)>&& decodedEntries) const
+    {
+        Vector<uint32_t> slots;
+        m_slots.decode(decoder, slots);
+        bool hasDeletedBucket = std::ranges::any_of(slots, [](uint32_t slot) { return slot & 1; });
+        Vector<typename Map::Entry> entries;
+        if (!hasDeletedBucket) {
+            entries.reserveInitialCapacity(decodedEntries.size());
+            for (auto& pair : decodedEntries) {
+                // A malformed key fails the validating decode, and the restore below refuses it too.
+                if (decoder.validates())
+                    coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<KeyTraitsArg>(pair.first));
+                entries.append(typename Map::Entry { WTF::move(pair.first), WTF::move(pair.second) });
+            }
+        }
+        if (hasDeletedBucket || !map.restoreHashedLayout(m_hashedCapacity, slots.span(), WTF::move(entries)))
+            decoder.noteFailure(CoreDecodeFailure::InconsistentMapLayout);
+    }
+
     CachedVector<CachedPair<Key, Value>> m_entries;
+    uint32_t m_hashedCapacity { 0 }; // JITCache: a core's hashed map, its bucket count; 0 otherwise
+    CachedVector<uint32_t> m_slots; // JITCache: (index << 1) | isDeleted for each occupied bucket, in index order
 };
 
 template<typename T>
@@ -1768,11 +2255,17 @@ public:
 
     // The characters follow this 12-byte header (length/flags, precomputed hash, ordinal) directly (see tailSize), instead
     // of a separately aligned allocation reached through an offset.
-    static size_t tailSize(const StringImpl& string) { return Shape(string).byteLength(); }
+    static size_t tailSize(Encoder& encoder, const StringImpl& string)
+    {
+        Shape shape(string);
+        EncoderScratchCharge copyCharge(encoder, shape.copyBytes());
+        return shape.byteLength();
+    }
 
     void encode(Encoder& encoder, const StringImpl& string)
     {
         Shape shape(string);
+        EncoderScratchCharge copyCharge(encoder, shape.copyBytes());
         m_isSymbol = shape.isSymbol;
         m_isRegistered = shape.isRegistered;
         m_isWellKnownSymbol = shape.isWellKnownSymbol;
@@ -1825,6 +2318,12 @@ public:
                     symbol = vm.propertyNames->builtinNames().lookUpWellKnownSymbol(buffer);
                 else
                     symbol = vm.propertyNames->builtinNames().lookUpPrivateName(buffer);
+                if (!symbol && decoder.isFallible()) {
+                    // JITCache: a core naming a symbol this VM lacks fails its decode instead of the process. The null
+                    // symbol is distinct per call, so no table built from it has duplicate keys (SPEC-ucb.codec.md, E5).
+                    decoder.noteFailure(CoreDecodeFailure::UnresolvedSymbol);
+                    return &SymbolImpl::createNullSymbol().leakRef();
+                }
                 RELEASE_ASSERT(symbol);
                 symbol->ref();
             }
@@ -1841,11 +2340,46 @@ public:
         return m_is8Bit ? create(span8()) : create(span16());
     }
 
+    // JITCache: the checks of the validating decode, on a record whose 12-byte header lies inside the payload
+    // (SPEC-ucb.codec.md, E15).
+    bool isWellFormed(Decoder& decoder) const
+    {
+        // The characters end inside the payload.
+        size_t byteLength = static_cast<size_t>(m_length) * (m_is8Bit ? sizeof(Latin1Character) : sizeof(char16_t));
+        if (!coreCodecHolds(decoder, tail(), byteLength, 1))
+            return false;
+        // AtomStringImpl::add takes the stored hash as given. An empty record never reaches it.
+        if (m_length && m_hash != (m_is8Bit ? StringHasher::computeHashAndMaskTop8Bits(span8()) : StringHasher::computeHashAndMaskTop8Bits(span16())))
+            return false;
+        // A JITCacheCore encoder numbers exactly the strings that are neither symbols nor empty (NumberStrings::Yes), and
+        // decode() consults the ordinal before the symbol bit.
+        if ((m_ordinal == noOrdinal) != (m_isSymbol || !m_length))
+            return false;
+        if (m_ordinal != noOrdinal) {
+            // Decoder::setAtomForOrdinal asserts that an ordinal is below the payload's size.
+            if (m_ordinal >= decoder.payloadSpan().size())
+                return false;
+            // A record whose ordinal the decoder already holds names that atom's characters.
+            if (AtomStringImpl* known = decoder.atomForOrdinal(m_ordinal)) {
+                if (!(m_is8Bit ? WTF::equal(known, span8()) : WTF::equal(known, span16())))
+                    return false;
+            }
+        }
+        // decode() asserts that a registered symbol is private exactly when the record does not call it well-known.
+        if (m_isSymbol && m_length && m_isRegistered && m_isWellKnownSymbol == m_isPrivate)
+            return false;
+        return true;
+    }
+
     // For uses that only need the characters (a string constant's JSString), not an atom: no atom table involved.
     String decodePlainString(Decoder& decoder) const
     {
-        if (m_isSymbol)
-            return String { adoptRef(*static_cast<StringImpl*>(decode(decoder))) };
+        if (m_isSymbol) {
+            UniquedStringImpl* symbol = decode(decoder);
+            if (!symbol)
+                return String();
+            return String { adoptRef(*static_cast<StringImpl*>(symbol)) };
+        }
         if (!m_length)
             return emptyString();
         if (m_ordinal != noOrdinal) {
@@ -1863,6 +2397,7 @@ public:
     }
 
     static constexpr unsigned minimumLengthToAliasPayload = 48; // below this a copy is smaller than pinning part of a page
+    bool isSymbol() const { return m_isSymbol; }
     std::span<const Latin1Character> NODELETE span8() const LIFETIME_BOUND { return { std::bit_cast<const Latin1Character*>(tail()), m_length }; }
     std::span<const char16_t> NODELETE span16() const LIFETIME_BOUND { return { std::bit_cast<const char16_t*>(tail()), m_length }; }
 
@@ -1888,12 +2423,17 @@ private:
                 characters = StringImpl::create8BitIfPossible(characters->span16());
         }
         size_t byteLength() const { return characters->length() * (characters->is8Bit() ? 1 : 2); }
+        // JITCache: what the shape allocated for a string it does not store as given, which an encode charges (E8).
+        size_t copyBytes() const { return characters.get() == original ? 0 : sizeof(StringImpl) + byteLength(); }
         RefPtr<StringImpl> characters;
+        const StringImpl* original { characters.get() };
         bool isSymbol { false };
         bool isRegistered { false };
         bool isWellKnownSymbol { false };
         bool isPrivate { false };
     };
+    friend struct CoreCodecSelfTestAccess;
+
     const uint8_t* tail() const { return std::bit_cast<const uint8_t*>(this + 1); }
     uint8_t* tail() { return std::bit_cast<uint8_t*>(this + 1); }
     uint32_t m_length : 27;
@@ -1928,7 +2468,12 @@ public:
         dst = decode(decoder);
     }
 
+    // JITCache: a pattern or a template literal's raw string, which a JITCacheCore encoder never writes null.
+    bool isNull() const { return m_impl.ptr().isEmpty(); }
+
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedRefPtr<CachedUniquedStringImpl> m_impl;
 };
 
@@ -1954,6 +2499,8 @@ public:
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedString m_string;
 };
 
@@ -1973,6 +2520,12 @@ public:
         if (this->isEmpty())
             return std::nullopt;
 
+        if (decoder.validates()) {
+            const T* record = this->template placedTarget<T>(decoder);
+            if (!coreCodecCheck(decoder, record && coreCodecIsWellFormed(decoder, *record)))
+                return std::nullopt;
+            return { record->decode(decoder) };
+        }
         return { this->template buffer<T>()->decode(decoder) };
     }
 
@@ -1991,6 +2544,13 @@ public:
 
     SourceType<T>* decodeAsPtr(Decoder& decoder) const
     {
+        if (decoder.validates()) {
+            // The slot must be filled (SPEC-ucb.codec.md, E15).
+            const T* record = this->template placedTarget<T>(decoder);
+            if (!coreCodecCheck(decoder, record && coreCodecIsWellFormed(decoder, *record)))
+                return nullptr;
+            return record->decode(decoder);
+        }
         RELEASE_ASSERT(!this->isEmpty());
         return this->template buffer<T>()->decode(decoder);
     }
@@ -2058,13 +2618,16 @@ public:
         memcpy(buffer, bitVector.words().data(), sizeInBytes);
     }
 
-    void decode(Decoder&, BitVector& bitVector) const
+    void decode(Decoder& decoder, BitVector& bitVector) const
     {
         if (!m_numBits)
             return;
-        bitVector.ensureSize(m_numBits);
         size_t sizeInBytes = BitVector::byteCount(m_numBits);
-        memcpy(bitVector.words().data(), this->buffer(), sizeInBytes);
+        const uint8_t* bits = decoder.validates() ? this->placedBytes(decoder, sizeInBytes, alignof(uintptr_t)) : this->buffer();
+        if (!coreCodecCheck(decoder, !!bits))
+            return;
+        bitVector.ensureSize(m_numBits);
+        memcpy(bitVector.words().data(), bits, sizeInBytes);
     }
 
 private:
@@ -2077,6 +2640,7 @@ public:
     void encode(Encoder& encoder, const UncheckedKeyHashSet<SourceType<T>, HashArg>& set)
     {
         SourceType<decltype(m_entries)> entriesVector(set.size());
+        EncoderScratchCharge entriesCharge(encoder, encoderHeapBytes(entriesVector));
         unsigned i = 0;
         for (const auto& item : set)
             entriesVector[i++] = item;
@@ -2088,8 +2652,12 @@ public:
     {
         SourceType<decltype(m_entries)> entriesVector;
         m_entries.decode(decoder, entriesVector);
-        for (const auto& item : entriesVector)
+        for (const auto& item : entriesVector) {
+            // A malformed key decodes as the empty value, which the set cannot hold (SPEC-ucb.codec.md, E15).
+            if (decoder.validates() && !coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<HashTraits<SourceType<T>>>(item)))
+                continue;
             set.add(item);
+        }
     }
 
 private:
@@ -2107,8 +2675,11 @@ public:
         m_type = static_cast<uint32_t>(handlerInfo.type());
     }
 
-    void decode(Decoder&, UnlinkedHandlerInfo& handlerInfo) const
+    void decode(Decoder& decoder, UnlinkedHandlerInfo& handlerInfo) const
     {
+        // The type is cast to HandlerType (SPEC-ucb.codec.md, E15); a malformed one leaves the default handler.
+        if (decoder.validates() && !coreCodecCheck(decoder, m_type <= static_cast<uint32_t>(HandlerType::SynthesizedFinally)))
+            return;
         handlerInfo = UnlinkedHandlerInfo(m_start, m_end, m_target, static_cast<HandlerType>(m_type));
     }
 
@@ -2199,25 +2770,33 @@ public:
     }
 
     // A damaged one decodes as "no expression info" (stack traces lose line/column for that function) rather than failing the function.
+    // A validating decode records the damage too (SPEC-ucb.codec.md, E15), and a JITCacheCore encoder sets no flag.
     std::unique_ptr<ExpressionInfo> decode(Decoder& decoder) const
     {
         const uint8_t* base = std::bit_cast<const uint8_t*>(this);
         auto payload = decoder.payloadSpan();
         const uint8_t* limit = payload.data() + payload.size();
-        if (!decoder.payloadContains(base, sizeof(uint32_t) + 1))
+        auto damaged = [&] {
+            if (decoder.validates())
+                decoder.noteFailure(CoreDecodeFailure::Malformed);
             return ExpressionInfo::createUninitialized(0, 0, 0);
+        };
+        if (!decoder.payloadContains(base, sizeof(uint32_t) + 1))
+            return damaged();
+        if (decoder.validates() && !coreCodecHolds(decoder, base, sizeof(CachedExpressionInfo), alignof(CachedExpressionInfo)))
+            return damaged();
         VarintReader reader(base + sizeof(uint32_t), limit);
         uint8_t flags = reader.u8();
         unsigned chapters = reader.u32();
         unsigned extensions = reader.u32();
-        if (reader.overran())
-            return ExpressionInfo::createUninitialized(0, 0, 0);
+        if (reader.overran() || (decoder.validates() && flags))
+            return damaged();
         unsigned encodedInfo = m_numberOfEncodedInfo;
         size_t payloadAt = roundUpToMultipleOf<4>(reader.position() - base);
         size_t payloadBytes = ExpressionInfo::payloadSizeInBytes(chapters, encodedInfo, extensions);
         size_t total = payloadAt + payloadBytes + ((flags & HasChecksum) ? sizeof(uint32_t) : 0);
         if (!decoder.payloadContains(base, total))
-            return ExpressionInfo::createUninitialized(0, 0, 0);
+            return damaged();
         if ((flags & HasChecksum) && decoder.verifiesChecksums()) {
             uint32_t stored;
             memcpy(&stored, base + payloadAt + payloadBytes, sizeof(stored));
@@ -2290,12 +2869,17 @@ public:
         env.m_hasAwaitUsingDeclaration = m_hasAwaitUsingDeclaration;
         m_map.decode(decoder, env.m_map);
         if (!m_rareData.isEmpty()) {
+            const CachedVariableEnvironmentRareData* rareData = decoder.validates() ? m_rareData.placedTarget<CachedVariableEnvironmentRareData>(decoder) : m_rareData.operator->();
+            if (!coreCodecCheck(decoder, !!rareData))
+                return;
             env.m_rareData = WTF::makeUnique<VariableEnvironment::RareData>();
-            m_rareData->decode(decoder, *env.m_rareData);
+            rareData->decode(decoder, *env.m_rareData);
         }
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     bool m_isEverythingCaptured;
     bool m_hasAwaitUsingDeclaration;
     uint8_t m_unused[2] { };
@@ -2315,6 +2899,7 @@ public:
             for (auto& key : std::get<CompactTDZEnvironment::Inflated>(env.m_variables))
                 compact.append(key);
         }
+        EncoderScratchCharge compactCharge(encoder, encoderHeapBytes(compact));
         EncodingOrder::sort(compact, [](const auto& key) -> const auto& { return key; });
         m_variables.encode(encoder, compact);
         m_hash = env.m_hash;
@@ -2333,12 +2918,81 @@ public:
 
     CompactTDZEnvironment* decode(Decoder& decoder) const
     {
+        if (decoder.validates()) {
+            // A malformed name decodes as null, which CompactTDZEnvironment cannot hold, and the VM interns an environment
+            // by the hash it is given, the exclusive-or of its names' hashes (SPEC-ucb.codec.md, E15).
+            CompactTDZEnvironment::Compact compact;
+            m_variables.decode(decoder, compact);
+            unsigned hash = 0;
+            for (auto& name : compact) {
+                if (!coreCodecCheck(decoder, !!name))
+                    return nullptr;
+                hash ^= name->hash();
+            }
+            if (!coreCodecCheck(decoder, hash == m_hash))
+                return nullptr;
+            CompactTDZEnvironment::sortCompact(compact);
+            CompactTDZEnvironment* env = new CompactTDZEnvironment;
+            env->m_variables = CompactTDZEnvironment::Variables(WTF::move(compact));
+            env->m_hash = m_hash;
+            return env;
+        }
         CompactTDZEnvironment* env = new CompactTDZEnvironment;
         decode(decoder, *env);
         return env;
     }
 
+    // JITCache: the environment digest of SPEC-ucb.md section 3.4, computed on the VM thread when a holder digest first
+    // reaches the environment and kept in it until it frees its names. The budget is charged for the sort buffer while it
+    // lives; on a refusal the digest is empty and the environment keeps none.
+    static std::optional<std::array<uint8_t, 32>> contentDigest(const CompactTDZEnvironment& environment, CoreEncodingBudget* budget, unsigned& environmentsDigested)
+    {
+        if (environment.m_contentDigest)
+            return *environment.m_contentDigest;
+
+        size_t count = WTF::switchOn(environment.m_variables,
+            [](const CompactTDZEnvironment::Compact& compact) -> size_t { return compact.size(); },
+            [](const CompactTDZEnvironment::Inflated& inflated) -> size_t { return inflated.size(); });
+        size_t sortBufferBytes = count * sizeof(const UniquedStringImpl*);
+        if (budget && sortBufferBytes && !budget->charge(sortBufferBytes))
+            return std::nullopt;
+        std::array<uint8_t, 32> digest;
+        {
+            auto releaseSortBuffer = makeScopeExit([&] {
+                if (budget && sortBufferBytes)
+                    budget->release(sortBufferBytes);
+            });
+            Vector<const UniquedStringImpl*> names;
+            names.reserveInitialCapacity(count);
+            WTF::switchOn(environment.m_variables,
+                [&](const CompactTDZEnvironment::Compact& compact) {
+                    for (auto& name : compact)
+                        names.append(name.get());
+                },
+                [&](const CompactTDZEnvironment::Inflated& inflated) {
+                    for (auto& name : inflated)
+                        names.append(name.get());
+                });
+            EncodingOrder::sort(names, [](const UniquedStringImpl* name) -> const StringImpl* { return name; });
+
+            JITCache::SHA256 hasher;
+            hasher.update("JITCache.tdze.v1"_s.span8());
+            coreCodecHashU32(hasher, static_cast<uint32_t>(names.size()));
+            for (const UniquedStringImpl* name : names) {
+                uint8_t kind = static_cast<uint8_t>(EncodingOrder::kind(name));
+                hasher.update(std::span { &kind, 1 });
+                coreCodecHashCanonicalString(hasher, name);
+            }
+            digest = hasher.finalize();
+        }
+        const_cast<CompactTDZEnvironment&>(environment).m_contentDigest = makeUniqueWithoutFastMallocCheck<std::array<uint8_t, 32>>(digest);
+        ++environmentsDigested;
+        return digest;
+    }
+
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedVector<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>> m_variables;
     unsigned m_hash;
 };
@@ -2377,7 +3031,15 @@ public:
         handle = decode(decoder);
     }
 
+    // JITCache: the start record of a core has an empty handle, which no native link has (SPEC-ucb.codec.md, E14).
+    bool isEmpty() const { return m_environment.isEmpty(); }
+
+    // The interned environment a live handle holds; null for an empty handle.
+    static const CompactTDZEnvironment* environmentOf(const CompactTDZEnvironmentMap::Handle& handle) { return handle.m_environment; }
+
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedPtr<CachedCompactTDZEnvironment> m_environment;
 };
 
@@ -2395,6 +3057,9 @@ public:
 
     ScopedArgumentsTable* decode(Decoder& decoder) const
     {
+        // ScopedArgumentsTable::tryCreate needs a length whose offsets the payload holds (SPEC-ucb.codec.md, E15).
+        if (decoder.validates() && m_length && !coreCodecCheck(decoder, !!m_arguments.placedTarget<ScopeOffset>(decoder, m_length)))
+            return nullptr;
         ScopedArgumentsTable* scopedArgumentsTable = ScopedArgumentsTable::tryCreate(decoder.vm(), m_length);
         RELEASE_ASSERT(scopedArgumentsTable); // We crash here. This is unlikely to continue execution if we hit this condition when decoding UnlinkedCodeBlock.
         m_arguments.decode(decoder, scopedArgumentsTable->m_arguments.mutableSpan().data(), m_length);
@@ -2418,12 +3083,20 @@ public:
         ASSERT(unpack() == bits);
     }
 
-    void decode(Decoder&, SymbolTableEntry& symbolTableEntry) const
+    void decode(Decoder& decoder, SymbolTableEntry& symbolTableEntry) const
     {
+        // A fat entry's bits are a pointer, which a payload cannot hold (SPEC-ucb.codec.md, E15); a malformed entry keeps the
+        // default slim entry.
+        if (decoder.validates() && !coreCodecCheck(decoder, !!(unpack() & SymbolTableEntry::SlimFlag)))
+            return;
         symbolTableEntry.m_bits = unpack();
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    static constexpr int32_t slimFlag() { return SymbolTableEntry::SlimFlag; }
+
     intptr_t unpack() const
     {
         unsigned rawOffset = static_cast<unsigned>(m_bits >> SymbolTableEntry::FlagBits);
@@ -2473,19 +3146,26 @@ public:
         symbolTable->m_maxScopeOffset = m_maxScopeOffset;
         symbolTable->m_usesSloppyEval = m_usesSloppyEval;
         symbolTable->m_nestedLexicalScope = m_nestedLexicalScope;
-        symbolTable->m_scopeType = m_scopeType;
+        // The scope type is read back as SymbolTable::ScopeType (SPEC-ucb.codec.md, E15).
+        if (!decoder.validates() || coreCodecCheck(decoder, m_scopeType <= SymbolTable::FunctionNameScope))
+            symbolTable->m_scopeType = m_scopeType;
         ScopedArgumentsTable* scopedArgumentsTable = m_arguments.decode(decoder);
         if (scopedArgumentsTable)
             symbolTable->m_arguments.set(decoder.vm(), symbolTable, scopedArgumentsTable);
         if (!m_rareData.isEmpty()) {
+            const CachedSymbolTableRareData* rareData = decoder.validates() ? m_rareData.placedTarget<CachedSymbolTableRareData>(decoder) : m_rareData.operator->();
+            if (!coreCodecCheck(decoder, !!rareData))
+                return symbolTable;
             symbolTable->m_rareData = WTF::makeUnique<SymbolTable::SymbolTableRareData>();
-            m_rareData->decode(decoder, *symbolTable->m_rareData);
+            rareData->decode(decoder, *symbolTable->m_rareData);
         }
 
         return symbolTable;
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedHashMap<CachedRefPtr<CachedUniquedStringImpl>, CachedSymbolTableEntry, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>, SymbolTableIndexHashTraits> m_map;
     ScopeOffset m_maxScopeOffset;
     unsigned m_usesSloppyEval : 1;
@@ -2496,11 +3176,23 @@ private:
     CachedPtr<CachedSymbolTableRareData> m_rareData;
 };
 
+// Whose constants a pool holds: a code block's constant registers, or an immutable butterfly's elements.
+enum class CachedJSValuePoolOwner : uint8_t { CodeBlock, Butterfly };
+
 // A pool reached through a slot-relative offset (constant arrays in a butterfly).
 class CachedJSValuePoolRef : public VariableLengthObject<WriteBarrier<Unknown>*> {
 public:
     void encode(Encoder&, std::span<const WriteBarrier<Unknown>>);
     void decode(Decoder&, WriteBarrier<Unknown>* out, unsigned count, const JSCell* owner) const;
+    // JITCache: whether the pool of `count` constants lies inside the payload (SPEC-ucb.codec.md, E15).
+    bool isPlaced(Decoder&, unsigned count) const;
+    // JITCache: the kind bytes of a placed pool of `count` constants.
+    std::span<const uint8_t> kinds(unsigned count) const
+    {
+        if (!count)
+            return { };
+        return { this->buffer(), count };
+    }
 };
 
 class CachedJSValue;
@@ -2521,17 +3213,13 @@ public:
             m_cachedValues.encode(encoder, std::span<const WriteBarrier<Unknown>> { immutableButterfly.toButterfly()->contiguous().data(), m_length });
     }
 
-    JSCellButterfly* decode(Decoder& decoder) const
-    {
-        JSCellButterfly* immutableButterfly = JSCellButterfly::create(decoder.vm(), m_indexingType, m_length);
-        if (hasDouble(m_indexingType))
-            m_cachedDoubles.decode(decoder, immutableButterfly->toButterfly()->contiguousDouble().data(), m_length, immutableButterfly);
-        else
-            m_cachedValues.decode(decoder, immutableButterfly->toButterfly()->contiguous().data(), m_length, immutableButterfly);
-        return immutableButterfly;
-    }
+    JSCellButterfly* decode(Decoder&) const;
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    bool hasWellFormedElements(Decoder&) const;
+
     IndexingType m_indexingType;
     uint8_t m_unused[3] { };
     unsigned m_length;
@@ -2546,8 +3234,12 @@ public:
     void encode(Encoder& encoder, const RegExp& regExp)
     {
         m_patternString.encode(encoder, regExp.m_patternString);
-        m_atom.encode(encoder, regExp.m_atom);
         m_flags = regExp.m_flags;
+        // JITCache: a core writes the pattern and the flags only, so that decoding takes RegExp::create, the call generation
+        // makes. The rest is compilation state of a cell the VM shares, which code deletion clears (SPEC-ucb.codec.md, E11).
+        if (encoder.isCore())
+            return;
+        m_atom.encode(encoder, regExp.m_atom);
         m_specificPattern = regExp.m_specificPattern;
         // What RegExp::finishCreation learns from parsing the pattern, so decode can skip the parse. A pattern with named
         // groups (rare) or very many subpatterns still parses on decode.
@@ -2557,13 +3249,24 @@ public:
 
     RegExp* decode(Decoder& decoder) const
     {
+        if (decoder.validates()) {
+            // The record E11 writes, a pattern, and flags within Yarr::Flags (SPEC-ucb.codec.md, E15).
+            bool isCoreRecord = !m_parsed && !m_numSubpatterns && m_atom.isNull() && m_specificPattern == Yarr::SpecificPattern::None;
+            bool hasKnownFlags = m_flags.toRaw() < (1u << Yarr::numberOfFlags);
+            if (!coreCodecCheck(decoder, isCoreRecord && hasKnownFlags && !m_patternString.isNull()))
+                return nullptr;
+        }
         String pattern { m_patternString.decode(decoder) };
+        if (decoder.validates() && !coreCodecCheck(decoder, !pattern.isNull()))
+            return nullptr;
         if (!m_parsed)
             return RegExp::create(decoder.vm(), pattern, m_flags);
         return RegExp::createFromCache(decoder.vm(), pattern, m_flags, m_numSubpatterns, String { m_atom.decode(decoder) }, m_specificPattern);
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedString m_patternString;
     CachedString m_atom;
     uint16_t m_numSubpatterns { 0 };
@@ -2588,10 +3291,18 @@ public:
         TemplateObjectDescriptor::OptionalStringVector decodedCookedStrings;
         m_rawStrings.decode(decoder, decodedRawStrings);
         m_cookedStrings.decode(decoder, decodedCookedStrings);
+        if (decoder.validates()) {
+            // TemplateObjectDescriptor hashes every raw string, and its cooked strings pair with them (SPEC-ucb.codec.md, E15).
+            bool hasEveryRawString = std::ranges::none_of(decodedRawStrings, [](const String& string) { return string.isNull(); });
+            if (!coreCodecCheck(decoder, hasEveryRawString && decodedRawStrings.size() == decodedCookedStrings.size()))
+                return nullptr;
+        }
         return JSTemplateObjectDescriptor::create(decoder.vm(), TemplateObjectDescriptor::create(WTF::move(decodedRawStrings), WTF::move(decodedCookedStrings)), m_endOffset);
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
     CachedVector<CachedString, 4> m_rawStrings;
     CachedVector<CachedOptional<CachedString>, 4> m_cookedStrings;
     int m_endOffset;
@@ -2617,6 +3328,10 @@ public:
         if (!m_length)
             return decoder.vm().heapBigIntConstantZero.get();
 
+        // JSBigInt::tryCreateWithLength needs a length of at most maxLength, and the digits lie inside the payload
+        // (SPEC-ucb.codec.md, E15).
+        if (decoder.validates() && !coreCodecCheck(decoder, m_length <= JSBigInt::maxLength && this->placedTarget<JSBigInt::Digit>(decoder, m_length)))
+            return nullptr;
         JSBigInt* bigInt = JSBigInt::tryCreateWithLength(decoder.vm(), m_length);
         RELEASE_ASSERT(bigInt);
         bigInt->setSign(m_sign);
@@ -2626,6 +3341,10 @@ public:
     }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    static constexpr unsigned maximumLength() { return JSBigInt::maxLength; }
+
     unsigned m_length;
     bool m_sign;
     uint8_t m_unused[3] { };
@@ -2650,6 +3369,9 @@ public:
         RegExp,
         TemplateObjectDescriptor,
         BigInt,
+        // JITCache: the VM's ordered-hash-table sentinel, which builtins compare by identity; no payload
+        // (SPEC-ucb.codec.md, E16).
+        OrderedHashTableSentinel,
     };
 
     Kind encode(Encoder& encoder, JSValue v)
@@ -2699,6 +3421,10 @@ public:
             return Kind::String;
         }
 
+        // JITCache: a core writes the sentinel by identity, before the butterfly it also is (SPEC-ucb.codec.md, E16).
+        if (encoder.isCore() && cell == encoder.vm().orderedHashTableSentinel())
+            return Kind::OrderedHashTableSentinel;
+
         if (auto* immutableButterfly = dynamicDowncast<JSCellButterfly>(cell)) {
             this->allocate<CachedImmutableButterfly>(encoder)->encode(encoder, *immutableButterfly);
             return Kind::ImmutableButterfly;
@@ -2722,8 +3448,11 @@ public:
         RELEASE_ASSERT_NOT_REACHED();
     }
 
-    JSValue decode(Decoder& decoder, Kind kind) const
+    JSValue decode(Decoder& decoder, Kind kind, CachedJSValuePoolOwner poolOwner) const
     {
+        // A failed check of the validating decode leaves undefined (SPEC-ucb.codec.md, E15).
+        if (decoder.validates() && !coreCodecCheck(decoder, isWellFormedKind(kind, poolOwner)))
+            return jsUndefined();
         switch (kind) {
         case Kind::Undefined:
             return jsUndefined();
@@ -2737,27 +3466,114 @@ public:
             return JSValue();
         case Kind::Int32:
             return jsNumber(static_cast<int32_t>(this->rawSlot()));
-        case Kind::Double:
-            return JSValue::decode(*this->buffer<EncodedJSValue>());
+        case Kind::Double: {
+            const EncodedJSValue* bits = checkedRecord<EncodedJSValue>(decoder);
+            if (!bits)
+                return jsUndefined();
+            if (decoder.validates() && !coreCodecCheck(decoder, isWellFormedDouble(*bits)))
+                return jsUndefined();
+            return JSValue::decode(*bits);
+        }
         case Kind::SymbolTable:
-            return this->buffer<CachedSymbolTable>()->decode(decoder);
-        case Kind::String:
-            if (this->hasInlineString())
+            if (auto* symbolTable = checkedRecord<CachedSymbolTable>(decoder))
+                return symbolTable->decode(decoder);
+            return jsUndefined();
+        case Kind::String: {
+            if (this->hasInlineString()) {
+                if (decoder.validates() && !coreCodecCheck(decoder, this->hasWellFormedInlineString()))
+                    return jsUndefined();
                 return jsOwnedString(decoder.vm(), String { this->inlineString(decoder) });
-            if (this->hasExternalString())
+            }
+            if (this->hasExternalString()) {
+                // A JITCacheCore encoder never writes an external-string ordinal.
+                if (decoder.validates() && !coreCodecCheck(decoder, false))
+                    return jsUndefined();
                 return decoder.jsStringForExternalString(this->externalStringOrdinal());
+            }
+            auto* string = checkedRecord<CachedUniquedStringImpl>(decoder);
+            if (!string)
+                return jsUndefined();
+            // A JSString's value is never a symbol, so the encoder never writes one here (SPEC-ucb.codec.md, E15).
+            if (decoder.validates() && !coreCodecCheck(decoder, !string->isSymbol()))
+                return jsUndefined();
+            // JITCache: a core's own string constant registers decode as the atoms generation makes them, and jsString gives
+            // the VM's own empty and one-character strings (SPEC-ucb.codec.md, E10). Constants inside cells keep their
+            // native decode.
+            if (decoder.purpose() == Decoder::Purpose::JITCacheCore && poolOwner == CachedJSValuePoolOwner::CodeBlock)
+                return jsString(decoder.vm(), String { adoptRef(*static_cast<StringImpl*>(string->decode(decoder))) });
             // A constant becomes a JSString; it does not have to be an atom, so skip the atom table.
-            return jsString(decoder.vm(), this->buffer<CachedUniquedStringImpl>()->decodePlainString(decoder));
+            return jsString(decoder.vm(), string->decodePlainString(decoder));
+        }
         case Kind::ImmutableButterfly:
-            return this->buffer<CachedImmutableButterfly>()->decode(decoder);
+            return decodeCell<CachedImmutableButterfly>(decoder);
         case Kind::RegExp:
-            return this->buffer<CachedRegExp>()->decode(decoder);
+            return decodeCell<CachedRegExp>(decoder);
         case Kind::TemplateObjectDescriptor:
-            return this->buffer<CachedTemplateObjectDescriptor>()->decode(decoder);
+            return decodeCell<CachedTemplateObjectDescriptor>(decoder);
         case Kind::BigInt:
-            return this->buffer<CachedBigInt>()->decode(decoder);
+            return decodeCell<CachedBigInt>(decoder);
+        case Kind::OrderedHashTableSentinel:
+            // A generated or imported UCB holds its own VM's sentinel (SPEC-ucb.codec.md, E16).
+            return decoder.vm().orderedHashTableSentinel();
         }
         RELEASE_ASSERT_NOT_REACHED();
+    }
+
+private:
+    // The record this slot names, which the validating decode checks first; null when a check fails.
+    template<typename T>
+    const T* checkedRecord(Decoder& decoder) const
+    {
+        if (!decoder.validates())
+            return this->template buffer<T>();
+        const T* record = this->template placedTarget<T>(decoder);
+        if (!coreCodecCheck(decoder, record && coreCodecIsWellFormed(decoder, *record)))
+            return nullptr;
+        return record;
+    }
+
+    template<typename T>
+    JSValue decodeCell(Decoder& decoder) const
+    {
+        if (auto* record = checkedRecord<T>(decoder)) {
+            if (auto* cell = record->decode(decoder))
+                return cell;
+        }
+        return jsUndefined();
+    }
+
+    // A kind the encoder writes. A butterfly holds the values of an array literal's constant elements, which
+    // ArrayNode::emitBytecode takes from ConstantNodes: null, booleans, numbers, strings and BigInts. It never holds a
+    // cell that holds constants itself, so a pool never nests in another.
+    static bool isWellFormedKind(Kind kind, CachedJSValuePoolOwner poolOwner)
+    {
+        if (kind > Kind::OrderedHashTableSentinel)
+            return false;
+        if (poolOwner == CachedJSValuePoolOwner::CodeBlock)
+            return true;
+        switch (kind) {
+        case Kind::Null:
+        case Kind::True:
+        case Kind::False:
+        case Kind::Int32:
+        case Kind::Double:
+        case Kind::String:
+        case Kind::BigInt:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // A Double record must decode to a double: other bits could name a cell, which the collector would follow. Its negation
+    // must be no impure NaN either, since the baseline's negate fast path flips bit 63 of the boxed value and so turns such a
+    // double into bits that name a cell, whether code reads it from a constant register or from a butterfly element. Every
+    // NaN generation writes passes: a constant register holds jsNaN(), and an element holds the NaN the parser folded, with
+    // the CPU's bits and possibly its sign flipped (SPEC-ucb.codec.md, E15).
+    static bool isWellFormedDouble(EncodedJSValue bits)
+    {
+        JSValue value = JSValue::decode(bits);
+        return value.isDouble() && !isImpureNaN(-value.asDouble());
     }
 };
 static_assert(sizeof(CachedJSValue) == sizeof(uint32_t));
@@ -2780,11 +3596,11 @@ struct CachedJSValuePool {
         return result.offset();
     }
 
-    static void decode(Decoder& decoder, const uint8_t* pool, unsigned count, WriteBarrier<Unknown>* out, const JSCell* owner)
+    static void decode(Decoder& decoder, const uint8_t* pool, unsigned count, WriteBarrier<Unknown>* out, const JSCell* owner, CachedJSValuePoolOwner poolOwner)
     {
         const CachedJSValue* slot = slots(pool, count);
         for (unsigned i = 0; i < count; ++i)
-            out[i].set(decoder.vm(), owner, slot[i].decode(decoder, static_cast<CachedJSValue::Kind>(pool[i])));
+            out[i].set(decoder.vm(), owner, slot[i].decode(decoder, static_cast<CachedJSValue::Kind>(pool[i]), poolOwner));
     }
 };
 
@@ -2795,11 +3611,59 @@ inline void CachedJSValuePoolRef::encode(Encoder& encoder, std::span<const Write
     this->pointAtPayloadOffset(encoder, CachedJSValuePool::encode(encoder, values));
 }
 
+inline bool CachedJSValuePoolRef::isPlaced(Decoder& decoder, unsigned count) const
+{
+    return this->placedBytes(decoder, CachedJSValuePool::byteSize(count), alignof(CachedJSValue));
+}
+
 inline void CachedJSValuePoolRef::decode(Decoder& decoder, WriteBarrier<Unknown>* out, unsigned count, const JSCell* owner) const
 {
     if (!count)
         return;
-    CachedJSValuePool::decode(decoder, this->buffer(), count, out, owner);
+    // The only pool reached through a slot is an immutable butterfly's, which CachedImmutableButterfly::decode placed.
+    ASSERT(!decoder.validates() || isPlaced(decoder, count));
+    CachedJSValuePool::decode(decoder, this->buffer(), count, out, owner, CachedJSValuePoolOwner::Butterfly);
+}
+
+// The elements lie inside the payload and hold only what ArrayNode::emitBytecode stores under the indexing type, which the
+// tiers read without checking (SPEC-ucb.codec.md, E15). An Int32 butterfly holds only int32 values, which the DFG reads as
+// boxed int32s. A Double butterfly holds no NaN: indexingTypeForValue gives a NaN element ContiguousShape, double storage
+// reads any NaN as a hole, and JSCellButterfly::get asserts against one and boxes each element with jsDoubleNumber, which
+// turns an impure NaN into bits that are no double and can name a cell.
+inline bool CachedImmutableButterfly::hasWellFormedElements(Decoder& decoder) const
+{
+    if (!m_length)
+        return true;
+    if (hasDouble(m_indexingType)) {
+        const double* elements = m_cachedDoubles.placedTarget<double>(decoder, m_length);
+        return elements && std::ranges::none_of(std::span { elements, m_length }, [](double element) {
+            return std::isnan(element);
+        });
+    }
+    if (!m_cachedValues.isPlaced(decoder, m_length))
+        return false;
+    if (m_indexingType != CopyOnWriteArrayWithInt32)
+        return true;
+    return std::ranges::all_of(m_cachedValues.kinds(m_length), [](uint8_t kind) {
+        return kind == static_cast<uint8_t>(CachedJSValue::Kind::Int32);
+    });
+}
+
+inline JSCellButterfly* CachedImmutableButterfly::decode(Decoder& decoder) const
+{
+    if (decoder.validates()) {
+        // VM::cellButterflyStructure indexes its table with the indexing type, which must be one of the three copy-on-write
+        // array types (SPEC-ucb.codec.md, E15).
+        bool isCopyOnWriteArray = m_indexingType == CopyOnWriteArrayWithInt32 || m_indexingType == CopyOnWriteArrayWithDouble || m_indexingType == CopyOnWriteArrayWithContiguous;
+        if (!coreCodecCheck(decoder, isCopyOnWriteArray && m_length <= IndexingHeader::maximumLength && hasWellFormedElements(decoder)))
+            return nullptr;
+    }
+    JSCellButterfly* immutableButterfly = JSCellButterfly::create(decoder.vm(), m_indexingType, m_length);
+    if (hasDouble(m_indexingType))
+        m_cachedDoubles.decode(decoder, immutableButterfly->toButterfly()->contiguousDouble().data(), m_length, immutableButterfly);
+    else
+        m_cachedValues.decode(decoder, immutableButterfly->toButterfly()->contiguous().data(), m_length, immutableButterfly);
+    return immutableButterfly;
 }
 
 // UnlinkedMetadataTable's offset table is cumulative and most opcodes have no metadata in a given function, so a code
@@ -2841,6 +3705,25 @@ struct CachedMetadataSteps {
         return steps;
     }
 
+    // JITCache: what UnlinkedMetadataTable::expandSteps asserts: strictly increasing opcodes below s_offsetTableEntries - 1
+    // that lay out a table whose offsets fit 32 bits (SPEC-ucb.codec.md, E15).
+    static bool stepsAreWellFormed(std::span<const uint32_t> steps)
+    {
+        uint64_t offset = UnlinkedMetadataTable::s_offset16TableSize;
+        unsigned nextOpcode = 0;
+        for (uint32_t step : steps) {
+            unsigned opcode = step >> indexShift;
+            if (opcode < nextOpcode || opcode >= UnlinkedMetadataTable::s_offsetTableEntries - 1)
+                return false;
+            nextOpcode = opcode + 1;
+            offset = roundUpToMultipleOf(metadataAlignment(static_cast<OpcodeID>(opcode)), offset);
+            offset += static_cast<uint64_t>(step & countMask) * metadataSize(static_cast<OpcodeID>(opcode));
+            if (offset + UnlinkedMetadataTable::s_offset32TableSize > std::numeric_limits<UnlinkedMetadataTable::Offset32>::max())
+                return false;
+        }
+        return true;
+    }
+
     static Ref<UnlinkedMetadataTable> build(unsigned numValueProfiles, std::span<const uint32_t> steps)
     {
         Ref<UnlinkedMetadataTable> metadataTable = UnlinkedMetadataTable::create(UnlinkedMetadataTable::stepsNeed32BitOffsets(steps), numValueProfiles);
@@ -2864,7 +3747,13 @@ static ptrdiff_t encodeArrayForTail(Encoder& encoder, const Container& container
     unsigned size = container.size();
     ASSERT(size);
     if constexpr (std::is_same_v<T, SourceType<T>> && std::is_trivially_copyable_v<T>) {
-        auto bytes = std::span { std::bit_cast<const uint8_t*>(container.span().data()), sizeof(T) * size };
+        // A container, or a span (an instruction stream's bytes, which an owned and a borrowed stream both have).
+        const T* elements;
+        if constexpr (requires { container.span(); })
+            elements = container.span().data();
+        else
+            elements = container.data();
+        auto bytes = std::span { std::bit_cast<const uint8_t*>(elements), sizeof(T) * size };
         unsigned hash = StringHasher::computeHashAndMaskTop8Bits(bytes) ^ static_cast<unsigned>(bytes.size());
         if (encoder.arraySharingEnabled()) {
             if (auto existing = encoder.existingIdenticalArray(bytes, hash, alignof(T))) {
@@ -3168,18 +4057,169 @@ class CachedTDZEnvironmentLink : public CachedObject<TDZEnvironmentLink> {
 public:
     void encode(Encoder& encoder, const TDZEnvironmentLink& environment)
     {
+        // JITCache: the encoder's start chain is written as the start record, an empty handle and an empty parent, which no
+        // native link has, since each holds an environment from CompactTDZEnvironmentMap::get (SPEC-ucb.codec.md, E14).
+        if (&environment == encoder.startChain())
+            return;
         m_handle.encode(encoder, environment.m_handle);
-        m_parent.encode(encoder, environment.m_parent);
+        encodeChain(encoder, m_parent, environment.m_parent.get());
+    }
+
+    // JITCache: writes a TDZ chain, a UFE's or a link's parent. A chain equal to the encoder's start chain, as many links
+    // and, link by link, the same environment object, is written as the start chain's own record; any other chain link by
+    // link until what remains equals it. The VM interns environments by content, so comparing environments rather than
+    // links cuts a natively decoded UCB's chains, whose links are fresh, where a generated UCB's are cut (E14).
+    static void encodeChain(Encoder& encoder, CachedRefPtr<CachedTDZEnvironmentLink>& slot, const TDZEnvironmentLink* chain)
+    {
+        const TDZEnvironmentLink* startChain = encoder.startChain();
+        if (startChain && chain && equalChains(chain, startChain))
+            chain = startChain;
+        slot.encode(encoder, chain);
     }
 
     TDZEnvironmentLink* decode(Decoder& decoder) const
     {
+        if (decoder.purpose() == Decoder::Purpose::JITCacheCore) {
+            if (m_handle.isEmpty())
+                return decodeStartRecord(decoder);
+            if (decoder.validates())
+                return decodeValidatedChain(decoder);
+        }
         CompactTDZEnvironmentMap::Handle handle = m_handle.decode(decoder);
         RefPtr<TDZEnvironmentLink> parent = m_parent.decode(decoder);
         return new TDZEnvironmentLink(WTF::move(handle), WTF::move(parent));
     }
 
+    // JITCache: the TDZ chain digest of SPEC-ucb.md section 3.4. A link's digest hashes its environment's digest and its
+    // parent's digest, 32 zero bytes after the last link, so the links are listed and digested from the chain's end. A
+    // chain longer than the links the list keeps inline moves the list to the heap, which the budget is charged for before
+    // the list is allocated and while it lives (SPEC-ucb.codec.md, section 2).
+    static std::optional<std::array<uint8_t, 32>> chainDigest(const TDZEnvironmentLink* chain, CoreEncodingBudget* budget, unsigned& environmentsDigested)
+    {
+        std::array<uint8_t, 32> digest { };
+        if (!chain)
+            return digest;
+        constexpr size_t inlineLinks = 32;
+        size_t count = 0;
+        for (const TDZEnvironmentLink* link = chain; link; link = link->m_parent.get())
+            ++count;
+        size_t linksBytes = count > inlineLinks ? count * sizeof(const TDZEnvironmentLink*) : 0;
+        if (budget && linksBytes && !budget->charge(linksBytes))
+            return std::nullopt;
+        auto releaseLinks = makeScopeExit([&] {
+            if (budget && linksBytes)
+                budget->release(linksBytes);
+        });
+        Vector<const TDZEnvironmentLink*, inlineLinks> links;
+        links.reserveInitialCapacity(count);
+        ASSERT(encoderHeapBytes(links) == linksBytes);
+        for (const TDZEnvironmentLink* link = chain; link; link = link->m_parent.get())
+            links.append(link);
+        for (size_t i = links.size(); i--;) {
+            // Every live link holds an environment the VM interned.
+            const CompactTDZEnvironment* environment = CachedCompactTDZEnvironmentMapHandle::environmentOf(links[i]->m_handle);
+            RELEASE_ASSERT(environment);
+            std::optional<std::array<uint8_t, 32>> environmentDigest = CachedCompactTDZEnvironment::contentDigest(*environment, budget, environmentsDigested);
+            if (!environmentDigest)
+                return std::nullopt;
+            JITCache::SHA256 hasher;
+            hasher.update("JITCache.tdzl.v1"_s.span8());
+            hasher.update(*environmentDigest);
+            hasher.update(digest);
+            digest = hasher.finalize();
+        }
+        return digest;
+    }
+
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    static bool equalChains(const TDZEnvironmentLink* chain, const TDZEnvironmentLink* other)
+    {
+        // At most one pair of links per link of the shorter chain.
+        while (chain && other) {
+            if (chain == other)
+                return true;
+            if (CachedCompactTDZEnvironmentMapHandle::environmentOf(chain->m_handle) != CachedCompactTDZEnvironmentMapHandle::environmentOf(other->m_handle))
+                return false;
+            chain = chain->m_parent.get();
+            other = other->m_parent.get();
+        }
+        return !chain && !other;
+    }
+
+    // The start record stands for the decoder's start chain and has an empty parent (E14). The decoder's finalizer releases
+    // one reference to the chain, as it releases one for each link the decode allocates.
+    TDZEnvironmentLink* decodeStartRecord(Decoder& decoder) const
+    {
+        TDZEnvironmentLink* startChain = decoder.startChain();
+        if (!startChain || !m_parent.ptr().isEmpty()) {
+            decoder.noteFailure(CoreDecodeFailure::Malformed);
+            return nullptr;
+        }
+        startChain->ref();
+        return startChain;
+    }
+
+    // The validating decode walks the chain instead of recursing into each parent, so that a chain as long as the payload
+    // allows decodes without exhausting the stack (E15). It follows parents, each placed and marked in the record cache, until
+    // an empty one, a start record or a link the decoder already decoded. A parent whose decode has not returned, this record
+    // included, which CachedPtr::decodeValidated marked, closes a loop, and one of another type fails as well. The walk then
+    // decodes from the deepest record up, recording each ancestor's link and handing its allocation's reference to the
+    // decoder's finalizer, as CachedRefPtr::decode does; CachedPtr::decodeValidated records this record's link itself.
+    TDZEnvironmentLink* decodeValidatedChain(Decoder& decoder) const
+    {
+        Vector<const CachedTDZEnvironmentLink*, 16> records;
+        RefPtr<TDZEnvironmentLink> parent;
+        for (const CachedTDZEnvironmentLink* record = this;;) {
+            records.append(record);
+            if (record->m_handle.isEmpty() || record->m_parent.ptr().isEmpty())
+                break;
+            const CachedTDZEnvironmentLink* next = record->m_parent.ptr().placedTarget<CachedTDZEnvironmentLink>(decoder);
+            if (!coreCodecCheck(decoder, !!next))
+                return nullptr;
+            void* decoded = nullptr;
+            CoreCodecRecordState state = coreCodecRecordState<CachedTDZEnvironmentLink>(decoder, next, decoded);
+            if (state == CoreCodecRecordState::Decoded) {
+                // A link this decoder decoded before, or null when it failed, which already recorded the failure.
+                parent = static_cast<TDZEnvironmentLink*>(decoded);
+                if (!parent)
+                    return nullptr;
+                break;
+            }
+            if (!coreCodecCheck(decoder, state == CoreCodecRecordState::Unvisited))
+                return nullptr;
+            coreCodecMarkRecord<CachedTDZEnvironmentLink>(decoder, next);
+            record = next;
+        }
+        // When a link fails, the failure is recorded and the records above it stay marked without a link, so that a later
+        // slot naming one of them fails too.
+        for (size_t i = records.size(); i--;) {
+            const CachedTDZEnvironmentLink* record = records[i];
+            TDZEnvironmentLink* link;
+            if (record->m_handle.isEmpty()) {
+                link = record->decodeStartRecord(decoder);
+                if (!link)
+                    return nullptr;
+            } else {
+                CompactTDZEnvironmentMap::Handle handle = record->m_handle.decode(decoder);
+                // An environment that failed decodes as an empty handle, after recording the failure.
+                if (!handle)
+                    return nullptr;
+                link = new TDZEnvironmentLink(WTF::move(handle), parent);
+            }
+            if (!i)
+                return link;
+            coreCodecSetRecordObject(decoder, record, link);
+            decoder.addFinalizer([link] {
+                link->deref();
+            });
+            parent = link;
+        }
+        RELEASE_ASSERT_NOT_REACHED();
+        return nullptr;
+    }
+
     CachedCompactTDZEnvironmentMapHandle m_handle;
     CachedRefPtr<CachedTDZEnvironmentLink> m_parent;
 };
@@ -3219,7 +4259,11 @@ public:
         definition.ident = m_ident.decode(decoder);
         definition.position = m_position.decode(decoder);
         definition.initializerPosition = m_initializerPosition.decode(decoder);
-        definition.kind = static_cast<UnlinkedFunctionExecutable::ClassElementDefinition::Kind>(m_kind);
+        // The kind is cast to its enum (SPEC-ucb.codec.md, E15); a malformed one keeps the default.
+        using Kind = UnlinkedFunctionExecutable::ClassElementDefinition::Kind;
+        if (decoder.validates() && !coreCodecCheck(decoder, m_kind <= static_cast<uint8_t>(Kind::StaticInitializationBlock)))
+            return;
+        definition.kind = static_cast<Kind>(m_kind);
     }
 
 private:
@@ -3296,6 +4340,31 @@ public:
             VarintWriter writer = packClassSource(rareData.m_classSource);
             writer.copyTo(p);
         }
+    }
+
+    // JITCache: the checks of the validating decode, on a record whose header word lies inside the payload: only the
+    // members the encoder writes, each inside the payload, and the class source's varints ending there (SPEC-ucb.codec.md, E15).
+    bool isWellFormed(Decoder& decoder) const
+    {
+        if (m_header & ~(HasClassSource | HasWrapperParameterNames | HasClassElementDefinitions | HasParentPrivateNameEnvironment))
+            return false;
+        size_t members = 0;
+        if (m_header & HasWrapperParameterNames)
+            members += sizeof(CachedVector<CachedIdentifier>);
+        if (m_header & HasClassElementDefinitions)
+            members += sizeof(CachedVector<CachedClassElementDefinition>);
+        if (m_header & HasParentPrivateNameEnvironment)
+            members += sizeof(CachedPrivateNameEnvironment);
+        const uint8_t* p = std::bit_cast<const uint8_t*>(this) + sizeof(uint32_t);
+        if (!coreCodecHolds(decoder, p, members, alignof(uint32_t)))
+            return false;
+        if (!(m_header & HasClassSource))
+            return true;
+        auto payload = decoder.payloadSpan();
+        VarintReader reader(p + members, payload.data() + payload.size());
+        for (unsigned i = 0; i < 4; ++i)
+            reader.u32();
+        return !reader.overran();
     }
 
     UnlinkedFunctionExecutable::RareData* decode(Decoder& decoder) const
@@ -3415,13 +4484,14 @@ public:
         const uint8_t* tail { nullptr };
         const uint8_t* tailEnd { nullptr };
         Scalars scalars;
+        uint32_t flags { 0 }; // the packed fields, as written
         bool intact { false };
     };
 
     static size_t tailSize(const Encoder& encoder, const UnlinkedFunctionExecutable& executable)
     {
         // Everything after the header word; see encode() for the order.
-        return slotBytes(headerFor(executable, &encoder)) + packedTail(executable).size();
+        return slotBytes(headerFor(executable, &encoder)) + packedTail(executable, encoder.purpose()).size();
     }
 
     void encode(Encoder&, const UnlinkedFunctionExecutable&);
@@ -3439,12 +4509,22 @@ public:
         View v = view(payload.data() + payload.size());
         if (!v.intact)
             return false;
+        if (decoder.validates() && !hasCoreTags(decoder, v))
+            return false;
         if (!(v.header & HasChecksum))
             return true;
         return decoder.regionChecksumMatches(this, *v.extent, v.checksum);
     }
 
+    // JITCache: the validating decode reaches a child's record through its slot (SPEC-ucb.codec.md, E15).
+    bool isWellFormed(Decoder& decoder) const { return isIntact(decoder); }
+
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    // JITCache: the header and tags a JITCacheCore encoder writes (SPEC-ucb.codec.md, E15).
+    bool hasCoreTags(Decoder&, const View&) const;
+
     static uint32_t headerFor(const UnlinkedFunctionExecutable&, const Encoder*);
     static size_t slotBytes(uint32_t header)
     {
@@ -3459,8 +4539,8 @@ private:
         }
         return bytes;
     }
-    static Vector<uint8_t, 64> packedTail(const UnlinkedFunctionExecutable&);
-    static void packScalars(const UnlinkedFunctionExecutable&, VarintWriter&);
+    static Vector<uint8_t, 64> packedTail(const UnlinkedFunctionExecutable&, Encoder::Purpose);
+    static void packScalars(const UnlinkedFunctionExecutable&, Encoder::Purpose, VarintWriter&);
 
     uint8_t* bytes() { return std::bit_cast<uint8_t*>(this); }
     const uint8_t* bytes() const { return std::bit_cast<const uint8_t*>(this); }
@@ -3546,6 +4626,30 @@ struct CachedCodeBlockExtras {
     CachedHashMap<JSInstructionStream::Offset, int> outOfLineJumpTargets;
 };
 
+// JITCache: an instruction stream the validating decode accepts (SPEC-ucb.codec.md, E15). Walked from offset 0, each
+// instruction starts with an opcode below NUMBER_OF_BYTECODE_IDS, after at most one op_wide16 or op_wide32 prefix, and is
+// not itself a prefix; its whole BaseInstruction::size() lies inside the stream; and the walk ends exactly at the end.
+static bool coreCodecIsWholeInstructionStream(std::span<const uint8_t> bytes)
+{
+    static_assert(maxJSOpcodeIDWidth == OpcodeSize::Narrow, "every width writes the opcode in one byte");
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        size_t remaining = bytes.size() - offset;
+        bool isPrefixed = bytes[offset] == op_wide16 || bytes[offset] == op_wide32;
+        size_t opcodeAt = isPrefixed ? 1 : 0;
+        if (opcodeAt >= remaining)
+            return false;
+        uint8_t opcode = bytes[offset + opcodeAt];
+        if (opcode >= NUMBER_OF_BYTECODE_IDS || opcode == op_wide16 || opcode == op_wide32)
+            return false;
+        size_t size = std::bit_cast<const JSInstruction*>(bytes.data() + offset)->size();
+        if (size > remaining)
+            return false;
+        offset += size;
+    }
+    return true;
+}
+
 // A code block is written as one region: its arrays (metadata steps, instructions, constants, identifiers, child slots,
 // extras), then a 16-byte record followed by a varint tail that says where in the region each array is and holds every
 // count/register/flag, then whatever the derived record adds, then the children's executable records.
@@ -3610,6 +4714,7 @@ public:
     struct Tail {
         Layout layout;
         Scalars scalars;
+        uint32_t flags { 0 }; // the packed scalar flags, as written
         const uint8_t* end { nullptr }; // where the tail's varints stop: the region size and checksum, when present, follow
         bool intact { true };
     };
@@ -3647,6 +4752,10 @@ public:
         Tail storage;
         const Layout& layout = tail(decoder, storage).layout;
         std::span<const uint8_t> bytes { at<uint8_t>(layout, layout.instructions), layout.instructions.count };
+        // JITCache: the validating decode hands back a stream made of whole instructions, or an empty one after recording
+        // the failure, so that every later walk over the stream stays inside it (SPEC-ucb.codec.md, E15).
+        if (decoder.validates() && !coreCodecCheck(decoder, coreCodecIsWholeInstructionStream(bytes)))
+            bytes = { };
         if (decoder.canBorrowPayload())
             return new JSInstructionStream(bytes, JSInstructionStream::Borrow);
         Vector<uint8_t, 0, UnsafeVectorOverflow, 16, InstructionStreamBufferMalloc> copy;
@@ -3661,6 +4770,9 @@ public:
         if (!(layout.flags & LayoutHasMetadata))
             return UnlinkedMetadataTable::empty();
         std::span<const uint32_t> steps { at<uint32_t>(layout, layout.steps), layout.steps.count };
+        // JITCache: UnlinkedMetadataTable::expandSteps asserts what the validating decode checks first (SPEC-ucb.codec.md, E15).
+        if (decoder.validates() && !coreCodecCheck(decoder, CachedMetadataSteps::stepsAreWellFormed(steps)))
+            return UnlinkedMetadataTable::empty();
         if (decoder.canBorrowPayload())
             return UnlinkedMetadataTable::createFromPersistentSteps(layout.metadataValueProfiles, steps);
         return CachedMetadataSteps::build(layout.metadataValueProfiles, steps);
@@ -3735,13 +4847,16 @@ public:
             return false;
         if ((layout.flags & LayoutHasExtras) && (layout.extrasAt < 0 || begin + layout.extrasAt + sizeof(CachedCodeBlockExtras) > end))
             return false;
+        if (decoder.validates() && !hasCoreLayout(decoder, tail))
+            return false;
         if (storedChecksum && !decoder.regionChecksumMatches(begin, regionSize, reinterpret_cast<const uint32_t*>(storedChecksum), std::span { external.data(), externalCount }))
             return false;
 
         for (const Array* children : { &layout.functionDecls, &layout.functionExprs }) {
             auto* slots = at<CachedWriteBarrier<CachedFunctionExecutable>>(layout, *children);
             for (unsigned i = 0; i < children->count; ++i) {
-                auto* record = slots[i].ptr().getIfInPayload(decoder);
+                // JITCache: the validating decode also places the child's record at its alignment (SPEC-ucb.codec.md, E15).
+                const CachedFunctionExecutable* record = decoder.validates() ? slots[i].ptr().template placedTarget<CachedFunctionExecutable>(decoder) : slots[i].ptr().getIfInPayload(decoder);
                 if (!record || !record->isIntact(decoder))
                     return false;
             }
@@ -3755,6 +4870,11 @@ protected:
     void decodeOwnMembers(Decoder&, CodeBlockType&) const { }
 
 private:
+    friend struct CoreCodecSelfTestAccess;
+
+    // JITCache: what the validating decode adds to the region's checks (SPEC-ucb.codec.md, E15).
+    bool hasCoreLayout(Decoder&, const Tail&) const;
+
     static void packScalars(const UnlinkedCodeBlock&, VarintWriter&);
     static void packLayout(const Layout&, VarintWriter&);
     const uint8_t* tailBytes() const { return std::bit_cast<const uint8_t*>(this) + sizeof(Record); }
@@ -3803,6 +4923,7 @@ private:
 class CachedProgramCodeBlock : public CachedGlobalCodeBlock<UnlinkedProgramCodeBlock> {
     using Base = CachedGlobalCodeBlock<UnlinkedProgramCodeBlock>;
     friend CachedCodeBlock<UnlinkedProgramCodeBlock>;
+    friend struct CoreCodecSelfTestAccess;
 
 public:
     UnlinkedProgramCodeBlock* decode(Decoder&) const;
@@ -3981,9 +5102,17 @@ ALWAYS_INLINE void CachedCodeBlock<CodeBlockType>::decode(Decoder& decoder, Unli
         AtomStringImpl::reserveCapacityForCurrentThread(expected);
     if (layout.constants.count) {
         codeBlock.m_constantRegisters = FixedVector<WriteBarrier<Unknown>>(layout.constants.count);
-        CachedJSValuePool::decode(decoder, at<uint8_t>(layout, layout.constants), layout.constants.count, codeBlock.m_constantRegisters.mutableSpan().data(), &codeBlock);
+        CachedJSValuePool::decode(decoder, at<uint8_t>(layout, layout.constants), layout.constants.count, codeBlock.m_constantRegisters.mutableSpan().data(), &codeBlock, CachedJSValuePoolOwner::CodeBlock);
     }
     decodeArrayFromTail<SourceCodeRepresentation>(decoder, at<SourceCodeRepresentation>(layout, layout.constantsSourceCodeRepresentation), layout.constantsSourceCodeRepresentation.count, codeBlock.m_constantsSourceCodeRepresentation);
+    if (decoder.validates()) {
+        // Linking switches on each representation (SPEC-ucb.codec.md, E15).
+        for (auto& representation : codeBlock.m_constantsSourceCodeRepresentation) {
+            if (!coreCodecCheck(decoder, representation <= SourceCodeRepresentation::LinkTimeConstant))
+                representation = SourceCodeRepresentation::Other;
+        }
+    }
+    // hasCoreLayout has checked the slot for the validating decode.
     codeBlock.m_expressionInfo = m_expressionInfo->decode(decoder);
     if (auto* e = extras(layout))
         e->outOfLineJumpTargets.decode(decoder, codeBlock.m_outOfLineJumpTargets);
@@ -4079,7 +5208,7 @@ enum CachedFunctionExecutableFlag : uint32_t {
 };
 static_assert(bitWidthOfImplementationVisibility <= 2);
 
-void CachedFunctionExecutable::packScalars(const UnlinkedFunctionExecutable& executable, VarintWriter& writer)
+void CachedFunctionExecutable::packScalars(const UnlinkedFunctionExecutable& executable, Encoder::Purpose purpose, VarintWriter& writer)
 {
     uint32_t flags = static_cast<uint32_t>(executable.m_scriptMode) << ExecutableScriptModeShift
         | static_cast<uint32_t>(executable.m_superBinding) << ExecutableSuperBindingShift
@@ -4096,7 +5225,9 @@ void CachedFunctionExecutable::packScalars(const UnlinkedFunctionExecutable& exe
         | static_cast<uint32_t>(executable.m_isBuiltinFunction) << ExecutableIsBuiltinFunctionShift
         | static_cast<uint32_t>(executable.m_isBuiltinDefaultClassConstructor) << ExecutableIsBuiltinDefaultClassConstructorShift;
     writer.u32(flags);
-    writer.u32(executable.m_features);
+    // JITCache: a core writes its children unparsed, as the parent's generation creates them. The lexically scoped features
+    // come from that generation, which has read the child's directive prologue (SPEC-ucb.codec.md, E2).
+    writer.u32(purpose == Encoder::Purpose::JITCacheCore ? 0 : executable.m_features);
     writer.u8(static_cast<uint8_t>(executable.m_lexicallyScopedFeatures));
     // Source positions cluster around the function's start, so all but the first are deltas.
     unsigned start = executable.m_startOffset;
@@ -4116,10 +5247,10 @@ void CachedFunctionExecutable::packScalars(const UnlinkedFunctionExecutable& exe
     }
 }
 
-Vector<uint8_t, 64> CachedFunctionExecutable::packedTail(const UnlinkedFunctionExecutable& executable)
+Vector<uint8_t, 64> CachedFunctionExecutable::packedTail(const UnlinkedFunctionExecutable& executable, Encoder::Purpose purpose)
 {
     VarintWriter writer;
-    packScalars(executable, writer);
+    packScalars(executable, purpose, writer);
     Vector<uint8_t, 64> bytes;
     bytes.grow(writer.size());
     writer.copyTo(bytes.mutableSpan().data());
@@ -4129,8 +5260,6 @@ Vector<uint8_t, 64> CachedFunctionExecutable::packedTail(const UnlinkedFunctionE
 uint32_t CachedFunctionExecutable::headerFor(const UnlinkedFunctionExecutable& executable, const Encoder* encoder)
 {
     uint32_t header = static_cast<uint32_t>(executable.m_sourceParseMode) << ParseModeShift;
-    if (executable.m_hasCapturedVariables)
-        header |= HasCapturedVariables;
     if (executable.m_firstLineOffset || executable.m_lineCount)
         header |= HasLines;
     if (!executable.ecmaName().isNull())
@@ -4139,6 +5268,13 @@ uint32_t CachedFunctionExecutable::headerFor(const UnlinkedFunctionExecutable& e
         header |= HasTDZ;
     if (executable.m_rareData)
         header |= HasRareData;
+    // JITCache: a core writes no child body and none of the fields the child's own parse sets, and never reads the UFE's
+    // slots, which share storage with a decoder while a natively decoded parent's child is lazily cached (SPEC-ucb.codec.md,
+    // E1 and E2; SPEC-ucb.md F1).
+    if (encoder->isCore())
+        return header;
+    if (executable.m_hasCapturedVariables)
+        header |= HasCapturedVariables;
     if (executable.m_unlinkedCodeBlockForCall)
         header |= HasCallSlot;
     if (executable.m_unlinkedCodeBlockForConstruct)
@@ -4148,6 +5284,28 @@ uint32_t CachedFunctionExecutable::headerFor(const UnlinkedFunctionExecutable& e
     if (encoder->updatable())
         header |= Updatable | HasChecksum | HasCallSlot | HasConstructSlot;
     return header;
+}
+
+bool CachedFunctionExecutable::hasCoreTags(Decoder& decoder, const View& v) const
+{
+    // No code block slot, checksum or updatable field (E1 and section 4), unparsed parse fields (E2), and every packed field,
+    // the parse mode and the lexically scoped features within the values their encoder writes.
+    static constexpr uint32_t coreHeaderBits = HasName | HasTDZ | HasRareData | HasLines | (0xffu << ParseModeShift);
+    static constexpr uint32_t knownFlags = (1u << (ExecutableIsBuiltinDefaultClassConstructorShift + 1)) - 1;
+    if (!coreCodecHolds(decoder, this, sizeof(CachedFunctionExecutable), alignof(CachedFunctionExecutable)))
+        return false;
+    if ((v.header & ~coreHeaderBits) || (v.flags & ~knownFlags))
+        return false;
+    auto field = [&](unsigned shift) {
+        return (v.flags >> shift) & 3;
+    };
+    if (field(ExecutableImplementationVisibilityShift) > static_cast<unsigned>(ImplementationVisibility::PrivateRecursive)
+        || field(ExecutableDerivedContextTypeShift) > static_cast<unsigned>(DerivedContextType::DerivedMethodContext)
+        || field(ExecutableEvalContextTypeShift) > static_cast<unsigned>(EvalContextType::InstanceFieldEvalContext))
+        return false;
+    return !v.scalars.features
+        && v.scalars.lexicallyScopedFeatures <= AllLexicallyScopedFeatures
+        && static_cast<unsigned>(v.scalars.sourceParseMode) <= static_cast<unsigned>(SourceParseMode::ClassStaticBlockMode);
 }
 
 auto CachedFunctionExecutable::view(const uint8_t* limit) const -> View
@@ -4186,6 +5344,7 @@ auto CachedFunctionExecutable::view(const uint8_t* limit) const -> View
     VarintReader reader(p, limit);
     Scalars& s = v.scalars;
     uint32_t flags = reader.u32();
+    v.flags = flags;
     auto bits = [&](unsigned shift, unsigned width = 1) { return (flags >> shift) & ((1u << width) - 1); };
     s.scriptMode = bits(ExecutableScriptModeShift);
     s.superBinding = bits(ExecutableSuperBindingShift);
@@ -4267,7 +5426,8 @@ ALWAYS_INLINE void CachedFunctionExecutable::encode(Encoder& encoder, const Unli
     if (header & HasRareData)
         place(rareData);
     {
-        Vector<uint8_t, 64> tail = packedTail(executable);
+        Vector<uint8_t, 64> tail = packedTail(executable, encoder.purpose());
+        EncoderScratchCharge tailCharge(encoder, encoderHeapBytes(tail));
         memcpy(p, tail.span().data(), tail.size());
         ASSERT(p + tail.size() == bytes() + sizeof(uint32_t) + tailSize(encoder, executable));
     }
@@ -4281,7 +5441,11 @@ ALWAYS_INLINE void CachedFunctionExecutable::encode(Encoder& encoder, const Unli
     if (name)
         name->encode(encoder, executable.ecmaName());
     if (tdz)
-        tdz->encode(encoder, executable.m_parentScopeTDZVariables);
+        CachedTDZEnvironmentLink::encodeChain(encoder, *tdz, executable.m_parentScopeTDZVariables.get());
+
+    // JITCache: a core neither reads the UFE's slots nor defers a body (SPEC-ucb.codec.md, E1).
+    if (encoder.isCore())
+        return;
 
     if (!executable.m_unlinkedCodeBlockForCall || !executable.m_unlinkedCodeBlockForConstruct)
         encoder.addLeafExecutable(&executable, encoder.offsetOf(this));
@@ -4309,7 +5473,8 @@ ALWAYS_INLINE UnlinkedFunctionExecutable* CachedFunctionExecutable::decode(Decod
 
 ALWAYS_INLINE UnlinkedFunctionExecutable::UnlinkedFunctionExecutable(Decoder& decoder, const CachedFunctionExecutable& cachedExecutable)
     : Base(decoder.vm(), decoder.vm().unlinkedFunctionExecutableStructure.get())
-    , m_isGeneratedFromCache(true)
+    // JITCache: a child decoded from a core keeps weak UCB edges where a generated one would (SPEC-ucb.codec.md, E6).
+    , m_isGeneratedFromCache(decoder.purpose() != Decoder::Purpose::JITCacheCore)
     , m_hasCapturedVariables(false)
     , m_isCached(false)
     , m_singletonHasBeenInvalidated(false)
@@ -4479,6 +5644,7 @@ auto CachedCodeBlock<CodeBlockType>::readTail(const uint8_t* limit) const -> Tai
 
     Scalars& s = tail.scalars;
     uint32_t flags = reader.u32();
+    tail.flags = flags;
     auto bits = [&](unsigned shift, unsigned width = 1) -> unsigned { return (flags >> shift) & ((1u << width) - 1); };
     s.isConstructor = bits(CodeBlockIsConstructorShift);
     s.superBinding = bits(CodeBlockSuperBindingShift);
@@ -4510,6 +5676,43 @@ auto CachedCodeBlock<CodeBlockType>::readTail(const uint8_t* limit) const -> Tai
 }
 
 template<typename CodeBlockType>
+bool CachedCodeBlock<CodeBlockType>::hasCoreLayout(Decoder& decoder, const Tail& tail) const
+{
+    // Every array and the extras aligned for their elements, which regionIsIntact has placed.
+    const Layout& layout = tail.layout;
+    uintptr_t begin = std::bit_cast<uintptr_t>(regionBegin(layout));
+    auto isAligned = [&](const Array& array, size_t alignment) {
+        return !array.count || !((begin + static_cast<intptr_t>(array.at)) % alignment);
+    };
+    if (!coreCodecHolds(decoder, this, sizeof(Record), alignof(Record))
+        || !isAligned(layout.steps, alignof(uint32_t))
+        || !isAligned(layout.constantsSourceCodeRepresentation, alignof(SourceCodeRepresentation))
+        || !isAligned(layout.constants, alignof(CachedJSValue))
+        || !isAligned(layout.identifiers, alignof(CachedIdentifier))
+        || !isAligned(layout.functionDecls, alignof(CachedWriteBarrier<CachedFunctionExecutable>))
+        || !isAligned(layout.functionExprs, alignof(CachedWriteBarrier<CachedFunctionExecutable>)))
+        return false;
+    if ((layout.flags & LayoutHasExtras) && ((begin + static_cast<intptr_t>(layout.extrasAt)) % alignof(CachedCodeBlockExtras)))
+        return false;
+
+    // The layout flags and packed scalars a JITCacheCore encoder writes: no checksum (section 4), and every packed field
+    // within its enum's values. The code type and the constructor kind take every value their two bits hold.
+    static constexpr uint32_t knownFlags = (1u << (CodeBlockIsBuiltinDefaultClassConstructorShift + 1)) - 1;
+    static constexpr uint8_t knownCodeGenerationModes = static_cast<uint8_t>(CodeGenerationMode::Debugger) | static_cast<uint8_t>(CodeGenerationMode::TypeProfiler) | static_cast<uint8_t>(CodeGenerationMode::ControlFlowProfiler);
+    const Scalars& scalars = tail.scalars;
+    if ((layout.flags & ~(LayoutHasMetadata | LayoutHasExtras)) || (tail.flags & ~knownFlags))
+        return false;
+    if (scalars.derivedContextType > static_cast<unsigned>(DerivedContextType::DerivedMethodContext)
+        || scalars.evalContextType > static_cast<unsigned>(EvalContextType::InstanceFieldEvalContext)
+        || static_cast<unsigned>(scalars.parseMode) > static_cast<unsigned>(SourceParseMode::ClassStaticBlockMode)
+        || (scalars.codeGenerationMode.toRaw() & ~knownCodeGenerationModes))
+        return false;
+
+    // The expression info's slot is filled: CachedPtr::get asserts it.
+    return !!m_expressionInfo.placedTarget<CachedExpressionInfo>(decoder);
+}
+
+template<typename CodeBlockType>
 auto CachedCodeBlock<CodeBlockType>::create(Encoder& encoder, const CodeBlockType& codeBlock) -> Record*
 {
     ptrdiff_t regionStart = encoder.currentOffset();
@@ -4529,11 +5732,13 @@ auto CachedCodeBlock<CodeBlockType>::create(Encoder& encoder, const CodeBlockTyp
             layout.flags |= LayoutHasMetadata;
             layout.metadataValueProfiles = metadata.m_numValueProfiles;
             auto steps = CachedMetadataSteps::compute(metadata);
+            EncoderScratchCharge stepsCharge(encoder, encoderHeapBytes(steps));
             place(layout.steps, steps.size(), [&] { return encodeArrayForTail<uint32_t>(encoder, steps); });
         }
+        // The stream's span, valid for an owned and for a borrowed stream: a UCB that Bun decoded from a persistent payload
+        // encodes like any other, its bytes copied (SPEC-ucb.codec.md, E3).
         const JSInstructionStream& instructions = *codeBlock.m_instructions;
-        RELEASE_ASSERT(!instructions.isBorrowed()); // a borrowed stream's bytes live in the payload being read
-        place(layout.instructions, instructions.m_instructions.size(), [&] { return encodeArrayForTail<uint8_t>(encoder, instructions.m_instructions); });
+        place(layout.instructions, instructions.m_bytes.size(), [&] { return encodeArrayForTail<uint8_t>(encoder, instructions.m_bytes); });
         place(layout.constantsSourceCodeRepresentation, codeBlock.m_constantsSourceCodeRepresentation.size(), [&] { return encodeArrayForTail<SourceCodeRepresentation>(encoder, codeBlock.m_constantsSourceCodeRepresentation); });
     }
     place(layout.constants, codeBlock.m_constantRegisters.size(), [&] { return CachedJSValuePool::encode(encoder, codeBlock.m_constantRegisters.span()); });
@@ -4570,10 +5775,12 @@ auto CachedCodeBlock<CodeBlockType>::create(Encoder& encoder, const CodeBlockTyp
     static_assert(PayloadType<Record>);
     Record* record = new (result.buffer()) Record();
     writer.copyTo(record->tailBytes());
+    EncoderScratchCharge writerCharge(encoder, writer.heapBytes());
     ptrdiff_t trailerOffset = result.offset() + sizeof(Record) + writer.size();
     encoder.deferCold([record, &encoder, expressionInfo = codeBlock.m_expressionInfo.get()] {
         // Self-checksummed and position-independent, so an identical one written earlier is reused.
         auto bytes = CachedExpressionInfo::pack(*expressionInfo, encoder.checksums());
+        EncoderScratchCharge bytesCharge(encoder, encoderHeapBytes(bytes));
         unsigned hash = StringHasher::computeHashAndMaskTop8Bits(bytes.span()) ^ static_cast<unsigned>(bytes.size());
         ptrdiff_t at;
         if (auto existing = encoder.existingIdenticalArray(bytes.span(), hash, alignof(CachedExpressionInfo)))
@@ -4849,7 +6056,12 @@ UnlinkedFunctionExecutable* decodeBuiltinFunction(VM& vm, Ref<CachedBytecode> ca
     auto* entry = std::bit_cast<const BuiltinFunctionCacheEntry*>(cachedBytecode->span().data());
     Ref decoder = Decoder::create(vm, WTF::move(cachedBytecode), &provider);
     DeferGC deferGC(vm);
-    return entry->decode(decoder.get(), sourceLength, embedderStamp);
+    UnlinkedFunctionExecutable* executable = entry->decode(decoder.get(), sourceLength, embedderStamp);
+    // JITCache: the decoded builtin is a root, whose identity is recorded before link reads it (SPEC-ucb.codec.md, E9;
+    // SPEC-ucb.md section 7.2.4).
+    if (executable)
+        JITCache::didDecodeBuiltinExecutable(vm, *executable, provider);
+    return executable;
 }
 
 RefPtr<CachedBytecode> encodeCodeBlock(VM& vm, const SourceCodeKey& key, const UnlinkedCodeBlock* codeBlock, FileSystem::FileHandle& fileHandle, BytecodeCacheError& error, EncoderStringTable* externalStrings, BytecodeCacheChecksums checksums, BytecodeCacheUpdatable updatable)
@@ -4968,8 +6180,10 @@ static_assert(sizeof(CachedImmutableButterfly) == 12);
 static_assert(sizeof(CachedJSTextPosition) == 12);
 static_assert(sizeof(CachedJSValue) == 4);
 static_assert(sizeof(CachedJSValuePoolRef) == 4);
-static_assert(sizeof(CachedModuleCodeBlock) == 44);
-static_assert(sizeof(CachedProgramCodeBlock) == 56);
+// JITCache: a declaration map also holds its hashed layout (SPEC-ucb.codec.md, E4).
+static_assert(sizeof(CachedInlineMap<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>, CachedEntryBits<VariableEnvironmentEntry>, VariableEnvironment::inlineMapCapacity, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>, VariableEnvironmentEntryHashTraits>) == 20);
+static_assert(sizeof(CachedModuleCodeBlock) == 56);
+static_assert(sizeof(CachedProgramCodeBlock) == 80);
 static_assert(sizeof(CachedRegExp) == 16);
 static_assert(sizeof(CachedScopedArgumentsTable) == 8);
 static_assert(sizeof(CachedSimpleJumpTable) == 20);
@@ -4988,7 +6202,7 @@ static_assert(sizeof(CachedTemplateObjectDescriptor) == 20);
 static_assert(sizeof(CachedTextPosition) == 8);
 static_assert(sizeof(CachedUniquedStringImpl) == 12);
 static_assert(sizeof(CachedUnlinkedSourceCode) == 12);
-static_assert(sizeof(CachedVariableEnvironment) == 16);
+static_assert(sizeof(CachedVariableEnvironment) == 28);
 static_assert(sizeof(CachedVariableEnvironmentRareData) == 8);
 #if ENABLE(WEBASSEMBLY)
 static_assert(sizeof(CachedWebAssemblySourceProvider) == 40);
@@ -4999,6 +6213,1072 @@ void decodeFunctionCodeBlock(Decoder& decoder, int32_t cachedFunctionCodeBlockOf
     auto* cachedCodeBlock = static_cast<const CachedWriteBarrier<CachedFunctionCodeBlock, UnlinkedFunctionCodeBlock>*>(decoder.ptrForOffsetFromBase(cachedFunctionCodeBlockOffset));
     cachedCodeBlock->decode(decoder, codeBlock, owner);
 }
+
+// JITCache: the core codec's entry points (SPEC-ucb.codec.md, section 2). A core and a descriptor start with a 16-byte
+// header: a magic at offset 0, a core's kind at offset 4 (a descriptor's is 0), rootOffset at offset 8, the offset of the
+// root record from the payload's start, and zero bytes elsewhere.
+static constexpr uint32_t coreCodecPayloadMagic = 0x43424355;
+static constexpr uint32_t coreCodecDescriptorMagic = 0x44424355;
+static constexpr size_t coreCodecHeaderSize = 16;
+
+static UnlinkedCodeBlockCoreKind coreCodecKindOf(const UnlinkedCodeBlock& codeBlock)
+{
+    const ClassInfo* classInfo = codeBlock.classInfo();
+    if (classInfo == UnlinkedProgramCodeBlock::info())
+        return UnlinkedCodeBlockCoreKind::Program;
+    if (classInfo == UnlinkedModuleProgramCodeBlock::info())
+        return UnlinkedCodeBlockCoreKind::Module;
+    if (classInfo == UnlinkedEvalCodeBlock::info())
+        return UnlinkedCodeBlockCoreKind::Eval;
+    RELEASE_ASSERT(classInfo == UnlinkedFunctionCodeBlock::info());
+    return UnlinkedCodeBlockCoreKind::Function;
+}
+
+// The start chain of E14: for a function core, the TDZ chain of the UFE whose slot holds the UCB; none otherwise.
+static RefPtr<TDZEnvironmentLink> coreCodecStartChain(UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder)
+{
+    ASSERT(!holder || kind == UnlinkedCodeBlockCoreKind::Function);
+    if (kind != UnlinkedCodeBlockCoreKind::Function || !holder)
+        return nullptr;
+    return holder->parentScopeTDZVariables();
+}
+
+static void coreCodecWriteHeader(Encoder::Allocation header, uint32_t magic, uint8_t kind, ptrdiff_t rootOffset)
+{
+    static_assert(std::endian::native == std::endian::little, "a core's integers are little-endian");
+    ASSERT(!header.offset());
+    uint32_t root = safeCast<uint32_t>(rootOffset);
+    memcpy(header.buffer(), &magic, sizeof(magic));
+    header.buffer()[4] = kind;
+    memcpy(header.buffer() + 8, &root, sizeof(root));
+}
+
+// Section 3: the header, the root record of the UCB's class, its rootOffset, then the deferred work.
+static void coreCodecEncodeCore(Encoder& encoder, const UnlinkedCodeBlock& codeBlock, UnlinkedCodeBlockCoreKind kind)
+{
+    // The pages are zeroed, so the header's other bytes are.
+    auto header = encoder.malloc(coreCodecHeaderSize, encoderMaxAlignment);
+    ptrdiff_t rootOffset = 0;
+    switch (kind) {
+    case UnlinkedCodeBlockCoreKind::Program:
+        rootOffset = encoder.offsetOf(CachedProgramCodeBlock::create(encoder, *uncheckedDowncast<UnlinkedProgramCodeBlock>(&codeBlock)));
+        break;
+    case UnlinkedCodeBlockCoreKind::Module:
+        rootOffset = encoder.offsetOf(CachedModuleCodeBlock::create(encoder, *uncheckedDowncast<UnlinkedModuleProgramCodeBlock>(&codeBlock)));
+        break;
+    case UnlinkedCodeBlockCoreKind::Eval:
+        rootOffset = encoder.offsetOf(CachedEvalCodeBlock::create(encoder, *uncheckedDowncast<UnlinkedEvalCodeBlock>(&codeBlock)));
+        break;
+    case UnlinkedCodeBlockCoreKind::Function:
+        rootOffset = encoder.offsetOf(CachedFunctionCodeBlock::create(encoder, *uncheckedDowncast<UnlinkedFunctionCodeBlock>(&codeBlock)));
+        break;
+    }
+    coreCodecWriteHeader(header, coreCodecPayloadMagic, static_cast<uint8_t>(kind), rootOffset);
+    encoder.encodeDeferred();
+}
+
+// Section 2: the UFE's record as a core writes a child, alone, with its own chain as the start chain, so that the chain is
+// one start record.
+static void coreCodecEncodeDescriptor(Encoder& encoder, const UnlinkedFunctionExecutable& executable)
+{
+    auto header = encoder.malloc(coreCodecHeaderSize, encoderMaxAlignment);
+    CachedFunctionExecutable* record = encoder.mallocFor<CachedFunctionExecutable>(executable);
+    record->encode(encoder, executable);
+    coreCodecWriteHeader(header, coreCodecDescriptorMagic, 0, encoder.offsetOf(record));
+    encoder.encodeDeferred();
+}
+
+// One JITCacheCore encode and its charges (E8). The encoder is freed before every charge it made is released; a payload
+// it releases stays charged for its caller.
+class CoreCodecEncode {
+    WTF_MAKE_NONCOPYABLE(CoreCodecEncode);
+    WTF_FORBID_HEAP_ALLOCATION;
+
+public:
+    CoreCodecEncode(VM& vm, CoreEncodingBudget* budget, RefPtr<TDZEnvironmentLink>&& startChain)
+        : m_charges { budget }
+        , m_startChain(WTF::move(startChain))
+        , m_encoder(vm, m_fileHandle, Encoder::NumberStrings::Yes, nullptr, BytecodeCacheChecksums::No, BytecodeCacheUpdatable::No, Encoder::Purpose::JITCacheCore, budget, m_startChain.get())
+    {
+    }
+
+    // The members go in reverse order, so the encoder is freed before m_charges releases what it charged.
+    ~CoreCodecEncode() { m_charges.bytes = m_encoder.chargedBytes(); }
+
+    Encoder& encoder() { return m_encoder; }
+    CoreEncodeFailure failure() const { return (m_encoder.budgetRefused() || m_payloadRefused) ? CoreEncodeFailure::BudgetRefused : CoreEncodeFailure::None; }
+
+    // The payload, its size charged before it is allocated; null when anything was refused.
+    RefPtr<CachedBytecode> release()
+    {
+        if (m_encoder.budgetRefused())
+            return nullptr;
+        if (m_charges.budget && !m_charges.budget->charge(m_encoder.releasedSize())) {
+            m_payloadRefused = true;
+            return nullptr;
+        }
+        BytecodeCacheError error;
+        RefPtr<CachedBytecode> payload = m_encoder.release(error);
+        RELEASE_ASSERT(payload);
+        return payload;
+    }
+
+    // E13: the payload's pages in order, unless anything was refused, in which case the sink sees nothing.
+    void forEachPage(const ScopedLambda<void(std::span<const uint8_t>)>& sink)
+    {
+        if (!m_encoder.budgetRefused())
+            m_encoder.forEachPage(sink);
+    }
+
+private:
+    struct Charges {
+        WTF_MAKE_NONCOPYABLE(Charges);
+
+    public:
+        explicit Charges(CoreEncodingBudget* encodeBudget)
+            : budget(encodeBudget)
+        {
+        }
+        ~Charges()
+        {
+            if (budget && bytes)
+                budget->release(bytes);
+        }
+
+        CoreEncodingBudget* const budget;
+        size_t bytes { 0 };
+    };
+
+    Charges m_charges;
+    const RefPtr<TDZEnvironmentLink> m_startChain;
+    FileSystem::FileHandle m_fileHandle;
+    Encoder m_encoder;
+    bool m_payloadRefused { false };
+};
+
+RefPtr<CachedBytecode> encodeUnlinkedCodeBlockCore(VM& vm, const UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder, CoreEncodingBudget* budget, CoreEncodeFailure& failure)
+{
+    UnlinkedCodeBlockCoreKind kind = coreCodecKindOf(codeBlock);
+    CoreCodecEncode encode(vm, budget, coreCodecStartChain(kind, holder));
+    coreCodecEncodeCore(encode.encoder(), codeBlock, kind);
+    RefPtr<CachedBytecode> payload = encode.release();
+    failure = encode.failure();
+    return payload;
+}
+
+RefPtr<CachedBytecode> encodeUnlinkedFunctionExecutableDescriptor(VM& vm, const UnlinkedFunctionExecutable& executable, CoreEncodingBudget* budget, CoreEncodeFailure& failure)
+{
+    CoreCodecEncode encode(vm, budget, executable.parentScopeTDZVariables());
+    coreCodecEncodeDescriptor(encode.encoder(), executable);
+    RefPtr<CachedBytecode> payload = encode.release();
+    failure = encode.failure();
+    return payload;
+}
+
+CoreEncodeFailure forEachUnlinkedCodeBlockCoreChunk(VM& vm, const UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder, CoreEncodingBudget* budget, const ScopedLambda<void(std::span<const uint8_t>)>& sink)
+{
+    UnlinkedCodeBlockCoreKind kind = coreCodecKindOf(codeBlock);
+    CoreCodecEncode encode(vm, budget, coreCodecStartChain(kind, holder));
+    coreCodecEncodeCore(encode.encoder(), codeBlock, kind);
+    encode.forEachPage(sink);
+    return encode.failure();
+}
+
+CoreEncodeFailure forEachUnlinkedFunctionExecutableDescriptorChunk(VM& vm, const UnlinkedFunctionExecutable& executable, CoreEncodingBudget* budget, const ScopedLambda<void(std::span<const uint8_t>)>& sink)
+{
+    CoreCodecEncode encode(vm, budget, executable.parentScopeTDZVariables());
+    coreCodecEncodeDescriptor(encode.encoder(), executable);
+    encode.forEachPage(sink);
+    return encode.failure();
+}
+
+// Section 3: the root record of the requested kind, placed and aligned, decoded; null for a damaged region.
+template<typename Record>
+static UnlinkedCodeBlock* coreCodecDecodeRoot(Decoder& decoder, std::span<const uint8_t> payload, uint32_t rootOffset)
+{
+    if (rootOffset % alignof(Record) || rootOffset > payload.size() || payload.size() - rootOffset < sizeof(Record)) {
+        decoder.noteFailure(CoreDecodeFailure::Malformed);
+        return nullptr;
+    }
+    return std::bit_cast<const Record*>(payload.data() + rootOffset)->decode(decoder);
+}
+
+UnlinkedCodeBlock* decodeUnlinkedCodeBlockCore(VM& vm, Ref<CachedBytecode> cachedBytecode, SourceProvider& provider, UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder, bool validate, CoreDecodeFailure& failure)
+{
+    failure = CoreDecodeFailure::None;
+    std::span<const uint8_t> payload = cachedBytecode->span();
+    if (payload.size() < coreCodecHeaderSize || std::bit_cast<uintptr_t>(payload.data()) % encoderMaxAlignment) {
+        failure = CoreDecodeFailure::Malformed;
+        return nullptr;
+    }
+    uint32_t magic;
+    uint32_t rootOffset;
+    uint32_t lastWord;
+    memcpy(&magic, payload.data(), sizeof(magic));
+    memcpy(&rootOffset, payload.data() + 8, sizeof(rootOffset));
+    memcpy(&lastWord, payload.data() + 12, sizeof(lastWord));
+    if (magic != coreCodecPayloadMagic || payload[5] || payload[6] || payload[7] || lastWord) {
+        failure = CoreDecodeFailure::Malformed;
+        return nullptr;
+    }
+    if (payload[4] != static_cast<uint8_t>(kind)) {
+        failure = CoreDecodeFailure::KindMismatch;
+        return nullptr;
+    }
+
+    // The payload stays alive in the decoder; no UFE keeps the decoder, since a core writes no child body (E1, E7).
+    Ref decoder = Decoder::create(vm, WTF::move(cachedBytecode), &provider, Decoder::Purpose::JITCacheCore, coreCodecStartChain(kind, holder), validate);
+    UnlinkedCodeBlock* codeBlock = nullptr;
+    {
+        DeferGC deferGC(vm);
+        switch (kind) {
+        case UnlinkedCodeBlockCoreKind::Program:
+            codeBlock = coreCodecDecodeRoot<CachedProgramCodeBlock>(decoder.get(), payload, rootOffset);
+            break;
+        case UnlinkedCodeBlockCoreKind::Module:
+            codeBlock = coreCodecDecodeRoot<CachedModuleCodeBlock>(decoder.get(), payload, rootOffset);
+            break;
+        case UnlinkedCodeBlockCoreKind::Eval:
+            codeBlock = coreCodecDecodeRoot<CachedEvalCodeBlock>(decoder.get(), payload, rootOffset);
+            break;
+        case UnlinkedCodeBlockCoreKind::Function:
+            codeBlock = coreCodecDecodeRoot<CachedFunctionCodeBlock>(decoder.get(), payload, rootOffset);
+            break;
+        }
+    }
+    // A region CachedCodeBlock::regionIsIntact refuses decodes as null. Any failure discards the UCB, which nothing
+    // references; the collector frees it.
+    if (!codeBlock && decoder->failure() == CoreDecodeFailure::None)
+        decoder->noteFailure(CoreDecodeFailure::Malformed);
+    failure = decoder->failure();
+    if (failure != CoreDecodeFailure::None)
+        return nullptr;
+    return codeBlock;
+}
+
+std::optional<std::array<uint8_t, 32>> tdzChainDigest(const TDZEnvironmentLink* chain, CoreEncodingBudget* budget, unsigned& environmentsDigested)
+{
+    return CachedTDZEnvironmentLink::chainDigest(chain, budget, environmentsDigested);
+}
+
+#if ENABLE(JITCACHE_TWINS)
+
+// JITCache: the cases of U7 that alter a core's records (SPEC-ucb.codec.md, section 7). Each encodes a core, changes one
+// record of a copy through the record's type, and decodes the copy, which must fail as the rule names and not crash.
+struct CoreCodecSelfTestAccess {
+    // A program whose core holds each record a case alters: more than nine global vars, so the var declarations take
+    // hashed storage, and an unreferenced one, whose name only that map holds; two lexical declarations in inline storage;
+    // a block whose captured binding makes a SymbolTable constant; immutable butterflies of strings, of int32s and of
+    // doubles; a butterfly of the NaN the parser folds from 1e400 * 0 and of its negation, whose Double elements keep the
+    // CPU's bits, so that the unaltered core shows that the validating decode accepts the NaNs of both signs generation
+    // writes; a BigInt, a RegExp, a double, long string constants and a template object descriptor; and two arrow
+    // functions, the one that captures the binding and a template literal's tag.
+    static constexpr ASCIILiteral programText =
+        "var v0 = 0, v1 = 1, v2 = 2, v3 = 3, v4 = 4, v5 = 5, v6 = 6, v7 = 7, v8 = 8, v9 = 9, v10 = 10, v11 = 11;\n"
+        "var unreferencedVariable;\n"
+        "let lexicalFirst = \"first lexical\", lexicalSecond = \"second lexical\";\n"
+        "{\n"
+        "    let capturedBinding = \"captured binding\";\n"
+        "    globalThis.capturedReader = () => capturedBinding;\n"
+        "}\n"
+        "var words = [\"alphabet\", \"betamax\", \"gammaray\"];\n"
+        "var numbers = [1, 2, 3];\n"
+        "var fractions = [1.5, 2.5];\n"
+        "var foldedNaNs = [1e400 * 0, -(1e400 * 0)];\n"
+        "var big = 123456789012345678901234567890n;\n"
+        "var pattern = /ab+c/g;\n"
+        "var text = \"a long string constant\";\n"
+        "var tagged = ((strings) => strings)`tagged ${v1} literal`;\n"
+        "if (text === \"another long string\")\n"
+        "    v0 = 0.25;\n"_s;
+
+    // A method created while its class's binding is under TDZ, so that its UFE holds a TDZ chain, and an arrow created
+    // while the method's own bindings are under TDZ, whose chain is a link naming them over the method's chain: the
+    // method's core holds that link, its environment and a start record (E14).
+    static constexpr ASCIILiteral functionText =
+        "class CoreCodecFixture {\n"
+        "    method()\n"
+        "    {\n"
+        "        const reader = () => CoreCodecFixture === pending;\n"
+        "        let pending = reader;\n"
+        "        return reader;\n"
+        "    }\n"
+        "}\n"_s;
+
+    template<typename T, typename Source>
+    static T* target(const VariableLengthObject<Source>& slot)
+    {
+        if (slot.isEmpty())
+            return nullptr;
+        return const_cast<T*>(slot.template buffer<T>());
+    }
+
+    template<typename T, size_t inlineCapacity, typename OverflowHandler, typename Malloc>
+    static std::span<T> elements(const CachedVector<T, inlineCapacity, OverflowHandler, Malloc>& vector)
+    {
+        if (!vector.m_size)
+            return { };
+        return { target<T>(vector), vector.m_size };
+    }
+
+    template<typename T, typename Source>
+    static CachedUniquedStringImpl* stringRecord(const CachedPtr<T, Source>& slot)
+    {
+        if (slot.isEmpty() || slot.hasInlineString() || slot.hasExternalString())
+            return nullptr;
+        return target<CachedUniquedStringImpl>(slot);
+    }
+
+    static bool hasCharacters(const CachedUniquedStringImpl& record, ASCIILiteral characters)
+    {
+        return record.m_is8Bit && !record.m_isSymbol && equalSpans(record.span8(), characters.span8());
+    }
+
+    template<typename Pairs>
+    static CachedUniquedStringImpl* keyRecord(Pairs pairs, ASCIILiteral name)
+    {
+        for (auto& pair : pairs) {
+            auto* record = stringRecord(pair.m_first.ptr());
+            if (record && hasCharacters(*record, name))
+                return record;
+        }
+        return nullptr;
+    }
+
+    template<typename Record>
+    static Record& root(std::span<uint8_t> payload)
+    {
+        uint32_t rootOffset;
+        memcpy(&rootOffset, payload.data() + 8, sizeof(rootOffset));
+        return *std::bit_cast<Record*>(payload.data() + rootOffset);
+    }
+
+    // One of the arrays a code block's layout locates.
+    template<typename Element, typename Record, typename ArrayOf>
+    static std::span<Element> array(Record& record, const ArrayOf& arrayOf)
+    {
+        auto tail = record.readTail();
+        const auto& located = arrayOf(tail.layout);
+        if (!located.count)
+            return { };
+        return { const_cast<Element*>(record.template at<Element>(tail.layout, located)), located.count };
+    }
+
+    template<typename Record>
+    static std::span<CachedIdentifier> identifiers(Record& record)
+    {
+        return array<CachedIdentifier>(record, [](const auto& layout) -> const auto& { return layout.identifiers; });
+    }
+
+    template<typename Record>
+    static std::span<uint8_t> instructions(Record& record)
+    {
+        return array<uint8_t>(record, [](const auto& layout) -> const auto& { return layout.instructions; });
+    }
+
+    // The first identifier whose string is a record rather than an inline string.
+    template<typename Record>
+    static CachedUniquedStringImpl* identifierRecord(Record& record, ASCIILiteral name = { })
+    {
+        for (auto& identifier : identifiers(record)) {
+            auto* string = stringRecord(identifier.m_string.m_impl.ptr());
+            if (string && (name.isNull() || hasCharacters(*string, name)))
+                return string;
+        }
+        return nullptr;
+    }
+
+    // The record of the first constant of `kind` that `accept` takes; a string constant held in its slot has none.
+    template<typename T, typename Record, typename Accept>
+    static T* constantRecord(Record& record, CachedJSValue::Kind kind, const Accept& accept)
+    {
+        auto tail = record.readTail();
+        unsigned count = tail.layout.constants.count;
+        if (!count)
+            return nullptr;
+        auto* kinds = const_cast<uint8_t*>(record.template at<uint8_t>(tail.layout, tail.layout.constants));
+        auto* slots = const_cast<CachedJSValue*>(CachedJSValuePool::slots(kinds, count));
+        for (unsigned i = 0; i < count; ++i) {
+            if (kinds[i] != static_cast<uint8_t>(kind))
+                continue;
+            if (kind == CachedJSValue::Kind::String && (slots[i].hasInlineString() || slots[i].hasExternalString()))
+                continue;
+            if (T* found = target<T>(slots[i]); found && accept(*found))
+                return found;
+        }
+        return nullptr;
+    }
+
+    template<typename T, typename Record>
+    static T* constantRecord(Record& record, CachedJSValue::Kind kind)
+    {
+        return constantRecord<T>(record, kind, [](const T&) {
+            return true;
+        });
+    }
+
+    template<typename Record>
+    static std::span<uint8_t> constantKinds(Record& record)
+    {
+        return array<uint8_t>(record, [](const auto& layout) -> const auto& { return layout.constants; });
+    }
+
+    // The element kinds of the first immutable butterfly constant whose indexing type is `indexingType`, which holds JSValues.
+    template<typename Record>
+    static std::span<uint8_t> butterflyElementKinds(Record& record, IndexingType indexingType)
+    {
+        ASSERT(!hasDouble(indexingType));
+        auto* butterfly = constantRecord<CachedImmutableButterfly>(record, CachedJSValue::Kind::ImmutableButterfly, [&](const CachedImmutableButterfly& candidate) {
+            return candidate.m_indexingType == indexingType;
+        });
+        if (!butterfly || !butterfly->m_length)
+            return { };
+        return { target<uint8_t>(butterfly->m_cachedValues), butterfly->m_length };
+    }
+
+    // The elements of the first immutable butterfly constant that holds raw doubles.
+    template<typename Record>
+    static std::span<double> butterflyDoubles(Record& record)
+    {
+        auto* butterfly = constantRecord<CachedImmutableButterfly>(record, CachedJSValue::Kind::ImmutableButterfly, [](const CachedImmutableButterfly& candidate) {
+            return candidate.m_indexingType == CopyOnWriteArrayWithDouble;
+        });
+        double* elements = butterfly && butterfly->m_length ? target<double>(butterfly->m_cachedDoubles) : nullptr;
+        if (!elements)
+            return { };
+        return { elements, butterfly->m_length };
+    }
+
+    // The bits of the first Double element in the pool of an immutable butterfly constant that holds JSValues.
+    template<typename Record>
+    static EncodedJSValue* butterflyDoubleElement(Record& record)
+    {
+        EncodedJSValue* element = nullptr;
+        constantRecord<CachedImmutableButterfly>(record, CachedJSValue::Kind::ImmutableButterfly, [&](const CachedImmutableButterfly& butterfly) {
+            if (hasDouble(butterfly.m_indexingType) || !butterfly.m_length)
+                return false;
+            auto* kinds = target<uint8_t>(butterfly.m_cachedValues);
+            auto* slots = CachedJSValuePool::slots(kinds, butterfly.m_length);
+            for (unsigned i = 0; i < butterfly.m_length; ++i) {
+                if (kinds[i] == static_cast<uint8_t>(CachedJSValue::Kind::Double)) {
+                    element = target<EncodedJSValue>(slots[i]);
+                    return !!element;
+                }
+            }
+            return false;
+        });
+        return element;
+    }
+
+    template<typename Record>
+    static std::span<CachedWriteBarrier<CachedFunctionExecutable>> functionExpressions(Record& record)
+    {
+        return array<CachedWriteBarrier<CachedFunctionExecutable>>(record, [](const auto& layout) -> const auto& { return layout.functionExprs; });
+    }
+
+    // Writes into `slot` the offset of `record`, as the encoder points a slot at a record.
+    template<typename Source>
+    static void pointAt(VariableLengthObject<Source>& slot, const void* record)
+    {
+        slot.setRawSlot(static_cast<uint32_t>(std::bit_cast<uintptr_t>(record) - std::bit_cast<uintptr_t>(&slot)));
+    }
+
+    // The executable record of a function core's first function expression, and the records on its TDZ chain.
+    static CachedFunctionExecutable* firstFunctionExpression(std::span<uint8_t> payload)
+    {
+        auto slots = functionExpressions(root<CachedFunctionCodeBlock>(payload));
+        if (slots.empty())
+            return nullptr;
+        return target<CachedFunctionExecutable>(slots[0].ptr());
+    }
+
+    static CachedTDZEnvironmentLink* firstChainRecord(std::span<uint8_t> payload)
+    {
+        auto* executable = firstFunctionExpression(payload);
+        if (!executable)
+            return nullptr;
+        auto view = executable->view();
+        if (!view.tdz)
+            return nullptr;
+        return target<CachedTDZEnvironmentLink>(view.tdz->ptr());
+    }
+
+    // The first link of that chain when it is a link the core's own generation created, with an environment.
+    static CachedTDZEnvironmentLink* ownLink(std::span<uint8_t> payload)
+    {
+        auto* link = firstChainRecord(payload);
+        if (!link || link->m_handle.isEmpty())
+            return nullptr;
+        return link;
+    }
+
+    static CachedCompactTDZEnvironment* ownEnvironment(std::span<uint8_t> payload)
+    {
+        auto* link = ownLink(payload);
+        return link ? target<CachedCompactTDZEnvironment>(link->m_handle.m_environment) : nullptr;
+    }
+
+    // The first start record on that chain.
+    static CachedTDZEnvironmentLink* startRecord(std::span<uint8_t> payload)
+    {
+        // A malformed chain cannot reach this point: the fixture's core is the encoder's own.
+        for (auto* link = firstChainRecord(payload); link; link = target<CachedTDZEnvironmentLink>(link->m_parent.ptr())) {
+            if (link->m_handle.isEmpty())
+                return link;
+        }
+        return nullptr;
+    }
+
+    static ASCIILiteral failureName(CoreDecodeFailure failure)
+    {
+        switch (failure) {
+        case CoreDecodeFailure::None:
+            return "None"_s;
+        case CoreDecodeFailure::Malformed:
+            return "Malformed"_s;
+        case CoreDecodeFailure::KindMismatch:
+            return "KindMismatch"_s;
+        case CoreDecodeFailure::UnresolvedSymbol:
+            return "UnresolvedSymbol"_s;
+        case CoreDecodeFailure::InconsistentMapLayout:
+            return "InconsistentMapLayout"_s;
+        }
+        return "an unknown failure"_s;
+    }
+
+    // Decodes a copy of `core` that `alter` changed, which must fail with `expected`.
+    template<typename Alter>
+    static bool expect(VM& vm, String& failure, ASCIILiteral name, const CachedBytecode& core, SourceProvider& provider, UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder, bool validate, CoreDecodeFailure expected, const Alter& alter)
+    {
+        auto copy = MallocSpan<uint8_t, VMMalloc>::malloc(core.size());
+        memcpySpan(copy.mutableSpan(), core.span());
+        if (!alter(copy.mutableSpan())) {
+            failure = makeString("U7: the codec fixture has no record for the case "_s, name);
+            return false;
+        }
+        CoreDecodeFailure result = CoreDecodeFailure::None;
+        UnlinkedCodeBlock* decoded = decodeUnlinkedCodeBlockCore(vm, CachedBytecode::create(WTF::move(copy), { }), provider, kind, holder, validate, result);
+        if (result == expected && (expected == CoreDecodeFailure::None) == !!decoded)
+            return true;
+        failure = makeString("U7: "_s, name, validate ? " with validate"_s : " without validate"_s, " decoded to "_s, failureName(result), " instead of "_s, failureName(expected));
+        return false;
+    }
+
+    template<typename Alter>
+    static bool expectBothModes(VM& vm, String& failure, ASCIILiteral name, const CachedBytecode& core, SourceProvider& provider, UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder, CoreDecodeFailure expected, const Alter& alter)
+    {
+        return expect(vm, failure, name, core, provider, kind, holder, false, expected, alter)
+            && expect(vm, failure, name, core, provider, kind, holder, true, expected, alter);
+    }
+
+    static bool runProgramCases(VM& vm, String& failure, const CachedBytecode& core, SourceProvider& provider)
+    {
+        using Program = CachedProgramCodeBlock;
+        constexpr auto kind = UnlinkedCodeBlockCoreKind::Program;
+        auto unaltered = [](std::span<uint8_t>) {
+            return true;
+        };
+        auto malformed = [&](ASCIILiteral name, const auto& alter) {
+            return expect(vm, failure, name, core, provider, kind, nullptr, true, CoreDecodeFailure::Malformed, alter);
+        };
+        auto hashedMap = [](Program& record) -> auto& { return record.m_varDeclarations.m_map; };
+        auto inlineMap = [](Program& record) -> auto& { return record.m_lexicalDeclarations.m_map; };
+        auto truncate = [](CachedUniquedStringImpl* record) {
+            if (!record)
+                return false;
+            record->m_length = (1u << 27) - 1;
+            return true;
+        };
+
+        // The fixture decodes, in both modes.
+        if (!expectBothModes(vm, failure, "the unaltered program core"_s, core, provider, kind, nullptr, CoreDecodeFailure::None, unaltered))
+            return false;
+
+        // E4.
+        if (!expectBothModes(vm, failure, "a hashed declaration map with a deleted bucket"_s, core, provider, kind, nullptr, CoreDecodeFailure::InconsistentMapLayout, [&](std::span<uint8_t> payload) {
+            auto& map = hashedMap(root<Program>(payload));
+            auto slots = elements(map.m_slots);
+            if (!map.m_hashedCapacity || slots.empty())
+                return false;
+            slots[0] |= 1;
+            return true;
+        }))
+            return false;
+        if (!expectBothModes(vm, failure, "a hashed declaration map whose capacity exceeds minLoadInverse times its entries"_s, core, provider, kind, nullptr, CoreDecodeFailure::InconsistentMapLayout, [&](std::span<uint8_t> payload) {
+            auto& map = hashedMap(root<Program>(payload));
+            if (!map.m_hashedCapacity)
+                return false;
+            map.m_hashedCapacity = 1u << 30;
+            return true;
+        }))
+            return false;
+
+        // E5: a private name this VM lacks, without and with validation.
+        if (!expectBothModes(vm, failure, "a payload naming an absent private name"_s, core, provider, kind, nullptr, CoreDecodeFailure::UnresolvedSymbol, [&](std::span<uint8_t> payload) {
+            auto* record = identifierRecord(root<Program>(payload), "capturedReader"_s);
+            if (!record)
+                return false;
+            record->m_isSymbol = 1;
+            record->m_isPrivate = 1;
+            record->m_isRegistered = 0;
+            record->m_isWellKnownSymbol = 0;
+            record->m_ordinal = CachedUniquedStringImpl::noOrdinal;
+            return true;
+        }))
+            return false;
+
+        // E15: placement.
+        if (!malformed("a nested offset past the payload"_s, [&](std::span<uint8_t> payload) {
+            for (auto& identifier : identifiers(root<Program>(payload))) {
+                auto& slot = identifier.m_string.m_impl.ptr();
+                if (!stringRecord(slot))
+                    continue;
+                uintptr_t past = std::bit_cast<uintptr_t>(payload.data() + payload.size()) + 64;
+                slot.setRawSlot(static_cast<uint32_t>((past - std::bit_cast<uintptr_t>(&slot)) & ~static_cast<uintptr_t>(3)));
+                return true;
+            }
+            return false;
+        }))
+            return false;
+        if (!malformed("a vector count past the payload"_s, [&](std::span<uint8_t> payload) {
+            auto& entries = hashedMap(root<Program>(payload)).m_entries;
+            if (!entries.m_size)
+                return false;
+            entries.m_size = 1u << 28;
+            return true;
+        }))
+            return false;
+        if (!malformed("a truncated string"_s, [&](std::span<uint8_t> payload) {
+            return truncate(identifierRecord(root<Program>(payload)));
+        }))
+            return false;
+        if (!malformed("a truncated string as the key of a hashed declaration map"_s, [&](std::span<uint8_t> payload) {
+            auto& map = hashedMap(root<Program>(payload));
+            return map.m_hashedCapacity && truncate(keyRecord(elements(map.m_entries), "unreferencedVariable"_s));
+        }))
+            return false;
+        if (!malformed("a truncated string as the key of an inline declaration map"_s, [&](std::span<uint8_t> payload) {
+            auto& map = inlineMap(root<Program>(payload));
+            return !map.m_hashedCapacity && truncate(keyRecord(elements(map.m_entries), "lexicalFirst"_s));
+        }))
+            return false;
+        if (!malformed("a truncated string as the key of a symbol table"_s, [&](std::span<uint8_t> payload) {
+            auto* table = constantRecord<CachedSymbolTable>(root<Program>(payload), CachedJSValue::Kind::SymbolTable);
+            return table && truncate(keyRecord(elements(table->m_map.m_entries), "capturedBinding"_s));
+        }))
+            return false;
+        // The record cache: an executable record, which the encoder writes once per child slot, named by two slots.
+        if (!malformed("two function slots naming one executable record"_s, [&](std::span<uint8_t> payload) {
+            auto slots = functionExpressions(root<Program>(payload));
+            if (slots.size() < 2)
+                return false;
+            auto* first = target<CachedFunctionExecutable>(slots[0].ptr());
+            if (!first)
+                return false;
+            pointAt(const_cast<std::remove_cvref_t<decltype(slots[1].ptr())>&>(slots[1].ptr()), first);
+            return true;
+        }))
+            return false;
+
+        // E15: strings.
+        if (!malformed("a wrong stored hash"_s, [&](std::span<uint8_t> payload) {
+            auto* record = identifierRecord(root<Program>(payload));
+            if (!record)
+                return false;
+            record->m_hash ^= 1;
+            return true;
+        }))
+            return false;
+        if (!malformed("a known ordinal with other characters"_s, [&](std::span<uint8_t> payload) {
+            CachedUniquedStringImpl* first = nullptr;
+            for (auto& identifier : identifiers(root<Program>(payload))) {
+                auto* record = stringRecord(identifier.m_string.m_impl.ptr());
+                if (!record || record->m_ordinal == CachedUniquedStringImpl::noOrdinal)
+                    continue;
+                if (!first) {
+                    first = record;
+                    continue;
+                }
+                // Records are written once per content, so two of them hold other characters.
+                record->m_ordinal = first->m_ordinal;
+                return true;
+            }
+            return false;
+        }))
+            return false;
+        if (!malformed("a string record without its ordinal"_s, [&](std::span<uint8_t> payload) {
+            auto* record = identifierRecord(root<Program>(payload));
+            if (!record)
+                return false;
+            record->m_ordinal = CachedUniquedStringImpl::noOrdinal;
+            return true;
+        }))
+            return false;
+        if (!malformed("a symbol record with an ordinal"_s, [&](std::span<uint8_t> payload) {
+            auto* record = identifierRecord(root<Program>(payload));
+            if (!record || record->m_ordinal == CachedUniquedStringImpl::noOrdinal)
+                return false;
+            // A registered private symbol, well formed but for the ordinal, which decode() would read before the symbol bit.
+            record->m_isSymbol = 1;
+            record->m_isRegistered = 1;
+            record->m_isPrivate = 1;
+            record->m_isWellKnownSymbol = 0;
+            return true;
+        }))
+            return false;
+
+        // E15: tags.
+        if (!malformed("an unknown constant kind"_s, [&](std::span<uint8_t> payload) {
+            auto kinds = constantKinds(root<Program>(payload));
+            if (kinds.empty())
+                return false;
+            kinds[0] = 0xff;
+            return true;
+        }))
+            return false;
+        if (!malformed("an external-string slot"_s, [&](std::span<uint8_t> payload) {
+            for (auto& identifier : identifiers(root<Program>(payload))) {
+                auto& slot = identifier.m_string.m_impl.ptr();
+                if (!stringRecord(slot))
+                    continue;
+                slot.setRawSlot(VariableLengthObjectBase::externalStringTag);
+                return true;
+            }
+            return false;
+        }))
+            return false;
+        if (!malformed("a symbol table entry without its slim flag"_s, [&](std::span<uint8_t> payload) {
+            auto* table = constantRecord<CachedSymbolTable>(root<Program>(payload), CachedJSValue::Kind::SymbolTable);
+            if (!table)
+                return false;
+            auto entries = elements(table->m_map.m_entries);
+            if (entries.empty())
+                return false;
+            entries[0].m_second.m_bits &= ~CachedSymbolTableEntry::slimFlag();
+            return true;
+        }))
+            return false;
+        if (!malformed("a butterfly whose indexing type is not copy-on-write"_s, [&](std::span<uint8_t> payload) {
+            auto* butterfly = constantRecord<CachedImmutableButterfly>(root<Program>(payload), CachedJSValue::Kind::ImmutableButterfly);
+            if (!butterfly)
+                return false;
+            butterfly->m_indexingType = ArrayWithContiguous;
+            return true;
+        }))
+            return false;
+        if (!malformed("a string constant whose record is a symbol"_s, [&](std::span<uint8_t> payload) {
+            auto* record = constantRecord<CachedUniquedStringImpl>(root<Program>(payload), CachedJSValue::Kind::String, [](const CachedUniquedStringImpl& string) {
+                return hasCharacters(string, "a long string constant"_s);
+            });
+            if (!record)
+                return false;
+            // A private name this VM lacks, which would decode as UnresolvedSymbol past the check.
+            record->m_isSymbol = 1;
+            record->m_isPrivate = 1;
+            record->m_ordinal = CachedUniquedStringImpl::noOrdinal;
+            return true;
+        }))
+            return false;
+        if (!malformed("a RegExp record with m_parsed set"_s, [&](std::span<uint8_t> payload) {
+            auto* regExp = constantRecord<CachedRegExp>(root<Program>(payload), CachedJSValue::Kind::RegExp);
+            if (!regExp)
+                return false;
+            regExp->m_parsed = 1;
+            return true;
+        }))
+            return false;
+        if (!malformed("a UFE header with HasCallSlot"_s, [&](std::span<uint8_t> payload) {
+            auto slots = functionExpressions(root<Program>(payload));
+            if (slots.empty())
+                return false;
+            auto* executable = target<CachedFunctionExecutable>(slots[0].ptr());
+            if (!executable)
+                return false;
+            executable->m_header |= CachedFunctionExecutable::HasCallSlot;
+            return true;
+        }))
+            return false;
+
+        // E15: native assertions.
+        if (!malformed("metadata steps out of order"_s, [&](std::span<uint8_t> payload) {
+            auto steps = array<uint32_t>(root<Program>(payload), [](const auto& layout) -> const auto& { return layout.steps; });
+            if (steps.size() < 2)
+                return false;
+            std::swap(steps[0], steps[1]);
+            return true;
+        }))
+            return false;
+        if (!malformed("a JSBigInt past maxLength"_s, [&](std::span<uint8_t> payload) {
+            auto* bigInt = constantRecord<CachedBigInt>(root<Program>(payload), CachedJSValue::Kind::BigInt);
+            if (!bigInt)
+                return false;
+            bigInt->m_length = CachedBigInt::maximumLength() + 1;
+            return true;
+        }))
+            return false;
+
+        // E15: records.
+        if (!malformed("a butterfly element that is a butterfly"_s, [&](std::span<uint8_t> payload) {
+            auto kinds = butterflyElementKinds(root<Program>(payload), CopyOnWriteArrayWithContiguous);
+            if (kinds.empty())
+                return false;
+            kinds[0] = static_cast<uint8_t>(CachedJSValue::Kind::ImmutableButterfly);
+            return true;
+        }))
+            return false;
+        if (!malformed("an Undefined element in a butterfly's pool"_s, [&](std::span<uint8_t> payload) {
+            auto kinds = butterflyElementKinds(root<Program>(payload), CopyOnWriteArrayWithContiguous);
+            if (kinds.empty())
+                return false;
+            kinds[0] = static_cast<uint8_t>(CachedJSValue::Kind::Undefined);
+            return true;
+        }))
+            return false;
+        if (!malformed("a Double element in a CopyOnWriteArrayWithInt32 butterfly"_s, [&](std::span<uint8_t> payload) {
+            auto kinds = butterflyElementKinds(root<Program>(payload), CopyOnWriteArrayWithInt32);
+            if (kinds.empty())
+                return false;
+            kinds[0] = static_cast<uint8_t>(CachedJSValue::Kind::Double);
+            return true;
+        }))
+            return false;
+        // The pure NaN, which boxes as a double whose negation is pure too, so that only the rule for double storage, which
+        // reads any NaN as a hole, rejects it.
+        if (!malformed("a NaN element in a CopyOnWriteArrayWithDouble butterfly"_s, [&](std::span<uint8_t> payload) {
+            auto elements = butterflyDoubles(root<Program>(payload));
+            if (elements.empty())
+                return false;
+            elements[0] = PNaN;
+            return true;
+        }))
+            return false;
+        if (!malformed("a double constant whose bits name a cell"_s, [&](std::span<uint8_t> payload) {
+            auto* bits = constantRecord<EncodedJSValue>(root<Program>(payload), CachedJSValue::Kind::Double);
+            if (!bits)
+                return false;
+            *bits = static_cast<EncodedJSValue>(0x10000);
+            return true;
+        }))
+            return false;
+        // A NaN that boxes as a double but whose negation, 0xffff000000000000, is impure: the baseline's negate fast path,
+        // which flips bit 63 of the boxed value, would turn it into bits that name a cell.
+        auto holdDoubleWithImpureNegation = [](EncodedJSValue* bits) {
+            if (!bits)
+                return false;
+            JSValue value(JSValue::EncodeAsDouble, std::bit_cast<double>(static_cast<uint64_t>(0x7fff000000000000ULL)));
+            *bits = JSValue::encode(value);
+            return value.isDouble() && isImpureNaN(-value.asDouble());
+        };
+        if (!malformed("a Double constant register whose negation is an impure NaN"_s, [&](std::span<uint8_t> payload) {
+            return holdDoubleWithImpureNegation(constantRecord<EncodedJSValue>(root<Program>(payload), CachedJSValue::Kind::Double));
+        }))
+            return false;
+        if (!malformed("a Double butterfly element whose negation is an impure NaN"_s, [&](std::span<uint8_t> payload) {
+            return holdDoubleWithImpureNegation(butterflyDoubleElement(root<Program>(payload)));
+        }))
+            return false;
+        if (!malformed("a template object descriptor with a null raw string"_s, [&](std::span<uint8_t> payload) {
+            auto* descriptor = constantRecord<CachedTemplateObjectDescriptor>(root<Program>(payload), CachedJSValue::Kind::TemplateObjectDescriptor);
+            if (!descriptor)
+                return false;
+            auto rawStrings = elements(descriptor->m_rawStrings);
+            if (rawStrings.empty())
+                return false;
+            rawStrings[0].m_impl.ptr().setRawSlot(VariableLengthObjectBase::emptySentinel);
+            return true;
+        }))
+            return false;
+        if (!malformed("a template object descriptor with fewer cooked strings than raw ones"_s, [&](std::span<uint8_t> payload) {
+            auto* descriptor = constantRecord<CachedTemplateObjectDescriptor>(root<Program>(payload), CachedJSValue::Kind::TemplateObjectDescriptor);
+            if (!descriptor || !descriptor->m_cookedStrings.m_size)
+                return false;
+            --descriptor->m_cookedStrings.m_size;
+            return true;
+        }))
+            return false;
+        if (!malformed("expression info with a flag"_s, [&](std::span<uint8_t> payload) {
+            auto* info = target<uint8_t>(root<Program>(payload).m_expressionInfo);
+            if (!info)
+                return false;
+            // The flags byte follows the 32-bit count of encoded entries.
+            info[sizeof(uint32_t)] |= CachedExpressionInfo::HasChecksum;
+            return true;
+        }))
+            return false;
+
+        // E15: instructions.
+        if (!malformed("an unknown opcode"_s, [&](std::span<uint8_t> payload) {
+            auto bytes = instructions(root<Program>(payload));
+            if (bytes.empty())
+                return false;
+            bytes[0] = static_cast<uint8_t>(NUMBER_OF_BYTECODE_IDS);
+            return true;
+        }))
+            return false;
+        if (!malformed("a prefix after a prefix"_s, [&](std::span<uint8_t> payload) {
+            auto bytes = instructions(root<Program>(payload));
+            if (bytes.size() < 2)
+                return false;
+            bytes[0] = static_cast<uint8_t>(op_wide16);
+            bytes[1] = static_cast<uint8_t>(op_wide16);
+            return true;
+        }))
+            return false;
+        return malformed("an instruction that runs past the stream"_s, [&](std::span<uint8_t> payload) {
+            auto bytes = instructions(root<Program>(payload));
+            if (bytes.empty() || !coreCodecIsWholeInstructionStream(bytes))
+                return false;
+            // The longest opcode, written over the opcode of the stream's last instruction.
+            unsigned longest = 0;
+            for (unsigned opcode = 0; opcode < NUMBER_OF_BYTECODE_IDS; ++opcode) {
+                if (opcode != op_wide16 && opcode != op_wide32 && opcodeLengths[opcode] > opcodeLengths[longest])
+                    longest = opcode;
+            }
+            size_t last = 0;
+            for (size_t offset = 0; offset < bytes.size(); offset += std::bit_cast<const JSInstruction*>(bytes.data() + offset)->size())
+                last = offset;
+            size_t lastSize = bytes.size() - last;
+            bool isPrefixed = bytes[last] == op_wide16 || bytes[last] == op_wide32;
+            size_t opcodeAt = last + (isPrefixed ? 1 : 0);
+            bytes[opcodeAt] = static_cast<uint8_t>(longest);
+            return std::bit_cast<const JSInstruction*>(bytes.data() + last)->size() > lastSize;
+        });
+    }
+
+    static bool runFunctionCases(VM& vm, String& failure, const CachedBytecode& core, SourceProvider& provider, const UnlinkedFunctionExecutable& holder)
+    {
+        constexpr auto kind = UnlinkedCodeBlockCoreKind::Function;
+        auto unaltered = [](std::span<uint8_t>) {
+            return true;
+        };
+        auto malformed = [&](ASCIILiteral name, const auto& alter) {
+            return expect(vm, failure, name, core, provider, kind, &holder, true, CoreDecodeFailure::Malformed, alter);
+        };
+
+        if (!expectBothModes(vm, failure, "the unaltered function core"_s, core, provider, kind, &holder, CoreDecodeFailure::None, unaltered))
+            return false;
+
+        // E14.
+        if (!expectBothModes(vm, failure, "a start record decoded without a start chain"_s, core, provider, kind, nullptr, CoreDecodeFailure::Malformed, [&](std::span<uint8_t> payload) {
+            return !!startRecord(payload);
+        }))
+            return false;
+        if (!expectBothModes(vm, failure, "a start record with an empty handle and a nonempty parent"_s, core, provider, kind, &holder, CoreDecodeFailure::Malformed, [&](std::span<uint8_t> payload) {
+            auto* link = startRecord(payload);
+            if (!link)
+                return false;
+            // The parent names the record itself, which a decode that followed it would loop on.
+            pointAt(link->m_parent.ptr(), link);
+            return true;
+        }))
+            return false;
+
+        // E15: records. A decode without validate would recurse along this loop without end.
+        if (!malformed("a TDZ link whose parent is itself"_s, [&](std::span<uint8_t> payload) {
+            auto* link = ownLink(payload);
+            if (!link)
+                return false;
+            pointAt(link->m_parent.ptr(), link);
+            return true;
+        }))
+            return false;
+        if (!malformed("a TDZ environment whose stored hash is not its names' hash"_s, [&](std::span<uint8_t> payload) {
+            auto* environment = ownEnvironment(payload);
+            if (!environment)
+                return false;
+            environment->m_hash ^= 1;
+            return true;
+        }))
+            return false;
+        if (!malformed("a TDZ environment with a null name"_s, [&](std::span<uint8_t> payload) {
+            auto* environment = ownEnvironment(payload);
+            if (!environment)
+                return false;
+            auto names = elements(environment->m_variables);
+            if (names.empty())
+                return false;
+            names[0].ptr().setRawSlot(VariableLengthObjectBase::emptySentinel);
+            return true;
+        }))
+            return false;
+
+        // E15: placement. The function's name decodes before its chain, as a string; the record cache refuses it as an
+        // environment, which a decoder caching objects by offset alone would take for one and assert on.
+        return malformed("a TDZ environment slot naming a string record"_s, [&](std::span<uint8_t> payload) {
+            auto* link = ownLink(payload);
+            auto* executable = firstFunctionExpression(payload);
+            if (!link || !executable)
+                return false;
+            auto view = executable->view();
+            CachedUniquedStringImpl* name = view.name ? stringRecord(view.name->m_string.m_impl.ptr()) : nullptr;
+            if (!name)
+                return false;
+            pointAt(link->m_handle.m_environment, name);
+            return true;
+        });
+    }
+
+    static bool run(VM& vm, String& failure)
+    {
+        JSLockHolder locker(vm);
+
+        SourceCode programSource = makeSource(String { programText }, SourceOrigin { }, SourceTaintedOrigin::Untainted);
+        ParserError error;
+        Strong<UnlinkedProgramCodeBlock> program { vm, recursivelyGenerateUnlinkedCodeBlockForProgram(vm, programSource, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None, 0) };
+        if (!program.get() || error.isValid()) {
+            failure = "U7: the codec fixture program failed to generate"_s;
+            return false;
+        }
+        CoreEncodeFailure encodeFailure = CoreEncodeFailure::None;
+        RefPtr<CachedBytecode> programCore = encodeUnlinkedCodeBlockCore(vm, *program.get(), nullptr, nullptr, encodeFailure);
+        if (!programCore) {
+            failure = "U7: the codec fixture program's core failed to encode"_s;
+            return false;
+        }
+        if (!runProgramCases(vm, failure, *programCore, *programSource.provider()))
+            return false;
+
+        SourceCode functionSource = makeSource(String { functionText }, SourceOrigin { }, SourceTaintedOrigin::Untainted);
+        Strong<UnlinkedProgramCodeBlock> classProgram { vm, recursivelyGenerateUnlinkedCodeBlockForProgram(vm, functionSource, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None, 0) };
+        if (!classProgram.get() || error.isValid()) {
+            failure = "U7: the codec fixture class failed to generate"_s;
+            return false;
+        }
+        UnlinkedFunctionExecutable* method = nullptr;
+        for (unsigned i = 0; i < classProgram->numberOfFunctionExprs(); ++i) {
+            if (classProgram->functionExpr(i)->ecmaName().string() == "method"_s)
+                method = classProgram->functionExpr(i);
+        }
+        if (!method || !method->parentScopeTDZVariables()) {
+            failure = "U7: the codec fixture's method has no TDZ chain"_s;
+            return false;
+        }
+        Strong<UnlinkedFunctionCodeBlock> methodBody { vm, method->unlinkedCodeBlockFor(vm, method->linkedSourceCode(functionSource), CodeSpecializationKind::CodeForCall, { }, error, method->parseMode()) };
+        if (!methodBody.get() || error.isValid()) {
+            failure = "U7: the codec fixture's method failed to generate"_s;
+            return false;
+        }
+        RefPtr<CachedBytecode> methodCore = encodeUnlinkedCodeBlockCore(vm, *methodBody.get(), method, nullptr, encodeFailure);
+        if (!methodCore) {
+            failure = "U7: the codec fixture method's core failed to encode"_s;
+            return false;
+        }
+        return runFunctionCases(vm, failure, *methodCore, *functionSource.provider(), *method);
+    }
+};
+
+namespace JITCache {
+
+// The part of U7 that alters a core's records (SPEC-ucb.codec.md, section 7), which runUCBSelfTest runs: it reports the
+// first case that fails in `failure` and returns false.
+bool runCoreCodecSelfTest(VM& vm, String& failure)
+{
+    return CoreCodecSelfTestAccess::run(vm, failure);
+}
+
+} // namespace JITCache
+
+#endif // ENABLE(JITCACHE_TWINS)
 
 } // namespace JSC
 

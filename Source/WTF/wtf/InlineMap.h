@@ -523,13 +523,17 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
     // - the non-deleted slots number entries.size();
     // - at least one bucket stays empty and (entries.size() + deleted - 1) * loadFactorDenominator < capacity * loadFactorNumerator,
     //   the most a map built by add() holds;
+    // - capacity <= entries.size() * minLoadInverse, the least a map holds, since a removal that leaves less shrinks the table;
     // - no key is the empty or the deleted value, which no bucket can hold;
     // - the keys are distinct, and each key's probe sequence from HashArg::hash(key), as findKeyOrEmptyOrDeleted() walks it,
     //   meets only occupied buckets before its own.
+    // Every condition but the probe walk is checked before the table is allocated, and the key values before anything hashes
+    // a key, because HashArg::hash may dereference one (IdentifierRepHash::hash does).
     //
-    // The probe check costs one walk per key and makes every lookup of the restored map find its key; the empty bucket
-    // makes every miss terminate. A restored map then behaves, for lookups, additions and removals, exactly as the map the
-    // layout was taken from, because a hashed map's behavior depends only on its capacity, its buckets and its deleted count.
+    // The minimum load bounds the table a layout can make the restore allocate by the entries the layout holds. The probe
+    // check costs one walk per key and makes every lookup of the restored map find its key; the empty bucket makes every
+    // miss terminate. A restored map then behaves, for lookups, additions and removals, exactly as the map the layout was
+    // taken from, because a hashed map's behavior depends only on its capacity, its buckets and its deleted count.
     bool restoreHashedLayout(unsigned capacity, std::span<const uint32_t> slots, Vector<Entry>&& entries)
     {
         RELEASE_ASSERT(isEmpty() && isInline()); // expecting a brand new map
@@ -554,6 +558,8 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
         if (occupied >= capacity)
             return false;
         if (occupied && (occupied - 1) * loadFactorDenominator >= static_cast<uint64_t>(capacity) * loadFactorNumerator)
+            return false;
+        if (capacity > static_cast<uint64_t>(entries.size()) * minLoadInverse)
             return false;
 
         // Checked before anything hashes a key, since a hash function may dereference it; a bucket holding the empty or the
