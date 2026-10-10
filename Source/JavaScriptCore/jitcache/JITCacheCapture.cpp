@@ -706,7 +706,7 @@ public:
         if (candidates.size() == candidates.capacity()) {
             size_t oldCapacity = candidates.capacity();
             CheckedSize newHeapBytes = oldCapacity;
-            newHeapBytes *= 2;
+            newHeapBytes *= 2u;
             newHeapBytes *= sizeof(Candidate);
             if (newHeapBytes.hasOverflowed() || !m_budget.tryCharge(newHeapBytes.value()))
                 return false;
