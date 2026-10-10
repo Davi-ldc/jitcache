@@ -28,6 +28,7 @@
 #include "LOLJIT.h"
 
 #include "JITCacheFaults.h"
+#include "JITCacheGlue.h"
 #include "JITCacheVMState.h"
 #include "JITSafepoint.h"
 #include "ProducerBudget.h"
@@ -126,6 +127,8 @@ CompilationResult BaselineJITPlan::finalize()
         dataLogLnIf(Options::verboseOSR(), "    JIT compilation successful.");
         m_codeBlock->ownerExecutable()->installCode(m_codeBlock);
         m_codeBlock->jitSoon();
+        // JITCache: the finalize capture (SPEC-integrator.md section 8.5), now that the CB is its executable's replacement.
+        JITCache::didFinalizeBaselineCompilation(*m_vm, *m_codeBlock, nullptr);
         break;
     default:
         RELEASE_ASSERT_NOT_REACHED();

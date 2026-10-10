@@ -429,51 +429,6 @@ static String describeUnopenedBody(const BodyOpen& opened)
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
-
-// Reads the file's first bytes.size() bytes. Returns 0, the errno of a failed read, or EIO at an early end of file.
-static int readFileStart(int fd, std::span<uint8_t> bytes)
-{
-    uint64_t offset = 0;
-    while (!bytes.empty()) {
-        ssize_t count = ::pread(fd, bytes.data(), bytes.size(), static_cast<off_t>(offset));
-        if (count < 0) {
-            if (errno == EINTR)
-                continue;
-            return errno;
-        }
-        if (!count)
-            return EIO;
-        bytes = bytes.subspan(static_cast<size_t>(count));
-        offset += static_cast<uint64_t>(count);
-    }
-    return 0;
-}
-
-// The envelope of the body open mapped, for the L and P a rewrite's stamp carries: a ValidatedBody exposes neither
-// (SPEC-integrator.md section 6.2), so the file's first 128 bytes are read by the key's name and checked as B1 to B5 check
-// them in Full mode, against the opened body's size. The envelope must carry the opened body's commit identifier, drawn
-// afresh for every write, so both reads saw one file; the producer lock keeps every other writer out between them.
-static std::expected<BodyEnvelope, CommitFailure> readOpenedEnvelope(const OpenedArtifact& artifact, const ValidatedBody& body)
-{
-    int fd;
-    do {
-        fd = ::openat(artifact.bodiesFd(), bodyFileName(body.key()).data(), O_RDONLY | O_CLOEXEC);
-    } while (fd < 0 && errno == EINTR);
-    if (fd < 0)
-        return failure(WriterChecks::rewrite, makeString("the body's envelope cannot be opened: "_s, errorText(errno)));
-    std::array<uint8_t, bodyEnvelopeBytes> envelopeBytes { };
-    int error = readFileStart(fd, envelopeBytes);
-    ::close(fd);
-    if (error)
-        return failure(WriterChecks::rewrite, makeString("the body's envelope cannot be read: "_s, errorText(error)));
-
-    auto envelope = validateBodyEnvelope(envelopeBytes, body.fileSize(), body.key(), artifact.headerDigest(), ValidationMode::Full);
-    if (!envelope)
-        return failure(WriterChecks::rewrite, makeString("the body's envelope fails "_s, envelope.error()));
-    if (envelope->version != body.version())
-        return failure(WriterChecks::rewrite, "the key's file changed between open and the envelope's read"_s);
-    return *envelope;
-}
 #endif
 
 } // namespace ArtifactWriterInternal
@@ -687,13 +642,13 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::rewriteSection(const 
     if (opened.outcome != StoreOutcome::Found)
         return failure(WriterChecks::rewrite, describeUnopenedBody(opened));
     RefPtr<ValidatedBody> body = WTF::move(opened.body);
-    auto envelope = readOpenedEnvelope(m_artifact, *body);
-    if (!envelope)
-        return std::unexpected(WTF::move(envelope.error()));
+
+    // The stamp comes from the body open validated: its key, tier, L and P (SPEC-integrator.md section 6.2).
+    CommitStamp stamp { body->key(), body->llintThreshold(), body->counterProgress(), body->highestTier() };
 
     // Full validation leaves exactly the sections the highest tier requires (check B7), so they are the ones to copy, and
     // body->section gives each one, empty ones included.
-    uint8_t highestTier = envelope->highestTier;
+    uint8_t highestTier = stamp.highestTier;
     ASCIILiteral sectionName = sectionKindDescription(kind).name;
     if (!isSectionRequired(kind, highestTier))
         return failure(WriterChecks::rewrite, makeString("the body holds no "_s, sectionName, " section"_s));
@@ -736,7 +691,6 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::rewriteSection(const 
     // section 4.4), that mapping borrows page-cache pages of the body file and is not charged.
     body = nullptr;
 
-    CommitStamp stamp { envelope->key, envelope->llintThreshold, envelope->counterProgress, highestTier };
     return commit(stamp, CommitSections { std::span { sources }.first(count) });
 }
 

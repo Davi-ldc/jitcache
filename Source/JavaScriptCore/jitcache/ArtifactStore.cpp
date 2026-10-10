@@ -746,7 +746,8 @@ BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
     for (size_t index = 0; index < numberOfSectionKinds; ++index)
         sections[index] = sectionIn(file, *layout, static_cast<SectionKind>(index));
     // The body owns the mapping from here and unmaps it in its destructor.
-    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, layout->version, layout->highestTier, file, sections));
+    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, layout->version, layout->highestTier, layout->llintThreshold,
+        layout->counterProgress, file, sections));
     return { StoreOutcome::Found, WTF::move(body), { }, file.size() };
 }
 

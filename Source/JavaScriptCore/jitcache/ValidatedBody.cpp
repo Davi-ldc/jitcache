@@ -16,10 +16,12 @@ namespace JSC::JITCache {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ValidatedBody);
 
-ValidatedBody::ValidatedBody(const BodyKey& key, uint64_t version, uint8_t highestTier, std::span<const uint8_t> mapping, const SectionSpans& sections)
+ValidatedBody::ValidatedBody(const BodyKey& key, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress, std::span<const uint8_t> mapping, const SectionSpans& sections)
     : m_key(key)
     , m_version(version)
     , m_highestTier(highestTier)
+    , m_llintThreshold(llintThreshold)
+    , m_counterProgress(counterProgress)
     , m_mapping(mapping)
     , m_sections(sections)
 {
@@ -52,6 +54,16 @@ uint64_t ValidatedBody::version() const
 uint8_t ValidatedBody::highestTier() const
 {
     return m_highestTier;
+}
+
+uint32_t ValidatedBody::llintThreshold() const
+{
+    return m_llintThreshold;
+}
+
+uint32_t ValidatedBody::counterProgress() const
+{
+    return m_counterProgress;
 }
 
 std::span<const uint8_t> ValidatedBody::section(SectionKind kind) const
@@ -137,8 +149,9 @@ Ref<ValidatedBody> ValidatedBody::createForTesting(const BodyKey& key, uint64_t 
         spans[static_cast<unsigned>(sections[i].kind)] = buffer.span().subspan(offsets[i], sections[i].bytes.size());
     }
 
-    // Moving the buffer into the body keeps its address, so the spans stay valid.
-    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, version, highestTier, { }, spans));
+    // Moving the buffer into the body keeps its address, so the spans stay valid. A test body has no envelope, so its L
+    // and P are 0.
+    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, version, highestTier, 0, 0, { }, spans));
     body->m_testBuffer = WTF::move(buffer);
     body->m_onDestroy = WTF::move(onDestroy);
     return body;

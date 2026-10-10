@@ -32,9 +32,9 @@ inline constexpr ASCIILiteral section = "writer.section"_s;
 inline constexpr ASCIILiteral reread = "writer.reread"_s; // step 6
 inline constexpr ASCIILiteral publish = "writer.publish"_s; // step 7
 #if ENABLE(JITCACHE_TWINS)
-// rewriteSection had nothing it could rewrite: open found no usable body, the body's envelope could not be read again or
-// was not the opened file's, or the range lies outside a section the body holds. Section 8.2 has no step for these, so
-// this twins-only name stands beside its steps; nothing is written when it fails.
+// rewriteSection had nothing it could rewrite (section 8.3): open did not answer Found, the kind names no section the
+// body's highest tier requires, or the range does not lie inside that section. Only rewriteSection returns it, and
+// nothing is written when it does.
 inline constexpr ASCIILiteral rewrite = "writer.rewrite"_s;
 #endif
 } // namespace WriterChecks
@@ -77,7 +77,7 @@ struct CommitResult {
     uint64_t fileSize;
 };
 struct CommitFailure {
-    ASCIILiteral check; // budget.limit, or a writer.* step of container sub-SPEC section 8.2
+    ASCIILiteral check; // budget.limit, a writer.* step of container sub-SPEC section 8.2, or writer.rewrite (its section 8.3)
     String detail;
 };
 
@@ -119,10 +119,10 @@ public:
     static std::optional<KillPoint> killPointNamed(StringView);
     // Opens the key's current body in Full mode through OpenedArtifact::open (container sub-SPEC section 7.2), copies its
     // sections into a buffer charged to the budget, overwrites bytes.size() bytes of the kind's section at offset, and
-    // commits the copy's sections under the envelope's key, tier, L and P, which recomputes every checksum and draws a
-    // fresh commit identifier. An open that answers Absent, Unavailable or Invalid, an envelope that is not the opened
-    // file's, an absent section and a range outside the section fail at writer.rewrite, and a refused charge for the copy
-    // at budget.limit, with nothing written; the commit itself fails as commit does.
+    // commits the copy's sections under the opened body's key, highestTier(), llintThreshold() and counterProgress(),
+    // which recomputes every checksum and draws a fresh commit identifier. An open that answers Absent, Unavailable or
+    // Invalid, a section the body's tier does not require and a range outside the section fail at writer.rewrite, and a
+    // refused charge for the copy at budget.limit, with nothing written; the commit itself fails as commit does.
     std::expected<CommitResult, CommitFailure> rewriteSection(const BodyKey&, SectionKind, uint64_t offset, std::span<const uint8_t> bytes);
 #endif
 
