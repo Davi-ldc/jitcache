@@ -13,7 +13,7 @@ curl -fsSLO https://github.com/Davi-ldc/bun/releases/download/bun-v1.4.2-jitcach
 unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
 ```
 
-Then run:
+To generate a cache, run:
 
 ```sh
 bun --jitcache[=<dir>] --jitcache-mode=p run server.ts
@@ -25,7 +25,7 @@ bun --jitcache[=<dir>] --jitcache-mode=p run server.ts
 bun --jitcache[=<dir>] --jitcache-mode=c/p-c run server.ts
 ```
 
-`c`, the default, only reads the cache. `p-c` also writes: it runs from the saved functions and keeps updating them when it learns more[^1], which is how a server keeps improving a cache, since `p` only creates new ones. Every write is atomic, so any number of processes can read a cache while one writes to it; a `p-c` that finds another process writing runs as `c`. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
+`c`, the default, only reads the cache. `p-c` also writes: it runs from the saved functions and keeps updating them when it learns more[^1], which is how a server keeps improving a cache, since `p` only creates new ones. Every write is atomic, so any number of processes can read a cache while one writes to it. Only one process writes at a time: a `p` or `p-c` that finds another process writing fails to start and runs as if JITCache were off, while the workers of the writing process read what it writes. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
 
 | Flag | Values |
 |---|---|
