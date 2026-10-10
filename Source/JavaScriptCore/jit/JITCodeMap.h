@@ -66,6 +66,19 @@ public:
 
     explicit operator bool() const { return m_size; }
 
+    unsigned size() const { return m_size; }
+
+    // Calls the functor with each entry's BytecodeIndex and CodeLocationLabel<JSEntryPtrTag>, in increasing bytecode
+    // index, the order JITCodeMapBuilder received them in and find searches.
+    template<typename Functor>
+    void forEach(const Functor& functor) const
+    {
+        BytecodeIndex* entryIndexes = indexes();
+        CodeLocationLabel<JSEntryPtrTag>* entryLocations = codeLocations();
+        for (unsigned entry = 0; entry < m_size; ++entry)
+            functor(entryIndexes[entry], entryLocations[entry]);
+    }
+
 private:
     CodeLocationLabel<JSEntryPtrTag>* codeLocations() const
     {

@@ -55,6 +55,21 @@ public:
     JITSubIC* addJITSubIC(BinaryArithProfile*);
     JITNegIC* addJITNegIC(UnaryArithProfile*);
 
+    // Calls the functor with each IC the holder owns, as a JITAddIC&, JITMulIC&, JITSubIC& or JITNegIC&, so the IC's type
+    // gives its kind. Only a caller instantiates it, so only callers need the ICs' complete types (JITMathIC.h).
+    template<typename Functor>
+    void forEachMathIC(const Functor& functor) const
+    {
+        for (auto* mathIC : m_addICs)
+            functor(*mathIC);
+        for (auto* mathIC : m_mulICs)
+            functor(*mathIC);
+        for (auto* mathIC : m_subICs)
+            functor(*mathIC);
+        for (auto* mathIC : m_negICs)
+            functor(*mathIC);
+    }
+
 private:
     Bag<JITAddIC> m_addICs;
     Bag<JITMulIC> m_mulICs;
