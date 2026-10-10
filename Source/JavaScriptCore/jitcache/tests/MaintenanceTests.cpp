@@ -1325,18 +1325,21 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
 
     auto checkUsage = [&](const String& label, std::initializer_list<CString> arguments) {
         CommandLineRun run = runMaintenanceCommand(arguments);
-        if (run.exitCode != 2 || !run.out.isEmpty() || !run.err.contains("usage: clean <path>"_s))
+        if (run.exitCode != 2 || !run.out.isEmpty() || !run.err.contains("usage: clean [<path>]"_s))
             JITCACHE_FAIL(makeString(label, ": exit "_s, run.exitCode, ", out \""_s, run.out, "\", err \""_s, run.err, '"'));
     };
     checkUsage("no arguments"_s, { });
     checkUsage("an unknown command"_s, { "prune"_s, path });
-    checkUsage("clean without a path"_s, { "clean"_s });
     checkUsage("clean with two paths"_s, { "clean"_s, path, path });
-    checkUsage("compact without a ratio"_s, { "compact"_s, path });
-    checkUsage("a ratio that is no number"_s, { "compact"_s, path, "half"_s });
-    checkUsage("an empty ratio"_s, { "compact"_s, path, ""_s });
-    checkUsage("an unknown option"_s, { "compact"_s, path, "0.5"_s, "--maybe"_s });
-    checkUsage("both answers"_s, { "compact"_s, path, "0.5"_s, "--yes"_s, "--no"_s });
+    checkUsage("an option of clean"_s, { "clean"_s, path, "--yes"_s });
+    checkUsage("compact without a ratio"_s, { "compact"_s });
+    checkUsage("a path before the ratio"_s, { "compact"_s, path, "0.5"_s });
+    checkUsage("a ratio that is no number"_s, { "compact"_s, "half"_s, path });
+    checkUsage("an empty ratio"_s, { "compact"_s, ""_s, path });
+    checkUsage("compact with two paths"_s, { "compact"_s, "0.5"_s, path, path });
+    checkUsage("an unknown option"_s, { "compact"_s, "0.5"_s, path, "--maybe"_s });
+    checkUsage("a mistyped answer without a path"_s, { "compact"_s, "0.5"_s, "--yse"_s });
+    checkUsage("both answers"_s, { "compact"_s, "0.5"_s, path, "--yes"_s, "--no"_s });
     JITCACHE_CHECK(artifact->temporariesInCache() == 1);
 
     CommandLineRun run = runMaintenanceCommand({ "clean"_s, makeString(artifact->path(), "/missing"_s).utf8() });
@@ -1349,18 +1352,18 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
         JITCACHE_FAIL(makeString("fmemopen failed: "_s, errnoText(errno)));
         return;
     }
-    run = runMaintenanceCommand({ "compact"_s, path, "1"_s }, input);
+    run = runMaintenanceCommand({ "compact"_s, "1"_s, path }, input);
     fclose(input);
     JITCACHE_CHECK(run.exitCode == 4);
     JITCACHE_CHECK(run.out.contains("compact: needs-confirmation"_s) && run.out.contains("deletes the whole artifact"_s));
     JITCACHE_CHECK(!run.out.contains(confirmationPrompt));
     JITCACHE_CHECK(artifact->temporariesInCache() == 1 && artifact->bodiesInBodies() == 2 && artifact->exists("cache/header"));
 
-    run = runMaintenanceCommand({ "compact"_s, path, "1"_s, "--no"_s });
+    run = runMaintenanceCommand({ "compact"_s, "1"_s, path, "--no"_s });
     JITCACHE_CHECK(run.exitCode == 4 && run.out.contains("compact: declined"_s) && !run.out.contains(confirmationPrompt));
     JITCACHE_CHECK(artifact->temporariesInCache() == 1 && artifact->bodiesInBodies() == 2);
 
-    run = runMaintenanceCommand({ "compact"_s, path, "2"_s });
+    run = runMaintenanceCommand({ "compact"_s, "2"_s, path });
     JITCACHE_CHECK(run.exitCode == 1 && run.out.contains("compact: failed"_s) && run.err.contains("bad-ratio"_s));
 
     {
@@ -1371,7 +1374,7 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
         }
         run = runMaintenanceCommand({ "clean"_s, path });
         JITCACHE_CHECK(run.exitCode == 3 && run.out.contains("clean: busy"_s));
-        run = runMaintenanceCommand({ "compact"_s, path, "0"_s });
+        run = runMaintenanceCommand({ "compact"_s, "0"_s, path });
         JITCACHE_CHECK(run.exitCode == 3 && run.out.contains("compact: busy"_s));
     }
 
@@ -1381,12 +1384,47 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
     JITCACHE_CHECK(!run.exitCode && run.out.contains("clean: done, 1 temporaries removed, 10 bytes reclaimed"_s));
     JITCACHE_CHECK(run.err == "unknown-file: cache/notes.txt\n"_s);
 
-    run = runMaintenanceCommand({ "compact"_s, path, "0"_s });
+    run = runMaintenanceCommand({ "compact"_s, "0"_s, path });
     JITCACHE_CHECK(!run.exitCode && run.out.contains("compact: done, 0 temporaries removed, 0 bodies evicted"_s));
     JITCACHE_CHECK(artifact->bodiesInBodies() == 2);
 
-    run = runMaintenanceCommand({ "compact"_s, path, "1"_s, "--yes"_s });
+    run = runMaintenanceCommand({ "compact"_s, "1"_s, "--yes"_s, path });
     JITCACHE_CHECK(!run.exitCode && run.out.contains("compact: done"_s) && !run.out.contains(confirmationPrompt));
+    JITCACHE_CHECK(!artifact->exists("cache/header") && !artifact->bodiesInBodies());
+}
+
+// M6. Without a path, both commands work on ./.jitcache in the working directory, here a symbolic link to the artifact.
+JITCACHE_TEST(maintenanceCommandLineDefaultsToTheJITCacheDirectory, No)
+{
+    HookScope hooks;
+    auto artifact = MaintenanceArtifact::create(context);
+    auto workingDirectory = MaintenanceArtifact::create(context, Layout::Parent);
+    if (!artifact || !workingDirectory)
+        return;
+    auto bodies = commitBodies(context, *artifact, 2);
+    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+        return;
+    if (symlinkat(artifact->pathArgument().data(), workingDirectory->parentFd(), ".jitcache")) {
+        JITCACHE_FAIL(makeString("symlinkat failed: "_s, errnoText(errno)));
+        return;
+    }
+
+    // The tests of a process run one at a time, so this one may move the working directory while it runs.
+    int previous = ::open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (previous < 0 || fchdir(workingDirectory->parentFd())) {
+        JITCACHE_FAIL(makeString("cannot enter the working directory: "_s, errnoText(errno)));
+        if (previous >= 0)
+            ::close(previous);
+        return;
+    }
+    CommandLineRun clean = runMaintenanceCommand({ "clean"_s });
+    CommandLineRun compact = runMaintenanceCommand({ "compact"_s, "1"_s, "--yes"_s });
+    bool restored = !fchdir(previous);
+    ::close(previous);
+
+    JITCACHE_CHECK(restored);
+    JITCACHE_CHECK(!clean.exitCode && clean.out.contains("clean: done, 1 temporaries removed, 10 bytes reclaimed"_s));
+    JITCACHE_CHECK(!compact.exitCode && compact.out.contains("compact: done"_s));
     JITCACHE_CHECK(!artifact->exists("cache/header") && !artifact->bodiesInBodies());
 }
 
@@ -1419,7 +1457,7 @@ JITCACHE_TEST(maintenanceCommandLinePromptsOnATerminal, No)
             return;
         }
 
-        CommandLineRun run = runMaintenanceCommand({ "compact"_s, artifact->pathArgument(), "1"_s }, terminal.input());
+        CommandLineRun run = runMaintenanceCommand({ "compact"_s, "1"_s, artifact->pathArgument() }, terminal.input());
         if (!run.out.contains(confirmationPrompt) || !run.out.contains("deletes the whole artifact"_s))
             JITCACHE_FAIL(makeString(label, ": no plan and prompt in \""_s, run.out, '"'));
         if (applies) {
@@ -1464,7 +1502,7 @@ JITCACHE_TEST(maintenanceCommandLineReportsAPlanChangedAtThePrompt, No)
     }
 
     // The command line runs on a thread of its own and writes to the pipe, which this thread reads until the prompt.
-    Vector<CString> arguments { CString { "compact"_s }, artifact->pathArgument(), CString { "1"_s } };
+    Vector<CString> arguments { CString { "compact"_s }, CString { "1"_s }, artifact->pathArgument() };
     CapturedOutput err;
     std::atomic<int> exitCode { -1 };
     FILE* input = terminal.input();

@@ -116,9 +116,11 @@ After applying, the epoch is bumped once, the lock released, and the outcome is 
 `runCommandLine` is the one front end both hosts use:
 
 ```text
-clean <path>
-compact <path> <ratio> [--yes | --no]
+clean [<path>]
+compact <ratio> [<path>] [--yes | --no]
 ```
+
+Without a path, a command works on `defaultArtifactPath`, `./.jitcache` (SPEC-integrator.md section 3.1). Every argument after the command's own that starts with `--` is an option, wherever it stands, so a mistyped answer is a usage error and never a path; a path that starts with `--` is written `./--name`.
 
 - `clean` calls `clean(path)` and prints one summary line: the outcome, the temporaries removed and the bytes reclaimed.
 - `compact` calls `compact(path, ratio, options)` with `Answer::Yes` for `--yes`, `Answer::No` for `--no`, and `Answer::Ask` otherwise. On `NeedsConfirmation`, when `in` is a terminal (`isatty`), it prints the plan's summary (bodies, bytes, and that the whole artifact goes) and the prompt `This operation will delete the entire cache. Ok? (y/n)`, reads one line, and on `y` or `Y` calls `compact` again with the returned plan as `confirmedPlan`; any other answer is `Declined`. When `in` is not a terminal, it prints the plan and stops, changing nothing.
@@ -128,7 +130,7 @@ Exit codes: 0 for `Done` and `NoArtifact`, 1 for `Failed`, 2 for a usage error, 
 
 The jsc shell runs it with `--jitcache-maintenance`, passing the script arguments (those after `--`) as the command line (SPEC-integrator.md section 11.1 says when).
 
-Bun runs it as `bun jitcache <command>`. `src/runtime/cli/mod.rs` gains `Tag::JITCacheCommand`, matched by `RootCommandMatcher::case(b"jitcache")`, dispatched to `jitcache_command::JITCacheCommand::exec()` in the new `src/runtime/cli/jitcache_command.rs` (declared with `#[path = "jitcache_command.rs"] pub(crate) mod jitcache_command;`), and a help entry, `bun jitcache clean <path>` and `bun jitcache compact <path> <ratio> [--yes|--no]`. `exec` passes the arguments after `jitcache` to `Bun__JITCache__runMaintenance` (SPEC-integrator.md section 11.2), which calls `runCommandLine` with `stdin`, `stdout` and `stderr`, and exits with its code.
+Bun runs it as `bun jitcache <command>`. `src/runtime/cli/mod.rs` gains `Tag::JITCacheCommand`, matched by `RootCommandMatcher::case(b"jitcache")`, dispatched to `jitcache_command::JITCacheCommand::exec()` in the new `src/runtime/cli/jitcache_command.rs` (declared with `#[path = "jitcache_command.rs"] pub(crate) mod jitcache_command;`), and a help entry, `bun jitcache clean [<path>]` and `bun jitcache compact <ratio> [<path>] [--yes|--no]`. `exec` passes the arguments after `jitcache` to `Bun__JITCache__runMaintenance` (SPEC-integrator.md section 11.2), which calls `runCommandLine` with `stdin`, `stdout` and `stderr`, and exits with its code.
 
 ## 6. Diagnostics and failures
 
@@ -164,7 +166,7 @@ The cases the sections above leave open read as follows, with no outcome or code
 - M3. Whole deletion: ratio 1, a ratio whose target needs every body, and any ratio above 0 on an artifact with no body give `NeedsConfirmation` with `Ask` and change nothing, temporaries included; `No` gives `Declined` and changes nothing; `Yes` deletes temporaries, bodies, header and directories and keeps the lock file. With one body's unlink made to fail (a test hook), `Yes` evicts the others, keeps `header` and that body, returns `Failed` with `unlink-failed`, and the store's `open` accepts what remains; with an unknown file in `bodies/`, it returns `Done` with `rmdir-failed`, and the next Producer reuses the remnant.
 - M4. Confirmation: a plan confirmed after a commit, an eviction or a header change in between gives `PlanChanged` and evicts nothing; an unchanged one applies.
 - M5. Interruption: an apply stopped after each unlink (a test hook) leaves an artifact that the store's `open` and its index accept (container sub-SPEC section 7.2), with only whole bodies; one stopped after the header's unlink leaves a remnant that `clean` finishes.
-- M6. The command line: each exit code; the prompt with a terminal (a pseudo-terminal in the test), `y` and `n`; no prompt and no change without a terminal.
+- M6. The command line: each exit code; the prompt with a terminal (a pseudo-terminal in the test), `y` and `n`; no prompt and no change without a terminal; without a path, both commands work on `.jitcache` in the working directory; a second path, an option `clean` lacks, a path before the ratio and a mistyped answer without a path are usage errors.
 
 M3 and M5 set two process-wide test hooks that `JITCacheMaintenanceTesting.h`, a private header, declares in twins builds; `JITCacheMaintenance.h` cannot hold them, since it is exported and declares nothing twins-only (SPEC-integrator.md section 3.5).
 

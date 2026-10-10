@@ -16,30 +16,30 @@ unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
 Then run:
 
 ```sh
-bun --jitcache=./.jitcache --jitcache-mode=p run server.ts
+bun --jitcache[=<dir>] --jitcache-mode=p run server.ts
 ```
 
-`p` creates the cache and saves each function's JIT code as it is compiled. Then, to use the cached code (each function is checked against its source, so one you edited compiles as usual), run:
+`p` creates the cache (default dir is `./.jitcache`) and saves each function's JIT code as it is compiled. To use the cached code:
 
 ```sh
-bun --jitcache=./.jitcache run server.ts
+bun --jitcache[=<dir>] --jitcache-mode=c/p-c run server.ts
 ```
 
-`c`, the default, only reads the cache. `p-c` reads and writes: it runs from the saved functions and keeps updating them when it learns more[^1], which is how a server keeps improving a cache, since `p` only creates new ones. Every write is atomic, so any number of processes can read a cache while one writes to it; a `p-c` that finds another process writing runs as `c`. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
+`c`, the default, only reads the cache. `p-c` also writes: it runs from the saved functions and keeps updating them when it learns more[^1], which is how a server keeps improving a cache, since `p` only creates new ones. Every write is atomic, so any number of processes can read a cache while one writes to it; a `p-c` that finds another process writing runs as `c`. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
 
 | Flag | Values |
 |---|---|
-| `--jitcache=<dir>` | the cache's directory; JITCache is off without it |
+| `--jitcache[=<dir>]` | turns JITCache on, with the cache in `<dir>`, `./.jitcache` by default; JITCache is off without it |
 | `--jitcache-mode=<mode>` | `c` (default), `p` or `p-c` |
 | `--jitcache-max-memory=<bytes>` | the memory `p` and `p-c` may spend on recording, in bytes (with a `K`, `M` or `G` suffix) or `unlimited`, the default |
 | `--jitcache-strict` | validates everything the cache holds and every assumption JITCache makes; slower, and off by default |
 | `--jitcache-log` | prints JITCache's status to stderr at start and at exit |
 
-Two commands maintain a cache:
+Two commands maintain a cache, `./.jitcache` unless you name another directory:
 
 ```sh
-bun jitcache clean ./.jitcache          # remove the files of writes that never finished
-bun jitcache compact ./.jitcache 0.25   # evict the quarter of the bytes that saves the least warm-up
+bun jitcache clean [<dir>]          # remove the files of writes that never finished
+bun jitcache compact 0.25 [<dir>]   # evict the quarter of the bytes that saves the least warm-up
 ```
 
 ### Other hosts

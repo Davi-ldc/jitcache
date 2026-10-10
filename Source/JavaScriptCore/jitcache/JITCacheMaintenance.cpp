@@ -2,6 +2,7 @@
 #include "JITCacheMaintenance.h"
 
 #include "ArtifactStore.h"
+#include "JITCacheAPI.h"
 #include "JITCacheContainer.h"
 #include "JITCacheMaintenanceTesting.h"
 #include <algorithm>
@@ -647,7 +648,8 @@ static std::optional<double> ratioArgument(const CString& argument)
     return ratio;
 }
 
-// "clean <path>" or "compact <path> <ratio> [--yes | --no]" (section 5); a usage error says why.
+// "clean [<path>]" or "compact <ratio> [<path>] [--yes | --no]" (section 5), the path defaulting to defaultArtifactPath; a
+// usage error says why.
 static std::expected<CommandLine, String> parseCommandLine(std::span<const CString> arguments)
 {
     if (arguments.empty())
@@ -655,34 +657,44 @@ static std::expected<CommandLine, String> parseCommandLine(std::span<const CStri
 
     CommandLine commandLine;
     auto command = arguments[0].span();
+    size_t trailing; // the index of the first argument that is a path or an option
     if (equalSpans(command, "clean"_span)) {
-        if (arguments.size() != 2)
-            return std::unexpected(String { "clean takes one path"_s });
         commandLine.command = CommandLine::Command::Clean;
+        trailing = 1;
     } else if (equalSpans(command, "compact"_span)) {
-        if (arguments.size() < 3 || arguments.size() > 4)
-            return std::unexpected(String { "compact takes a path, a ratio and at most one of --yes and --no"_s });
+        if (arguments.size() < 2)
+            return std::unexpected(String { "compact takes a ratio"_s });
         commandLine.command = CommandLine::Command::Compact;
-        auto ratio = ratioArgument(arguments[2]);
+        auto ratio = ratioArgument(arguments[1]);
         if (!ratio)
-            return std::unexpected(makeString("the ratio "_s, displayArgument(arguments[2]), " is not a number"_s));
+            return std::unexpected(makeString("the ratio "_s, displayArgument(arguments[1]), " is not a number"_s));
         commandLine.ratio = *ratio;
-        if (arguments.size() == 4) {
-            auto option = arguments[3].span();
-            if (equalSpans(option, "--yes"_span))
-                commandLine.answer = Answer::Yes;
-            else if (equalSpans(option, "--no"_span))
-                commandLine.answer = Answer::No;
-            else
-                return std::unexpected(makeString("unknown option "_s, displayArgument(arguments[3])));
-        }
+        trailing = 2;
     } else
         return std::unexpected(makeString("unknown command "_s, displayArgument(arguments[0])));
 
-    auto path = pathArgument(arguments[1]);
-    if (!path)
-        return std::unexpected(makeString("the path "_s, displayArgument(arguments[1]), " is not UTF-8"_s));
-    commandLine.path = WTF::move(*path);
+    // Every argument that starts with "--" is an option, so a mistyped one is never taken for a path.
+    std::optional<String> path;
+    bool answered = false;
+    for (const CString& argument : arguments.subspan(trailing)) {
+        auto text = argument.span();
+        if (!spanHasPrefix(text, "--"_span)) {
+            if (path)
+                return std::unexpected(String { "at most one path"_s });
+            path = pathArgument(argument);
+            if (!path)
+                return std::unexpected(makeString("the path "_s, displayArgument(argument), " is not UTF-8"_s));
+            continue;
+        }
+        bool yes = equalSpans(text, "--yes"_span);
+        if (commandLine.command != CommandLine::Command::Compact || (!yes && !equalSpans(text, "--no"_span)))
+            return std::unexpected(makeString("unknown option "_s, displayArgument(argument)));
+        if (answered)
+            return std::unexpected(String { "at most one of --yes and --no"_s });
+        commandLine.answer = yes ? Answer::Yes : Answer::No;
+        answered = true;
+    }
+    commandLine.path = path ? WTF::move(*path) : String { defaultArtifactPath };
     return commandLine;
 }
 
@@ -978,8 +990,8 @@ int runCommandLine(std::span<const CString> arguments, FILE* in, FILE* out, FILE
     int exitCode;
     if (!commandLine) {
         printLine(err, makeString("jitcache maintenance: "_s, commandLine.error()));
-        printLine(err, "usage: clean <path>"_s);
-        printLine(err, "       compact <path> <ratio> [--yes | --no]"_s);
+        printLine(err, "usage: clean [<path>]"_s);
+        printLine(err, "       compact <ratio> [<path>] [--yes | --no]"_s);
         exitCode = usageExitCode;
     } else if (commandLine->command == CommandLine::Command::Clean) {
         Report report = clean(commandLine->path);

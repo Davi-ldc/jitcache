@@ -62,7 +62,7 @@ struct CompactOptions {
 
 JS_EXPORT_PRIVATE Report clean(const String& parentPath);
 JS_EXPORT_PRIVATE Report compact(const String& parentPath, double ratio, const CompactOptions&);
-// "clean <path>" or "compact <path> <ratio> [--yes | --no]" (section 5); returns the process exit code.
+// "clean [<path>]" or "compact <ratio> [<path>] [--yes | --no]" (section 5); returns the process exit code.
 JS_EXPORT_PRIVATE int runCommandLine(std::span<const CString> arguments, FILE* in, FILE* out, FILE* err);
 
 } // namespace JSC::JITCache::Maintenance

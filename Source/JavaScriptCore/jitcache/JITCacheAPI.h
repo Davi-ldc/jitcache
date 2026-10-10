@@ -32,6 +32,9 @@ struct Config {
     String twinReportPath; // ENABLE(JITCACHE_TWINS) builds; ignored elsewhere
 };
 
+// The artifact path of a bare --jitcache and of a maintenance command without one (section 11.1).
+static constexpr ASCIILiteral defaultArtifactPath = "./.jitcache"_s;
+
 enum class StartOutcome : uint8_t { Created, Opened, Busy, Rejected, Fault };
 struct StartResult {
     StartOutcome outcome;
