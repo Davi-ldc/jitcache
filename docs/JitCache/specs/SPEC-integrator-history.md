@@ -120,6 +120,10 @@ Bun later dropped two of the shell's flags. `--jitcache-log` printed JSON lines 
 
 Bun calls `delta` in `VirtualMachine::on_exit`, after the user's exit handlers and before teardown, the same point where it persists the Node compile cache. THREAD's "no implicit `delta`" constrains JITCache; the host chooses when to call it, and process exit is the idle point a serverless instance reaches.
 
+### `bun jitcache` is a subcommand
+
+The SPEC first put `Tag::JITCacheCommand` in `src/runtime/cli/mod.rs`, which only re-exports `Tag` from `src/options_types/command_tag.rs`. With that file outside its task, the implementer matched the command word in a check of its own before `which()`, repeating `which()`'s rule for skipping leading flags. That works, but it is a second classifier that drifts when Bun changes `which()`, it leaves the crash report's command character unset, and it wires the command unlike every other subcommand. `bun jitcache` became a `Tag` like the rest, dispatched as `bun discord` is, without a context; `exec` takes the entries after the first `jitcache` in argv, which is the word `which()` matched, so nothing repeats its rule (maintenance sub-SPEC section 5).
+
 ### Bun's twins build reaches only exported headers
 
 Bun's `JSCInitialize` and `JITCacheHost::configureVM` first called the placement and layout functions through `JITCacheTwinsHarness.h`, which was not exported, while Bun's build sees JSC only through the build directory and the copied `Headers` and `PrivateHeaders`, so the `bun-twins` target could not compile. Reaching the source tree through Bun's `vendor/WebKit` symlink would have bypassed the rule SPEC-image.md section 14.4 states for every exported header. The exported twins header became `JITCacheTwinsHost.h`, named for who uses it, and declares with `JS_EXPORT_PRIVATE` and WTF and JSC types only everything a host calls in twins builds; `recordVMLayout` gained a `HeapProbes` parameter for the flag that had reached it through none. Task 14 ends by building `bun-debug` and `bun-twins`, which would have caught the defect.
