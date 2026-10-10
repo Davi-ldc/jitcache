@@ -504,6 +504,20 @@ static void removeTemporaries(int cacheFd, const Vector<CString>& temporaries, R
     }
 }
 
+// Clean's step 3 also removes a .cache.replaced that a ConsumerProducer's replacement left when it stopped midway
+// (container sub-SPEC section 1.4), counting its files' sizes; a name in it that is no artifact file stays, and with it
+// the directory.
+static void removeReplacedLeftover(int parentFd, Report& report, Removals& removals)
+{
+    uint64_t bytes = 0;
+    int error = removeReplacedArtifact(parentFd, bytes);
+    report.bytesReclaimed += bytes;
+    if (bytes)
+        removals.removedAnything = true;
+    if (error)
+        addDiagnostic(report, Codes::unlinkFailed, makeString(ArtifactNames::replacedCacheDirectory, "/: "_s, errorText(error)));
+}
+
 // Clean's step 5.
 static void reportUnknownFiles(Vector<String>&& names, Report& report)
 {
@@ -841,6 +855,7 @@ Report clean(const String& parentPath)
 
     Removals removals;
     removeTemporaries(session->cache.get(), cache->temporaries, report, removals); // step 3
+    removeReplacedLeftover(session->parent.get(), report, removals);
 
     // Step 4. A remnant without a body and without unknown names goes; one with unknown names is what the next Producer
     // reuses; one with bodies keeps them, since clean never removes a committed body.
@@ -935,6 +950,7 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
     }
     Removals removals;
     removeTemporaries(session->cache.get(), cache->temporaries, report, removals);
+    removeReplacedLeftover(session->parent.get(), report, removals);
     reportUnknownFiles(WTF::move(cache->unknownNames), report);
     reportUnknownFiles(WTF::move(bodies.unknownNames), report);
 

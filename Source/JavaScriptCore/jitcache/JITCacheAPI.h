@@ -35,10 +35,12 @@ struct Config {
 // The artifact path of a bare --jitcache and of a maintenance command without one (section 11.1).
 static constexpr ASCIILiteral defaultArtifactPath = "./.jitcache"_s;
 
-enum class StartOutcome : uint8_t { Created, Opened, Busy, Rejected, Fault };
+// The role says what a start did: a Producer created its artifact and the other roles opened theirs, or, for a
+// ConsumerProducer, replaced an incompatible one, which the step says (THREAD Session).
+enum class StartOutcome : uint8_t { Started, Busy, Rejected, Fault };
 struct StartResult {
     StartOutcome outcome;
-    ASCIILiteral step; // empty for Created and Opened
+    ASCIILiteral step; // for Started, empty, or "start.replaced" when a ConsumerProducer replaced an incompatible artifact
     String detail;
 };
 
@@ -51,7 +53,7 @@ struct FaultReport {
     String stepName() const; // part + "." + check, or check when part is empty
 };
 
-enum class SessionState : uint8_t { Unconfigured, Created, Opened, Faulted };
+enum class SessionState : uint8_t { Unconfigured, Started, Faulted };
 enum class ProductionState : uint8_t { NotProducing, Active, Ended };
 
 struct Progress {

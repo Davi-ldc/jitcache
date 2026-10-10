@@ -42,6 +42,8 @@ inline constexpr ASCIILiteral lockFile = ".cache.producer.lock"_s;
 inline constexpr ASCIILiteral cacheDirectory = "cache"_s;
 inline constexpr ASCIILiteral header = "header"_s;
 inline constexpr ASCIILiteral bodiesDirectory = "bodies"_s;
+// <parent>/.cache.replaced: an incompatible cache/ a ConsumerProducer moved aside (container sub-SPEC section 1.4).
+inline constexpr ASCIILiteral replacedCacheDirectory = ".cache.replaced"_s;
 } // namespace ArtifactNames
 
 // A body's name: the lowercase hex of its 40 canonical key bytes, which is THREAD Storage's body-key hash, then ".bin".
@@ -75,6 +77,13 @@ std::optional<TemporaryKind> temporaryKindOfFileName(std::span<const char> name)
 // with each entry's name, "." and ".." aside, and its inode. Returns 0, or the errno of the call that failed, after
 // which visit may have seen part of the directory. Any thread; it takes no lock, so a caller may hold one.
 int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char> name, uint64_t inode)>& visit);
+
+// Removes <parent>/.cache.replaced, under the producer lock (container sub-SPEC section 1.4), the way a whole-artifact
+// deletion removes cache/ (maintenance sub-SPEC section 4.5): its temporaries, its bodies and its header, then bodies/ and
+// the directory. A name that is none of these stays, and with it the directories. Adds each removed file's size, taken
+// with fstatat before its unlinkat, to bytesRemoved. Returns 0, also when there is no such directory, or the errno of
+// the first call that failed.
+int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved);
 
 // The producer lock (container sub-SPEC section 2): a non-blocking flock on <parent>/.cache.producer.lock, a 64-byte file
 //   0   8  the bytes JITCLOCK

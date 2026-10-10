@@ -510,6 +510,56 @@ int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char>
     return error;
 }
 
+int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved)
+{
+    using namespace ArtifactStoreInternal;
+    int replacedFd = openAt(parentFd, ArtifactNames::replacedCacheDirectory.characters(), directoryFlags);
+    if (replacedFd < 0)
+        return errno == ENOENT ? 0 : errno;
+
+    auto removeFile = [&](int directoryFd, const char* name) -> int {
+        struct stat status;
+        bool sized = !::fstatat(directoryFd, name, &status, AT_SYMLINK_NOFOLLOW);
+        if (::unlinkat(directoryFd, name, 0))
+            return errno == ENOENT ? 0 : errno;
+        if (sized)
+            bytesRemoved += static_cast<uint64_t>(status.st_size);
+        return 0;
+    };
+    // Names are collected first and removed after the listing, so no entry goes while its directory is read.
+    auto removeListed = [&](int directoryFd, bool (*removes)(std::span<const char>)) -> int {
+        Vector<CString> names;
+        int error = listDirectory(directoryFd, [&](std::span<const char> name, uint64_t) {
+            if (removes(name))
+                names.append(CString { name });
+        });
+        for (auto& name : names) {
+            if (error)
+                break;
+            error = removeFile(directoryFd, name.data());
+        }
+        return error;
+    };
+
+    int error = removeListed(replacedFd, [](std::span<const char> name) { return !!temporaryKindOfFileName(name); });
+    if (!error) {
+        int bodiesFd = openAt(replacedFd, ArtifactNames::bodiesDirectory.characters(), directoryFlags);
+        if (bodiesFd >= 0) {
+            error = removeListed(bodiesFd, [](std::span<const char> name) { return !!bodyKeyFromFileName(name); });
+            ::close(bodiesFd);
+        } else if (errno != ENOENT)
+            error = errno;
+    }
+    if (!error)
+        error = removeFile(replacedFd, ArtifactNames::header.characters());
+    if (!error && ::unlinkat(replacedFd, ArtifactNames::bodiesDirectory.characters(), AT_REMOVEDIR) && errno != ENOENT)
+        error = errno;
+    ::close(replacedFd);
+    if (!error && ::unlinkat(parentFd, ArtifactNames::replacedCacheDirectory.characters(), AT_REMOVEDIR))
+        error = errno;
+    return error;
+}
+
 // The producer lock (container sub-SPEC section 2).
 
 ProducerLock::ProducerLock(int fd, uint64_t* epoch)

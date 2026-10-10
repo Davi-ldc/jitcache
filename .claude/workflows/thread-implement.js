@@ -1,12 +1,12 @@
 export const meta = {
   name: 'thread-implement',
-  description: 'JITCache step 2: implement every task of the five SPECs as soon as its dependencies pass and its files are free, review each until a clean pass and commit it, build the committed tree and run its unit tests and smoke whenever something new lands, then build everything and verify by a ladder, sending each failure back to the code that caused it',
+  description: 'JITCache step 2: implement every task of the five SPECs as soon as its dependencies pass and its files are free, review each until a clean pass and commit it, and whenever something new lands build the committed tree and run the verification ladder over whatever exists, then build everything and run the ladder once more with plain mode and QEMU, sending each failure back to the code that caused it',
   whenToUse: 'After thread-prep and spec-compaction, with THREAD and the SPECs sealed and committed. args: { landed: the tasks earlier runs committed, as { id, summary } (the last result gives them) or bare ids; planCache: the last result\'s planCache; reentry: { <task>: diff path, or { diff, answer, findings } }; first: ids to admit first; buildOnly: build and fix the landed tasks and stop; runDir: where logs and diffs go }.',
   phases: [
     { title: 'Plan', detail: 'The task graph from the five task lists, verbatim, cached per SPEC and re-extracted only where a task list changed; an unresolved or unknown dependency, a cycle or a gap stops the run' },
-    { title: 'Implement', detail: 'Each task starts when its dependencies have passed and its files are free: write -> 3 adversarial reviewers -> amend, until a clean pass, then one commit; a design conflict waits in the run for its answer. Whenever something new lands, the committed tree builds and runs its unit tests and, once the jsc host has landed, a Producer-then-Consumer smoke, which the test tasks wait for' },
+    { title: 'Implement', detail: 'Each task starts when its dependencies have passed and its files are free: write -> 3 adversarial reviewers -> amend, until a clean pass, then one commit; a design conflict waits in the run for its answer. Whenever something new lands, a cycle runs the verification ladder over whatever exists, stopping at its first failing rung: build, unit tests, the Producer-then-Consumer smoke the test tasks wait for, the corpora once the runner has landed, the pin comparison once its task has' },
     { title: 'Build', detail: 'The full build of the committed tree: twins, plain debug and Bun twins, then aarch64 once x86 is green; per round, a fix proposal per file -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
-    { title: 'Verify', detail: 'A ladder that stops at its first failing rung (build, unit tests, smoke, pin comparison, corpora, QEMU) -> an item per failure of that rung, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
+    { title: 'Verify', detail: 'The cycles\' ladder once more over everything, plus plain mode and QEMU: build, unit tests, smoke, corpora, pin comparison, plain mode, QEMU, stopping at the first failing rung -> an item per failure of that rung, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
   ],
 }
 
@@ -46,25 +46,33 @@ export const meta = {
 //   or clean. A failed task blocks its dependents, and its files go back to HEAD. Each task commits
 //   its own files as soon as it passes: one line, "checkpoint: <two to five words>", with no task
 //   id, no body and no trailer. Commits queue.
-// - Code runs as soon as it can. Jarred compiled once and verified at the end because he had an
-//   oracle and a passing corpus before he began; we had neither, so an execution failure would
-//   otherwise first show in Verify, far from the task that caused it. Whenever something new has
-//   landed, a cycle builds in the build snapshot, a sparse git worktree that holds the committed
-//   tree only, so no file an implementer is still writing reaches it: an incremental x86 twins
-//   build, plus aarch64 while what landed holds ARM64-only code that has not built clean, Bun's
-//   twins build while Bun code that landed has not, and a short fix loop. A twins build that links
-//   runs every testjitcache test in a process of its own, plus the UCB self-test once the jsc host
-//   (SMOKE_HOST) has landed; a failing test is fixed as an error of the file that defines it. When
-//   they pass, the smoke runs one trivial script through a producer, a consumer and the JITCache-off
-//   oracle, and its failures are fixed as Verify's are. The test tasks (SMOKE_GATED) start only
-//   once the smoke has passed; cycles go on while they wait, and after MAX_SMOKE_CYCLES cycles
-//   without a green smoke they are blocked by it and the run goes on. An error that only a task not
-//   yet landed can remove waits for that task.
+// - No check waits for Verify if a cycle can run it. Jarred compiled once and verified at the end
+//   because he had an oracle and a passing corpus before he began; we had neither, so an execution
+//   failure would otherwise first show in Verify, far from the task that caused it. Whenever
+//   something new has landed, a cycle runs the verification ladder over whatever exists, in the
+//   build snapshot, a sparse git worktree that holds the committed tree only, so no file an
+//   implementer is still writing reaches it. It stops at the first failing rung:
+//     build: an incremental x86 twins build, plus aarch64 while what landed holds ARM64-only code
+//       that has not built clean, Bun's twins build while Bun code that landed has not, or every
+//       time once the Bun host (BUN_HOST) has landed, and the pin once PIN_HOST has;
+//     unit tests: every testjitcache test in a process of its own, the UCB self-test once the jsc
+//       host (SMOKE_HOST) has landed, and the checks the tasks name that no other rung runs; a
+//       failing test is fixed as an error of the file that defines it;
+//     smoke: one trivial script through a producer, a consumer and the JITCache-off oracle, once
+//       SMOKE_HOST has landed;
+//     corpora: once the runner (RUNNER_HOST) has landed, the runner in twins mode over every
+//       directory of JSTests/jitcache that exists, with Bun once the Bun host has landed;
+//     pin: once PIN_HOST has landed, the pin comparison.
+//   The later rungs' failures go to the task whose code is wrong, the test task itself when the
+//   test is wrong, and are fixed as Verify's are. The test tasks (SMOKE_GATED) start only once the
+//   smoke has passed; cycles go on while they wait, and after MAX_SMOKE_CYCLES cycles without a
+//   green smoke they are blocked by it and the run goes on. An error that only a task not yet
+//   landed can remove waits for that task.
 // - Once every task has ended, the Build phase builds everything: twins, plain debug and Bun twins,
 //   then aarch64 once x86 is green. args.buildOnly runs that phase alone over the landed tasks.
-//   Verify is a ladder that stops at its first failing rung (build, unit tests, smoke, pin
-//   comparison, corpora in twins then plain mode, QEMU), and a round fixes only that rung's
-//   failures; the concurrency family and the benches wait for the milestones. A failure goes back
+//   Verify is the cycles' ladder once more, over everything, plus what is too costly for every
+//   cycle: the corpora in plain mode and the runs under QEMU. A round fixes only the first failing
+//   rung's failures; the concurrency family and the benches wait for the milestones. A failure goes back
 //   to the code that caused it: a cause in another file moves the failure there, never into a
 //   workaround where it shows. A fix lands only when a majority of its three reviewers approves
 //   it; a rejected fix is never replaced by an unreviewed one, and its objections go to the next
@@ -103,6 +111,12 @@ const MAX_SMOKE_CYCLES = 3
 // tasks that write only tests wait until it passes. Rewrite both when the task lists change.
 const SMOKE_HOST = 'integrator.12'
 const SMOKE_GATED = ['ucb.11', 'image.12', 'cb.7', 'ics.7', 'integrator.15']
+// The later rungs come with three more tasks: the corpora once the runner (RUNNER_HOST) has landed,
+// Bun-hosted scripts once the Bun host (BUN_HOST) has, and the pin comparison once PIN_HOST has.
+// Rewrite them too when the task lists change.
+const RUNNER_HOST = 'integrator.13'
+const BUN_HOST = 'integrator.14'
+const PIN_HOST = 'integrator.17'
 
 // Builds compile the committed tree only, in the build snapshot, a sparse worktree of this
 // repository with its own build root: the build directories under the main build root belong to
@@ -245,6 +259,7 @@ const BUILD = {
   properties: {
     success: { type: 'boolean' },
     twinsBuilt: { type: 'boolean', description: 'true when the twins target compiled and linked, whatever the other targets did' },
+    built: { type: 'array', items: { type: 'string' }, description: 'every target that compiled and linked, written exactly as the prompt lists it' },
     commit: { type: 'string', description: 'the commit the build snapshot held' },
     errorLogPath: { type: 'string', description: 'where the full raw error log was saved' },
     notBuilt: { type: 'array', items: { type: 'string' }, description: 'the targets build.ts does not know' },
@@ -334,15 +349,8 @@ const FIX_ITEM = {
   },
 }
 
-const SMOKE = {
-  type: 'object',
-  required: ['green', 'items'],
-  properties: {
-    green: { type: 'boolean' },
-    items: { type: 'array', description: 'independent fix items with DISJOINT file scopes', items: FIX_ITEM },
-    note: { type: 'string' },
-  },
-}
+// The ladder's rungs, named by number alone, so an item's rung always matches the failing rung's.
+const RUNGS = ['V0', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
 
 const VERIFY = {
   type: 'object',
@@ -356,7 +364,7 @@ const VERIFY = {
         type: 'object',
         required: ['rung', 'status'],
         properties: {
-          rung: { type: 'string' },
+          rung: { type: 'string', enum: RUNGS, description: 'the rung\'s number alone' },
           status: { type: 'string', enum: ['pass', 'fail', 'skipped', 'notRun'] },
           detail: { type: 'string' },
         },
@@ -368,7 +376,7 @@ const VERIFY = {
       items: {
         ...FIX_ITEM,
         required: [...FIX_ITEM.required, 'rung'],
-        properties: { ...FIX_ITEM.properties, rung: { type: 'string' } },
+        properties: { ...FIX_ITEM.properties, rung: { type: 'string', enum: RUNGS, description: 'the number of the rung that failed' } },
       },
     },
   },
@@ -433,6 +441,12 @@ const overlaps = (a, b) => covers(a, b) || covers(b, a)
 const ownedBy = (files, path) => files.some(f => covers(f, path))
 const isReport = path => /^report\/[^/\\\0]+\.md$/.test(path)
 const unique = items => [...new Set(items)]
+const ladderGreen = ladder => ladder.allGreen && !ladder.rungs.some(r => r.status === 'fail' || r.status === 'skipped')
+// The items of a ladder's first failing rung, the only ones a round fixes.
+const firstRungItems = ladder => {
+  const failing = ladder.rungs.find(r => r.status === 'fail')
+  return { failing, items: failing ? ladder.items.filter(it => it.rung === failing.rung) : ladder.items }
+}
 const base = path => String(path).split('/').filter(Boolean).pop()
 
 // ---------------------------------------------------------------------------
@@ -500,7 +514,7 @@ let haltReason = null     // why no new work starts: a git step or the build loo
 let smokeGreen = false    // once it has passed, the gate stays open
 let smokeGaveUp = false
 let smokeCycles = 0
-let smokePrevious = null  // the last failing smoke's items, with what became of each
+let ladderPrevious = null // the last failing cycle ladder's rungs and items, with what became of each
 const smokeDue = () => isPassed(SMOKE_HOST)
 const gatedReady = () => SMOKE_GATED.some(id => byId.has(id) && !state.has(id) && byId.get(id).deps.every(d => isPassed(d.id)))
 const waitingOnSmoke = () => smokeDue() && !smokeGreen && !smokeGaveUp && gatedReady()
@@ -820,8 +834,9 @@ Group every compile error by source file (attribute errors in headers to the hea
 attribute link errors to the .cpp owning the missing symbol), each path from the repository's
 root, without the snapshot's directory, or under ${BUN_REPO}/ for Bun's files, and start each
 error of an aarch64 build with "[aarch64]". Return success=true only on a fully clean
-build+link of every target that ran, and twinsBuilt=true when the twins target compiled and
-linked, whatever the others did.`
+build+link of every target that ran, twinsBuilt=true when the twins target compiled and
+linked, whatever the others did, and in built every target that compiled and linked, written
+exactly as above.`
 
 // The unit tests: every testjitcache test, each in a process of its own so a crash ends only that
 // test, and, once the jsc host has landed, the UCB self-test, which only $vm reaches.
@@ -840,10 +855,21 @@ the last one with --jitcache-log so its final status shows the fault the row exp
 call throws or whose expectation fails is a failing test "ucb-self-test:<configuration>" in
 Source/JavaScriptCore/jitcache/UCBSelfTest.cpp, with the message as its output.`
 
+// The checks the tasks name in their own text, beyond what other rungs run: mostly JSTests/stress
+// runs. A cycle runs those its builds allow; Verify runs them all.
+const taskChecks = final => `Then run every check the passed tasks name in their own text, listed below, that no other
+rung runs: a testjitcache test ran above, a runner sequence or self-test belongs to the corpora or
+the pin comparison, and a build to V0. ${final
+  ? 'Run each on the build it names, the twins build when it names none.'
+  : 'Run each on the twins build; one that needs a build this cycle did not make waits for Verify.'} A
+failing check's file is the test or script it runs, from the repository's root.
+${fence('task_checks', order.filter(t => isPassed(t.id)).flatMap(t => t.checks.map(check => ({ task: t.id, check }))), Infinity)}`
+
 const testsPrompt = tag => `Repo: ${REPO}. You run the unit tests of build ${tag}, which just built the twins target in the build
 snapshot ${SNAPSHOT}. Read skills/SKILL.md only, plus the SPEC sections named below. Run nothing but
 the tests, from ${SNAPSHOT}; no git, no build, and fix nothing.
 ${UNIT_TESTS}${smokeDue() ? `\n${UCB_SELF_TEST}` : ''}
+${taskChecks(false)}
 ${LONG_COMMANDS} Report how many tests ran and every one that did not pass, with its file from the
 repository's root and its failure output: the messages, the assertion or sanitizer report and its
 first frames.`
@@ -866,21 +892,41 @@ runs: the same standard output and heap description as the oracle, a final statu
 at least one install in the Consumer, and twin reports with no difference and no skip. A sequence
 whose only failures are heap coincidences runs once more, as section 7.5 says.`
 
-const smokePrompt = (tag, previous) => `${CONTEXT}${authority(PARTS, 'where a failure bears on it')}
-You run ALONE the smoke of build ${tag}, which just built the twins target in the build snapshot
-${SNAPSHOT}: run anything, but no git and no build.
-${SMOKE_STEPS}
-${LONG_COMMANDS}
+// The corpora and the pin comparison, the rungs the runner gives once its task and the pin's have
+// landed; the cycles and Verify share their text.
+const corporaRung = bun => `the runner (Tools/Scripts/run-jitcache-tests) in twins mode on the twins build, with
+    --js-only, since V1 ran every C++ test, over every directory of its default test paths
+    (SPEC-integrator.harness.md section 7.1) that exists, each named on its command line, ${bun
+  ? 'with --bun naming the Bun executable that target bun-twins built'
+  : 'without --bun, since no current Bun build with the JITCache host exists: the runner skips and lists the Bun-hosted scripts'};
+    then the runner's own self-tests, H1 to H6 and H8 of that SPEC's section 13, as that section runs them.`
+const PIN_RUNG = `give V3's runner run --pin, naming the WebKit build that target pin made from ${PIN_SOURCE}:
+    its pin comparison of every script, then the runner's self-test H7. V3 and V4 come from one run of
+    the runner: report its pin comparison and H7 as V4 and the rest as V3.`
+
+// A cycle's ladder once its unit tests pass: the smoke, then the corpora once the runner has
+// landed, then the pin comparison once its task has, stopping at the first failing rung.
+const ladderPrompt = (tag, previous, { corpora, bun, pin }) => `${CONTEXT}${authority(PARTS, 'where a failure bears on it')}
+You run ALONE the ladder of build ${tag}: its builds just finished in the build snapshot ${SNAPSHOT},
+and its unit tests passed. Run anything, but no git and no build; run the runner and the scripts
+from ${SNAPSHOT}, on the builds under ${SNAPSHOT_ROOT}.
+Run the rungs IN ORDER and stop at the first one that fails at all: report every rung after it as
+'skipped', and give fix items only for the failures of the rung that failed.
+V2  smoke: ${SMOKE_STEPS}${corpora ? `
+V3  corpora: ${corporaRung(bun)}` : ''}${pin ? `
+V4  pin: ${PIN_RUNG}` : ''}
+${LONG_COMMANDS} Keep every log under ${RUN_DIR}/ladder-${tag}/.
 The passed tasks and the files each owns, to name the task a failure lies in:
 ${fence('task_files', order.filter(t => isPassed(t.id)).map(t => ({ task: t.id, files: t.files })), Infinity)}
-${previous ? `The previous round's smoke report, with what became of each item:
-${fence('smoke_report', previous, 30000)}
+${previous ? `The previous round's ladder report, with what became of each item:
+${fence('ladder_report', previous, 30000)}
 Fixes were applied since: re-establish ground truth yourself, and carry each rejection's objections
 and each moved root cause into the item that raises its failure again.` : ''}
-Set green when the smoke passes. Otherwise produce, for every failure, an independent fix item with
-exact evidence (the run, its output, status line, twin report or stack trace) and a MINIMAL disjoint
-file scope (two failures sharing a root-cause file = ONE item), naming the task whose code the
-failure lies in: a failure goes back to the task that caused it.`
+Set allGreen when every rung passes. Otherwise produce, for every failure of the rung that failed,
+an independent fix item with exact evidence (the run, its output, status line, twin report or stack
+trace) and a MINIMAL disjoint file scope (two failures sharing a root-cause file = ONE item), naming
+its rung and the task whose code the failure lies in, or the task that wrote the test when the test
+is what is wrong: a failure goes back to the task that caused it.`
 
 const fixAnswerBlock = text => text ? `
 The human answered the spec conflict this file's earlier fix raised, and the SPEC now holds the
@@ -937,37 +983,33 @@ ${fence('reviewer_votes', votes.map(v => ({ approve: v.approve, reasons: v.reaso
 Apply the proposal incorporating the amendments.${conflictFile ? ` Record its spec conflict in ${conflictFile}:
 ${CONFLICT_FILE}.` : ''} Set applied to false if you wrote nothing.`
 
-// A ladder: each rung runs only once every rung below it passes, so a round's fixes all answer one
-// rung's failures.
+// Verify is the cycles' ladder run once more over everything that exists, plus what is too costly
+// for every cycle: the corpora in plain mode and the runs under QEMU. Each rung runs only once
+// every rung below it passes, so a round's fixes all answer one rung's failures.
 const rungs = () => `
 Run the rungs IN ORDER and stop at the first one that fails at all: report every rung after it as
 'skipped', and give fix items only for the failures of the rung that failed. A rung whose tool or
 build the tree does not have is 'notRun', with the reason, and the ladder goes on past it.
 V0  build: ${[...BUILD_TARGETS, ARM_TARGET].join(', ')}, all green.
 V1  unit: ${UNIT_TESTS}${smokeDue() ? `\n${UCB_SELF_TEST}` : ''}
-    Then every check the passed tasks name in their own text, listed below.
+    ${taskChecks(true)}
 V2  smoke: ${smokeDue() ? SMOKE_STEPS : `notRun, since the jsc host (${SMOKE_HOST}) has not landed.`}
-V3  pin: the runner (Tools/Scripts/run-jitcache-tests) in twins mode on the twins build, with
-    Bun's twins executable and --pin with the pin build (target pin): its pin comparison of
-    every script.
-V4  corpora: that same run's sequences, every directory and every C++ test, with the
-    JITCache-off oracle and the twin reports; then the runner in plain mode on the debug build,
-    every directory. V3 and V4 come from one run of the runner: report its pin comparison as V3
-    and the rest as V4.
-V5  QEMU: the runner in twins mode on the aarch64 twins build under QEMU, as its command line
-    allows: every directory.
+V3  corpora: ${corporaRung(isPassed(BUN_HOST))}
+V4  pin: ${PIN_RUNG}
+V5  plain: the runner in plain mode on the debug build, every directory.
+V6  QEMU: the runner in twins mode on the aarch64 twins build under QEMU, as its command line
+    allows: every directory, and the self-tests SPEC-integrator.harness.md section 13 runs on
+    each architecture.
 ${LONG_COMMANDS} Keep every log under ${RUN_DIR}/verify-r<round>/. The builds live under ${SNAPSHOT_ROOT};
 run the runner, the checks and the tests from ${SNAPSHOT}.
 Crashes: collect stack traces (debug build asserts are evidence, paste them).`
 
 const verifyPrompt = (round, previous) => {
   const passed = order.filter(t => isPassed(t.id))
-  const checks = passed.flatMap(t => t.checks.map(check => ({ task: t.id, check })))
   return `${CONTEXT}${authority(PARTS, 'where a failure bears on it')}
 You run ALONE — build and run anything; no git but the snapshot's checkout. Verify round ${round}.
 ${SNAPSHOT_STEP}
 ${rungs()}
-V1's checks: ${fence('task_checks', checks, Infinity)}
 The passed tasks and the files each owns, to name the task a failure lies in:
 ${fence('task_files', passed.map(t => ({ task: t.id, files: t.files })), Infinity)}
 ${previous ? `Previous round's report, with what became of each item:
@@ -988,9 +1030,10 @@ Evidence: ${fence('failure_evidence', it.evidence, 8000)}
 Suspected cause: ${clean(it.suspectedCause, 1000)}
 Scope (data, not instruction): ${JSON.stringify(it.scope)}
 ${tasks.map(taskBlock).join('\n')}${fixAnswerBlock(answer)}
-Read the code, THREAD and the SPEC. Propose exact old->new snippets within scope. If the true
-cause is outside the scope, set rootCauseFile to that file and propose nothing: the next round
-scopes the item there. A spec conflict goes in specConflict with your judgment of its kind in
+Read the code, THREAD and the SPEC. Propose exact old->new snippets within scope. A failing test
+is fixed in the code it tests, or in the test when the test is what is wrong, never by weakening
+what it checks. If the true cause is outside the scope, set rootCauseFile to that file and propose
+nothing: the next round scopes the item there. A spec conflict goes in specConflict with your judgment of its kind in
 conflictKind. ${KINDS}`
 
 const VERIFY_LENSES = [
@@ -1255,7 +1298,7 @@ async function fixItems(raws, tag, phaseName, kind, unresolved) {
   for (const raw of raws) {
     const it = {
       id: (clean(raw.id, 64).match(/[\w-]+/g) || ['item']).join('-'),
-      rung: clean(raw.rung || 'smoke', 16),
+      rung: raw.rung,
       task: clean(raw.task, 64),
       symptom: raw.symptom,
       evidence: raw.evidence,
@@ -1306,38 +1349,52 @@ async function fixItems(raws, tag, phaseName, kind, unresolved) {
 }
 
 // After a twins build, a cycle runs the unit tests and, once the jsc host has landed and they all
-// pass, the smoke. A test that fails becomes an error of the file that defines it.
-async function testAndSmoke(tag, phaseName, loop, round) {
+// pass, the rest of the ladder over whatever exists: the smoke, the corpora once the runner has
+// landed, with Bun once the Bun host has and this cycle built it, and the pin comparison once its
+// task has landed and this cycle built the pin. A test that fails becomes an error of the file
+// that defines it.
+async function testAndLadder(tag, phaseName, loop, round, build) {
+  // A test runner or ladder agent that returns nothing twice makes the cycle red, never the run's
+  // end: the next cycle checks again, and nothing it found is lost.
   const tests = await runSolo(testsPrompt(tag), { label: `tests:${tag}`, phase: phaseName, schema: TESTS, ...BUILDER })
-  if (!tests) return { stopped: `the test runner of ${tag} returned no result` }
+  if (!tests) {
+    log(`Build ${tag}: the test runner returned nothing twice; the cycle is red`)
+    loop.tests.push({ round, missing: true })
+    return { failures: [], ladder: null, red: true }
+  }
   loop.tests.push({ round, ran: tests.ran, failed: tests.failures.map(f => clean(f.test, 200)) })
   if (tests.failures.length) log(`Build ${tag}: ${tests.failures.length} of ${tests.ran} unit test(s) failed`)
-  if (tests.failures.length || !smokeDue()) return { failures: tests.failures, smoke: null }
-  const smoke = await runSolo(smokePrompt(tag, smokePrevious), { label: `smoke:${tag}`, phase: phaseName, schema: SMOKE, ...AGENT })
-  if (!smoke) return { stopped: `the smoke of ${tag} returned no result` }
-  loop.smoke.push({ round, green: smoke.green, items: smoke.items.length })
-  if (smoke.green) {
-    smokePrevious = null
-    if (!smokeGreen) {
-      smokeGreen = true
-      TIMELINE.push('smoke:green')
-      log('Smoke green: the test tasks may start')
-      notify()
-    }
+  if (tests.failures.length || !smokeDue()) return { failures: tests.failures, ladder: null }
+  const built = build.built || []
+  const due = { corpora: isPassed(RUNNER_HOST), bun: isPassed(BUN_HOST) && built.includes('bun-twins'), pin: isPassed(PIN_HOST) && built.includes('pin') }
+  const ladder = await runSolo(ladderPrompt(tag, ladderPrevious, due), { label: `ladder:${tag}`, phase: phaseName, schema: VERIFY, ...AGENT })
+  if (!ladder) {
+    log(`Build ${tag}: the ladder agent returned nothing twice; the cycle is red`)
+    loop.ladder.push({ round, missing: true })
+    return { failures: [], ladder: null, red: true }
   }
-  return { failures: [], smoke }
+  loop.ladder.push({ round, rungs: ladder.rungs.map(r => `${r.rung}:${r.status}`), items: ladder.items.length })
+  const smoke = ladder.rungs.find(r => r.rung === 'V2')
+  if (smoke && smoke.status === 'pass' && !smokeGreen) {
+    smokeGreen = true
+    TIMELINE.push('smoke:green')
+    log('Smoke green: the test tasks may start')
+    notify()
+  }
+  if (ladderGreen(ladder)) ladderPrevious = null
+  return { failures: [], ladder }
 }
 
 // One build loop: a build of the committed tree, then per failing file a fix proposal, three votes
 // and an apply, until the build is green, the rounds run out or no later round could change
 // anything. With withTests, the cycles' loops, a twins build that links also runs the unit tests
-// and, once the jsc host has landed, the smoke: a failing test is fixed as an error of the file
-// that defines it, and the smoke's items as Verify's are, so the loop is green only when the
-// build, the tests and a due smoke all pass. A file whose errors wait on a task not yet landed, on
+// and, once the jsc host has landed, the rest of the ladder over whatever exists: a failing test
+// is fixed as an error of the file that defines it, and the ladder's items as Verify's are, so the
+// loop is green only when the build, the tests and every rung due all pass. A file whose errors wait on a task not yet landed, on
 // a decision or on a running task that holds it is left for later; the Build phase waits for
 // decisions, a cycle leaves them to the next cycle, which an answer starts.
 async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForDecisions, withTests) {
-  const loop = { name, targets, green: false, rounds: 0, commit: null, notBuilt: [], tests: [], smoke: [], waiting: [], deferred: [], unresolved: [] }
+  const loop = { name, targets, green: false, rounds: 0, commit: null, notBuilt: [], tests: [], ladder: [], waiting: [], deferred: [], unresolved: [] }
   BUILDS.push(loop)
   for (let round = 1; round <= maxRounds && !capReached && !gitFailure; round++) {
     loop.rounds = round
@@ -1347,14 +1404,14 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
     loop.notBuilt = build.notBuilt
     loop.commit = build.commit || null
     const tested = withTests && build.twinsBuilt
-    const checked = tested ? await testAndSmoke(tag, phaseName, loop, round) : { failures: [], smoke: null }
+    const checked = tested ? await testAndLadder(tag, phaseName, loop, round, build) : { failures: [], ladder: null }
     if (checked.stopped) return { ...loop, stopped: checked.stopped }
-    const { failures, smoke } = checked
-    const smokeFailed = !!smoke && !smoke.green
-    if (build.success && (!withTests || (tested && !failures.length && (smoke ? smoke.green : !smokeDue())))) {
+    const { failures, ladder } = checked
+    const ladderFailed = !!ladder && !ladderGreen(ladder)
+    if (build.success && (!withTests || (tested && !checked.red && !failures.length && (ladder ? !ladderFailed : !smokeDue())))) {
       loop.green = true
       carried.clear()
-      log(`Build ${name} green after ${round} round(s)${tested ? `, its unit tests${smoke ? ' and the smoke' : ''} passing` : ''}`)
+      log(`Build ${name} green after ${round} round(s)${tested ? `, its unit tests${ladder ? ` and its ladder (${ladder.rungs.map(r => r.rung).join(', ')})` : ''} passing` : ''}`)
       return loop
     }
 
@@ -1378,7 +1435,11 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
     for (const [file, errors] of carried) add(file, errors)
     carried.clear()
     if (unnamed.length) log(`Build ${tag}: ${unnamed.length} error or test entries name no file of either repository; they stay in the log`)
-    if (!byFile.size && !smokeFailed) {
+    if (!byFile.size && !ladderFailed) {
+      if (checked.red) {
+        loop.stalled = `${tag}: red, since a check agent returned nothing twice`
+        return loop
+      }
       if (!build.success) return { ...loop, stopped: `${tag} failed with no file to fix`, detail: build.note }
       loop.stalled = `${tag}: unit tests failed in files no one named`
       log(`Build ${name}: ${loop.stalled}`)
@@ -1393,7 +1454,7 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
       }
       items.push(item)
     }
-    if (!items.length && !smokeFailed) {
+    if (!items.length && !ladderFailed) {
       if (waitForDecisions && deciding.size) {
         log(`Build ${tag}: every error left waits on the human's answer; waiting`)
         await Promise.race([...deciding.values()])
@@ -1441,11 +1502,17 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
     const committed = !applied.length || await commitFixes(applied, failures.length ? 'fixes compile errors and failing unit tests' : 'fixes compile errors', phaseName, tag)
     release(`fix:${tag}`)
     if (!committed) return { ...loop, stopped: `${tag}'s commit failed` }
-    // The smoke's items go after the file fixes, so no item meets a file those fixes hold.
-    const smokeFixes = smokeFailed ? await fixItems(smoke.items, `${tag}-smoke`, phaseName, 'fixes what the smoke found', loop.unresolved) : null
-    if (smokeFixes && !smokeFixes.committed) return { ...loop, stopped: `${tag}'s commit failed` }
-    if (smokeFixes && smokeFixes.itemReport.length) smokePrevious = { items: smokeFixes.itemReport }
-    const changed = applied.length || carried.size || outcomes.some(o => o && o.outcome === 'rejected') || (smokeFixes && smokeFixes.changed)
+    // The ladder's items go after the file fixes, so no item meets a file those fixes hold; only its
+    // first failing rung's items are fixed this round.
+    let ladderFixes = null
+    if (ladderFailed) {
+      const { failing, items: raws } = firstRungItems(ladder)
+      if (failing && raws.length < ladder.items.length) log(`Build ${tag}: ${ladder.items.length - raws.length} ladder item(s) of later rungs wait until ${failing.rung} passes`)
+      ladderFixes = await fixItems(raws, `${tag}-ladder`, phaseName, 'fixes what the ladder found', loop.unresolved)
+      if (!ladderFixes.committed) return { ...loop, stopped: `${tag}'s commit failed` }
+      ladderPrevious = { rungs: ladder.rungs, items: ladderFixes.itemReport }
+    }
+    const changed = applied.length || carried.size || outcomes.some(o => o && o.outcome === 'rejected') || (ladderFixes && ladderFixes.changed)
     const deferredNow = loop.deferred.some(d => d.round === round)
     if (!changed && items.length === batch.length && !deferredNow) {
       if (waitForDecisions && deciding.size) continue
@@ -1550,8 +1617,8 @@ if (graph.problems.length && stale.length < PARTS.length) {
 }
 order = graph.sorted
 byId = graph.ids
-for (const id of [SMOKE_HOST, ...SMOKE_GATED])
-  if (!byId.has(id)) graph.problems.push(`the smoke's constants name ${id}, which is no task: rewrite SMOKE_HOST and SMOKE_GATED with the task lists`)
+for (const id of [SMOKE_HOST, ...SMOKE_GATED, RUNNER_HOST, BUN_HOST, PIN_HOST])
+  if (!byId.has(id)) graph.problems.push(`the ladder's constants name ${id}, which is no task: rewrite SMOKE_HOST, SMOKE_GATED, RUNNER_HOST, BUN_HOST and PIN_HOST with the task lists`)
 if (graph.problems.length) return report('stopped', { where: 'Plan', reason: 'the task graph is invalid', problems: graph.problems })
 if (haveFingerprints)
   PLAN_CACHE = { parts: Object.fromEntries(PARTS.map(p => [p, { fingerprint: fingerprints[p], tasks: raw.filter(t => t.part === p) }])) }
@@ -1647,7 +1714,10 @@ async function buildDaemon() {
       armLanded = false
       bunLanded = false
       TIMELINE.push(`build:c${cycle}`)
-      const targets = ['twins', ...(armDirty ? [ARM_TARGET] : []), ...(bunDirty ? ['bun-twins'] : [])]
+      // Every landing changes the engine Bun links, so once the Bun host has landed every cycle
+      // builds Bun, and the runner runs the Bun-hosted scripts; the pin builds once, then holds.
+      const targets = ['twins', ...(armDirty ? [ARM_TARGET] : []), ...(bunDirty || isPassed(BUN_HOST) ? ['bun-twins'] : []),
+        ...(isPassed(PIN_HOST) ? ['pin'] : [])]
       const loop = await buildLoop(`c${cycle}`, targets, true, MAX_CYCLE_ROUNDS, 'Implement', false, true)
       cycle++
       if (loop.stopped) {
@@ -1726,9 +1796,7 @@ for (let round = 1; round <= MAX_VERIFY_ROUNDS && !capReached; round++) {
 
   // A ladder: a round fixes only the first failing rung's items, and the rungs above it run again
   // once it passes.
-  const rungOf = name => (String(name).match(/V\d/) || [String(name)])[0]
-  const failing = verify.rungs.find(r => r.status === 'fail')
-  const raws = failing ? verify.items.filter(it => rungOf(it.rung) === rungOf(failing.rung)) : verify.items
+  const { failing, items: raws } = firstRungItems(verify)
   log(`Verify round ${round}: ${verify.rungs.map(r => `${r.rung}:${r.status}`).join(' ')}; ${raws.length} item(s)`)
   if (raws.length < verify.items.length) log(`Verify round ${round}: ${verify.items.length - raws.length} item(s) of other rungs wait until ${failing.rung} passes`)
   const fixed = await fixItems(raws, `verify-r${round}`, 'Verify', 'fixes failing tests', VERIFY_REPORT.unresolved)

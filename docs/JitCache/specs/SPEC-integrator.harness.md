@@ -136,7 +136,7 @@ In twins builds `CommandLine::parseArguments` also recognizes:
 | `jitcacheICsSnapshot(fn, kind)` | 2 | `JSC::JITCache::ICs::functionSnapshotBaselineICs` (SPEC-ics.md section 11.1) |
 | `jitcacheDelta()` | 0 | calls `delta`; `Completed` returns `{ eligibleKeys, committedBodies, committedBytes, deferredKeys }`; `Rejected` throws an `Error` whose message is `DeltaResult::rejection`, and `Faulted` one whose message is the fault's `stepName()` |
 | `jitcacheStatus()` | 0 | the full step name of `status().firstFault`, or `null` |
-| `jitcacheStartOutcome()` | 0 | `"created"`, `"opened"`, `"busy"`, `"rejected"` or `"fault"` for the shell's `start`, or `null` when it made none |
+| `jitcacheStartOutcome()` | 0 | `"started"`, `"busy"`, `"rejected"` or `"fault"` for the shell's `start`, or `null` when it made none |
 | `jitcacheProgress()` | 0 | an object holding every field of `Progress` by name |
 | `jitcacheBodyKey(fn, kind)` | 2 | the lowercase hex of the key recorded for the UCB of `fn`'s CB of `kind` (`"call"` or `"construct"`), using the CB's baseline alternative for an optimized CB, or `null` |
 | `jitcacheBodyEvents(fn, kind)` | 2 | the event counts of the UCB of `fn`'s CB of `kind`, or `null` (section 10.2) |

@@ -659,6 +659,50 @@ JITCACHE_TEST(maintenanceCleanRemovesOnlyTemporaries, No)
     JITCACHE_CHECK(artifact->epoch() == epochAfter);
 }
 
+// M1. clean removes the .cache.replaced a ConsumerProducer's replacement left when it stopped midway (container sub-SPEC
+// section 1.4), with its header, bodies and temporaries, counts their bytes and bumps the epoch; a name in it that is no
+// artifact file stays, with the directories that hold it, and is reported.
+JITCACHE_TEST(maintenanceCleanRemovesAReplacedArtifact, No)
+{
+    HookScope hooks;
+    for (bool withUnknownFile : { false, true }) {
+        String label = withUnknownFile ? "with an unknown file"_s : "without one"_s;
+        auto artifact = MaintenanceArtifact::create(context);
+        if (!artifact)
+            return;
+        int replacedFd = -1;
+        int replacedBodiesFd = -1;
+        if (mkdirat(artifact->parentFd(), ArtifactNames::replacedCacheDirectory.characters(), 0755)
+            || (replacedFd = openat(artifact->parentFd(), ArtifactNames::replacedCacheDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0
+            || mkdirat(replacedFd, ArtifactNames::bodiesDirectory.characters(), 0755)
+            || (replacedBodiesFd = openat(replacedFd, ArtifactNames::bodiesDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) {
+            JITCACHE_FAIL(makeString(label, ": cannot make .cache.replaced: "_s, errnoText(errno)));
+            return;
+        }
+        bool placed = artifact->placeFile(context, replacedFd, ArtifactNames::header.characters(), 64)
+            && artifact->placeFile(context, replacedBodiesFd, bodyFileName(maintenanceKey(7)).data(), 300)
+            && (!withUnknownFile || artifact->placeFile(context, replacedBodiesFd, "stray", 5));
+        ::close(replacedBodiesFd);
+        ::close(replacedFd);
+        if (!placed)
+            return;
+        auto epochBefore = artifact->epoch();
+
+        Maintenance::Report report = Maintenance::clean(artifact->path());
+        if (!checkOutcome(context, label, report, Maintenance::Outcome::Done))
+            continue;
+        if (report.bytesReclaimed != 364)
+            JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
+        if (artifact->exists(".cache.replaced") != withUnknownFile || artifact->exists(".cache.replaced/bodies/stray") != withUnknownFile)
+            JITCACHE_FAIL(makeString(label, ": .cache.replaced is "_s, artifact->exists(".cache.replaced") ? "still there"_s : "gone"_s));
+        if (withUnknownFile != hasDiagnosticStartingWith(report, "unlink-failed"_s, ".cache.replaced/"_s))
+            JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
+        auto epochAfter = artifact->epoch();
+        JITCACHE_CHECK(epochBefore && epochAfter && *epochAfter == *epochBefore + 1);
+        JITCACHE_CHECK(artifact->exists("cache/header"));
+    }
+}
+
 // M1. A header-less cache/ that holds a body is a remnant clean never finishes: it removes the temporaries only.
 JITCACHE_TEST(maintenanceCleanKeepsTheBodiesOfARemnant, No)
 {
@@ -1183,7 +1227,7 @@ JITCACHE_TEST(maintenanceWholeDeletionLeavesARemnantTheNextProducerReuses, Yes)
     config.producerLimitBytes = 1 << 20;
     config.strict = true;
     StartResult started = JITCache::start(*context.vm(), config);
-    if (started.outcome != StartOutcome::Created)
+    if (started.outcome != StartOutcome::Started)
         JITCACHE_FAIL(makeString("the Producer's start is "_s, JITCache::name(started.outcome), " at "_s, started.step, ": "_s, started.detail));
     JITCACHE_CHECK(artifact->exists("cache/header") && artifact->exists("cache/bodies/stray"));
 }

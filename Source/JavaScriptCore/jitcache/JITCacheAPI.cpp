@@ -50,10 +50,8 @@ static ASCIILiteral sessionStateName(SessionState state)
     switch (state) {
     case SessionState::Unconfigured:
         return "unconfigured"_s;
-    case SessionState::Created:
-        return "created"_s;
-    case SessionState::Opened:
-        return "opened"_s;
+    case SessionState::Started:
+        return "started"_s;
     case SessionState::Faulted:
         return "faulted"_s;
     }
@@ -386,9 +384,28 @@ static std::expected<ScopedDescriptor, StartResult> openCompatibleArtifact(int p
     return std::unexpected(StartResult { StartOutcome::Fault, "start.header"_s, { } });
 }
 
+// A ConsumerProducer's replacement of an incompatible artifact (container sub-SPEC section 1.4), under the producer lock:
+// cache/ moves aside to .cache.replaced, so a consumer that pinned it keeps a directory that only loses entries, a new
+// artifact is created as a Producer creates one, and the old directory is then removed; what of it stays, clean removes.
+// A .cache.replaced an earlier replacement left goes first, since the move needs its name. Returns the new cache/'s
+// descriptor.
+static std::expected<ScopedDescriptor, StartResult> replaceArtifact(int parentFd, const String& path)
+{
+    uint64_t bytesRemoved = 0;
+    if (int error = removeReplacedArtifact(parentFd, bytesRemoved))
+        return std::unexpected(ioFault(path, "cannot remove an earlier .cache.replaced"_s, error));
+    if (::renameat(parentFd, ArtifactNames::cacheDirectory.characters(), parentFd, ArtifactNames::replacedCacheDirectory.characters()))
+        return std::unexpected(ioFault(path, "cannot move the incompatible cache/ aside"_s, errno));
+    auto cache = createArtifact(parentFd, path);
+    if (cache)
+        removeReplacedArtifact(parentFd, bytesRemoved);
+    return cache;
+}
+
 struct ArtifactAccess {
     std::unique_ptr<ProducerLock> producerLock; // producing roles
     RefPtr<OpenedArtifact> artifact;
+    String replaced; // the incompatibility a ConsumerProducer's artifact had when it replaced it; null otherwise
 };
 
 // Step 7 of section 3.2, in its order. A failure returns the result that ends start; the producer lock is a local
@@ -425,6 +442,15 @@ static std::expected<ArtifactAccess, StartResult> openArtifact(const Config& con
     }
 
     auto cache = config.role == Role::Producer ? createArtifact(parent.get(), path) : openCompatibleArtifact(parent.get(), path);
+    // A ConsumerProducer replaces an incompatible artifact, under the producer lock it holds, where a Consumer is rejected.
+    String replaced;
+    if (!cache && config.role == Role::ConsumerProducer && cache.error().step == "start.incompatible"_s) {
+        replaced = WTF::move(cache.error().detail);
+        cache = replaceArtifact(parent.get(), path);
+        // Other processes' objects then refresh and erase the old bodies, as after a whole-artifact deletion.
+        if (cache)
+            producerLock->bumpEpoch();
+    }
     if (!cache)
         return std::unexpected(WTF::move(cache.error()));
 
@@ -433,7 +459,7 @@ static std::expected<ArtifactAccess, StartResult> openArtifact(const Config& con
     auto taken = ArtifactRegistry::take(parent.get(), cache->get(), expectedHeader().span());
     if (!taken)
         return std::unexpected(ioFault(path, "cannot open and list cache/bodies/"_s, taken.error()));
-    return ArtifactAccess { WTF::move(producerLock), WTF::move(*taken) };
+    return ArtifactAccess { WTF::move(producerLock), WTF::move(*taken), WTF::move(replaced) };
 }
 
 #endif // OS(LINUX) && ENABLE(JIT) && (CPU(X86_64) || CPU(ARM64))
@@ -450,10 +476,8 @@ String FaultReport::stepName() const
 ASCIILiteral name(StartOutcome outcome)
 {
     switch (outcome) {
-    case StartOutcome::Created:
-        return "created"_s;
-    case StartOutcome::Opened:
-        return "opened"_s;
+    case StartOutcome::Started:
+        return "started"_s;
     case StartOutcome::Busy:
         return "busy"_s;
     case StartOutcome::Rejected:
@@ -594,14 +618,14 @@ StartResult start(VM& vm, const Config& config)
     if (facts.engineObject && !facts.engineObject->size)
         return rejectWithoutState({ StartOutcome::Rejected, "start.build-id"_s, "the engine object has no GNU build ID"_s });
 
-    // Steps 7 to 9: Created for a Producer and Opened for the other roles, or the step's Fault, after which the lock the
-    // step took is released, since a faulted VM never produces.
+    // Steps 7 to 9: Started, at start.replaced when a ConsumerProducer replaced an incompatible artifact, or the step's
+    // Fault, after which the lock the step took is released, since a faulted VM never produces.
     auto access = openArtifact(config);
     if (!access && access.error().outcome != StartOutcome::Fault)
         return rejectWithoutState(WTF::move(access.error()));
-    StartResult result = access
-        ? StartResult { config.role == Role::Producer ? StartOutcome::Created : StartOutcome::Opened, { }, { } }
-        : WTF::move(access.error());
+    StartResult result = !access ? WTF::move(access.error())
+        : access->replaced.isNull() ? StartResult { StartOutcome::Started, { }, { } }
+        : StartResult { StartOutcome::Started, "start.replaced"_s, access->replaced };
 
     // Step 10.
     VMState::StartParts parts;
@@ -633,11 +657,8 @@ Status status(VM& vm)
 
     // Reads only: no file opens, no fault is raised and no state changes (section 3.3).
     switch (state->startOutcome()) {
-    case StartOutcome::Created:
-        result.state = SessionState::Created;
-        break;
-    case StartOutcome::Opened:
-        result.state = SessionState::Opened;
+    case StartOutcome::Started:
+        result.state = SessionState::Started;
         break;
     case StartOutcome::Fault:
         result.state = SessionState::Faulted;
@@ -744,7 +765,7 @@ VMState::VMState(const Config& config, StartParts&& parts)
     , m_artifact(WTF::move(parts.artifact))
 {
     // A start fault is the first activity fault, and production, off whenever activity is (II2), never begins.
-    ASSERT(m_startOutcome == StartOutcome::Created || m_startOutcome == StartOutcome::Opened || m_startOutcome == StartOutcome::Fault);
+    ASSERT(m_startOutcome == StartOutcome::Started || m_startOutcome == StartOutcome::Fault);
     ASSERT((m_startOutcome == StartOutcome::Fault) == !!m_activityFault);
     ASSERT(!!parts.producerLimitBytes == producing());
     ASSERT((m_startOutcome != StartOutcome::Fault) == !!m_artifact);

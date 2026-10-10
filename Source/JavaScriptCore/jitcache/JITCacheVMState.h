@@ -66,7 +66,7 @@ public:
     ~VMState(); // defined in JITCacheAPI.cpp
 
     // What the glue, the hosts and status read and write on the state's parts. VM thread.
-    StartOutcome startOutcome() const; // Created, Opened or Fault
+    StartOutcome startOutcome() const; // Started or Fault
     // The faults status reports (section 3.3), which delta returns too (section 3.4). activityFault is the recorded one,
     // or debugger.attach when a debugger turned activity off before any fault was recorded. productionFault, for a
     // producing role only, is the recorded one; while production is active and no fault is recorded, budget.limit once
@@ -109,7 +109,7 @@ private:
     friend void didFailExecutableAllocation(VM&, ExecutableAllocationSite);
     friend void didAttachDebugger(VM&);
 
-    // What start hands the constructor. The outcome is Created, Opened or Fault; a Fault carries the start fault, which
+    // What start hands the constructor. The outcome is Started or Fault; a Fault carries the start fault, which
     // becomes the first activity fault, and neither a producer lock nor an artifact. A producing role carries its limit.
     struct StartParts {
         StartOutcome outcome { StartOutcome::Fault };
