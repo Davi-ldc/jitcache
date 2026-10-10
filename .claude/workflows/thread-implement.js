@@ -1625,18 +1625,21 @@ const readyTasks = () => order.filter(t => !state.has(t.id) && t.deps.every(d =>
 // The committed tree builds whenever something new has landed, an answer has come for a fix that
 // waited on one, or the test tasks wait for the smoke: an incremental x86 twins build with its
 // unit tests and the smoke, plus aarch64 while ARM64-only code that landed has not built clean,
-// Bun's twins build while Bun code that landed has not, and a short fix loop. After
-// MAX_SMOKE_CYCLES cycles that the test tasks waited through without a green smoke, they are
+// Bun's twins build while Bun code that landed has not, and a short fix loop. A run that takes
+// over landed tasks starts with a cycle, so their tests run while the first tasks are written.
+// After MAX_SMOKE_CYCLES cycles that the test tasks waited through without a green smoke, they are
 // blocked by the smoke and the run goes on.
 async function buildDaemon() {
   let built = 0
   let armDirty = false
   let bunDirty = false
+  let startCycle = LANDED.length > 0
   for (let cycle = 1; ; ) {
     const seen = events
     if (gitFailure || capReached) return
     const smokeWait = waitingOnSmoke()
-    if (landings > built || answersPending || smokeWait) {
+    if (startCycle || landings > built || answersPending || smokeWait) {
+      startCycle = false
       built = landings
       answersPending = false
       armDirty = armDirty || armLanded
