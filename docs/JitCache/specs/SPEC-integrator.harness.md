@@ -289,7 +289,7 @@ This is THREAD Verification's oracle. After each sequence, the runner compares e
 - their standard output, byte for byte, which carries the results, exceptions and stack traces the script prints;
 - in twins mode, for a jsc-hosted script that does not declare `jitcache-heap: off`, their heap descriptions, the run's `run<i>.heap` against its oracle run's `oracle<j>.heap` (section 6), byte for byte.
 
-A difference fails the sequence (THREAD Verification). The comparisons of SPEC-ics.md T6 are these pairs. A script therefore follows SPEC-integrator.md R-ALL-4 and prints what it compares, stack traces included; holding its body in a function of the role and paths (section 7.3) keeps the role out of the heap, since the description leaves out the shell's `arguments` (section 6.1). In plain mode the oracle compares the output only.
+A run that `jitcache-expect-exit` expects to end by `abort` or `kill` writes no heap description, since the shell writes it after the run loop, so the oracle compares its output only, as section 7.5 skips its status checks. Its oracle run carries no kill flag and runs to the end, so such a script prints nothing after the point where the signal can strike. A difference fails the sequence (THREAD Verification). The comparisons of SPEC-ics.md T6 are these pairs. A script therefore follows SPEC-integrator.md R-ALL-4 and prints what it compares, stack traces included; holding its body in a function of the role and paths (section 7.3) keeps the role out of the heap, since the description leaves out the shell's `arguments` (section 6.1). In plain mode the oracle compares the output only.
 
 ### 7.7 Bun-hosted runs
 
