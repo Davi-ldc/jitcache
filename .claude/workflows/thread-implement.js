@@ -56,8 +56,9 @@ export const meta = {
 //       that has not built clean, Bun's twins build while Bun code that landed has not, or every
 //       time once the Bun host (BUN_HOST) has landed, and the pin once PIN_HOST has;
 //     unit tests: every testjitcache test in a process of its own, the UCB self-test once the jsc
-//       host (SMOKE_HOST) has landed, and the checks the tasks name that no other rung runs; a
-//       failing test is fixed as an error of the file that defines it;
+//       host (SMOKE_HOST) has landed, and the checks the tasks name that no other rung runs, those
+//       over the engine's own tests compared with the pin build once it exists; a failing test is
+//       fixed as an error of the file that defines it;
 //     smoke: one trivial script through a producer, a consumer and the JITCache-off oracle, once
 //       SMOKE_HOST has landed;
 //     corpora: once the runner (RUNNER_HOST) has landed, the runner in twins mode over every
@@ -859,18 +860,28 @@ const UCB_SELF_TEST = `Then run the UCB self-test, which $vm reaches, once per c
 self-test.js row of SPEC-ucb.md section 13.3, on one fresh artifact: each run is
 \`${TWINS_BIN}/jsc --destroy-vm --useDollarVM=true --useConcurrentJIT=false <the JITCache flags of
 SPEC-integrator.md section 11.1 for that configuration> -e '<that call of $vm.jitCacheUCBSelfTest>'\`,
-the last one with --jitcache-log so its final status shows the fault the row expects. A run whose
+with strict on unless the row says it is off, as every test runs (THREAD Verification), and the last
+one with --jitcache-log so its final status shows the fault the row expects. A run whose
 call throws or whose expectation fails is a failing test "ucb-self-test:<configuration>" in
 Source/JavaScriptCore/jitcache/UCBSelfTest.cpp, with the message as its output.`
 
 // The checks the tasks name in their own text, beyond what other rungs run: mostly JSTests/stress
-// runs. A cycle runs those its builds allow; Verify runs them all.
+// runs. A cycle runs those its builds allow; Verify runs them all. The engine's own tests guard
+// native behavior, which JITCache must leave as it was, faults included (skills/SKILL.md, Scope):
+// many fail natively in an ASan build or under Bun's error messages, so only a difference from the
+// pinned engine is a failure, and without the pin build there is nothing to compare with.
+const PIN_BIN = `${SNAPSHOT_ROOT}/linux-x86_64-debug-local-pin/deps/WebKit/bin`
 const taskChecks = final => `Then run every check the passed tasks name in their own text, listed below, that no other
 rung runs: a testjitcache test ran above, a runner sequence or self-test belongs to the corpora or
 the pin comparison, and a build to V0. ${final
   ? 'Run each on the build it names, the twins build when it names none.'
   : 'Run each on the twins build; one that needs a build this cycle did not make waits for Verify.'} A
-failing check's file is the test or script it runs, from the repository's root.
+check over the engine's own tests (under JSTests/, outside JSTests/jitcache/) guards native
+behavior: run each of its tests on this build and on the pin build, \`${PIN_BIN}/jsc\`, with the
+same options, and report a test as failing only where the two runs differ in exit status, or in
+the message of a thrown error or a failed assertion. While \`${PIN_BIN}/jsc\` does not exist, such a
+check is not run${final ? ': list it as not run' : ' and waits for a later cycle'}. A failing
+check's file is the test or script it runs, from the repository's root.
 ${fence('task_checks', order.filter(t => isPassed(t.id)).flatMap(t => t.checks.map(check => ({ task: t.id, check }))), Infinity)}`
 
 const testsPrompt = tag => `Repo: ${REPO}. You run the unit tests of build ${tag}, which just built the twins target in the build
