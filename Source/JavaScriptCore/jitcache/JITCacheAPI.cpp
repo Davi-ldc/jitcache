@@ -769,6 +769,9 @@ VMState::VMState(const Config& config, StartParts&& parts)
     ASSERT((m_startOutcome == StartOutcome::Fault) == !!m_activityFault);
     ASSERT(!!parts.producerLimitBytes == producing());
     ASSERT((m_startOutcome != StartOutcome::Fault) == !!m_artifact);
+    // Every role's report reads its own artifact's index statistics at each flush (harness sub-SPEC section 9.2).
+    if (m_benchReport && m_artifact)
+        m_benchReport->setArtifact(m_artifact.copyRef());
     if (!parts.producerLimitBytes)
         return;
 

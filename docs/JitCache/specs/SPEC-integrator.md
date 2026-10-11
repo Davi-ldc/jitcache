@@ -643,8 +643,9 @@ public:
 #endif
 
 private:
-    // Step 8 of container sub-SPEC section 8.2, under the opened artifact's m_indexLock.
-    void didPublish(const BodyKey&, uint64_t inode);
+    // Step 8 of container sub-SPEC section 8.2, under the opened artifact's m_indexLock. timed is whether the commit
+    // was given a CommitTiming: only then does the update read a clock, for IndexStatistics' timed updates.
+    void didPublish(const BodyKey&, uint64_t inode, bool timed);
 
     OpenedArtifact& m_artifact;
     ProducerLock& m_producerLock;
