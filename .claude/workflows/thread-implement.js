@@ -260,7 +260,7 @@ const BUILD = {
   properties: {
     success: { type: 'boolean' },
     twinsBuilt: { type: 'boolean', description: 'true when the twins target compiled and linked, whatever the other targets did' },
-    built: { type: 'array', items: { type: 'string' }, description: 'every target that compiled and linked, written exactly as the prompt lists it' },
+    built: { type: 'array', items: { type: 'string' }, description: 'every target that compiled and linked, written as the prompt lists it without --keep-going' },
     commit: { type: 'string', description: 'the commit the build snapshot held' },
     errorLogPath: { type: 'string', description: 'where the full raw error log was saved' },
     notBuilt: { type: 'array', items: { type: 'string' }, description: 'the targets build.ts does not know' },
@@ -845,7 +845,7 @@ root, without the snapshot's directory, or under ${BUN_REPO}/ for Bun's files, a
 error of an aarch64 build with "[aarch64]". Return success=true only on a fully clean
 build+link of every target that ran, twinsBuilt=true when the twins target compiled and
 linked, whatever the others did, and in built every target that compiled and linked, written
-exactly as above.`
+as above without --keep-going.`
 
 // The unit tests: every testjitcache test, each in a process of its own so a crash ends only that
 // test, and, once the jsc host has landed, the UCB self-test, which only $vm reaches.
@@ -1384,7 +1384,8 @@ async function testAndLadder(tag, phaseName, loop, round, build) {
   loop.tests.push({ round, ran: tests.ran, failed: tests.failures.map(f => clean(f.test, 200)) })
   if (tests.failures.length) log(`Build ${tag}: ${tests.failures.length} of ${tests.ran} unit test(s) failed`)
   if (tests.failures.length || !smokeDue()) return { failures: tests.failures, ladder: null }
-  const built = build.built || []
+  // A target as the build ran it carries --keep-going, which says nothing of what it is.
+  const built = (build.built || []).map(t => String(t).replace(/\s+--keep-going\b/g, '').trim())
   const due = { corpora: isPassed(RUNNER_HOST), bun: isPassed(BUN_HOST) && built.includes('bun-twins'), pin: isPassed(PIN_HOST) && built.includes('pin') }
   const ladder = await runSolo(ladderPrompt(tag, ladderPrevious, due), { label: `ladder:${tag}`, phase: phaseName, schema: VERIFY, ...AGENT })
   if (!ladder) {
