@@ -754,10 +754,17 @@ read alike, with no task id, wave or round number, as in "checkpoint: SHA-256 wi
 body and no trailer, Co-Authored-By included.
 ${fence('paths_to_commit', files, Infinity)}${task ? `\n${taskBlock(task)}` : ''}`
 
+// A saved diff holds this repository's changes; a task with files in ~/bun also gets <diff>.bun, the
+// diff of those in that repository with paths from its root, since one git apply covers one repository.
+const saveDiff = (t, path) => `save the diff of its paths in this repository against HEAD, new files whole, to
+${path}${t.files.some(f => f.startsWith('~/bun/'))
+    ? `, and the diff of its paths under ${BUN_REPO}/ against that repository's HEAD, new files whole and with
+paths from that repository's root (\`git -C ${BUN_REPO} diff\`), to ${path}.bun`
+    : ''}`
+
 const restorePrompt = t => `${COMMITTER}
-Task ${t.id} failed. Save the diff of its paths against HEAD, new files whole, to
-${RUN_DIR}/${t.id}-failed.diff; then restore each tracked path to HEAD and delete each new one.
-Commit nothing.
+Task ${t.id} failed. First ${saveDiff(t, `${RUN_DIR}/${t.id}-failed.diff`)}; then restore each
+tracked path to HEAD and delete each new one. Commit nothing.
 ${fence('paths_to_restore', [...t.files, conflictDir(t)], Infinity)}`
 
 // A request that was answered before is kept, numbered, so that only a new answer ends the wait.
@@ -769,7 +776,7 @@ ${INBOX}/${id}.answer.<n>.md, with n the smallest number free for both.`
 // waits in the inbox while the task waits in the run for the answer.
 const parkPrompt = (t, designFiles) => `${COMMITTER}
 Task ${t.id} parks on a design conflict and waits for the human's answer. ${archiveStep(t.id)} Then
-save the diff of its paths against HEAD, new files whole, to ${parkedDiff(t)}. Then write
+${saveDiff(t, parkedDiff(t))}. Then write
 ${INBOX}/${t.id}.request.md: a title naming the task, the text of each design conflict file below,
 the path of the diff, and the line "Answer in ${INBOX}/${t.id}.answer.md". Write it to a temporary
 file in ${INBOX}/ first and rename it, so a reader never sees half of it. Last, restore each
@@ -792,8 +799,9 @@ ${fence('fix_proposal', { conflict: prop.specConflict, kind: 'design', fix: prop
 const reapplyPrompt = (t, diff, exclude) => {
   const ex = exclude.map(f => ` --exclude=${f}`).join('')
   return `${COMMITTER}
-Task ${t.id} continues from earlier work. Run \`git apply --check${ex} ${diff}\`; if it passes,
-apply the diff with \`git apply${ex} ${diff}\`, without committing. If it fails, change nothing and
+Task ${t.id} continues from earlier work. Run \`git apply --check${ex} ${diff}\` here and, if
+${diff}.bun exists, \`git -C ${BUN_REPO} apply --check ${diff}.bun\`. If every check passes, apply
+each diff the same way without --check, without committing. If any check fails, change nothing and
 set ok to false.`
 }
 
