@@ -3191,7 +3191,8 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, SelfTestPart& 
         texts.append(String { text });
     texts.append(bigProgramText());
     for (const String& text : texts) {
-        ProgramFixture fixture = generateProgramFixture(vm, text, 1);
+        // Only roundTripsChild generates children, never a class field initializer's (see there).
+        ProgramFixture fixture = generateProgramFixture(vm, text, 0);
         if (!u7.check(!!fixture.codeBlock, "a corpus program failed to generate"_s))
             return false;
         UnlinkedProgramCodeBlock& program = *fixture.codeBlock.get();
@@ -3199,16 +3200,21 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, SelfTestPart& 
         bool declaresSymbol = holdsSymbolKey(program.variableDeclarations()) || holdsSymbolKey(program.lexicalDeclarations());
         if (!u7.check(!declaresSymbol, "a corpus program declares a symbol, whose per-process hash would make its hashed layout differ between processes"_s))
             return false;
-        if (!roundTripsCore(vm, u7, program, nullptr, provider, UnlinkedCodeBlockCoreKind::Program, "a corpus program"_s))
-            return false;
         auto roundTripsChild = [&](UnlinkedFunctionExecutable* child) {
             if (!child)
                 return false;
+            // A class field initializer's body is never generated here. Its parse makes one DefineFieldNode per field, a
+            // parser-arena node whose destructor never runs but which holds the field's Identifier, so each field name's atom
+            // leaks with JITCache off too; the self-test has no oracle run, so it avoids input the engine leaks on
+            // (SPEC-integrator.harness.md). The initializer's descriptor, class element definitions included, goes through
+            // the program's core.
+            if (child->parseMode() == SourceParseMode::ClassFieldInitializerMode)
+                return true;
             CodeSpecializationKind kind = child->isClassConstructorFunction() ? CodeSpecializationKind::CodeForConstruct : CodeSpecializationKind::CodeForCall;
             ParserError error;
             Strong<UnlinkedFunctionCodeBlock> body { vm, child->unlinkedCodeBlockFor(vm, child->linkedSourceCode(fixture.source), kind, { }, error, child->parseMode()) };
             if (!body)
-                return true; // a body that does not generate on its own, such as a class field initializer's outside its class
+                return true; // a body that does not generate on its own
             return roundTripsCore(vm, u7, *body.get(), child, provider, UnlinkedCodeBlockCoreKind::Function, "a corpus function"_s);
         };
         for (unsigned i = 0; i < std::min<size_t>(program.numberOfFunctionDecls(), 8); ++i) {
@@ -3219,6 +3225,10 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, SelfTestPart& 
             if (!roundTripsChild(program.functionExpr(i)))
                 return false;
         }
+        // After the children's round trips, whose generation parsed them and filled their slots: the program's decoded
+        // children must still come back unparsed, with the lexically scoped features generation gave them (codec E1, E2).
+        if (!roundTripsCore(vm, u7, program, nullptr, provider, UnlinkedCodeBlockCoreKind::Program, "a corpus program"_s))
+            return false;
     }
     return true;
 }
@@ -4645,6 +4655,14 @@ static bool testDecodedButterflyProvenance(VM& vm, VMState& state, JSGlobalObjec
         UnlinkedFunctionCodeBlock* slot = nullptr;
         if (attachInstead) {
             slot = decodedBody(vm, function, generated.source); // no body: the decode is recorded as Decoded
+            if (!slot)
+                return false;
+            // A live decoded UCB attaches only once the constants its atom map marks are atoms (C10, section 7.3.2 step 9),
+            // which the native decode leaves plain (F19); a property-key use of each would atomize it in place.
+            for (auto& constant : slot->constantRegisters()) {
+                if (JSValue value = constant.get(); value && value.isString())
+                    atomizeStringConstant(vm, *asString(value));
+            }
             artifact.list(inputs.key, 41, body->validated(inputs.key, 5000));
             if (decodedBody(vm, function, generated.source) != slot) // the filled slot: an attach
                 return false;
