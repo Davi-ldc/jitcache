@@ -6,11 +6,8 @@
 #include "JITCachePlatform.h"
 #include "ProducerBudget.h"
 #include <algorithm>
-#include <errno.h>
-#include <fcntl.h>
+#include <cerrno>
 #include <limits>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/Locker.h>
@@ -20,6 +17,12 @@
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
 
+#if OS(LINUX)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #if ENABLE(JITCACHE_TWINS)
 #include <signal.h>
 #include <wtf/Scope.h>
@@ -27,12 +30,18 @@
 
 // The writer (container sub-SPEC section 8): it streams a body to a temporary in cache/, rereads and validates it,
 // publishes it with renameat and keeps the shared index current. Every section is opaque bytes to it.
+//
+// Its file work sits behind OS(LINUX) (SPEC-integrator.md section 11). Elsewhere start rejects at start.platform, so no
+// producing VM, and no writer, exists; a commit there fails at writer.create with ENOSYS, which only keeps the writer's
+// interface compiling and linking.
 
 namespace JSC::JITCache {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ArtifactWriter);
 
 namespace ArtifactWriterInternal {
+
+#if OS(LINUX)
 
 // The states a commit's system calls leave, in commit order (harness sub-SPEC section 12). Twins builds can kill the
 // producer at each of them; other builds arm none.
@@ -431,6 +440,8 @@ static String describeUnopenedBody(const BodyOpen& opened)
 }
 #endif
 
+#endif // OS(LINUX)
+
 } // namespace ArtifactWriterInternal
 
 // The sources (SPEC-integrator.md section 6.3).
@@ -489,6 +500,11 @@ void ArtifactWriter::releaseStagingBuffer()
 
 std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitStamp& stamp, const CommitSections& sections)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(stamp);
+    UNUSED_PARAM(sections);
+    return std::unexpected(CommitFailure { WriterChecks::create, String::fromUTF8(safeStrerror(ENOSYS).data()) });
+#else
     using namespace ArtifactWriterInternal;
 
     CommitHooks hooks;
@@ -572,6 +588,7 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitSt
     // Step 8.
     didPublish(stamp.key, *inode);
     return CommitResult { envelope.version, *fileSize };
+#endif
 }
 
 void ArtifactWriter::didPublish(const BodyKey& key, uint64_t inode)

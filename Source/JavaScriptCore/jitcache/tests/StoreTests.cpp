@@ -574,7 +574,7 @@ JITCACHE_TEST(storeRegistrySharesObjects, No)
     JITCACHE_CHECK(third && third != first);
 }
 
-// C4. A listing finds the body names, ignores temporaries and counts foreign names; every later listing of the object
+// C4. A listing finds the body names and ignores every other name; every later listing of the object
 // finds the same set with the same tokens; a body replaced by a rename gets a fresh token at the next listing, and an
 // untouched one keeps its token. Inotify is forced off with a zero listing interval, so each epoch change lists.
 JITCACHE_TEST(storeListingKeepsTokens, No)
@@ -595,8 +595,8 @@ JITCACHE_TEST(storeListingKeepsTokens, No)
         || !artifact->publishBody(context, c, makeBody(c, 3, 3).file.span()))
         return;
 
-    // Temporaries are ignored. A body name with an uppercase digit, a name whose key BodyKey::fromBytes rejects, and any
-    // other name are foreign.
+    // A listing ignores every name that is not a body (container sub-SPEC section 6.2): temporaries, a body name with an
+    // uppercase digit, a name whose key BodyKey::fromBytes rejects, and any other name.
     BodyFileName uppercase = bodyFileName(absent);
     uppercase.characters[0] = 'A';
     BodyFileName rejected = bodyFileName(std::bit_cast<BodyKey>(storeKeyBytes(5, 2)));
@@ -612,7 +612,6 @@ JITCACHE_TEST(storeListingKeepsTokens, No)
     if (!object)
         return;
     JITCACHE_CHECK(object->indexedBodies() == 3);
-    JITCACHE_CHECK(object->foreignNames() == 3);
     uint64_t tokenA = object->token(a);
     uint64_t tokenB = object->token(b);
     uint64_t tokenC = object->token(c);
@@ -622,7 +621,7 @@ JITCACHE_TEST(storeListingKeepsTokens, No)
     for (unsigned listing = 0; listing < 2; ++listing) {
         artifact->bump();
         JITCACHE_CHECK(object->token(a) == tokenA && object->token(b) == tokenB && object->token(c) == tokenC);
-        JITCACHE_CHECK(object->indexedBodies() == 3 && object->foreignNames() == 3);
+        JITCACHE_CHECK(object->indexedBodies() == 3);
     }
 
     if (!artifact->publishBody(context, a, makeBody(a, 9, 9).file.span()))

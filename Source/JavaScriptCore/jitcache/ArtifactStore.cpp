@@ -4,17 +4,10 @@
 #include "JITCacheParameters.h"
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
 #include <limits>
 #include <mutex>
-#include <stddef.h>
-#include <sys/file.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <wtf/ASCIICType.h>
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/HashFunctions.h>
@@ -25,12 +18,24 @@
 #include <wtf/text/StringCommon.h>
 
 #if OS(LINUX)
+#include <dirent.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <stddef.h>
+#include <sys/file.h>
 #include <sys/inotify.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 // The artifact in a process (container sub-SPEC sections 1.1, 2 and 5 to 7): the names, the producer lock, the registry,
 // the opened artifact with its index, listings and refresh, and the store's three reads.
+//
+// Every system call sits behind OS(LINUX) (SPEC-integrator.md section 11). Elsewhere start rejects at start.platform and
+// maintenance fails with platform before either reaches the store, so the calls that would reach the operating system
+// fail with ENOSYS, no lock, opened artifact or saved summary is ever built, and the other definitions only keep the
+// store's interface compiling and linking.
 
 namespace JSC::JITCache {
 
@@ -39,15 +44,6 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SavedSummaries);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(OpenedArtifact);
 
 namespace ArtifactStoreInternal {
-
-// The lock file (container sub-SPEC section 2): the tag, the layout version, four zero bytes, the commit epoch and 40
-// zero bytes.
-static constexpr size_t lockFileBytes = 64;
-static constexpr std::array<uint8_t, 8> lockFileTag { 'J', 'I', 'T', 'C', 'L', 'O', 'C', 'K' };
-static constexpr uint32_t lockFileLayoutVersion = 1;
-static constexpr size_t lockFileVersionOffset = 8;
-static constexpr size_t lockFileEpochOffset = 16;
-static_assert(!(lockFileEpochOffset % alignof(uint64_t)), "the epoch is loaded and bumped atomically through the page-aligned mapping");
 
 // The names of section 1.1.
 static constexpr std::array<char, 4> bodyNameSuffix { '.', 'b', 'i', 'n' };
@@ -65,26 +61,125 @@ static constexpr size_t keySpecializationOffset = 2;
 static constexpr size_t keyModeOffset = 3;
 static constexpr size_t keyIdentityDigestOffset = 8;
 
+static uint64_t loadEpoch(const uint64_t* epoch)
+{
+    return __atomic_load_n(epoch, __ATOMIC_ACQUIRE);
+}
+
+// Hex digits as section 1.1 spells them: lowercase only.
+static std::optional<uint8_t> lowercaseHexDigitValue(char character)
+{
+    if (isASCIIDigit(character))
+        return static_cast<uint8_t>(character - '0');
+    if (character >= 'a' && character <= 'f')
+        return static_cast<uint8_t>(character - 'a' + 10);
+    return std::nullopt;
+}
+
+static void writeLowercaseHex(std::span<char> destination, std::span<const uint8_t> bytes)
+{
+    RELEASE_ASSERT(destination.size() == 2 * bytes.size());
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        destination[2 * index] = upperNibbleToLowercaseASCIIHexDigit(bytes[index]);
+        destination[2 * index + 1] = lowerNibbleToLowercaseASCIIHexDigit(bytes[index]);
+    }
+}
+
+static bool readLowercaseHex(std::span<const char> digits, std::span<uint8_t> bytes)
+{
+    RELEASE_ASSERT(digits.size() == 2 * bytes.size());
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        auto high = lowercaseHexDigitValue(digits[2 * index]);
+        auto low = lowercaseHexDigitValue(digits[2 * index + 1]);
+        if (!high || !low)
+            return false;
+        bytes[index] = static_cast<uint8_t>(*high << 4 | *low);
+    }
+    return true;
+}
+
+static bool isLowercaseHex(std::span<const char> digits)
+{
+    return std::ranges::all_of(digits, [](char character) {
+        return !!lowercaseHexDigitValue(character);
+    });
+}
+
+// The store's three calls that open a file (section 7.5), which the twins builds' fault hook can fail.
+enum class StoreCall : uint8_t { Open, ReadSavedSummaries, Listing };
+
+#if ENABLE(JITCACHE_TWINS)
+static_assert(static_cast<uint8_t>(StoreTesting::Call::Open) == static_cast<uint8_t>(StoreCall::Open));
+static_assert(static_cast<uint8_t>(StoreTesting::Call::ReadSavedSummaries) == static_cast<uint8_t>(StoreCall::ReadSavedSummaries));
+static_assert(static_cast<uint8_t>(StoreTesting::Call::Listing) == static_cast<uint8_t>(StoreCall::Listing));
+
+// Every hook is made of atomics: the listing's hook is read under m_indexLock, which is a leaf, and the shell sets the
+// hooks from its own thread. A test sets a hook while the store is idle, so the fields need no joint update; armed is
+// stored last and loaded first.
+struct StoreFaultHook {
+    std::atomic<bool> armed { false };
+    std::atomic<uint8_t> call { 0 };
+    std::atomic<int> error { 0 };
+    std::atomic<uint64_t> n { 0 }; // 0: every call
+    std::atomic<uint64_t> calls { 0 }; // the calls of that kind since the hook was set
+};
+static StoreFaultHook storeFaultHook;
+static std::atomic<bool> storeRegistrySharing { true };
+static std::atomic<bool> storeInotifyEnabled { true };
+static std::atomic<double> storeListingIntervalSeconds { std::numeric_limits<double>::quiet_NaN() }; // NaN: the parameter
+#endif
+
+// The error the fault hook makes the call's openat fail with, or 0.
+static int injectedOpenError(StoreCall call)
+{
+#if ENABLE(JITCACHE_TWINS)
+    if (!storeFaultHook.armed.load())
+        return 0;
+    if (storeFaultHook.call.load() != static_cast<uint8_t>(call))
+        return 0;
+    uint64_t ordinal = storeFaultHook.calls.fetch_add(1) + 1;
+    uint64_t n = storeFaultHook.n.load();
+    if (n && ordinal != n)
+        return 0;
+    return storeFaultHook.error.load();
+#else
+    UNUSED_PARAM(call);
+    return 0;
+#endif
+}
+
+static Seconds fallbackListingInterval()
+{
+#if ENABLE(JITCACHE_TWINS)
+    double seconds = storeListingIntervalSeconds.load();
+    if (!std::isnan(seconds))
+        return Seconds(seconds);
+#endif
+    return Seconds::fromMilliseconds(static_cast<double>(fallbackListingIntervalMilliseconds));
+}
+
+#if OS(LINUX)
+
+// The lock file (container sub-SPEC section 2): the tag, the layout version, four zero bytes, the commit epoch and 40
+// zero bytes.
+static constexpr size_t lockFileBytes = 64;
+static constexpr std::array<uint8_t, 8> lockFileTag { 'J', 'I', 'T', 'C', 'L', 'O', 'C', 'K' };
+static constexpr uint32_t lockFileLayoutVersion = 1;
+static constexpr size_t lockFileVersionOffset = 8;
+static constexpr size_t lockFileEpochOffset = 16;
+static_assert(!(lockFileEpochOffset % alignof(uint64_t)), "the epoch is loaded and bumped atomically through the page-aligned mapping");
+
 // The summary sections a score reads (section 7.3), which the scoring read checksums.
 static constexpr std::array<SectionKind, 3> summarySectionKinds { SectionKind::UCBFeedback, SectionKind::CBSummaryBaseline, SectionKind::ICsBaseline };
 
-// The pinned descriptors (section 5.2). O_PATH and MAP_POPULATE are Linux's; elsewhere start rejects at its build-ID
-// step before any artifact is opened, so the fallbacks only keep the file compiling.
+// The pinned descriptors (section 5.2).
 static constexpr int directoryFlags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
-#if OS(LINUX)
 static constexpr int pinnedParentFlags = O_PATH | O_DIRECTORY | O_CLOEXEC;
-static constexpr int populateMapping = MAP_POPULATE;
-#else
-static constexpr int pinnedParentFlags = directoryFlags;
-static constexpr int populateMapping = 0;
-#endif
 
-#if OS(LINUX)
 // One read of the inotify queue holds at least one event with the longest name.
 static constexpr size_t inotifyBufferBytes = 4096;
 static_assert(inotifyBufferBytes >= sizeof(struct inotify_event) + NAME_MAX + 1);
 static constexpr uint32_t watchedEvents = IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR;
-#endif
 
 static int openAt(int directoryFd, const char* name, int flags, mode_t mode = 0)
 {
@@ -219,96 +314,9 @@ static void unmapEpoch(const uint64_t* epoch)
     munmap(const_cast<uint8_t*>(page), lockFileBytes);
 }
 
-static uint64_t loadEpoch(const uint64_t* epoch)
-{
-    return __atomic_load_n(epoch, __ATOMIC_ACQUIRE);
-}
-
-// Hex digits as section 1.1 spells them: lowercase only.
-static std::optional<uint8_t> lowercaseHexDigitValue(char character)
-{
-    if (isASCIIDigit(character))
-        return static_cast<uint8_t>(character - '0');
-    if (character >= 'a' && character <= 'f')
-        return static_cast<uint8_t>(character - 'a' + 10);
-    return std::nullopt;
-}
-
-static void writeLowercaseHex(std::span<char> destination, std::span<const uint8_t> bytes)
-{
-    RELEASE_ASSERT(destination.size() == 2 * bytes.size());
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        destination[2 * index] = upperNibbleToLowercaseASCIIHexDigit(bytes[index]);
-        destination[2 * index + 1] = lowerNibbleToLowercaseASCIIHexDigit(bytes[index]);
-    }
-}
-
-static bool readLowercaseHex(std::span<const char> digits, std::span<uint8_t> bytes)
-{
-    RELEASE_ASSERT(digits.size() == 2 * bytes.size());
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        auto high = lowercaseHexDigitValue(digits[2 * index]);
-        auto low = lowercaseHexDigitValue(digits[2 * index + 1]);
-        if (!high || !low)
-            return false;
-        bytes[index] = static_cast<uint8_t>(*high << 4 | *low);
-    }
-    return true;
-}
-
-static bool isLowercaseHex(std::span<const char> digits)
-{
-    return std::ranges::all_of(digits, [](char character) {
-        return !!lowercaseHexDigitValue(character);
-    });
-}
-
 static bool isDotOrDotDot(std::span<const char> name)
 {
     return (name.size() == 1 && name[0] == '.') || (name.size() == 2 && name[0] == '.' && name[1] == '.');
-}
-
-// The store's three calls that open a file (section 7.5), which the twins builds' fault hook can fail.
-enum class StoreCall : uint8_t { Open, ReadSavedSummaries, Listing };
-
-#if ENABLE(JITCACHE_TWINS)
-static_assert(static_cast<uint8_t>(StoreTesting::Call::Open) == static_cast<uint8_t>(StoreCall::Open));
-static_assert(static_cast<uint8_t>(StoreTesting::Call::ReadSavedSummaries) == static_cast<uint8_t>(StoreCall::ReadSavedSummaries));
-static_assert(static_cast<uint8_t>(StoreTesting::Call::Listing) == static_cast<uint8_t>(StoreCall::Listing));
-
-// Every hook is made of atomics: the listing's hook is read under m_indexLock, which is a leaf, and the shell sets the
-// hooks from its own thread. A test sets a hook while the store is idle, so the fields need no joint update; armed is
-// stored last and loaded first.
-struct StoreFaultHook {
-    std::atomic<bool> armed { false };
-    std::atomic<uint8_t> call { 0 };
-    std::atomic<int> error { 0 };
-    std::atomic<uint64_t> n { 0 }; // 0: every call
-    std::atomic<uint64_t> calls { 0 }; // the calls of that kind since the hook was set
-};
-static StoreFaultHook storeFaultHook;
-static std::atomic<bool> storeRegistrySharing { true };
-static std::atomic<bool> storeInotifyEnabled { true };
-static std::atomic<double> storeListingIntervalSeconds { std::numeric_limits<double>::quiet_NaN() }; // NaN: the parameter
-#endif
-
-// The error the fault hook makes the call's openat fail with, or 0.
-static int injectedOpenError(StoreCall call)
-{
-#if ENABLE(JITCACHE_TWINS)
-    if (!storeFaultHook.armed.load())
-        return 0;
-    if (storeFaultHook.call.load() != static_cast<uint8_t>(call))
-        return 0;
-    uint64_t ordinal = storeFaultHook.calls.fetch_add(1) + 1;
-    uint64_t n = storeFaultHook.n.load();
-    if (n && ordinal != n)
-        return 0;
-    return storeFaultHook.error.load();
-#else
-    UNUSED_PARAM(call);
-    return 0;
-#endif
 }
 
 static bool registryShares()
@@ -320,20 +328,9 @@ static bool registryShares()
 #endif
 }
 
-static Seconds fallbackListingInterval()
-{
-#if ENABLE(JITCACHE_TWINS)
-    double seconds = storeListingIntervalSeconds.load();
-    if (!std::isnan(seconds))
-        return Seconds(seconds);
-#endif
-    return Seconds::fromMilliseconds(static_cast<double>(fallbackListingIntervalMilliseconds));
-}
-
 // The inotify watch on the pinned bodies/ directory (section 6.3), or -1, in which case the object refreshes by listing.
 static int watchBodies(int bodiesFd)
 {
-#if OS(LINUX)
 #if ENABLE(JITCACHE_TWINS)
     if (!storeInotifyEnabled.load())
         return -1;
@@ -348,16 +345,11 @@ static int watchBodies(int bodiesFd)
         return -1;
     }
     return fd;
-#else
-    UNUSED_PARAM(bodiesFd);
-    return -1;
-#endif
 }
 
 // Reads the inotify queue until EAGAIN and drops what it read: a listing reads the directory those events describe.
 static void discardEvents(int inotifyFd)
 {
-#if OS(LINUX)
     if (inotifyFd < 0)
         return;
     std::array<uint8_t, inotifyBufferBytes> buffer;
@@ -369,9 +361,6 @@ static void discardEvents(int inotifyFd)
             continue;
         return;
     }
-#else
-    UNUSED_PARAM(inotifyFd);
-#endif
 }
 
 struct MapFailure {
@@ -421,6 +410,16 @@ static std::span<const uint8_t> sectionIn(std::span<const uint8_t> file, const B
         return { };
     return file.subspan(static_cast<size_t>(extent->offset), static_cast<size_t>(extent->size));
 }
+
+#else // !OS(LINUX)
+
+// No object has an inotify descriptor here.
+static void discardEvents(int inotifyFd)
+{
+    ASSERT_UNUSED(inotifyFd, inotifyFd < 0);
+}
+
+#endif // OS(LINUX)
 
 } // namespace ArtifactStoreInternal
 
@@ -481,6 +480,11 @@ std::optional<TemporaryKind> temporaryKindOfFileName(std::span<const char> name)
 
 int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char> name, uint64_t inode)>& visit)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(directoryFd);
+    UNUSED_PARAM(visit);
+    return ENOSYS;
+#else
     using namespace ArtifactStoreInternal;
     // "." relative to the descriptor gives an open file description of the listing's own: fdopendir of a dup would share
     // the descriptor's offset, which glibc's fdopendir does not reset, so a second listing would read nothing.
@@ -508,10 +512,16 @@ int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char>
     }
     closedir(directory);
     return error;
+#endif
 }
 
 int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(parentFd);
+    UNUSED_PARAM(bytesRemoved);
+    return ENOSYS;
+#else
     using namespace ArtifactStoreInternal;
     int replacedFd = openAt(parentFd, ArtifactNames::replacedCacheDirectory.characters(), directoryFlags);
     if (replacedFd < 0)
@@ -558,6 +568,7 @@ int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved)
     if (!error && ::unlinkat(parentFd, ArtifactNames::replacedCacheDirectory.characters(), AT_REMOVEDIR))
         error = errno;
     return error;
+#endif
 }
 
 // The producer lock (container sub-SPEC section 2).
@@ -570,6 +581,10 @@ ProducerLock::ProducerLock(int fd, uint64_t* epoch)
 
 std::expected<std::unique_ptr<ProducerLock>, ProducerLock::Failure> ProducerLock::tryAcquire(int parentFd)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(parentFd);
+    return std::unexpected(Failure { false, ENOSYS });
+#else
     using namespace ArtifactStoreInternal;
     int fd = openAt(parentFd, ArtifactNames::lockFile.characters(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0)
@@ -600,6 +615,7 @@ std::expected<std::unique_ptr<ProducerLock>, ProducerLock::Failure> ProducerLock
     }
     auto* epoch = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(page) + lockFileEpochOffset);
     return std::unique_ptr<ProducerLock>(new ProducerLock(fd, epoch));
+#endif
 }
 
 uint64_t ProducerLock::bumpEpoch()
@@ -610,9 +626,13 @@ uint64_t ProducerLock::bumpEpoch()
 
 ProducerLock::~ProducerLock()
 {
+#if OS(LINUX)
     using namespace ArtifactStoreInternal;
     munmap(reinterpret_cast<uint8_t*>(m_epoch) - lockFileEpochOffset, lockFileBytes);
     ::close(m_fd);
+#else
+    UNUSED_VARIABLE(m_fd);
+#endif
 }
 
 // The index's hash and traits (container sub-SPEC section 6.1).
@@ -663,7 +683,11 @@ SavedSummaries::SavedSummaries(std::span<const uint8_t> mapping, uint64_t versio
 
 SavedSummaries::~SavedSummaries()
 {
+#if OS(LINUX)
     ArtifactStoreInternal::unmap(m_mapping);
+#else
+    UNUSED_VARIABLE(m_mapping);
+#endif
 }
 
 uint64_t SavedSummaries::version() const
@@ -705,6 +729,12 @@ OpenedArtifact::OpenedArtifact(int parentFd, int cacheFd, int bodiesFd, const st
 
 std::expected<Ref<OpenedArtifact>, int> OpenedArtifact::create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(parentFd);
+    UNUSED_PARAM(cacheFd);
+    UNUSED_PARAM(headerBytes);
+    return std::unexpected(ENOSYS);
+#else
     using namespace ArtifactStoreInternal;
     // The object pins descriptors of its own, so it outlives the descriptors of the VM that built it, and every later
     // lookup, open and write goes through the directories whose header that VM checked.
@@ -740,10 +770,12 @@ std::expected<Ref<OpenedArtifact>, int> OpenedArtifact::create(int parentFd, int
     if (error)
         return std::unexpected(error);
     return artifact;
+#endif
 }
 
 OpenedArtifact::~OpenedArtifact()
 {
+#if OS(LINUX)
     // The last reference is gone, so no other thread reads the guarded fields.
     if (m_epoch)
         ArtifactStoreInternal::unmapEpoch(m_epoch);
@@ -752,6 +784,9 @@ OpenedArtifact::~OpenedArtifact()
     ::close(m_bodiesFd);
     ::close(m_cacheFd);
     ::close(m_parentFd);
+#else
+    UNUSED_VARIABLE(m_parentFd);
+#endif
 }
 
 uint64_t OpenedArtifact::token(const BodyKey& key)
@@ -763,6 +798,11 @@ uint64_t OpenedArtifact::token(const BodyKey& key)
 
 BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(key);
+    UNUSED_PARAM(mode);
+    return { StoreOutcome::Invalid, nullptr, { "container.io"_s, ENOSYS } };
+#else
     using namespace ArtifactStoreInternal;
     uint64_t tokenBeforeOpen;
     {
@@ -775,7 +815,7 @@ BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
         return { StoreOutcome::Absent, nullptr, { } };
 
     // The file work runs outside m_indexLock (section 6.4).
-    auto mapped = mapBodyFile(StoreCall::Open, m_bodiesFd, key, populateMapping);
+    auto mapped = mapBodyFile(StoreCall::Open, m_bodiesFd, key, MAP_POPULATE);
     if (!mapped) {
         if (!mapped.error().error)
             return { StoreOutcome::Invalid, nullptr, { mapped.error().check, 0 } };
@@ -799,10 +839,16 @@ BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
     Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, layout->version, layout->highestTier, layout->llintThreshold,
         layout->counterProgress, file, sections));
     return { StoreOutcome::Found, WTF::move(body), { }, file.size() };
+#endif
 }
 
 SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, ValidationMode mode)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(key);
+    UNUSED_PARAM(mode);
+    return { StoreOutcome::Invalid, nullptr, { "container.io"_s, ENOSYS } };
+#else
     using namespace ArtifactStoreInternal;
     // The read opens the body by its name whatever the index holds, so a body the index lacks, such as one whose producer
     // died between its rename and its epoch bump, is found; ENOENT alone answers that no body exists. The token read
@@ -834,6 +880,7 @@ SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, Validati
         sectionIn(file, *layout, SectionKind::UCBFeedback), sectionIn(file, *layout, SectionKind::CBSummaryBaseline),
         sectionIn(file, *layout, SectionKind::ICsBaseline)));
     return { StoreOutcome::Found, WTF::move(summaries), { } };
+#endif
 }
 
 bool OpenedArtifact::containsKey(const BodyKey& key)
@@ -847,12 +894,6 @@ uint64_t OpenedArtifact::indexedBodies()
 {
     Locker locker { m_indexLock };
     return m_index.size();
-}
-
-uint64_t OpenedArtifact::foreignNames()
-{
-    Locker locker { m_indexLock };
-    return m_foreignNames;
 }
 
 std::span<const uint8_t, 16> OpenedArtifact::headerDigest() const
@@ -907,22 +948,20 @@ int OpenedArtifact::list()
     m_lastListingStart = MonotonicTime::now();
 
     HashMap<BodyKey, IndexEntry, BodyKeyHash, BodyKeyHashTraits> index;
-    uint64_t foreignNames = 0;
     // A key whose entry in the old index holds the same nonzero inode keeps its token; every other key takes a fresh one.
-    // A body replaced by renameat carries its temporary's inode, so it gets a fresh token.
+    // A body replaced by renameat carries its temporary's inode, so it gets a fresh token. Every name that is not a body's
+    // is ignored: temporaries, and stray files, which clean reports.
     const auto& previousIndex = m_index;
     uint64_t& nextToken = m_nextToken;
     int error = injectedOpenError(StoreCall::Listing);
     if (!error) {
         error = listDirectory(m_bodiesFd, [&](std::span<const char> name, uint64_t inode) {
-            if (auto key = bodyKeyFromFileName(name)) {
-                auto previous = previousIndex.find(*key);
-                bool keepsToken = previous != previousIndex.end() && previous->value.inode && previous->value.inode == inode;
-                index.set(*key, IndexEntry { keepsToken ? previous->value.token : nextToken++, inode });
+            auto key = bodyKeyFromFileName(name);
+            if (!key)
                 return;
-            }
-            if (!temporaryKindOfFileName(name))
-                ++foreignNames;
+            auto previous = previousIndex.find(*key);
+            bool keepsToken = previous != previousIndex.end() && previous->value.inode && previous->value.inode == inode;
+            index.set(*key, IndexEntry { keepsToken ? previous->value.token : nextToken++, inode });
         });
     }
 
@@ -935,7 +974,6 @@ int OpenedArtifact::list()
         return error;
     }
     m_index = WTF::move(index);
-    m_foreignNames = foreignNames;
     if (epoch)
         m_lastEpochSeen = *epoch;
     m_listingPending = false;
@@ -1058,6 +1096,12 @@ ArtifactRegistry& ArtifactRegistry::singleton()
 
 std::expected<Ref<OpenedArtifact>, int> ArtifactRegistry::take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(parentFd);
+    UNUSED_PARAM(cacheFd);
+    UNUSED_PARAM(headerBytes);
+    return std::unexpected(ENOSYS);
+#else
     // The key is the directory start opened and read the header through, so an object found under it pinned the very
     // directory whose header the VM checked.
     struct stat status;
@@ -1104,6 +1148,7 @@ std::expected<Ref<OpenedArtifact>, int> ArtifactRegistry::take(int parentFd, int
     // When another VM registered its object first, that object wins, and this one is destroyed with created, outside
     // the lock.
     return registered.releaseNonNull();
+#endif
 }
 
 #if ENABLE(JITCACHE_TWINS)

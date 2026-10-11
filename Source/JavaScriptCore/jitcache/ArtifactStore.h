@@ -212,9 +212,6 @@ public:
     // which opens no file and changes no state, and the start bench event (SPEC-integrator.md section 3.3; harness
     // sub-SPEC section 9.2).
     uint64_t indexedBodies();
-    // The names in bodies/ that the last listing that succeeded found to be neither a body name nor a temporary, which
-    // a listing counts for status (section 6.2). Read under m_indexLock without a refresh.
-    uint64_t foreignNames();
 
     std::span<const uint8_t, 16> headerDigest() const LIFETIME_BOUND;
     int cacheFd() const; // the writer's temporaries (section 8.2)
@@ -253,7 +250,6 @@ private:
     // When the last listing started, so an object that refreshes by listing lists at most once per
     // fallbackListingIntervalMilliseconds (section 6.3).
     MonotonicTime m_lastListingStart WTF_GUARDED_BY_LOCK(m_indexLock);
-    uint64_t m_foreignNames WTF_GUARDED_BY_LOCK(m_indexLock) { 0 };
     bool m_listingPending WTF_GUARDED_BY_LOCK(m_indexLock) { false };
     bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false };
 };

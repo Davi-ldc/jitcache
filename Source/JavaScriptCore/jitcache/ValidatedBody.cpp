@@ -1,9 +1,12 @@
 #include "config.h"
 #include "ValidatedBody.h"
 
-#include <sys/mman.h>
 #include <wtf/Assertions.h>
 #include <wtf/TZoneMallocInlines.h>
+
+#if OS(LINUX)
+#include <sys/mman.h>
+#endif
 
 #if ENABLE(JITCACHE_TWINS)
 #include <algorithm>
@@ -35,10 +38,15 @@ ValidatedBody::~ValidatedBody()
 #endif
     // The store maps a body from a page boundary and hands over exactly what mmap returned (container sub-SPEC
     // section 7.2); a test body has no mapping, and its buffer goes with m_testBuffer.
+#if OS(LINUX)
     if (!m_mapping.empty()) {
         int result = munmap(const_cast<uint8_t*>(m_mapping.data()), m_mapping.size());
         ASSERT_UNUSED(result, !result);
     }
+#else
+    // Off Linux the store maps nothing (SPEC-integrator.md section 11).
+    ASSERT(m_mapping.empty());
+#endif
 }
 
 const BodyKey& ValidatedBody::key() const

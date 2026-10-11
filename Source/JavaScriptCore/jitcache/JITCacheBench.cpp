@@ -8,16 +8,25 @@
 #include "VM.h"
 #include <atomic>
 #include <cmath>
-#include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
-#include <sys/resource.h>
-#include <time.h>
-#include <unistd.h>
+#include <wtf/ProcessID.h>
 #include <wtf/SafeStrerror.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/CString.h>
+
+#if OS(LINUX)
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <time.h>
+#include <unistd.h>
+#else
+#include <wtf/CPUTime.h>
+#endif
+
+// The bench report (harness sub-SPEC section 9). Its file work sits behind OS(LINUX) (SPEC-integrator.md section 11):
+// elsewhere start rejects at start.platform before it opens a report, so open returns null and no report exists.
 
 namespace JSC::JITCache {
 
@@ -28,8 +37,10 @@ namespace JITCacheBenchInternal {
 // The buffer goes out once it passes 1 MiB (harness sub-SPEC section 9.1).
 static constexpr size_t flushThresholdCharacters = 1 * MB;
 
+#if OS(LINUX)
 // Each report takes the next ordinal, which every line carries as "vm".
 static std::atomic<unsigned> nextVMOrdinal { 0 };
+#endif
 
 static void appendValue(StringBuilder& line, const decltype(BenchField::value)& value)
 {
@@ -76,6 +87,10 @@ static void writeOut(int fd, StringBuilder& buffer)
 {
     if (buffer.isEmpty())
         return;
+#if !OS(LINUX)
+    UNUSED_PARAM(fd);
+    buffer.clear();
+#else
     CString bytes = buffer.toString().utf8();
     buffer.clear();
     auto remaining = bytes.span();
@@ -90,22 +105,28 @@ static void writeOut(int fd, StringBuilder& buffer)
         }
         remaining = remaining.subspan(static_cast<size_t>(written));
     }
+#endif
 }
 
 } // namespace JITCacheBenchInternal
 
 std::unique_ptr<BenchReport> BenchReport::open(const String& path)
 {
+#if !OS(LINUX)
+    UNUSED_PARAM(path);
+    return nullptr;
+#else
     int fd = ::open(path.utf8().data(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0)
         return nullptr;
     unsigned vmOrdinal = JITCacheBenchInternal::nextVMOrdinal.fetch_add(1, std::memory_order_relaxed);
     return std::unique_ptr<BenchReport>(new BenchReport(fd, vmOrdinal));
+#endif
 }
 
 BenchReport::BenchReport(int fd, unsigned vmOrdinal)
     : m_fd(fd)
-    , m_pid(getpid())
+    , m_pid(getCurrentProcessID())
     , m_vmOrdinal(vmOrdinal)
 {
 }
@@ -115,7 +136,9 @@ BenchReport::~BenchReport()
     // The owner flushes the report first (section 9.1). Lines recorded since still reach the file, without another
     // round of the summary lines, which a report closed before its VM was configured must not write.
     JITCacheBenchInternal::writeOut(m_fd, m_buffer);
+#if OS(LINUX)
     ::close(m_fd);
+#endif
 }
 
 void BenchReport::record(ASCIILiteral event, std::initializer_list<BenchField> fields)
@@ -151,11 +174,13 @@ void BenchReport::flush()
         { "peak"_s, static_cast<uint64_t>(m_budget ? m_budget->peakBytes() : 0) },
     });
 
+    uint64_t maxResidentBytes = 0;
+#if OS(LINUX)
     // Linux reports ru_maxrss in kilobytes.
     struct rusage usage { };
-    uint64_t maxResidentBytes = 0;
     if (!getrusage(RUSAGE_SELF, &usage))
         maxResidentBytes = static_cast<uint64_t>(usage.ru_maxrss) * KB;
+#endif
     JITCacheBenchInternal::appendLine(m_buffer, m_pid, m_vmOrdinal, "process"_s, {
         { "maxResidentBytes"_s, maxResidentBytes },
         { "executablePoolCommittedBytes"_s, static_cast<uint64_t>(ExecutableAllocator::committedByteCount()) },
@@ -194,9 +219,14 @@ BenchReport* benchReport(VM& vm)
 
 uint64_t benchThreadCPUNanoseconds()
 {
+#if OS(LINUX)
     struct timespec now { };
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return static_cast<uint64_t>(now.tv_sec) * 1000000000 + static_cast<uint64_t>(now.tv_nsec);
+#else
+    // Nothing measures here, since no report exists; WTF's thread CPU clock keeps the definition meaningful.
+    return static_cast<uint64_t>(CPUTime::forCurrentThread().nanoseconds());
+#endif
 }
 
 String bodyKeyHex(const BodyKey& key)
