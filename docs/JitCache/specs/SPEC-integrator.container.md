@@ -292,6 +292,26 @@ The registry holds no producer lock: each producing `VMState` owns its `Producer
 `ArtifactStore.h` declares it with the members sections 6 to 8 use:
 
 ```cpp
+// The process's totals for one object, which the bench report's index line writes (harness sub-SPEC section 9.2). The
+// times are MonotonicTime wall time.
+struct IndexStatistics {
+    bool hasInotify { false };
+    uint64_t bodies { 0 };                    // the index's size
+    uint64_t tableBytes { 0 };                // the index's table
+    uint64_t buildNanoseconds { 0 };          // the listing that built the index
+    uint64_t listings { 0 };                  // every listing, failed ones and the build's included
+    uint64_t listingNanoseconds { 0 };
+    uint64_t failedListings { 0 };
+    uint64_t queueOverflows { 0 };            // IN_Q_OVERFLOW events, each of which forces a listing
+    uint64_t refreshes { 0 };                 // refreshes that found the epoch moved
+    uint64_t refreshNanoseconds { 0 };
+    uint64_t deferredRefreshes { 0 };         // refreshes the interval deferred (section 6.3)
+    uint64_t deferredMisses { 0 };            // keys a deferred listing left as misses (section 6.3)
+    uint64_t writerUpdates { 0 };             // step 8 of section 8.2
+    uint64_t timedWriterUpdates { 0 };        // those of a commit given a CommitTiming, the only ones that read a clock
+    uint64_t writerUpdateNanoseconds { 0 };
+};
+
 class OpenedArtifact final : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<OpenedArtifact> {
     WTF_MAKE_NONCOPYABLE(OpenedArtifact);
     WTF_MAKE_TZONE_ALLOCATED(OpenedArtifact);
@@ -304,6 +324,7 @@ public:
     SavedSummaryRead readSavedSummaries(const BodyKey&, ValidationMode);
     bool containsKey(const BodyKey&);
     uint64_t indexedBodies();   // the index's size, under m_indexLock without a refresh: Progress::indexedBodies and the start event
+    IndexStatistics statistics();   // under m_indexLock without a refresh: the bench report's index line
 
     std::span<const uint8_t, 16> headerDigest() const LIFETIME_BOUND;
     int cacheFd() const;    // the writer's temporaries (section 8.2)
@@ -316,7 +337,7 @@ private:
     static std::expected<Ref<OpenedArtifact>, int> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
     OpenedArtifact(int parentFd, int cacheFd, int bodiesFd, const std::array<uint8_t, 16>& headerDigest, const uint64_t* epoch, int inotifyFd);
 
-    void refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock);                       // section 6.3
+    bool refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock);                       // section 6.3; true when the interval deferred a listing
     int list() WTF_REQUIRES_LOCK(m_indexLock);                                 // section 6.2; 0, or the failing call's errno, after which the index is as it was
     void drainEvents(bool listOnOverflow) WTF_REQUIRES_LOCK(m_indexLock);       // section 6.3; the writer's step 8 passes false
     void learn(const BodyKey&, uint64_t inode) WTF_REQUIRES_LOCK(m_indexLock);  // section 6.4
@@ -337,6 +358,8 @@ private:
     MonotonicTime m_lastListingStart WTF_GUARDED_BY_LOCK(m_indexLock);   // when the last listing started (section 6.3)
     bool m_listingPending WTF_GUARDED_BY_LOCK(m_indexLock) { false };
     bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false };
+    IndexStatistics m_statistics WTF_GUARDED_BY_LOCK(m_indexLock);
+    HashSet<BodyKey, BodyKeyHash, BodyKeyHashTraits> m_missedWhileDeferred WTF_GUARDED_BY_LOCK(m_indexLock);   // section 6.3
 };
 ```
 
@@ -391,7 +414,7 @@ Every object refreshes, whatever the roles of the VMs that hold it (section 5.1)
 `refreshIfStale()` runs under `m_indexLock` at the start of every `token` and `open` (section 7). It returns at once when the object has no epoch or its pinned directory is gone. Otherwise it loads the epoch and returns when it equals the last epoch seen; this is the whole cost of a lookup while nothing changes, one acquire load from a shared page. When the epoch moved:
 
 - with inotify and no listing pending, it records the new epoch and reads events until `EAGAIN`. For a body name, `IN_MOVED_TO` gives the key a fresh token and inode 0 (present, inode unknown), and `IN_MOVED_FROM` and `IN_DELETE` erase it. `IN_Q_OVERFLOW`, or a `read` that fails with an error other than `EAGAIN`, makes it list (section 6.2), and the descriptor stays. `IN_DELETE_SELF`, `IN_MOVE_SELF` and `IN_IGNORED` mean the pinned directory is gone: the index is cleared, the inotify descriptor closed and the object marked gone, so every later lookup misses without refreshing;
-- without inotify, or with a listing pending, it lists (section 6.2), unless the object's last listing started less than `fallbackListingIntervalMilliseconds` ago (SPEC-integrator.md section 16). Then it returns without recording the epoch: the index answers as it stood, a body it lacks is a miss (THREAD Failures), and the first lookup after the interval lists. The object records when each listing starts, so a process whose objects have no inotify descriptor lists at most once per interval.
+- without inotify, or with a listing pending, it lists (section 6.2), unless the object's last listing started less than `fallbackListingIntervalMilliseconds` ago (SPEC-integrator.md section 16). Then it returns without recording the epoch: the index answers as it stood, a body it lacks is a miss (THREAD Failures), and the first lookup after the interval lists. The object records when each listing starts, so a process whose objects have no inotify descriptor lists at most once per interval. A `token` that finds no body while the interval defers a listing keeps its key in `m_missedWhileDeferred`, and the next listing adds to `deferredMisses` each of those keys it finds and empties the set: those are the bodies the deferral left as misses, against which the bench tunes the interval (SPEC-integrator.md IB2).
 
 The object holds `bodiesFd` open until it is destroyed, and Linux raises `IN_DELETE_SELF` and `IN_IGNORED` for a removed directory only once its last open reference closes, so of the three only `IN_MOVE_SELF` reaches a live object. Removing `bodies/` requires unlinking every body in it first: an object that refreshes by reading events erases each key at its `IN_DELETE`, and one that refreshes by listing, without inotify or with a listing pending, fails that listing with `ENOENT`, which leaves the index as it was until `open` meets each stale key's `ENOENT` (section 7).
 
