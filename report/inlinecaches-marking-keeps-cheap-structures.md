@@ -1,0 +1,11 @@
+# inlinecaches.md: marking keeps a case's structure while its prototype is marked
+
+Section: Property inline cache, Reset, the GC caller.
+
+The section says GC finalization resets an IC "when the mirrored structure or any reference held by the inlined handler or the chain has died". A reader takes that to mean a structure dies once no object has it, and plans a GC reset by dropping the last object. Marking keeps the structure longer. When the collector visits an executable's edge to its CodeBlock (`ScriptExecutable::visitCodeBlockEdge`, and the executable's output constraint while that CodeBlock is unmarked, `FunctionExecutable::visitOutputConstraintsImpl` and `GlobalExecutable::visitOutputConstraintsImpl`), it marks the CodeBlock's global object and runs `CodeBlock::propagateTransitions`. That walks every property IC (`PropertyInlineCache::propagateTransitions`, `InlineCacheHandler::propagateTransitions`, `AccessCase::propagateTransitions`) and calls `Structure::markIfCheap` on the mirrored structure and on each case's structure and poly-proto chain. `Structure::isCheapDuringGC` holds when the structure's realm is null or marked and, unless the structure is poly-proto, its stored prototype is null or marked; the structure is then marked. A transition case also marks its new structure when its old one is marked, and an LLInt CodeBlock does the same for its `put_by_id`, `put_private_name` and `set_private_brand` metadata.
+
+So a case on an object whose prototype stays alive, such as an object literal on `Object.prototype`, keeps its structure through every collection that has marked the prototype by the time it visits the edge, and `resetByGC` stays clear. A GC reset needs a structure whose prototype dies with it.
+
+Proposed text, appended to the GC bullet of Reset:
+
+"Marking keeps a case's structure without any object: when the collector visits the CodeBlock's executable, `CodeBlock::propagateTransitions` marks each structure the mirror or a case names whose realm and stored prototype are already marked (`Structure::markIfCheap`), and a transition case's new structure when its old one is marked. A GC reset therefore needs the structure's prototype to be unmarked at that visit, which in practice means the prototype dies with the structure."
