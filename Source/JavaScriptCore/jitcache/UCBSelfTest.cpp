@@ -3070,12 +3070,15 @@ static bool sameAsDecoded(VM& vm, SelfTestPart& u7, UnlinkedCodeBlock& original,
         return false;
     if (!u7.check(liveFeedbackCounts(original) == liveFeedbackCounts(decoded), makeString("decoded "_s, what, " has other profile, child or constant counts"_s)))
         return false;
-    if (auto* originalGlobal = dynamicDowncast<UnlinkedGlobalCodeBlock>(original)) {
+    // UnlinkedGlobalCodeBlock declares no ClassInfo, so a dynamic cast to it accepts a function UCB, whose cell lacks these
+    // fields. A function body's parse fields are its UFE's (T2); they travel in the identity section, and both sides share the holder.
+    if (!is<UnlinkedFunctionCodeBlock>(original)) {
+        auto& originalGlobal = uncheckedDowncast<UnlinkedGlobalCodeBlock>(original);
         auto& decodedGlobal = uncheckedDowncast<UnlinkedGlobalCodeBlock>(decoded);
-        bool sameParse = originalGlobal->codeFeatures() == decodedGlobal.codeFeatures() && originalGlobal->lexicallyScopedFeatures() == decodedGlobal.lexicallyScopedFeatures()
-            && originalGlobal->hasCapturedVariables() == decodedGlobal.hasCapturedVariables() && originalGlobal->lineCount() == decodedGlobal.lineCount()
-            && originalGlobal->endColumn() == decodedGlobal.endColumn() && WTF::equal(originalGlobal->sourceURLDirective(), decodedGlobal.sourceURLDirective())
-            && WTF::equal(originalGlobal->sourceMappingURLDirective(), decodedGlobal.sourceMappingURLDirective());
+        bool sameParse = originalGlobal.codeFeatures() == decodedGlobal.codeFeatures() && originalGlobal.lexicallyScopedFeatures() == decodedGlobal.lexicallyScopedFeatures()
+            && originalGlobal.hasCapturedVariables() == decodedGlobal.hasCapturedVariables() && originalGlobal.lineCount() == decodedGlobal.lineCount()
+            && originalGlobal.endColumn() == decodedGlobal.endColumn() && WTF::equal(originalGlobal.sourceURLDirective(), decodedGlobal.sourceURLDirective())
+            && WTF::equal(originalGlobal.sourceMappingURLDirective(), decodedGlobal.sourceMappingURLDirective());
         if (!u7.check(sameParse, makeString("decoded "_s, what, " has other global parse fields"_s)))
             return false;
     }
