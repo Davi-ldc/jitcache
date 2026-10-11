@@ -1,0 +1,1287 @@
+#!/usr/bin/env bun
+// JITCache's test runner (SPEC-integrator.harness.md section 7). It runs every JS script of the test directories as
+// sequences of jsc or Bun processes over one artifact, checks each run (exit, checkers, final status, twin report),
+// compares every run that configures JITCache with a JITCache-off run of the same script, the oracle of THREAD
+// Verification, and runs testjitcache's C++ groups. Its self-tests (JSTests/jitcache/integrator/runner/self-test.ts)
+// import it as a module, so it starts only when run as a program.
+
+import { spawn } from "node:child_process";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+export const repositoryRoot = resolve(import.meta.dirname, "../..");
+export const corpusRoot = join(repositoryRoot, "JSTests/jitcache");
+
+// Directives are comment lines within a script's first lines (section 7.2).
+const directiveLines = 50;
+
+export const lanes = ["ucb", "image", "cb", "ics", "integrator"] as const;
+export type Lane = (typeof lanes)[number];
+export type Role = "Off" | "Producer" | "ConsumerProducer" | "Consumer" | "Maintenance";
+const roles: readonly Role[] = ["Off", "Producer", "ConsumerProducer", "Consumer", "Maintenance"];
+const modeFlags = { Producer: "p", ConsumerProducer: "p-c", Consumer: "c" } as const;
+
+export const configuresJITCache = (role: Role) => role === "Producer" || role === "ConsumerProducer" || role === "Consumer";
+const produces = (role: Role) => role === "Producer" || role === "ConsumerProducer";
+const imports = (role: Role) => role === "Consumer" || role === "ConsumerProducer";
+
+// Section 7.4: the sequence a script that declares none runs, and whether the directory's scripts need a twins build.
+// In twins mode every directory's runs also get --useConcurrentJIT=false unless their options set it.
+const laneDefaults: Record<Lane, { sequence: string; twinsRequired: boolean }> = {
+  ucb: { sequence: "Producer --jitcache-delta-at-exit; Consumer", twinsRequired: false },
+  image: { sequence: "Producer --jitcache-delta-at-exit; Consumer", twinsRequired: false },
+  cb: { sequence: "Producer --jitcache-delta-at-exit; Consumer", twinsRequired: false },
+  ics: { sequence: "Producer; Consumer", twinsRequired: true },
+  integrator: { sequence: "Producer --jitcache-delta-at-exit; Consumer", twinsRequired: true },
+};
+
+// The twin report's spellings (harness sub-SPEC section 2).
+export const twinParts = ["ucb", "image", "cb", "ics", "integrator"] as const;
+export const twinDomains = ["engine-image", "executable-pool", "structure-reservation", "heap"] as const;
+
+// Section 7.7: of the JITCache flags, those a Bun-hosted run passes to Bun, those it drops, and every other one is
+// malformed there, since Bun takes no other (SPEC-integrator.md section 11.2).
+const bunPassedFlags = new Set([
+  "--jitcache",
+  "--jitcache-mode",
+  "--jitcache-strict",
+  "--jitcache-bench-report",
+  "--jitcache-twins-report",
+  "--jitcache-twins-record-layout",
+  "--jitcache-twins-avoid-layout",
+  "--jitcache-body-events",
+]);
+const bunDroppedFlags = new Set(["--jitcache-delta-at-exit", "--jitcache-log", "--jitcache-describe-heap"]);
+
+const hostArchitecture = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;
+
+const usage = `Usage: run-jitcache-tests --build=<WebKit build directory> [--bun=<Bun executable>] [--mode=twins|plain]
+                         [--extra-options="<options>"] [--filter=<regex>] [--jobs=<n>] [--timeout=<seconds>]
+                         [--js-only | --cpp-only] [--qemu-cpu=<model>] [<test paths>...]
+--build names <build-root>/linux-<arch>-<profile>/deps/WebKit. A test path is a script, or a directory whose .js and
+.mjs files are scripts; the default paths are JSTests/jitcache/ucb, image, cb, ics and integrator. The runner's own
+tests, whose fixtures in JSTests/jitcache/integrator/runner/ fail on purpose, run through
+bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins build>.`;
+
+export class UsageError extends Error {}
+class CalibrationError extends Error {}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Command line (section 7.1)
+
+export interface RunnerOptions {
+  build: string;
+  bun: string | null;
+  mode: "twins" | "plain" | null; // null: twins exactly when the build has twins
+  extraOptions: string[];
+  filter: RegExp | null;
+  jobs: number;
+  timeoutSeconds: number;
+  jsOnly: boolean;
+  cppOnly: boolean;
+  qemuCpu: string | null;
+  testPaths: string[];
+}
+
+export function parseCommandLine(argv: string[]): RunnerOptions {
+  const options: RunnerOptions = {
+    build: "",
+    bun: null,
+    mode: null,
+    extraOptions: [],
+    filter: null,
+    jobs: 5,
+    timeoutSeconds: 600,
+    jsOnly: false,
+    cppOnly: false,
+    qemuCpu: null,
+    testPaths: [],
+  };
+  for (const argument of argv) {
+    if (!argument.startsWith("--")) {
+      options.testPaths.push(resolve(argument));
+      continue;
+    }
+    const equals = argument.indexOf("=");
+    const name = equals < 0 ? argument : argument.slice(0, equals);
+    const value = equals < 0 ? null : argument.slice(equals + 1);
+    const required = () => {
+      if (value === null || value === "") throw new UsageError(`${name} needs a value`);
+      return value;
+    };
+    switch (name) {
+      case "--build":
+        options.build = resolve(required());
+        break;
+      case "--bun":
+        options.bun = resolve(required());
+        break;
+      case "--mode": {
+        const mode = required();
+        if (mode !== "twins" && mode !== "plain") throw new UsageError(`--mode is twins or plain, not ${mode}`);
+        options.mode = mode;
+        break;
+      }
+      case "--extra-options":
+        options.extraOptions = optionList(value ?? "", "--extra-options");
+        break;
+      case "--filter":
+        try {
+          options.filter = new RegExp(required());
+        } catch (error) {
+          throw new UsageError(`--filter is no regular expression: ${(error as Error).message}`);
+        }
+        break;
+      case "--jobs":
+        options.jobs = positiveInteger(required(), name);
+        break;
+      case "--timeout":
+        options.timeoutSeconds = positiveInteger(required(), name);
+        break;
+      case "--js-only":
+      case "--cpp-only":
+        if (value !== null) throw new UsageError(`${name} takes no value`);
+        if (name === "--js-only") options.jsOnly = true;
+        else options.cppOnly = true;
+        break;
+      case "--qemu-cpu":
+        options.qemuCpu = required();
+        break;
+      default:
+        throw new UsageError(`unknown option ${argument}`);
+    }
+  }
+  if (!options.build) throw new UsageError("--build is required");
+  if (options.jsOnly && options.cppOnly) throw new UsageError("--js-only and --cpp-only exclude each other");
+  return options;
+}
+
+function positiveInteger(text: string, name: string): number {
+  const number = Number(text);
+  if (!Number.isInteger(number) || number < 1) throw new UsageError(`${name} takes a positive integer, not ${text}`);
+  return number;
+}
+
+// A space-separated list of --options, as --extra-options and a run's options are written.
+function optionList(text: string, where: string): string[] {
+  const options = text.split(/\s+/).filter(Boolean);
+  for (const option of options) {
+    if (!option.startsWith("--")) throw new UsageError(`${where} holds ${option}, which is no --option`);
+  }
+  return options;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The build
+
+export interface Build {
+  directory: string;
+  jsc: string;
+  testjitcache: string;
+  architecture: string;
+  twins: boolean; // cmakeconfig.h defines ENABLE_JITCACHE_TWINS as 1
+  sanitized: boolean; // CMakeCache.txt sets ENABLE_SANITIZERS to address
+  emulated: boolean; // an aarch64 build on an x86_64 host, whose processes run under QEMU user mode (section 7.9)
+  emulationRoot: string; // qemu-aarch64 -L
+  resultsDirectory: string;
+}
+
+export function loadBuild(directory: string): Build {
+  const build = resolve(directory);
+  if (!statSync(build, { throwIfNoEntry: false })?.isDirectory()) throw new UsageError(`--build names no directory: ${build}`);
+  const jsc = join(build, "bin/jsc");
+  if (!statSync(jsc, { throwIfNoEntry: false })?.isFile()) throw new UsageError(`${build} holds no bin/jsc`);
+  const config = readText(join(build, "cmakeconfig.h")) ?? "";
+  const cache = readText(join(build, "CMakeCache.txt")) ?? "";
+  const twins = /^#define ENABLE_JITCACHE_TWINS 1\s*$/m.test(config);
+  const sanitizers = /^ENABLE_SANITIZERS:[A-Z]+=(.*)$/m.exec(cache)?.[1] ?? "";
+  const sanitized = sanitizers.split(/[;,\s]+/).includes("address");
+  // <build-root>/linux-<arch>-<profile>/deps/WebKit names its architecture; another layout falls back on the cache.
+  const profileDirectory = resolve(build, "../..");
+  const laidOut = basename(resolve(build, "..")) === "deps" && /^linux-/.test(basename(profileDirectory));
+  const architecture = /^linux-(x86_64|aarch64)-/.exec(basename(profileDirectory))?.[1]
+    ?? /^CMAKE_SYSTEM_PROCESSOR:[A-Z]+=(.*)$/m.exec(cache)?.[1]?.trim()
+    ?? hostArchitecture;
+  const emulated = architecture === "aarch64" && hostArchitecture === "x86_64";
+  // The ASan runtime of the aarch64 builds needs glibc 2.34 or newer, which the sysroot build.ts links against lacks.
+  const emulationRoot = sanitized
+    ? resolve(process.env.JITCACHE_AARCH64_ASAN_ROOT || join(homedir(), "jitcachearm/arm64-glibc-root"))
+    : resolve(process.env.JITCACHE_AARCH64_SYSROOT || join(homedir(), "collo-local/tools/linux-sysroot-glibc-arm64"));
+  return {
+    directory: build,
+    jsc,
+    testjitcache: join(build, "bin/testjitcache"),
+    architecture,
+    twins,
+    sanitized,
+    emulated,
+    emulationRoot,
+    resultsDirectory: laidOut ? join(dirname(profileDirectory), "jitcache-results") : join(build, "jitcache-results"),
+  };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Processes
+
+export interface ProcessIO {
+  env: Record<string, string | undefined>;
+  cwd: string;
+  stdout: string; // file paths
+  stderr: string;
+}
+
+export interface ProcessEnd {
+  code: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  error: string | null; // the process could not start
+}
+
+export function runProcess(executable: string, args: string[], io: ProcessIO, timeoutSeconds: number): Promise<ProcessEnd> {
+  const stdout = openSync(io.stdout, "w");
+  const stderr = openSync(io.stderr, "w");
+  return new Promise(done => {
+    let settled = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (end: ProcessEnd) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      closeSync(stdout);
+      closeSync(stderr);
+      done(end);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(executable, args, { cwd: io.cwd, env: io.env, stdio: ["ignore", stdout, stderr] });
+    } catch (error) {
+      finish({ code: null, signal: null, timedOut: false, error: String((error as Error).message ?? error) });
+      return;
+    }
+    timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutSeconds * 1000);
+    child.on("error", error => finish({ code: null, signal: null, timedOut, error: error.message }));
+    child.on("exit", (code, signal) => finish({ code, signal, timedOut, error: null }));
+  });
+}
+
+// The guest stack sizes of section 7.9: 8 + 64·k MiB with k drawn from 1 to 64, distinct among the processes of one
+// sequence, or of one calibration, since under QEMU the stack is the one input that moves the heap (N26). A process
+// that belongs to neither, such as testjitcache's, whose heap no twin check compares, draws its k alone.
+const guestStackSizes = 64;
+const guestStackMiB = (k: number) => 8 + 64 * k;
+const drawGuestStack = () => 1 + Math.floor(Math.random() * guestStackSizes);
+
+export class StackSizes {
+  private readonly drawn = new Set<number>();
+
+  // runAttempt refuses a sequence that would start more processes than there are sizes, so only a caller that skipped
+  // that check can exhaust them.
+  next(): number {
+    if (this.drawn.size === guestStackSizes) throw new Error(`more than ${guestStackSizes} processes drew from one set of guest stack sizes`);
+    let k: number;
+    do k = drawGuestStack();
+    while (this.drawn.has(k));
+    this.drawn.add(k);
+    return guestStackMiB(k);
+  }
+}
+
+export class Launcher {
+  constructor(readonly build: Build, readonly timeoutSeconds: number, readonly defaultCpu: string) {}
+
+  // An executable of the build, of the pin or the Bun executable: under QEMU user mode when the build is emulated, as
+  // qemu-aarch64 -L <root> -cpu <model> -s <n>M <executable> <arguments> (section 7.9). stacks holds the sizes the
+  // process's sequence or calibration drew, and is null for a process outside both.
+  engine(executable: string, args: string[], io: ProcessIO, stacks: StackSizes | null, cpu: string | null = null): Promise<ProcessEnd> {
+    if (!this.build.emulated) return runProcess(executable, args, io, this.timeoutSeconds);
+    const env = { ...io.env };
+    // LeakSanitizer cannot start its tracer under QEMU.
+    if (this.build.sanitized) env.ASAN_OPTIONS = env.ASAN_OPTIONS ? `${env.ASAN_OPTIONS}:detect_leaks=0` : "detect_leaks=0";
+    // qemu-aarch64 8.2.2 reads -s 1G as a 128 KiB stack, so the size is written in M.
+    const stack = stacks ? stacks.next() : guestStackMiB(drawGuestStack());
+    const qemuArgs = ["-L", this.build.emulationRoot, "-cpu", cpu ?? this.defaultCpu, "-s", `${stack}M`, executable, ...args];
+    return runProcess("qemu-aarch64", qemuArgs, { ...io, env }, this.timeoutSeconds);
+  }
+
+  // A process of the host, such as a checker, which the Bun that runs this runner runs.
+  host(executable: string, args: string[], io: ProcessIO): Promise<ProcessEnd> {
+    return runProcess(executable, args, io, this.timeoutSeconds);
+  }
+}
+
+export function describeEnd(end: ProcessEnd): string {
+  if (end.error) return `could not start: ${end.error}`;
+  if (end.timedOut) return "timed out";
+  if (end.signal) return `ended by ${end.signal}`;
+  return `exited with ${end.code}`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Scripts and directives (section 7.2)
+
+export type ExpectedExit = number | "abort" | "kill";
+export type TwinKind = "difference" | "skip" | "coincidence";
+
+// A <run index>, alone naming that run of every sequence, or <sequence>:<run> naming one sequence's.
+export interface RunAddress {
+  sequence: number | null;
+  run: number;
+}
+
+export interface RunSpec {
+  role: Role;
+  options: string[]; // a Maintenance run's maintenance command line instead
+}
+
+export interface Script {
+  path: string;
+  display: string;
+  lane: Lane | null;
+  host: "jsc" | "bun";
+  sequences: RunSpec[][];
+  requiresTwins: boolean;
+  heapOff: string | null;
+  pinOff: string | null;
+  expectExit: { at: RunAddress; exit: ExpectedExit }[];
+  faults: { at: RunAddress; step: string; required: boolean }[];
+  expectNoInstall: RunAddress[];
+  expectTwin: { at: RunAddress; kind: TwinKind; subject: string }[];
+  checks: { at: RunAddress; checker: string }[];
+  qemuCpu: { at: RunAddress; model: string }[];
+}
+
+export class MalformedScript extends Error {}
+
+export const addresses = (at: RunAddress, sequence: number, run: number) =>
+  at.run === run && (at.sequence === null || at.sequence === sequence);
+
+export function displayPath(path: string): string {
+  const inCorpus = relative(corpusRoot, path);
+  if (!inCorpus.startsWith("..") && !isAbsolute(inCorpus)) return inCorpus;
+  const inWorkingDirectory = relative(process.cwd(), path);
+  return inWorkingDirectory.startsWith("..") || isAbsolute(inWorkingDirectory) ? path : inWorkingDirectory;
+}
+
+// The lane directory a script sits in, at any depth below it: JSTests/jitcache/<lane>/.
+export function laneOf(path: string): Lane | null {
+  const directories = dirname(resolve(path)).split(sep);
+  for (let i = directories.length - 2; i >= 0; --i) {
+    const lane = directories[i + 1] as Lane;
+    if (directories[i] === "jitcache" && lanes.includes(lane)) return lane;
+  }
+  return null;
+}
+
+function parseSequence(text: string): RunSpec[] {
+  const runs = text.split(";").map(run => run.trim());
+  if (runs.some(run => !run)) throw new MalformedScript(`jitcache-runs holds an empty run: ${text}`);
+  return runs.map(run => {
+    const [role, ...options] = run.split(/\s+/);
+    if (!roles.includes(role as Role)) throw new MalformedScript(`unknown role ${role} in jitcache-runs`);
+    if (role === "Maintenance") {
+      if (!options.length) throw new MalformedScript("a Maintenance run needs a maintenance command line");
+      return { role: "Maintenance" as Role, options };
+    }
+    for (const option of options) {
+      if (!option.startsWith("--")) throw new MalformedScript(`run option ${option} is no --option`);
+    }
+    return { role: role as Role, options };
+  });
+}
+
+function parseAddress(text: string): RunAddress {
+  const match = /^(?:(\d+):)?(\d+)$/.exec(text);
+  if (!match) throw new MalformedScript(`${text} is no run index`);
+  return { sequence: match[1] === undefined ? null : Number(match[1]), run: Number(match[2]) };
+}
+
+function parseExpectedExit(text: string): ExpectedExit {
+  if (text === "abort" || text === "kill") return text;
+  if (!/^\d+$/.test(text) || Number(text) > 255) throw new MalformedScript(`${text} is no exit code, abort or kill`);
+  return Number(text);
+}
+
+export function parseScript(path: string): Script {
+  const absolute = resolve(path);
+  const lane = laneOf(absolute);
+  const script: Script = {
+    path: absolute,
+    display: displayPath(absolute),
+    lane,
+    host: "jsc",
+    sequences: [],
+    requiresTwins: false,
+    heapOff: null,
+    pinOff: null,
+    expectExit: [],
+    faults: [],
+    expectNoInstall: [],
+    expectTwin: [],
+    checks: [],
+    qemuCpu: [],
+  };
+  const singletons = new Set<string>();
+  const once = (name: string) => {
+    if (singletons.has(name)) throw new MalformedScript(`jitcache-${name} appears twice`);
+    singletons.add(name);
+  };
+  const lines = readFileSync(absolute, "utf8").split("\n").slice(0, directiveLines);
+  lines.forEach((line, index) => {
+    if (!/^\s*\/\/\s*jitcache-/.test(line)) return;
+    const match = /^\s*\/\/\s*jitcache-([a-z0-9-]+):(.*)$/.exec(line);
+    if (!match) throw new MalformedScript(`line ${index + 1} is no directive: ${line.trim()}`);
+    const [, name, rest] = match;
+    const value = rest.trim();
+    const words = value.split(/\s+/).filter(Boolean);
+    const arity = (count: number) => {
+      if (words.length !== count) throw new MalformedScript(`jitcache-${name} takes ${count} words: ${value}`);
+    };
+    const reason = () => {
+      if (words[0] !== "off" || words.length < 2) throw new MalformedScript(`jitcache-${name} reads off <reason>`);
+      return words.slice(1).join(" ");
+    };
+    switch (name) {
+      case "runs":
+        script.sequences.push(parseSequence(value));
+        break;
+      case "host":
+        once(name);
+        if (value !== "jsc" && value !== "bun") throw new MalformedScript(`jitcache-host is jsc or bun, not ${value}`);
+        script.host = value;
+        break;
+      case "requires":
+        once(name);
+        if (value !== "twins") throw new MalformedScript(`jitcache-requires takes twins, not ${value}`);
+        script.requiresTwins = true;
+        break;
+      case "expect-exit":
+        arity(2);
+        script.expectExit.push({ at: parseAddress(words[0]), exit: parseExpectedExit(words[1]) });
+        break;
+      case "expect-fault":
+      case "require-fault":
+        arity(2);
+        script.faults.push({ at: parseAddress(words[0]), step: words[1], required: name === "require-fault" });
+        break;
+      case "expect-no-install":
+        arity(1);
+        script.expectNoInstall.push(parseAddress(words[0]));
+        break;
+      case "expect-twin": {
+        arity(3);
+        const kind = words[1] as TwinKind;
+        const subjects: readonly string[] = kind === "coincidence" ? twinDomains : kind === "difference" || kind === "skip" ? twinParts : [];
+        if (!subjects.includes(words[2])) throw new MalformedScript(`jitcache-expect-twin cannot declare ${words[1]} ${words[2]}`);
+        script.expectTwin.push({ at: parseAddress(words[0]), kind, subject: words[2] });
+        break;
+      }
+      case "check": {
+        arity(2);
+        const checker = resolve(dirname(absolute), words[1]);
+        if (!statSync(checker, { throwIfNoEntry: false })?.isFile()) throw new MalformedScript(`checker ${words[1]} does not exist`);
+        script.checks.push({ at: parseAddress(words[0]), checker });
+        break;
+      }
+      case "heap":
+        once(name);
+        script.heapOff = reason();
+        break;
+      case "pin":
+        once(name);
+        script.pinOff = reason();
+        break;
+      case "qemu-cpu":
+        arity(2);
+        script.qemuCpu.push({ at: parseAddress(words[0]), model: words[1] });
+        break;
+      default:
+        throw new MalformedScript(`unknown directive jitcache-${name}`);
+    }
+  });
+
+  if (!script.sequences.length) {
+    if (!lane) throw new MalformedScript("the script declares no jitcache-runs, and its directory gives no default sequence");
+    script.sequences.push(parseSequence(laneDefaults[lane].sequence));
+  }
+  if (lane && laneDefaults[lane].twinsRequired) script.requiresTwins = true;
+
+  const named = (at: RunAddress) =>
+    script.sequences.flatMap((runs, k) => runs.flatMap((run, i) => (addresses(at, k, i) ? [run] : [])));
+  const allAddresses = [
+    ...script.expectExit.map(e => e.at),
+    ...script.faults.map(f => f.at),
+    ...script.expectNoInstall,
+    ...script.expectTwin.map(t => t.at),
+    ...script.checks.map(c => c.at),
+    ...script.qemuCpu.map(q => q.at),
+  ];
+  for (const at of allAddresses) {
+    if (!named(at).length) throw new MalformedScript(`run ${at.sequence === null ? "" : `${at.sequence}:`}${at.run} names no run`);
+  }
+  for (const at of script.expectNoInstall) {
+    if (named(at).some(run => !imports(run.role))) throw new MalformedScript("jitcache-expect-no-install names a run that is neither a Consumer nor a ConsumerProducer");
+  }
+  for (const twin of script.expectTwin) {
+    if (named(twin.at).some(run => !configuresJITCache(run.role))) throw new MalformedScript("jitcache-expect-twin names a run without JITCache, which writes no twin report");
+  }
+  return script;
+}
+
+// Section 7.7: the option problems that make a Bun-hosted script malformed, given the --extra-options of this run.
+export function bunOptionProblem(script: Script, extraOptions: string[]): string | null {
+  if (script.host !== "bun") return null;
+  for (const runs of script.sequences) {
+    for (const run of runs) {
+      if (run.role === "Maintenance") continue;
+      for (const option of [...extraOptions, ...run.options]) {
+        const name = flagName(option);
+        if (name.startsWith("--jitcache")) {
+          if (!bunPassedFlags.has(name) && !bunDroppedFlags.has(name)) return `Bun takes no ${name}`;
+        } else if (!option.includes("=")) {
+          return `${option} has no value to pass to Bun as BUN_JSC_${option.slice(2)}`;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+const flagName = (option: string) => {
+  const equals = option.indexOf("=");
+  return equals < 0 ? option : option.slice(0, equals);
+};
+
+// The last value an option list gives a boolean JSC option, or null when none sets it.
+function booleanOption(options: string[], name: string): boolean | null {
+  let value: boolean | null = null;
+  for (const option of options) {
+    if (option === `--${name}`) value = true;
+    else if (option.startsWith(`--${name}=`)) value = /^(true|yes|1)$/i.test(option.slice(name.length + 3));
+  }
+  return value;
+}
+
+export const expectedExit = (script: Script, sequence: number, run: number): ExpectedExit =>
+  script.expectExit.findLast(e => addresses(e.at, sequence, run))?.exit ?? 0;
+
+const endsBySignal = (exit: ExpectedExit) => exit === "abort" || exit === "kill";
+
+export function exitProblem(end: ProcessEnd, expected: ExpectedExit): string | null {
+  if (end.error || end.timedOut) return describeEnd(end);
+  const signal = expected === "abort" ? "SIGABRT" : expected === "kill" ? "SIGKILL" : null;
+  if (signal ? end.signal === signal : end.code === expected && !end.signal) return null;
+  return `${describeEnd(end)}, expected ${signal ? `to end by ${signal}` : `to exit with ${expected}`}`;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Results
+
+export interface Failure {
+  sequence: number | null; // null for the script as a whole
+  attempt: number | null;
+  run: number | null;
+  role: Role | null;
+  check: string;
+  detail: string;
+}
+
+// HARNESS.md: the runner writes each run's results as JSON lines under the build root.
+class ResultsLog {
+  readonly path: string;
+
+  constructor(directory: string, fallback: string) {
+    const name = `${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}.jsonl`;
+    try {
+      mkdirSync(directory, { recursive: true });
+      this.path = join(directory, name);
+      appendFileSync(this.path, "");
+    } catch {
+      this.path = join(fallback, name);
+    }
+  }
+
+  write(record: object) {
+    appendFileSync(this.path, `${JSON.stringify(record)}\n`);
+  }
+}
+
+class Pool {
+  private running = 0;
+  private readonly waiting: (() => void)[] = [];
+
+  constructor(private readonly size: number) {}
+
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    if (this.running >= this.size) await new Promise<void>(resume => this.waiting.push(resume));
+    ++this.running;
+    try {
+      return await work();
+    } finally {
+      --this.running;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The session: one invocation of the runner
+
+// What the command lines of section 7.3 depend on beyond the script and the run.
+export interface CommandContext {
+  readonly twins: boolean;
+  readonly extraOptions: string[];
+  readonly mallocForceEnabled: boolean; // the calibration of section 7.3 chose WebKitMallocForceEnabled=1
+}
+
+// The environment of every jsc or Bun process; twins-mode processes get the calibration's variable.
+export function engineEnvironment(context: CommandContext): Record<string, string | undefined> {
+  return context.mallocForceEnabled ? { ...process.env, WebKitMallocForceEnabled: "1" } : { ...process.env };
+}
+
+export class Session implements CommandContext {
+  readonly mode: "twins" | "plain";
+  readonly launcher: Launcher;
+  readonly results: ResultsLog;
+  readonly base: string; // the invocation's temporary directory
+  readonly pool: Pool;
+  mallocForceEnabled = false;
+  private calibrated = false;
+  readonly listed: string[] = [];
+  passed = 0;
+  failed = 0;
+  skipped = 0;
+  private keepBase = false;
+
+  constructor(readonly options: RunnerOptions, readonly build: Build) {
+    if (options.mode === "twins" && !build.twins) throw new UsageError(`--mode=twins needs a twins build, and ${build.directory} is none`);
+    if (options.qemuCpu !== null && !build.emulated) throw new UsageError("--qemu-cpu applies only to an aarch64 build on an x86_64 host");
+    this.mode = options.mode ?? (build.twins ? "twins" : "plain");
+    this.base = mkdtempSync(join(tmpdir(), "jitcache-tests-"));
+    this.launcher = new Launcher(build, options.timeoutSeconds, options.qemuCpu ?? "max");
+    this.results = new ResultsLog(build.resultsDirectory, this.base);
+    this.pool = new Pool(options.jobs);
+  }
+
+  get twins() {
+    return this.mode === "twins";
+  }
+
+  get extraOptions() {
+    return this.options.extraOptions;
+  }
+
+  // Section 7.3: before the first twins-mode sequence, check that the heap moves between processes, and where it stays
+  // put, hand the JSC heap to libpas, whose pages the kernel places (N17).
+  async calibrate() {
+    if (!this.twins || this.calibrated) return;
+    this.calibrated = true;
+    const probeNames = ["vm", "cell", "atom"];
+    for (const forced of [false, true]) {
+      const directory = mkdtempSync(join(this.base, "calibration-"));
+      const stacks = new StackSizes();
+      const env = forced ? { ...process.env, WebKitMallocForceEnabled: "1" } : { ...process.env };
+      const probes: string[][] = [];
+      for (let i = 0; i < 2; ++i) {
+        const layout = join(directory, `calibration${i}.layout`);
+        const io = { env, cwd: directory, stdout: join(directory, `calibration${i}.stdout`), stderr: join(directory, `calibration${i}.stderr`) };
+        const args = ["--useDollarVM=true", `--jitcache-twins-record-layout=${layout}`, ...this.options.extraOptions, "-e", ""];
+        const end = await this.launcher.engine(this.build.jsc, args, io, stacks);
+        // Only the layout matters: a process without --destroy-vm may still end on a leak report.
+        const heap = /^heap (\S+) (\S+) (\S+)$/m.exec(readText(layout) ?? "");
+        if (!heap) throw new CalibrationError(`calibration process ${i} wrote no heap line (${describeEnd(end)}): ${tail(readText(io.stderr))}`);
+        probes.push(heap.slice(1));
+      }
+      const repeated = probeNames.filter((_, p) => probes[0][p] === probes[1][p]);
+      this.results.write({ kind: "calibration", webKitMallocForceEnabled: forced, probes, repeated });
+      if (!repeated.length) {
+        this.mallocForceEnabled = forced;
+        console.log(forced
+          ? "calibration: the build's allocator keeps the heap at one base; every twins-mode process gets WebKitMallocForceEnabled=1"
+          : "calibration: the heap moves between processes");
+        rmSync(directory, { recursive: true, force: true });
+        return;
+      }
+      console.log(`calibration${forced ? " with WebKitMallocForceEnabled=1" : ""}: the ${repeated.join(", ")} probe repeats between two processes`);
+    }
+    throw new CalibrationError("the heap domain does not move between processes, even with WebKitMallocForceEnabled=1, so no twin check could tell a heap target the image recorded from one it resolves");
+  }
+
+  keep() {
+    this.keepBase = true;
+  }
+
+  // Prints the summary, writes it to the results and returns the exit code.
+  finish(error: string | null): number {
+    if (error) {
+      console.log(`ERROR ${error}`);
+      this.failed++;
+    }
+    for (const line of this.listed) console.log(`listed: ${line}`);
+    const exit = this.failed ? 1 : 0;
+    this.results.write({ kind: "summary", passed: this.passed, failed: this.failed, skipped: this.skipped, listed: this.listed, error, exit });
+    console.log(`${this.passed} passed, ${this.failed} failed, ${this.skipped} skipped`);
+    // The results fall back to the temporary directory when the build root takes no file, and then outlive the run too.
+    if (this.keepBase || this.results.path.startsWith(`${this.base}${sep}`)) console.log(`kept: ${this.base}`);
+    else rmSync(this.base, { recursive: true, force: true });
+    console.log(`results: ${this.results.path}`);
+    return exit;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Run command lines (sections 7.3 and 7.7)
+
+export interface SequencePaths {
+  artifact: string;
+  scratch: string;
+  layouts: string[]; // the layout files earlier runs of the sequence wrote
+}
+
+// Section 7.4: in twins mode, --useConcurrentJIT=false unless the run's options set useConcurrentJIT.
+function directoryDefaults(context: CommandContext, script: Script, options: string[]): string[] {
+  if (!context.twins || !script.lane || booleanOption(options, "useConcurrentJIT") !== null) return [];
+  return ["--useConcurrentJIT=false"];
+}
+
+// Whether concurrent JIT is off in a run, by the last setting its command line gives, or JSC's default, on.
+export function concurrentJITOff(context: CommandContext, script: Script, options: string[]): boolean {
+  const effective = booleanOption([...directoryDefaults(context, script, options), ...context.extraOptions, ...options], "useConcurrentJIT");
+  return effective === false;
+}
+
+// <jsc> --destroy-vm [JITCache flags] [twins-mode flags] [directory defaults] [extra options] <options> <script> -- ...
+// name is run<i> or oracle<j>, which names the files the run writes in the scratch directory.
+export function jscArguments(context: CommandContext, script: Script, sequence: number, role: Role, options: string[], paths: SequencePaths, name: string): string[] {
+  const { artifact, scratch } = paths;
+  const args = ["--destroy-vm"];
+  const jitcache = configuresJITCache(role);
+  if (jitcache) args.push(`--jitcache=${artifact}`, `--jitcache-mode=${modeFlags[role as keyof typeof modeFlags]}`, "--jitcache-strict=1", "--jitcache-log");
+  if (context.twins) {
+    args.push("--useDollarVM=true", `--jitcache-describe-heap=${join(scratch, `${name}.heap`)}`);
+    if (jitcache) {
+      args.push(
+        `--jitcache-twins-report=${join(scratch, `${name}.twins`)}`,
+        `--jitcache-twins-record-layout=${join(scratch, `${name}.layout`)}`,
+        `--jitcache-twins-avoid-layout=${paths.layouts.join(",")}`,
+      );
+    }
+  }
+  args.push(...directoryDefaults(context, script, options), ...context.extraOptions, ...options);
+  args.push(script.path, "--", role, scratch, artifact, String(sequence));
+  return args;
+}
+
+// <bun> <JITCache flags> <script> <role> <scratch> <artifact> <sequence>, with the JSC options as BUN_JSC_ variables.
+export function bunInvocation(context: CommandContext, script: Script, sequence: number, role: Role, options: string[], paths: SequencePaths, name: string) {
+  const { artifact, scratch } = paths;
+  const args: string[] = [];
+  if (configuresJITCache(role)) {
+    args.push(`--jitcache=${artifact}`, `--jitcache-mode=${modeFlags[role as keyof typeof modeFlags]}`, "--jitcache-strict=1");
+    if (context.twins) {
+      args.push(
+        `--jitcache-twins-report=${join(scratch, `${name}.twins`)}`,
+        `--jitcache-twins-record-layout=${join(scratch, `${name}.layout`)}`,
+        `--jitcache-twins-avoid-layout=${paths.layouts.join(",")}`,
+      );
+    }
+  }
+  // --destroy-vm's counterpart, and section 7.4's default as section 7.7 spells it.
+  const env: Record<string, string | undefined> = { ...engineEnvironment(context), BUN_DESTRUCT_VM_ON_EXIT: "1" };
+  if (directoryDefaults(context, script, options).length) env.BUN_JSC_useConcurrentJIT = "0";
+  // Bun hands a BUN_JSC_ variable that Options::setOption rejects to onCrash, so no JITCache flag goes that way.
+  for (const option of [...context.extraOptions, ...options]) {
+    const flag = flagName(option);
+    if (flag.startsWith("--jitcache")) {
+      if (bunPassedFlags.has(flag)) args.push(option);
+      continue;
+    }
+    env[`BUN_JSC_${flag.slice(2)}`] = option.slice(flag.length + 1);
+  }
+  args.push(script.path, role, scratch, artifact, String(sequence));
+  return { args, env };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// One attempt at a sequence
+
+interface Attempt {
+  sequence: number;
+  attempt: number;
+  directory: string;
+  failures: Failure[];
+  marks: Failure[]; // heap coincidences, which repeat the sequence when they are its only failures
+  notes: string[]; // what the runner lists and goes on
+  faults: Map<number, Set<string>>; // the fault steps each run's final statuses report
+}
+
+interface TwinEntry {
+  kind: string;
+  part?: string;
+  domain?: string;
+  check?: string;
+  detail?: string;
+  reason?: string;
+}
+
+const twinMatches = (entry: TwinEntry, declared: { kind: TwinKind; subject: string }) =>
+  entry.kind === declared.kind && (declared.kind === "coincidence" ? entry.domain : entry.part) === declared.subject;
+
+function cpuOf(script: Script, sequence: number, run: number): string | null {
+  return script.qemuCpu.findLast(q => addresses(q.at, sequence, run))?.model ?? null;
+}
+
+async function runAttempt(session: Session, script: Script, k: number, attempt: number): Promise<Attempt> {
+  const directory = mkdtempSync(join(session.base, `${script.display.replace(/[^\w.-]+/g, "_")}.s${k}.a${attempt}-`));
+  const paths: SequencePaths = { artifact: join(directory, "artifact"), scratch: join(directory, "scratch"), layouts: [] };
+  mkdirSync(paths.artifact);
+  mkdirSync(paths.scratch);
+  const { scratch } = paths;
+  const runs = script.sequences[k];
+  const stacks = new StackSizes();
+  const result: Attempt = { sequence: k, attempt, directory, failures: [], marks: [], notes: [], faults: new Map() };
+  const fail = (run: number | null, check: string, detail: string) =>
+    result.failures.push({ sequence: k, attempt, run, role: run === null ? null : runs[run].role, check, detail });
+  const io = (name: string): ProcessIO => ({
+    env: engineEnvironment(session),
+    cwd: scratch,
+    stdout: join(scratch, `${name}.stdout`),
+    stderr: join(scratch, `${name}.stderr`),
+  });
+
+  // Under QEMU every process of the sequence, its oracle runs included, needs a guest stack size of its own (section 7.9).
+  const processes = runs.length + oracleOptionSets(runs).length;
+  if (session.build.emulated && processes > guestStackSizes) {
+    fail(null, "qemu-stack", `the sequence starts ${processes} processes, and only ${guestStackSizes} guest stack sizes differ under QEMU`);
+    return result;
+  }
+
+  for (let i = 0; i < runs.length; ++i) {
+    const run = runs[i];
+    const name = `run${i}`;
+    let end: ProcessEnd;
+    if (run.role === "Maintenance") {
+      // <jsc> --jitcache-maintenance -- <command>, as section 7.3 writes it: maintenance runs before JSC::initialize
+      // and runs no JavaScript, so neither the directory's defaults nor --extra-options, which vary how JSC runs, apply.
+      const command = run.options.map(word => word.replaceAll("$ARTIFACT", paths.artifact));
+      end = await session.launcher.engine(session.build.jsc, ["--jitcache-maintenance", "--", ...command], io(name), stacks, cpuOf(script, k, i));
+    } else if (script.host === "jsc") {
+      end = await session.launcher.engine(session.build.jsc, jscArguments(session, script, k, run.role, run.options, paths, name), io(name), stacks, cpuOf(script, k, i));
+    } else {
+      const { args, env } = bunInvocation(session, script, k, run.role, run.options, paths, name);
+      end = await session.launcher.engine(session.options.bun!, args, { ...io(name), env }, stacks, cpuOf(script, k, i));
+    }
+
+    // Section 7.5, after each run.
+    const expected = expectedExit(script, k, i);
+    const exit = exitProblem(end, expected);
+    if (exit) fail(i, end.timedOut ? "timeout" : "exit", exit);
+    for (const { checker } of script.checks.filter(c => addresses(c.at, k, i))) {
+      const label = `${name}.${basename(checker, extname(checker))}`;
+      const checkerIO = { env: { ...process.env }, cwd: scratch, stdout: join(scratch, `${label}.stdout`), stderr: join(scratch, `${label}.stderr`) };
+      const checked = await session.launcher.host(process.execPath, [checker, join(scratch, `${name}.stdout`), join(scratch, `${name}.stderr`), scratch], checkerIO);
+      if (checked.error || checked.timedOut || checked.code !== 0) fail(i, "checker", `${displayPath(checker)} ${describeEnd(checked)}: ${tail(readText(checkerIO.stderr) || readText(checkerIO.stdout))}`);
+    }
+    if (!configuresJITCache(run.role)) continue;
+    const layout = join(scratch, `${name}.layout`);
+    if (session.twins && existsSync(layout)) paths.layouts.push(layout);
+    // Bun writes final statuses only in twins mode, and a run that ends by a signal writes none.
+    if (!endsBySignal(expected) && (script.host === "jsc" || session.twins)) checkStatuses(script, k, i, run, readText(join(scratch, `${name}.stderr`)) ?? "", result, fail);
+    if (session.twins) checkTwinReports(session, script, k, i, runs, scratch, attempt, result, fail);
+  }
+
+  await runOracle(session, script, k, runs, paths, stacks, result, fail);
+  return result;
+}
+
+type Fail = (run: number | null, check: string, detail: string) => void;
+
+// Section 7.5: the final statuses a run with JITCache wrote to standard error.
+function checkStatuses(script: Script, k: number, i: number, run: RunSpec, stderr: string, result: Attempt, fail: Fail) {
+  const statuses: any[] = [];
+  for (const line of stderr.split("\n")) {
+    if (!line.startsWith('{"jitcache":"status"')) continue;
+    try {
+      statuses.push(JSON.parse(line));
+    } catch {
+      fail(i, "status", `a status line is no JSON: ${line}`);
+    }
+  }
+  if (!statuses.length) {
+    fail(i, "status", "the run wrote no final status");
+    return;
+  }
+  const allowed = new Set(script.faults.filter(f => addresses(f.at, k, i)).map(f => f.step));
+  const reported = new Set<string>();
+  for (const status of statuses) {
+    for (const fault of [status.activityFault, status.productionFault]) {
+      if (!fault || reported.has(fault.step)) continue;
+      reported.add(fault.step);
+      if (!allowed.has(fault.step)) fail(i, "fault", `the status reports ${fault.class} at ${fault.step}, which no directive declares${fault.detail ? `: ${fault.detail}` : ""}`);
+    }
+  }
+  result.faults.set(i, reported);
+  if (imports(run.role) && !script.expectNoInstall.some(at => addresses(at, k, i))) {
+    const installs = statuses.reduce((sum, status) => sum + Number(status.progress?.installs ?? 0), 0);
+    if (!installs) fail(i, "install", `the ${run.role} installed no body`);
+  }
+}
+
+// Section 7.5: a run's twin reports, the main VM's and, for Bun, each worker VM's.
+function checkTwinReports(session: Session, script: Script, k: number, i: number, runs: RunSpec[], scratch: string, attempt: number, result: Attempt, fail: Fail) {
+  const name = `run${i}.twins`;
+  if (!existsSync(join(scratch, name))) {
+    fail(i, "twin-report", "the run wrote no twin report");
+    return;
+  }
+  const files = [name, ...readdirSync(scratch).filter(file => file.startsWith(`${name}.`)).sort()];
+  const entries: TwinEntry[] = [];
+  for (const file of files) {
+    (readText(join(scratch, file)) ?? "").split("\n").forEach((line, index) => {
+      if (!line.trim()) return;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        fail(i, "twin-report", `${file}:${index + 1} is no JSON line: ${line}`);
+      }
+    });
+  }
+  const declared = script.expectTwin.filter(t => addresses(t.at, k, i));
+  for (const twin of declared) {
+    if (!entries.some(entry => twinMatches(entry, twin))) fail(i, "twin-expected", `no ${twin.kind} report of ${twin.subject} appeared, which jitcache-expect-twin requires`);
+  }
+  // Section 7.4: a skip fails the run exactly when concurrent JIT is off in it and in every earlier run that produced.
+  const offIn = (j: number) => concurrentJITOff(session, script, runs[j].options);
+  const skipFails = offIn(i) && runs.every((run, j) => j >= i || !produces(run.role) || offIn(j));
+  for (const entry of entries) {
+    if (declared.some(twin => twinMatches(entry, twin))) continue;
+    if (entry.kind === "difference") fail(i, "twin-difference", `${entry.part} ${entry.check}: ${entry.detail}`);
+    else if (entry.kind === "skip" && skipFails) fail(i, "twin-skip", `${entry.part} ${entry.check} skipped with concurrent JIT off in this run and every earlier producing run: ${entry.reason}`);
+    else if (entry.kind === "skip") result.notes.push(`run ${i} skipped ${entry.part} ${entry.check}: ${entry.reason}`);
+    else if (entry.kind === "coincidence" && entry.domain === "heap" && attempt === 1) {
+      result.marks.push({ sequence: k, attempt, run: i, role: runs[i].role, check: "twin-coincidence", detail: `heap: ${entry.detail}` });
+    } else if (entry.kind === "coincidence") fail(i, "twin-coincidence", `${entry.domain}: ${entry.detail}`);
+    else fail(i, "twin-report", `a report of unknown kind ${entry.kind}`);
+  }
+}
+
+// Section 7.6: the oracle's option sets, numbered j in this order, each a run's options without the JITCache ones and
+// the runs that configure JITCache with them.
+function oracleOptionSets(runs: RunSpec[]): { options: string[]; runs: number[] }[] {
+  const sets = new Map<string, { options: string[]; runs: number[] }>();
+  runs.forEach((run, i) => {
+    if (!configuresJITCache(run.role)) return;
+    const options = run.options.filter(option => !option.startsWith("--jitcache"));
+    const key = JSON.stringify(options);
+    if (!sets.has(key)) sets.set(key, { options, runs: [] });
+    sets.get(key)!.runs.push(i);
+  });
+  return [...sets.values()];
+}
+
+// Section 7.6: every run that configures JITCache against an Off run of its own options without the JITCache ones,
+// one oracle run per distinct option set.
+async function runOracle(session: Session, script: Script, k: number, runs: RunSpec[], paths: SequencePaths, stacks: StackSizes, result: Attempt, fail: Fail) {
+  const { scratch } = paths;
+  let j = 0;
+  for (const { options, runs: compared } of oracleOptionSets(runs)) {
+    const name = `oracle${j}`;
+    const io: ProcessIO = { env: engineEnvironment(session), cwd: scratch, stdout: join(scratch, `${name}.stdout`), stderr: join(scratch, `${name}.stderr`) };
+    // An oracle run is no run a jitcache-qemu-cpu index names, so under QEMU it takes --qemu-cpu's model (section 7.9).
+    let end: ProcessEnd;
+    if (script.host === "jsc") {
+      end = await session.launcher.engine(session.build.jsc, jscArguments(session, script, k, "Off", options, paths, name), io, stacks);
+    } else {
+      const { args, env } = bunInvocation(session, script, k, "Off", options, paths, name);
+      end = await session.launcher.engine(session.options.bun!, args, { ...io, env }, stacks);
+    }
+    const oracleOutput = readBytes(io.stdout);
+    const heapCompared = session.twins && script.host === "jsc" && !script.heapOff;
+    const oracleHeap = heapCompared ? readBytes(join(scratch, `${name}.heap`)) : null;
+    for (const i of compared) {
+      const output = readBytes(join(scratch, `run${i}.stdout`));
+      if (!output.equals(oracleOutput)) fail(i, "oracle-output", `its output differs from oracle ${j}'s (${describeEnd(end)}) ${firstDifference(output, oracleOutput)}`);
+      // A run that ends by a signal never reaches the end of the run, where the shell writes its description.
+      if (!heapCompared || endsBySignal(expectedExit(script, k, i))) continue;
+      const heapFile = join(scratch, `run${i}.heap`);
+      if (!existsSync(heapFile)) fail(i, "oracle-heap", "the run wrote no heap description");
+      else if (!existsSync(join(scratch, `${name}.heap`))) fail(i, "oracle-heap", `oracle ${j} wrote no heap description (${describeEnd(end)})`);
+      else {
+        const heap = readBytes(heapFile);
+        if (!heap.equals(oracleHeap!)) fail(i, "oracle-heap", `its heap description differs from oracle ${j}'s ${firstDifference(heap, oracleHeap!)}`);
+      }
+    }
+    ++j;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Scripts
+
+async function runSequence(session: Session, script: Script, k: number): Promise<Attempt> {
+  const first = await runAttempt(session, script, k, 1);
+  const repeats = !first.failures.length && first.marks.length > 0;
+  session.results.write(attemptRecord(script, first, repeats ? "repeat" : first.failures.length ? "fail" : "pass"));
+  if (!repeats) return first;
+  // Section 7.5: a heap coincidence that recurs in fresh processes is a defect, not chance.
+  const second = await runAttempt(session, script, k, 2);
+  session.results.write(attemptRecord(script, second, second.failures.length ? "fail" : "pass"));
+  second.notes.unshift(`repeated after a heap coincidence: ${first.marks.map(mark => `run ${mark.run} ${mark.detail}`).join("; ")}`);
+  if (!second.failures.length) rmSync(first.directory, { recursive: true, force: true });
+  return second;
+}
+
+function attemptRecord(script: Script, attempt: Attempt, outcome: string) {
+  return {
+    kind: "sequence",
+    script: script.display,
+    sequence: attempt.sequence,
+    attempt: attempt.attempt,
+    outcome,
+    failures: attempt.failures,
+    marks: attempt.marks,
+    notes: attempt.notes,
+    directory: attempt.directory,
+  };
+}
+
+async function runScript(session: Session, script: Script) {
+  const attempts = await Promise.all(script.sequences.map((_, k) => session.pool.run(() => runSequence(session, script, k))));
+  const failures = attempts.flatMap(attempt => attempt.failures);
+  // Section 7.5: after the last sequence, every required fault was reported by some run its directive names.
+  for (const fault of script.faults.filter(f => f.required)) {
+    const reported = attempts.some(attempt => [...attempt.faults].some(([i, steps]) => addresses(fault.at, attempt.sequence, i) && steps.has(fault.step)));
+    if (!reported) {
+      const at = `${fault.at.sequence === null ? "" : `${fault.at.sequence}:`}${fault.at.run}`;
+      failures.push({ sequence: null, attempt: null, run: null, role: null, check: "required-fault", detail: `no run ${at} reported ${fault.step}` });
+    }
+  }
+  for (const attempt of attempts) {
+    if (!attempt.failures.length) rmSync(attempt.directory, { recursive: true, force: true });
+    else session.keep();
+  }
+  session.results.write({ kind: "script", script: script.display, outcome: failures.length ? "fail" : "pass", failures });
+  if (failures.length) {
+    session.failed++;
+    console.log(`FAIL ${script.display}`);
+    for (const failure of failures) console.log(`  ${describeFailure(failure)}`);
+    for (const attempt of attempts.filter(a => a.failures.length)) console.log(`  sequence ${attempt.sequence}: ${attempt.directory}`);
+  } else {
+    session.passed++;
+    console.log(`PASS ${script.display}${script.sequences.length > 1 ? ` (${script.sequences.length} sequences)` : ""}`);
+  }
+  for (const attempt of attempts) for (const note of attempt.notes) console.log(`  listed: sequence ${attempt.sequence}: ${note}`);
+}
+
+function describeFailure(failure: Failure): string {
+  const where = [
+    failure.sequence === null ? null : `sequence ${failure.sequence}${failure.attempt && failure.attempt > 1 ? ` (attempt ${failure.attempt})` : ""}`,
+    failure.run === null ? null : `run ${failure.run} (${failure.role})`,
+  ].filter(Boolean);
+  return `${where.length ? `${where.join(", ")}: ` : ""}${failure.check}: ${failure.detail}`;
+}
+
+// main checked that every path given exists; a lane whose default directory does not exist yet has no script.
+function collectScripts(paths: string[]): string[] {
+  const scripts: string[] = [];
+  for (const path of paths) {
+    const status = statSync(path, { throwIfNoEntry: false });
+    if (!status) continue;
+    if (status.isFile()) {
+      scripts.push(path);
+      continue;
+    }
+    // A directory's scripts are its own .js and .mjs files; helpers and checkers sit in subdirectories or have
+    // other extensions.
+    for (const name of readdirSync(path).sort()) {
+      const file = join(path, name);
+      if (/\.m?js$/.test(name) && statSync(file).isFile()) scripts.push(file);
+    }
+  }
+  return scripts;
+}
+
+async function runScripts(session: Session) {
+  const { options } = session;
+  const paths = options.testPaths.length ? options.testPaths : lanes.map(lane => join(corpusRoot, lane));
+  const runnable: Script[] = [];
+  let pinScripts = 0;
+  for (const path of collectScripts(paths)) {
+    const display = displayPath(path);
+    if (options.filter && !options.filter.test(display)) continue;
+    let script: Script;
+    try {
+      script = parseScript(path);
+      const problem = bunOptionProblem(script, options.extraOptions);
+      if (problem) throw new MalformedScript(problem);
+    } catch (error) {
+      if (!(error instanceof MalformedScript)) throw error;
+      session.failed++;
+      const failure: Failure = { sequence: null, attempt: null, run: null, role: null, check: "malformed", detail: error.message };
+      session.results.write({ kind: "script", script: display, outcome: "fail", failures: [failure] });
+      console.log(`FAIL ${display}\n  malformed: ${error.message}`);
+      continue;
+    }
+    const skip = script.requiresTwins && !session.twins ? "requires twins"
+      : script.host === "bun" && !options.bun ? "Bun-hosted, and no --bun names a Bun executable"
+      : script.qemuCpu.length && !session.build.emulated ? "declares jitcache-qemu-cpu, so it runs only under QEMU"
+      : null;
+    if (skip) {
+      session.skipped++;
+      session.listed.push(`${display}: ${skip}`);
+      session.results.write({ kind: "script", script: display, outcome: "skip", reason: skip });
+      continue;
+    }
+    if (script.host === "jsc") pinScripts++;
+    runnable.push(script);
+  }
+  if (!runnable.length) return;
+  await session.calibrate();
+  await Promise.all(runnable.map(script => runScript(session, script)));
+  // Section 7.1: the comparison of the off path with the pin's (section 11) runs only with --pin.
+  if (pinScripts) session.listed.push(`the pin comparison of ${pinScripts} jsc-hosted scripts: no --pin names the pin's build`);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// C++ tests (section 7.8)
+
+async function runCppTests(session: Session) {
+  const { build, options } = session;
+  if (!statSync(build.testjitcache, { throwIfNoEntry: false })?.isFile()) {
+    session.listed.push("the C++ tests: the build has no bin/testjitcache, which only twins builds have");
+    return;
+  }
+  const directory = mkdtempSync(join(session.base, "cpp-"));
+  const io = (name: string): ProcessIO => ({ env: { ...process.env }, cwd: directory, stdout: join(directory, `${name}.stdout`), stderr: join(directory, `${name}.stderr`) });
+  // A testjitcache process belongs to no sequence, and no twin check compares its heap with another's, so under QEMU each
+  // draws its guest stack alone (section 7.9).
+  const listing = io("list");
+  const listed = await session.launcher.engine(build.testjitcache, ["--list"], listing, null);
+  if (listed.error || listed.timedOut || listed.code !== 0) {
+    session.failed++;
+    session.keep();
+    console.log(`FAIL testjitcache --list ${describeEnd(listed)}: ${tail(readText(listing.stderr))}`);
+    session.results.write({ kind: "cpp-list", outcome: "fail", detail: describeEnd(listed) });
+    return;
+  }
+  // One "name<TAB>options" line per test; tests with the same options string share a process.
+  const groups = new Map<string, { all: string[]; selected: string[] }>();
+  for (const line of (readText(listing.stdout) ?? "").split("\n")) {
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    const [name, group] = tab < 0 ? [line, ""] : [line.slice(0, tab), line.slice(tab + 1)];
+    if (!groups.has(group)) groups.set(group, { all: [], selected: [] });
+    groups.get(group)!.all.push(name);
+    if (!options.filter || options.filter.test(name)) groups.get(group)!.selected.push(name);
+  }
+  let index = 0;
+  const selectedGroups = [...groups].filter(([, { selected }]) => selected.length);
+  await Promise.all(selectedGroups.map(([group, { all, selected: names }]) => session.pool.run(async () => {
+    // testjitcache filters by substring, so a group the filter splits runs one process per selected test, which may
+    // also run the tests whose names contain that name.
+    const runs = names.length === all.length ? [[`--group=${group}`]] : names.map(name => [`--group=${group}`, `--filter=${name}`]);
+    const failedTests: string[] = [];
+    const problems: string[] = [];
+    for (const args of runs) {
+      const files = io(`group${index++}`);
+      const end = await session.launcher.engine(build.testjitcache, args, files, null);
+      const output = readText(files.stdout) ?? "";
+      failedTests.push(...[...output.matchAll(/^FAIL (\S+)$/gm)].map(match => match[1]));
+      if (end.error || end.timedOut || end.code !== 0) {
+        const lines = output.split("\n").filter(line => line.startsWith("FAIL ") || line.startsWith("    "));
+        problems.push(`${args.join(" ")} ${describeEnd(end)}${lines.length ? `\n${lines.join("\n")}` : `: ${tail(readText(files.stderr))}`}`);
+      }
+    }
+    session.results.write({ kind: "cpp-group", options: group, tests: names, outcome: problems.length ? "fail" : "pass", failedTests, problems });
+    if (problems.length) {
+      session.failed++;
+      session.keep();
+      console.log(`FAIL testjitcache group "${group}"`);
+      for (const problem of problems) console.log(problem.replace(/^/gm, "  "));
+    } else {
+      session.passed++;
+      console.log(`PASS testjitcache group "${group}" (${names.length} tests)`);
+    }
+  })));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Helpers
+
+export function readText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function readBytes(path: string): Buffer {
+  try {
+    return readFileSync(path);
+  } catch {
+    return Buffer.alloc(0);
+  }
+}
+
+function tail(text: string | null, lines = 12): string {
+  if (!text) return "(no output)";
+  return text.trimEnd().split("\n").slice(-lines).join("\n");
+}
+
+// Where two outputs first differ, by line.
+function firstDifference(a: Buffer, b: Buffer): string {
+  const left = a.toString("utf8").split("\n");
+  const right = b.toString("utf8").split("\n");
+  const clip = (line: string | undefined) => (line === undefined ? "(end of output)" : JSON.stringify(line.length > 160 ? `${line.slice(0, 160)}…` : line));
+  for (let line = 0; line < Math.max(left.length, right.length); ++line) {
+    if (left[line] !== right[line]) return `at line ${line + 1}: ${clip(left[line])}, oracle ${clip(right[line])}`;
+  }
+  return "in bytes that are not text";
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+
+export async function main(argv: string[]): Promise<number> {
+  let session: Session;
+  try {
+    const options = parseCommandLine(argv);
+    const build = loadBuild(options.build);
+    if (options.bun && !statSync(options.bun, { throwIfNoEntry: false })?.isFile()) throw new UsageError(`--bun names no file: ${options.bun}`);
+    for (const path of options.testPaths) {
+      if (!existsSync(path)) throw new UsageError(`no such test path: ${path}`);
+    }
+    session = new Session(options, build);
+  } catch (error) {
+    if (!(error instanceof UsageError)) throw error;
+    console.error(`run-jitcache-tests: ${error.message}\n${usage}`);
+    return 2;
+  }
+  console.log(`build ${session.build.directory}: ${session.mode} mode, ${session.build.architecture}${session.build.emulated ? ` under QEMU (${session.options.qemuCpu ?? "max"})` : ""}`);
+  try {
+    if (!session.options.jsOnly) await runCppTests(session);
+    if (!session.options.cppOnly) await runScripts(session);
+  } catch (error) {
+    if (!(error instanceof CalibrationError)) throw error;
+    session.keep();
+    return session.finish(error.message);
+  }
+  return session.finish(null);
+}
+
+if (import.meta.main) process.exit(await main(process.argv.slice(2)));

@@ -35,6 +35,7 @@
 #include "ProducerBudget.h"
 #include "ReleaseHeapAccessScope.h"
 #include "SourceCode.h"
+#include "TwinReport.h"
 #include "VM.h"
 #include "ValidatedBody.h"
 #include <algorithm>
@@ -48,7 +49,9 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <wtf/ASCIICType.h>
 #include <wtf/FileSystem.h>
+#include <wtf/JSONValues.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/SafeStrerror.h>
 #include <wtf/StdLibExtras.h>
@@ -313,6 +316,43 @@ static String readTextFile(const String& path)
 {
     auto bytes = readFileBytes(path);
     return bytes ? String::fromUTF8(bytes->span()) : String();
+}
+
+// What JSON's grammar forbids in a line that WTF's JSON parser accepts and JSON.parse, which the runner reads twin
+// reports with, rejects: a character below U+0020, which JSON allows only as whitespace between tokens, where a twin
+// report writes none, and an escape JSON does not define, such as \x or \v. A null String when the line has neither.
+static String jsonGrammarProblem(StringView line)
+{
+    for (unsigned i = 0; i < line.length(); ++i) {
+        char16_t character = line[i];
+        if (character < 0x20)
+            return makeString("the control character "_s, static_cast<unsigned>(character), " unescaped at offset "_s, i);
+        if (character != '\\')
+            continue;
+        unsigned escape = i++;
+        if (i == line.length())
+            return makeString("a backslash at offset "_s, escape, " ends the line"_s);
+        switch (line[i]) {
+        case '"':
+        case '\\':
+        case '/':
+        case 'b':
+        case 'f':
+        case 'n':
+        case 'r':
+        case 't':
+            break;
+        case 'u':
+            for (unsigned digit = 0; digit < 4; ++digit) {
+                if (++i == line.length() || !isASCIIHexDigit(line[i]))
+                    return makeString("the \\u escape at offset "_s, escape, " lacks four hexadecimal digits"_s);
+            }
+            break;
+        default:
+            return makeString("the escape at offset "_s, escape, " is none JSON defines"_s);
+        }
+    }
+    return { };
 }
 
 // A VM beside the test's, with its API lock and heap access held, destroyed under that lock when the object goes, as
@@ -1644,17 +1684,17 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
     JITCACHE_CHECK(!rejectedLines.contains("\"event\":\"budget\""_s));
 
     VM& vm = *context.vm();
-    String openedReport = directory->path("opened.jsonl"_s);
+    String startedReport = directory->path("started.jsonl"_s);
     Config config = strictConfig(artifact, Role::ConsumerProducer);
-    config.benchReportPath = openedReport;
+    config.benchReportPath = startedReport;
     if (!startsAs(context, "a start with a bench report"_s, JITCache::start(vm, config), StartOutcome::Started))
         return;
     JITCACHE_CHECK(vm.jitCacheState()->benchReport());
     flushBenchReport(vm);
-    String openedLines = readTextFile(openedReport);
-    JITCACHE_CHECK(openedLines.contains("\"outcome\":\"started\",\"role\":\"consumer-producer\",\"nanoseconds\":"_s));
-    JITCACHE_CHECK(openedLines.contains("\"event\":\"budget\""_s));
-    JITCACHE_CHECK(openedLines.contains(makeString("\"limit\":"_s, static_cast<uint64_t>(testProducerLimitBytes))));
+    String startedLines = readTextFile(startedReport);
+    JITCACHE_CHECK(startedLines.contains("\"outcome\":\"started\",\"role\":\"consumer-producer\",\"nanoseconds\":"_s));
+    JITCACHE_CHECK(startedLines.contains("\"event\":\"budget\""_s));
+    JITCACHE_CHECK(startedLines.contains(makeString("\"limit\":"_s, static_cast<uint64_t>(testProducerLimitBytes))));
 }
 
 // The JSON lines of section 3.1: every field of the struct by name, enums by their names, an absent optional as null and
@@ -1682,20 +1722,148 @@ JITCACHE_TEST(integratorJSONLines, No)
     faultedStatus.progress.installs = 5;
     faultedStatus.budget.refused = true;
     String json = toJSON(faultedStatus);
+    JITCACHE_CHECK(json.contains("\"state\":\"started\""_s));
     JITCACHE_CHECK(json.contains("\"role\":\"consumer-producer\""_s));
     JITCACHE_CHECK(json.contains("\"activityFault\":{\"class\":\"debugger-attached\",\"step\":\"debugger.attach\",\"detail\":\"\"}"_s));
     JITCACHE_CHECK(json.contains("\"production\":\"ended\""_s));
     JITCACHE_CHECK(json.contains("\"installs\":5"_s));
     JITCACHE_CHECK(json.contains("\"refused\":true}}"_s));
+    faultedStatus.state = SessionState::Faulted;
+    JITCACHE_CHECK(toJSON(faultedStatus).contains("\"state\":\"faulted\""_s));
 
     JITCACHE_CHECK((FaultReport { FaultClass::InvalidMaterial, { }, "container.io"_s, { } }.stepName() == "container.io"_s));
+    JITCACHE_CHECK(name(StartOutcome::Started) == "started"_s);
     JITCACHE_CHECK(name(StartOutcome::Busy) == "busy"_s);
+    JITCACHE_CHECK(name(StartOutcome::Rejected) == "rejected"_s);
+    JITCACHE_CHECK(name(StartOutcome::Fault) == "fault"_s);
     JITCACHE_CHECK(name(FaultClass::ExecutableMemory) == "executable-memory"_s);
     for (Role role : { Role::Consumer, Role::Producer, Role::ConsumerProducer })
         JITCACHE_CHECK(parseRole(StringView { name(role) }) == role);
     JITCACHE_CHECK(!parseRole("Consumer"_s));
     JITCACHE_CHECK(!parseRole("p-c"_s));
     JITCACHE_CHECK(name(static_cast<Role>(7)).isNull());
+}
+
+// Harness sub-SPEC H3: a group's options hold their values once JSC::initialize returns. The runner runs this test as
+// testjitcache --group="--useConcurrentJIT=false --numberOfGCMarkers=1", and the runner's self-test checks that --list
+// names it with exactly that string.
+JITCACHE_TEST_WITH_OPTIONS(integratorHarnessReadsGroupOptions, No, "--useConcurrentJIT=false --numberOfGCMarkers=1")
+{
+    JITCACHE_CHECK(!Options::useConcurrentJIT());
+    JITCACHE_CHECK(Options::numberOfGCMarkers() == 1);
+}
+
+// H3: testjitcache sets a group's options before notifyOptionsChanged derives the dependent ones, so a group that turns
+// the JIT off also has the baseline JIT off.
+JITCACHE_TEST_WITH_OPTIONS(integratorHarnessDerivesDependentOptions, No, "--useJIT=false")
+{
+    JITCACHE_CHECK(!Options::useJIT());
+    JITCACHE_CHECK(!Options::useBaselineJIT());
+}
+
+// H3: a failing check prints its file, line and message, and the process exits with 1. The check fails only when the
+// runner's self-test names this test in JITCACHE_TEST_FAIL_ON_PURPOSE, so every other run passes it.
+JITCACHE_TEST(integratorHarnessReportsAFailingCheck, No)
+{
+    const char* purpose = getenv("JITCACHE_TEST_FAIL_ON_PURPOSE");
+    bool failsOnPurpose = purpose && StringView::fromLatin1(purpose) == "integratorHarnessReportsAFailingCheck"_s;
+    JITCACHE_CHECK(!failsOnPurpose);
+}
+
+// H4: every line of the twin report parses as JSON, with the fields in the order section 2 of the harness sub-SPEC gives
+// them and each value as written, whatever characters a detail holds: quotes, backslashes, control characters,
+// characters outside ASCII and a lone surrogate. WTF's parser also accepts raw control characters and the escapes \x
+// and \v, so each line must first pass jsonGrammarProblem, as the runner's JSON.parse would require. The runner's
+// self-test abort.js shows the other half of H4, that a line written right before an abort() is in the file.
+JITCACHE_TEST(integratorTwinReportLinesParseAsJSON, No)
+{
+    auto directory = TemporaryDirectory::create(context);
+    if (!directory)
+        return;
+    String path = directory->path("twins.jsonl"_s);
+
+    constexpr std::array<char16_t, 3> loneSurrogate { u'a', 0xD800, u'b' };
+    const Vector<String> details {
+        emptyString(),
+        "a plain detail"_s,
+        "a \"quoted\" word and a \\ backslash"_s,
+        "a line break\n, a tab\t, a return\r and the controls \x01 and \x1f"_s,
+        String::fromUTF8("caf\xC3\xA9 and \xF0\x9F\x98\x80"),
+        String(std::span<const char16_t> { loneSurrogate }),
+    };
+    constexpr std::array<std::pair<TwinPart, ASCIILiteral>, 5> parts { {
+        { TwinPart::UCB, "ucb"_s },
+        { TwinPart::Image, "image"_s },
+        { TwinPart::CB, "cb"_s },
+        { TwinPart::ICs, "ics"_s },
+        { TwinPart::Integrator, "integrator"_s },
+    } };
+    constexpr std::array<std::pair<RelocationDomain, ASCIILiteral>, 4> domains { {
+        { RelocationDomain::EngineImage, "engine-image"_s },
+        { RelocationDomain::ExecutablePool, "executable-pool"_s },
+        { RelocationDomain::StructureReservation, "structure-reservation"_s },
+        { RelocationDomain::Heap, "heap"_s },
+    } };
+
+    // Each line the report should hold, as its fields' names and values in order.
+    using Fields = Vector<std::pair<String, String>>;
+    Vector<Fields> expected;
+    {
+        auto report = TwinReport::open(path);
+        if (!report) {
+            JITCACHE_FAIL(makeString("cannot open a twin report at "_s, path));
+            return;
+        }
+        for (size_t i = 0; i < details.size(); ++i) {
+            auto [part, partName] = parts[i % parts.size()];
+            auto [domain, domainName] = domains[i % domains.size()];
+            report->difference(part, "a-difference"_s, details[i]);
+            expected.append({ { "kind"_s, "difference"_s }, { "part"_s, partName }, { "check"_s, "a-difference"_s }, { "detail"_s, details[i] } });
+            report->skip(part, "a-skip"_s, details[i]);
+            expected.append({ { "kind"_s, "skip"_s }, { "part"_s, partName }, { "check"_s, "a-skip"_s }, { "reason"_s, details[i] } });
+            report->relocationCoincidence(domain, details[i]);
+            expected.append({ { "kind"_s, "coincidence"_s }, { "domain"_s, domainName }, { "detail"_s, details[i] } });
+        }
+        JITCACHE_CHECK(report->differences() == details.size());
+        JITCACHE_CHECK(report->skips() == details.size());
+        JITCACHE_CHECK(report->coincidences() == details.size());
+    }
+
+    String text = readTextFile(path);
+    if (text.isNull()) {
+        JITCACHE_FAIL(makeString("cannot read the twin report at "_s, path));
+        return;
+    }
+    JITCACHE_CHECK(text.endsWith('\n'));
+    Vector<String> lines = text.split('\n');
+    if (lines.size() != expected.size()) {
+        JITCACHE_FAIL(makeString("the report holds "_s, lines.size(), " lines, expected "_s, expected.size()));
+        return;
+    }
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (String problem = jsonGrammarProblem(lines[i]); !problem.isNull()) {
+            JITCACHE_FAIL(makeString("line "_s, i + 1, " breaks JSON's grammar with "_s, problem, ": "_s, lines[i]));
+            continue;
+        }
+        RefPtr<JSON::Value> value = JSON::Value::parseJSON(lines[i]);
+        RefPtr<JSON::Object> object = value ? value->asObject() : nullptr;
+        if (!object) {
+            JITCACHE_FAIL(makeString("line "_s, i + 1, " is no JSON object: "_s, lines[i]));
+            continue;
+        }
+        const Fields& fields = expected[i];
+        Vector<String> names = fields.map([](auto& field) {
+            return field.first;
+        });
+        if (object->keys() != names) {
+            JITCACHE_FAIL(makeString("line "_s, i + 1, " does not hold the expected fields in order: "_s, lines[i]));
+            continue;
+        }
+        for (auto& [fieldName, fieldValue] : fields) {
+            if (object->getString(fieldName) != fieldValue)
+                JITCACHE_FAIL(makeString("line "_s, i + 1, "'s "_s, fieldName, " is not the value written: "_s, lines[i]));
+        }
+    }
 }
 
 // T-SCORE: beats compares scores field by field in THREAD Capture's order, a withheld counter above one that travels, and
