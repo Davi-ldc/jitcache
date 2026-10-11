@@ -2,7 +2,8 @@
 // JITCache's test runner (SPEC-integrator.harness.md section 7). It runs every JS script of the test directories as
 // sequences of jsc or Bun processes over one artifact, checks each run (exit, checkers, final status, twin report),
 // compares every run that configures JITCache with a JITCache-off run of the same script, the oracle of THREAD
-// Verification, with --pin compares each oracle option set's code with the pin's (section 11, jitcache-pin-compare.ts),
+// Verification, which also tells the engine's leaks from JITCache's (section 7.5), with --pin compares each oracle
+// option set's code with the pin's (section 11, jitcache-pin-compare.ts),
 // and runs testjitcache's C++ groups. Its self-tests (JSTests/jitcache/integrator/runner/self-test.ts) import it as a
 // module, so it starts only when run as a program.
 
@@ -614,6 +615,59 @@ export function exitProblem(end: ProcessEnd, expected: ExpectedExit): string | n
   return `${describeEnd(end)}, expected ${signal ? `to end by ${signal}` : `to exit with ${expected}`}`;
 }
 
+// Section 7.5: the objects LeakSanitizer reported leaked at a process's exit. A record is a header, "Direct leak of 52
+// byte(s) in 2 object(s) allocated from:", then one line per frame of the allocation stack, "#0 0x2e7f104 in malloc ...",
+// then, under report_objects=1, "Objects leaked above:" and one "0x701a793f5340 (26 bytes)" line per object.
+// LeakSanitizer merges every object leaked from one stack into one record and prints their sum, so the runner compares
+// objects: each keeps its own size and its record's frames without their program counters, which address randomization
+// moves between processes; each frame keeps its function and source line, or its module and offset. A record without
+// its object lines counts as one object of its total.
+export interface LeakedObject {
+  bytes: number;
+  stack: string;
+}
+
+export function leakedObjects(stderr: string): LeakedObject[] {
+  const objects: LeakedObject[] = [];
+  const lines = stderr.split("\n");
+  for (let n = 0; n < lines.length; ++n) {
+    const header = /^(?:Direct|Indirect) leak of (\d+) byte\(s\) in \d+ object\(s\)/.exec(lines[n]);
+    if (!header) continue;
+    const frames: string[] = [];
+    while (/^\s+#\d+ /.test(lines[n + 1] ?? "")) frames.push(lines[++n].trim().replace(/^(#\d+) 0x[0-9a-f]+/, "$1"));
+    const stack = frames.join("\n");
+    const sizes: number[] = [];
+    let m = n + 1;
+    while (lines[m] === "") ++m;
+    if (lines[m] === "Objects leaked above:") {
+      let size: RegExpExecArray | null;
+      while ((size = /^0x[0-9a-f]+ \((\d+) bytes\)$/.exec(lines[m + 1] ?? ""))) {
+        sizes.push(Number(size[1]));
+        ++m;
+      }
+      n = m;
+    }
+    for (const bytes of sizes.length ? sizes : [Number(header[1])]) objects.push({ bytes, stack });
+  }
+  return objects;
+}
+
+// Section 7.5: the objects a run leaked that its oracle did not, each paired with at most one oracle object of the same
+// size and stack.
+export function leaksBeyond(leaked: LeakedObject[], oracle: LeakedObject[]): LeakedObject[] {
+  const key = ({ bytes, stack }: LeakedObject) => `${bytes}\n${stack}`;
+  const left = new Map<string, number>();
+  for (const object of oracle) left.set(key(object), (left.get(key(object)) ?? 0) + 1);
+  return leaked.filter(object => {
+    const count = left.get(key(object)) ?? 0;
+    if (count) left.set(key(object), count - 1);
+    return !count;
+  });
+}
+
+const describeLeaks = (leaks: LeakedObject[]) =>
+  `${leaks.length} object(s), the first ${leaks[0].bytes} bytes allocated from ${leaks[0].stack.split("\n").slice(0, 8).join(" <- ")}`;
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Results
 
@@ -677,6 +731,21 @@ export interface CommandContext {
 // The environment of every jsc or Bun process; twins-mode processes get the calibration's variable.
 export function engineEnvironment(context: CommandContext): Record<string, string | undefined> {
   return context.mallocForceEnabled ? { ...process.env, WebKitMallocForceEnabled: "1" } : { ...process.env };
+}
+
+// The environment of a run whose leaks the runner judges itself (section 7.5), from the one engineEnvironment or
+// bunInvocation gives. When a process leaks, LeakSanitizer ends it with ASan's exitcode in place of its own status, so
+// a script that throws and leaks exits 1 where it would exit 3. exitcode=0 keeps the run's status and still prints the
+// report leakedObjects reads, and abort_on_error=1 keeps every other sanitizer error fatal: it ends the process by
+// SIGABRT, where exitcode=0 would let it exit 0. report_objects=1 lists each leaked object's size, which LeakSanitizer
+// reads from LSAN_OPTIONS alone. A process without ASan ignores both variables, and under QEMU the launcher appends
+// detect_leaks=0 after these options (section 7.9).
+function keepingExitStatus(env: ProcessIO["env"]): ProcessIO["env"] {
+  return {
+    ...env,
+    ASAN_OPTIONS: `${env.ASAN_OPTIONS ? `${env.ASAN_OPTIONS}:` : ""}exitcode=0:abort_on_error=1`,
+    LSAN_OPTIONS: `${env.LSAN_OPTIONS ? `${env.LSAN_OPTIONS}:` : ""}report_objects=1`,
+  };
 }
 
 // What the pin comparison of section 11.2 starts its two runs with: this build's side and the pin's.
@@ -902,12 +971,6 @@ async function runAttempt(session: Session, script: Script, k: number, attempt: 
   const result: Attempt = { sequence: k, attempt, directory, failures: [], marks: [], notes: [], faults: new Map() };
   const fail = (run: number | null, check: string, detail: string) =>
     result.failures.push({ sequence: k, attempt, run, role: run === null ? null : runs[run].role, check, detail });
-  const io = (name: string): ProcessIO => ({
-    env: engineEnvironment(session),
-    cwd: scratch,
-    stdout: join(scratch, `${name}.stdout`),
-    stderr: join(scratch, `${name}.stderr`),
-  });
 
   // Under QEMU every process of the sequence, its oracle runs and pin comparisons included, needs a guest stack size of
   // its own (section 7.9).
@@ -920,23 +983,39 @@ async function runAttempt(session: Session, script: Script, k: number, attempt: 
   for (let i = 0; i < runs.length; ++i) {
     const run = runs[i];
     const name = `run${i}`;
+    const expected = expectedExit(script, k, i);
+    // The runner judges the leaks of every run that reaches LeakSanitizer's check at exit (section 7.5). A run expected
+    // to end by a signal never does, so it keeps ASan's defaults, where abort_on_error=1 would pass any sanitizer error
+    // as the abort it expects.
+    const judged = !endsBySignal(expected);
+    const io = (env: ProcessIO["env"]): ProcessIO => ({
+      env: judged ? keepingExitStatus(env) : env,
+      cwd: scratch,
+      stdout: join(scratch, `${name}.stdout`),
+      stderr: join(scratch, `${name}.stderr`),
+    });
     let end: ProcessEnd;
     if (run.role === "Maintenance") {
       // <jsc> --jitcache-maintenance -- <command>, as section 7.3 writes it: maintenance runs before JSC::initialize
       // and runs no JavaScript, so neither the directory's defaults nor --extra-options, which vary how JSC runs, apply.
       const command = run.options.map(word => word.replaceAll("$ARTIFACT", paths.artifact));
-      end = await session.launcher.engine(session.build.jsc, ["--jitcache-maintenance", "--", ...command], io(name), stacks, cpuOf(script, k, i));
+      end = await session.launcher.engine(session.build.jsc, ["--jitcache-maintenance", "--", ...command], io(engineEnvironment(session)), stacks, cpuOf(script, k, i));
     } else if (script.host === "jsc") {
-      end = await session.launcher.engine(session.build.jsc, jscArguments(session, script, k, run.role, run.options, paths, name), io(name), stacks, cpuOf(script, k, i));
+      end = await session.launcher.engine(session.build.jsc, jscArguments(session, script, k, run.role, run.options, paths, name), io(engineEnvironment(session)), stacks, cpuOf(script, k, i));
     } else {
       const { args, env } = bunInvocation(session, script, k, run.role, run.options, paths, name);
-      end = await session.launcher.engine(session.options.bun!, args, { ...io(name), env }, stacks, cpuOf(script, k, i));
+      end = await session.launcher.engine(session.options.bun!, args, io(env), stacks, cpuOf(script, k, i));
     }
 
     // Section 7.5, after each run.
-    const expected = expectedExit(script, k, i);
     const exit = exitProblem(end, expected);
     if (exit) fail(i, end.timedOut ? "timeout" : "exit", exit);
+    // An Off run's leaks are the engine's, and runOracle judges those of a run that configures JITCache. A Maintenance
+    // run has no oracle, so every leak it reports fails it.
+    if (run.role === "Maintenance" && judged) {
+      const leaked = leakedObjects(readText(join(scratch, `${name}.stderr`)) ?? "");
+      if (leaked.length) fail(i, "leak", `the run has no oracle, and it leaked ${describeLeaks(leaked)}`);
+    }
     for (const { checker } of script.checks.filter(c => addresses(c.at, k, i))) {
       const label = `${name}.${basename(checker, extname(checker))}`;
       const checkerIO = { env: { ...process.env }, cwd: scratch, stdout: join(scratch, `${label}.stdout`), stderr: join(scratch, `${label}.stderr`) };
@@ -1048,23 +1127,30 @@ async function runOracle(session: Session, script: Script, k: number, runs: RunS
   let j = 0;
   for (const { options, runs: compared } of oracleOptionSets(runs)) {
     const name = `oracle${j}`;
-    const io: ProcessIO = { env: engineEnvironment(session), cwd: scratch, stdout: join(scratch, `${name}.stdout`), stderr: join(scratch, `${name}.stderr`) };
+    // No exit check reads an oracle run's status, so every oracle run takes the environment that prints its leaks.
+    const io: ProcessIO = { env: keepingExitStatus(engineEnvironment(session)), cwd: scratch, stdout: join(scratch, `${name}.stdout`), stderr: join(scratch, `${name}.stderr`) };
     // An oracle run is no run a jitcache-qemu-cpu index names, so under QEMU it takes --qemu-cpu's model (section 7.9).
     let end: ProcessEnd;
     if (script.host === "jsc") {
       end = await session.launcher.engine(session.build.jsc, jscArguments(session, script, k, "Off", options, paths, name), io, stacks);
     } else {
       const { args, env } = bunInvocation(session, script, k, "Off", options, paths, name);
-      end = await session.launcher.engine(session.options.bun!, args, { ...io, env }, stacks);
+      end = await session.launcher.engine(session.options.bun!, args, { ...io, env: keepingExitStatus(env) }, stacks);
     }
     const oracleOutput = readBytes(io.stdout);
+    const oracleLeaks = leakedObjects(readText(io.stderr) ?? "");
     const heapCompared = session.twins && script.host === "jsc" && !script.heapOff;
     const oracleHeap = heapCompared ? readBytes(join(scratch, `${name}.heap`)) : null;
     for (const i of compared) {
       const output = readBytes(join(scratch, `run${i}.stdout`));
       if (!output.equals(oracleOutput)) fail(i, "oracle-output", `its output differs from oracle ${j}'s (${describeEnd(end)}) ${firstDifference(output, oracleOutput)}`);
-      // A run that ends by a signal never reaches the end of the run, where the shell writes its description.
-      if (!heapCompared || endsBySignal(expectedExit(script, k, i))) continue;
+      // A run that ends by a signal never reaches the end of the run, where LeakSanitizer checks for leaks and the shell
+      // writes its heap description.
+      if (endsBySignal(expectedExit(script, k, i))) continue;
+      // Section 7.5: a leak passes when the oracle reports it too, the engine's own.
+      const leaked = leaksBeyond(leakedObjects(readText(join(scratch, `run${i}.stderr`)) ?? ""), oracleLeaks);
+      if (leaked.length) fail(i, "leak", `of the objects it leaked, oracle ${j} (${describeEnd(end)}) reports no match for ${describeLeaks(leaked)}`);
+      if (!heapCompared) continue;
       const heapFile = join(scratch, `run${i}.heap`);
       if (!existsSync(heapFile)) fail(i, "oracle-heap", "the run wrote no heap description");
       else if (!existsSync(join(scratch, `${name}.heap`))) fail(i, "oracle-heap", `oracle ${j} wrote no heap description (${describeEnd(end)})`);
