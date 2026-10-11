@@ -46,6 +46,7 @@
 #include "InstanceOfAccessCase.h"
 #include "IntrinsicGetterAccessCase.h"
 #include "JIT.h"
+#include "JITCacheFaults.h"
 #include "JITOperations.h"
 #include "JITThunks.h"
 #include "JSMap.h"
@@ -5054,6 +5055,9 @@ AccessGenerationResult InlineCacheCompiler::compile(const GCSafeConcurrentJSLock
     LinkBuffer linkBuffer(jit, codeBlock, LinkBuffer::Profile::InlineCache, JITCompilationCanFail);
     if (linkBuffer.didFailToAllocate()) {
         dataLogLnIf(InlineCacheCompilerInternal::verbose, "Did fail to allocate.");
+        // JITCache: the caller's slow path writes the give-up after this returns, so the fault comes first
+        // (SPEC-ics.md E5).
+        JITCache::didFailExecutableAllocation(vm(), JITCache::ExecutableAllocationSite::InlineCacheHandler);
         return AccessGenerationResult::GaveUp;
     }
 
@@ -7895,6 +7899,9 @@ AccessGenerationResult InlineCacheCompiler::compileOneAccessCaseHandler(const Ve
     LinkBuffer linkBuffer(jit, codeBlock, LinkBuffer::Profile::InlineCache, JITCompilationCanFail);
     if (linkBuffer.didFailToAllocate()) {
         dataLogLnIf(InlineCacheCompilerInternal::verbose, "Did fail to allocate.");
+        // JITCache: the caller's slow path writes the give-up after this returns, so the fault comes first
+        // (SPEC-ics.md E5).
+        JITCache::didFailExecutableAllocation(vm, JITCache::ExecutableAllocationSite::InlineCacheHandler);
         return AccessGenerationResult::GaveUp;
     }
 
@@ -7978,6 +7985,9 @@ MacroAssemblerCodeRef<JITStubRoutinePtrTag> InlineCacheCompiler::compileGetByDOM
     LinkBuffer patchBuffer(jit, GLOBAL_THUNK_ID, LinkBuffer::Profile::InlineCache, JITCompilationCanFail);
     if (patchBuffer.didFailToAllocate()) {
         dataLogLnIf(InlineCacheCompilerInternal::verbose, "Did fail to allocate.");
+        // JITCache: compileOneAccessCaseHandler turns the empty code into a give-up, which its caller's slow path
+        // writes after this returns, so the fault comes first (SPEC-ics.md E5).
+        JITCache::didFailExecutableAllocation(vm, JITCache::ExecutableAllocationSite::InlineCacheHandler);
         return { };
     }
 
