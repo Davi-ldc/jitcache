@@ -27,10 +27,12 @@
 #include "BaselineJITPlan.h"
 #include "LOLJIT.h"
 
+#include "JITCacheBench.h"
 #include "JITCacheFaults.h"
 #include "JITCacheGlue.h"
 #include "JITCacheVMState.h"
 #include "JITSafepoint.h"
+#include "JITThunks.h"
 #include "ProducerBudget.h"
 #include "VM.h"
 
@@ -49,12 +51,25 @@ BaselineJITPlan::BaselineJITPlan(CodeBlock* codeBlock)
     // and JIT::compileSync, construct the plan on the VM thread, and the lookup takes only the registry's leaf lock.
     if (JITCache::producerContext(vm))
         m_jitCacheRecordsImage = vm.jitCacheState()->registry().keyOf(*codeBlock->unlinkedCodeBlock()).has_value();
+
+    // JITCache: the plan measures its native cost, and passes it to the finalize capture hook, exactly when the VM has an
+    // open bench report now (harness sub-SPEC section 9.3).
+    m_jitCacheMeasure = !!JITCache::benchReport(vm);
 }
 
 auto BaselineJITPlan::compileInThreadImpl(JITCompilationEffort effort) -> CompilationPath
 {
     m_codeBlock->updateAllNonLazyValueProfilePredictions();
     m_codeBlock->updateAllLazyValueProfilePredictions();
+
+    // JITCache: the native cost counts the compilation after its profile drain, and notes per-VM support generated
+    // meanwhile, on this thread or another (harness sub-SPEC section 9.3).
+    uint64_t jitCacheSupportGenerations = 0;
+    uint64_t jitCacheCompileStart = 0;
+    if (m_jitCacheMeasure) {
+        jitCacheSupportGenerations = m_vm->jitStubs->supportGenerations();
+        jitCacheCompileStart = JITCache::benchThreadCPUNanoseconds();
+    }
 
     // BaselineJITPlan can keep underlying CodeBlock alive while running.
     // So we do not need to suspend this compilation thread while running GC.
@@ -73,8 +88,14 @@ auto BaselineJITPlan::compileInThreadImpl(JITCompilationEffort effort) -> Compil
             m_jitCode = WTF::move(jitCode);
         }
     }
+    // JITCache: a cancelled plan has dropped its VM (JITPlan::cancel) and is never finalized, so the measured span closes
+    // only after the cancellation test.
     if (result.didGetCancelled())
         return CancelPath;
+    if (m_jitCacheMeasure) {
+        m_jitCacheCompileNanoseconds = JITCache::benchThreadCPUNanoseconds() - jitCacheCompileStart;
+        m_jitCacheSupportGenerated = m_vm->jitStubs->supportGenerations() != jitCacheSupportGenerations;
+    }
     return BaselinePath;
 }
 
@@ -111,6 +132,19 @@ bool BaselineJITPlan::isKnownToBeLiveDuringGC(AbstractSlotVisitor&)
 
 CompilationResult BaselineJITPlan::finalize()
 {
+    // JITCache: when measuring, the finalization's own span runs from here to the finalize capture hook, without the
+    // relinks of incoming calls that installCode's relink timer adds to the report meanwhile (harness sub-SPEC section
+    // 9.3). What relinks outside this span left in the accumulator is discarded first.
+    JITCache::BenchReport* jitCacheReport = m_jitCacheMeasure ? JITCache::benchReport(*m_vm) : nullptr;
+    ASSERT(!m_jitCacheMeasure || jitCacheReport); // the report lives as long as the state, which outlives every plan
+    uint64_t jitCacheSupportGenerations = 0;
+    uint64_t jitCacheFinalizeStart = 0;
+    if (jitCacheReport) {
+        jitCacheReport->takeRelinkNanoseconds();
+        jitCacheSupportGenerations = m_vm->jitStubs->supportGenerations();
+        jitCacheFinalizeStart = JITCache::benchThreadCPUNanoseconds();
+    }
+
     CompilationResult result = JIT::finalizeOnMainThread(m_codeBlock, *this, m_jitCode);
     switch (result) {
     case CompilationResult::CompilationFailed:
@@ -122,14 +156,24 @@ CompilationResult BaselineJITPlan::finalize()
         m_codeBlock->dontJITAnytimeSoon();
         m_codeBlock->m_didFailJITCompilation = true;
         break;
-    case CompilationResult::CompilationSuccessful:
+    case CompilationResult::CompilationSuccessful: {
         WTF::crossModifyingCodeFence();
         dataLogLnIf(Options::verboseOSR(), "    JIT compilation successful.");
         m_codeBlock->ownerExecutable()->installCode(m_codeBlock);
         m_codeBlock->jitSoon();
+        JITCache::BaselineCompileTiming jitCacheTiming { };
+        if (jitCacheReport) {
+            uint64_t finalizeNanoseconds = JITCache::benchThreadCPUNanoseconds() - jitCacheFinalizeStart;
+            // installCode's relink ran inside the span, timed by the same thread's clock.
+            uint64_t relinkNanoseconds = jitCacheReport->takeRelinkNanoseconds();
+            ASSERT(relinkNanoseconds <= finalizeNanoseconds);
+            bool supportGenerated = m_jitCacheSupportGenerated || m_vm->jitStubs->supportGenerations() != jitCacheSupportGenerations;
+            jitCacheTiming = { m_jitCacheCompileNanoseconds, finalizeNanoseconds - relinkNanoseconds, supportGenerated };
+        }
         // JITCache: the finalize capture (SPEC-integrator.md section 8.5), now that the CB is its executable's replacement.
-        JITCache::didFinalizeBaselineCompilation(*m_vm, *m_codeBlock, nullptr);
+        JITCache::didFinalizeBaselineCompilation(*m_vm, *m_codeBlock, jitCacheReport ? &jitCacheTiming : nullptr);
         break;
+    }
     default:
         RELEASE_ASSERT_NOT_REACHED();
         break;

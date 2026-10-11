@@ -33,6 +33,7 @@
 #include "GetterSetterAccessCase.h"
 #include "InlineCacheCompiler.h"
 #include "InstanceOfAccessCase.h"
+#include "JITThunks.h"
 #include "JSModuleEnvironment.h"
 #include "JSModuleNamespaceObject.h"
 #include "ModuleNamespaceAccessCase.h"
@@ -213,6 +214,8 @@ Ref<InlineCacheHandler> InlineCacheCompiler::generateSlowPathHandler(VM& vm, Acc
     ASSERT(!isCompilationThread());
     if (auto handler = vm.m_sharedJITStubs->getSlowPathHandler(accessType))
         return handler.releaseNonNull();
+    // JITCache: a handler the VM lacked is per-VM support generated now (harness sub-SPEC section 9.3).
+    vm.jitStubs->noteSupportGeneration();
     auto handler = InlineCacheHandler::createSlowPath(vm, accessType);
     vm.m_sharedJITStubs->setSlowPathHandler(accessType, handler);
     return handler;

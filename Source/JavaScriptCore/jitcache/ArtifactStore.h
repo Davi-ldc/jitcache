@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <utility>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/HashTraits.h>
 #include <wtf/Lock.h>
 #include <wtf/MonotonicTime.h>
@@ -159,6 +160,33 @@ struct BodyOpen {
     uint64_t mappedBytes { 0 };
 };
 
+// What one opened artifact's index has cost so far, which every flush of a bench report writes as an index line
+// (SPEC-integrator.md IB2). The VMs of a process that open one artifact share its index (II21), so these are the
+// process's totals for it, whichever VM did the work. Times are wall time from MonotonicTime, which the vDSO serves: the
+// index's work runs under m_indexLock, at request points and in the writer's step 8, inside spans that the lookups and
+// the commit measure with the thread CPU clock, so it adds no system call to them.
+struct IndexStatistics {
+    bool hasInotify { false }; // whether the index refreshes from inotify events now
+    uint64_t bodies { 0 }; // the keys the index lists now
+    uint64_t tableBytes { 0 }; // the index table's storage now: its buckets times their size
+    uint64_t buildNanoseconds { 0 }; // the listing that built the index
+    uint64_t listings { 0 }; // every listing, the build's and the failed ones included
+    uint64_t listingNanoseconds { 0 };
+    uint64_t failedListings { 0 };
+    // Inotify queue overflows and failed reads of the queue, each of which forces a listing: at once in a refresh, or at
+    // the first refresh the interval allows after the writer's step 8 marked one pending.
+    uint64_t queueOverflows { 0 };
+    uint64_t refreshes { 0 }; // lookups that found the epoch moved and applied the queued events or listed
+    uint64_t refreshNanoseconds { 0 }; // their time, the listings they ran included
+    uint64_t deferredRefreshes { 0 }; // lookups that found the epoch moved and left the listing to the interval
+    // Keys a deferred listing left as misses: keys a token read found no body for while the interval deferred a listing,
+    // which the next listing then found (section 6.3).
+    uint64_t deferredMisses { 0 };
+    uint64_t writerUpdates { 0 }; // the writer's index updates (container sub-SPEC section 8.2, step 8)
+    uint64_t timedWriterUpdates { 0 }; // those of commits given a CommitTiming, which alone read a clock
+    uint64_t writerUpdateNanoseconds { 0 }; // the timed updates' time under m_indexLock
+};
+
 class OpenedArtifact;
 
 class SavedSummaries { // one body's mapping, with its three summary sections checked; unmaps when destroyed
@@ -212,6 +240,9 @@ public:
     // which opens no file and changes no state, and the start bench event (SPEC-integrator.md section 3.3; harness
     // sub-SPEC section 9.2).
     uint64_t indexedBodies();
+    // The index's statistics, read under m_indexLock without a refresh: the index line each flush of a bench report
+    // writes for the artifact start handed it (harness sub-SPEC section 9.2).
+    IndexStatistics statistics();
 
     std::span<const uint8_t, 16> headerDigest() const LIFETIME_BOUND;
     int cacheFd() const; // the writer's temporaries (section 8.2)
@@ -224,10 +255,12 @@ private:
     static std::expected<Ref<OpenedArtifact>, int> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
     OpenedArtifact(int parentFd, int cacheFd, int bodiesFd, const std::array<uint8_t, 16>& headerDigest, const uint64_t* epoch, int inotifyFd);
 
-    void refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock); // section 6.3
+    // Section 6.3. Returns whether the index may lag the epoch because the listing interval deferred its listing.
+    bool refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock);
     // Section 6.2: drains the inotify queue, reads the epoch and lists. Success swaps the new map in, records that epoch as
-    // the last seen and clears a pending listing; a failure leaves the index as it was, records the epoch it read and
-    // marks a listing pending. Returns 0, or the errno of the call that failed.
+    // the last seen, clears a pending listing and counts in deferredMisses each key of m_missedWhileDeferred it found; a
+    // failure leaves the index as it was, records the epoch it read and marks a listing pending. Either empties
+    // m_missedWhileDeferred. Returns 0, or the errno of the call that failed.
     int list() WTF_REQUIRES_LOCK(m_indexLock);
     void drainEvents(bool listOnOverflow) WTF_REQUIRES_LOCK(m_indexLock); // section 6.3; the writer's step 8 passes false
     void learn(const BodyKey&, uint64_t inode) WTF_REQUIRES_LOCK(m_indexLock); // section 6.4
@@ -252,6 +285,10 @@ private:
     MonotonicTime m_lastListingStart WTF_GUARDED_BY_LOCK(m_indexLock);
     bool m_listingPending WTF_GUARDED_BY_LOCK(m_indexLock) { false };
     bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false };
+    // The totals of IndexStatistics; statistics() fills the fields that describe the index now.
+    IndexStatistics m_statistics WTF_GUARDED_BY_LOCK(m_indexLock);
+    // The keys token found no body for while the interval deferred a listing, until the next listing (section 6.3).
+    HashSet<BodyKey, BodyKeyHash, BodyKeyHashTraits> m_missedWhileDeferred WTF_GUARDED_BY_LOCK(m_indexLock);
 };
 
 // The process-wide registry of opened artifacts (container sub-SPEC section 5.1), keyed by the cache/ directory's

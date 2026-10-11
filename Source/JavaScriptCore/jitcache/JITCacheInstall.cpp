@@ -16,6 +16,7 @@
 #include "JITCacheFaults.h"
 #include "JITCacheGlue.h"
 #include "JITCacheVMState.h"
+#include "JITThunks.h"
 #include "JSCInlines.h"
 #include "LLIntSlowPaths.h"
 #include "ProducerBudget.h"
@@ -96,18 +97,22 @@ constexpr unsigned numberOfInstallSteps = static_cast<unsigned>(InstallStep::Ins
 // The install event's measurements, taken only while a bench report is open (harness sub-SPEC sections 9.1 and 9.2).
 // The total is the thread CPU time of the whole function, one pair of reads of CLOCK_THREAD_CPUTIME_ID, whose every read
 // is a system call inside the span; the step breakdown only explains it, so it reads CLOCK_MONOTONIC, which the vDSO
-// serves. Each step's time runs from the previous mark to the step's end.
+// serves. Each step's time runs from the previous mark to the step's end. The support generations counted at the start
+// tell, at the return, whether the install generated per-VM support, which sets the body aside (section 9.3).
 class InstallMeasurement {
     WTF_MAKE_NONCOPYABLE(InstallMeasurement);
     WTF_FORBID_HEAP_ALLOCATION;
 public:
-    explicit InstallMeasurement(BenchReport* report)
-        : m_report(report)
+    InstallMeasurement(VM& vm, BenchReport* report)
+        : m_vm(vm)
+        , m_report(report)
+        , m_supportGenerationsAtStart(report ? vm.jitStubs->supportGenerations() : 0)
         , m_startNanoseconds(report ? benchThreadCPUNanoseconds() : 0)
     {
     }
 
     BenchReport* report() const { return m_report; }
+    bool supportGenerated() const { return m_vm.jitStubs->supportGenerations() != m_supportGenerationsAtStart; }
 
     // Marks the start of the next step, or skips work that is no step of section 7.2, such as a twin check.
     void mark()
@@ -129,21 +134,26 @@ public:
     std::optional<uint64_t> stepNanoseconds(InstallStep step) const { return m_stepNanoseconds[static_cast<unsigned>(step)]; }
 
 private:
+    VM& m_vm;
     BenchReport* const m_report;
+    const uint64_t m_supportGenerationsAtStart;
     const uint64_t m_startNanoseconds;
     MonotonicTime m_mark;
     std::array<std::optional<uint64_t>, numberOfInstallSteps> m_stepNanoseconds { }; // empty for a step that did not run
 };
 
-// What the install event reports beside the times (harness sub-SPEC section 9.2).
+// What the install event reports beside the times (harness sub-SPEC section 9.2). codeSize is the installed
+// BaselineJITCode's JITCode::size(), its executable allocation, which the compile event of a native compilation reports
+// the same way, so the two events of one body report one size; the image section's code size stands beside it.
 struct InstalledBody {
     BodyKey key;
     CBCounterRestore restore;
+    uint64_t codeSize;
     uint32_t imageCodeSize;
     uint32_t imageFixupCount;
 };
 
-static void recordInstallEvent(const InstallMeasurement& measurement, const InstalledBody& installed, uint64_t totalNanoseconds, uint64_t bodyReleaseNanoseconds)
+static void recordInstallEvent(const InstallMeasurement& measurement, const InstalledBody& installed, uint64_t totalNanoseconds, uint64_t bodyReleaseNanoseconds, bool supportGenerated)
 {
     using BenchValue = decltype(BenchField::value);
     auto step = [&](InstallStep installStep) {
@@ -172,8 +182,10 @@ static void recordInstallEvent(const InstallMeasurement& measurement, const Inst
         { "restore.crossed"_s, installed.restore.crossed },
         { "restore.nativeSlice"_s, installed.restore.nativeSlice },
         { "restore.slice"_s, installed.restore.slice },
+        { "codeSize"_s, installed.codeSize },
         { "image.codeSize"_s, static_cast<uint64_t>(installed.imageCodeSize) },
         { "image.fixupCount"_s, static_cast<uint64_t>(installed.imageFixupCount) },
+        { "supportGenerated"_s, supportGenerated },
     });
 }
 
@@ -284,7 +296,7 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     if (!state)
         return InstallOutcome::NotInstalled;
     // The total runs from here to the close of step 18 while a bench report is open (harness sub-SPEC section 9.2).
-    InstallMeasurement measurement(state->benchReport());
+    InstallMeasurement measurement(vm, state->benchReport());
     // Section 4.2: a flag test unless production has ended with its memory still held.
     state->releaseEndedProductionMemory();
 
@@ -453,8 +465,9 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     state->registry().resolvePendingImport(ucb, *import, ImportResolution::Installed);
     import = nullptr;
 
-    // Step 18.
+    // Step 18. The code's size is read before the twins builds' stash takes the code.
     ++state->progress().installs;
+    uint64_t codeSize = measurement.report() ? static_cast<uint64_t>(code->size()) : 0;
 #if ENABLE(JITCACHE_TWINS)
     stashImageTwinCheck(*state, PendingImageTwinCheck { &newborn, WTF::move(code), Ref<ValidatedBody> { *body }, view });
 #endif
@@ -467,7 +480,8 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     uint64_t totalEnd = benchThreadCPUNanoseconds();
     body = nullptr;
     uint64_t releaseEnd = benchThreadCPUNanoseconds();
-    recordInstallEvent(measurement, InstalledBody { key, restore, imageCodeSize, imageFixupCount }, totalEnd - measurement.startNanoseconds(), releaseEnd - totalEnd);
+    recordInstallEvent(measurement, InstalledBody { key, restore, codeSize, imageCodeSize, imageFixupCount }, totalEnd - measurement.startNanoseconds(),
+        releaseEnd - totalEnd, measurement.supportGenerated());
 
     // Step 19.
     return InstallOutcome::Installed;

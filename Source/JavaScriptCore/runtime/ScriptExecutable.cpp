@@ -34,6 +34,7 @@
 #include "GlobalExecutable.h"
 #include "IsoCellSetInlines.h"
 #include "JIT.h"
+#include "JITCacheBench.h"
 #include "JITCacheGlue.h"
 #include "JSCellInlines.h"
 #include "JSGlobalObjectInlines.h"
@@ -211,8 +212,12 @@ void ScriptExecutable::installCode(VM& vm, CodeBlock* genericCodeBlock, CodeType
             debugger->registerCodeBlock(genericCodeBlock);
     }
 
-    if (oldCodeBlock)
+    if (oldCodeBlock) {
+        // JITCache: the native cost leaves out relinking incoming calls, so the bench times it apart (harness sub-SPEC
+        // section 9.3). The timer measures only on the VM thread outside GC work.
+        JITCache::RelinkTimer relinkTimer(vm);
         oldCodeBlock->unlinkOrUpgradeIncomingCalls(vm, genericCodeBlock);
+    }
 
     vm.writeBarrier(this);
 }

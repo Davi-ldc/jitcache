@@ -24,6 +24,7 @@ class VM;
 namespace JSC::JITCache {
 
 class BodyKey;
+class OpenedArtifact;
 
 // The bench report (harness sub-SPEC section 9). When Config::benchReportPath is set, the VMState keeps one, which
 // appends JSON lines to that path, buffered and flushed when the buffer passes 1 MiB, after each delta, at each host's
@@ -45,16 +46,23 @@ public:
     // start's step 3 (SPEC-integrator.md section 3.2): appends to path; null when the file cannot be opened. The report
     // takes the VM's ordinal in the process, which every line carries, from a process-wide counter.
     static std::unique_ptr<BenchReport> open(const String& path);
-    ~BenchReport(); // closes the file; its owner flushes it first (section 9.1)
+    ~BenchReport(); // writes the lines still buffered, without the summary lines, and closes the file
 
     void record(ASCIILiteral event, std::initializer_list<BenchField>); // VM thread; flushes past 1 MiB
-    void flush(); // VM thread: the buffered lines, then the lookup and budget lines
+    // VM thread: the buffered lines, then the lookup line, the index line when the report has an artifact, and the budget
+    // and process lines.
+    void flush();
     void addRelinkNanoseconds(uint64_t); // VM thread: the relink accumulator of section 9.3
     uint64_t takeRelinkNanoseconds(); // VM thread: returns the accumulator and resets it
 
     // VM thread. The budget whose limit, charged and peak bytes each flush's budget line writes (section 9.2); the state
     // sets its producer budget once it exists, and a report without one writes zeros.
     void setBudget(RefPtr<ProducerBudget>&&);
+
+    // VM thread. The VM's own artifact, whose IndexStatistics each flush's index line writes (section 9.2); start hands it
+    // the OpenedArtifact the state holds, and a report without one writes no index line. The VMs of a process that open
+    // one artifact share its index, so the line holds the process's totals for it, which each of their reports repeats.
+    void setArtifact(RefPtr<OpenedArtifact>&&);
 
     // VM thread. The lookup line each flush writes (section 9.2): the count and CPU time of bodyVersion for absent and
     // for present keys, and of openBody by result, which VMState::bodyVersion and VMState::openBody add to
@@ -77,6 +85,7 @@ private:
     StringBuilder m_buffer; // the lines not yet written
     uint64_t m_relinkNanoseconds { 0 };
     RefPtr<ProducerBudget> m_budget;
+    RefPtr<OpenedArtifact> m_artifact; // destroyed with the report, whose .cpp sees the complete type
     std::array<LookupTally, numberOfLookups> m_lookups { };
 };
 

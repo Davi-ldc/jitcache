@@ -76,6 +76,13 @@ struct CommitResult {
     uint64_t version;
     uint64_t fileSize;
 };
+// Thread CPU nanoseconds of a commit's parts (container sub-SPEC section 8.2), which the capture glue passes while a bench
+// report is open and writes in the capture event (harness sub-SPEC section 9.2). A part the commit did not reach stays 0.
+struct CommitTiming {
+    std::array<uint64_t, numberOfSectionKinds> streamNanoseconds { }; // by SectionKind; 0 for a kind the commit lacks
+    uint64_t rereadNanoseconds { 0 }; // step 6
+    uint64_t publishNanoseconds { 0 }; // steps 7 and 8
+};
 struct CommitFailure {
     ASCIILiteral check; // budget.limit, a writer.* step of container sub-SPEC section 8.2, or writer.rewrite (its section 8.3)
     String detail;
@@ -94,7 +101,11 @@ class ArtifactWriter {
 public:
     ArtifactWriter(OpenedArtifact&, ProducerLock&, ProducerBudget&, size_t stagingBytes); // stagingBytes is at least 1
     ~ArtifactWriter(); // frees the staging buffer and releases its charge
-    std::expected<CommitResult, CommitFailure> commit(const CommitStamp&, const CommitSections&);
+    // Given a timing, the commit reads the thread CPU clock at the bounds of the parts it fills: each source's stream time
+    // runs from the end of the previous source's, or from the start of step 4, to the end of its own bytes, its padding
+    // and the flushes it fills included, and the last source's also covers step 4's final flush. Given none, it reads no
+    // clock.
+    std::expected<CommitResult, CommitFailure> commit(const CommitStamp&, const CommitSections&, CommitTiming* = nullptr);
     void releaseStagingBuffer(); // the end of production
 
 #if ENABLE(JITCACHE_TWINS)
@@ -128,8 +139,9 @@ public:
 
 private:
     // Step 8 of container sub-SPEC section 8.2, under the opened artifact's m_indexLock: applies the queued events, bumps
-    // the epoch, records the bump as seen when the object was current, and learns the published file's inode.
-    void didPublish(const BodyKey&, uint64_t inode);
+    // the epoch, records the bump as seen when the object was current, and learns the published file's inode. It counts
+    // the update in the index statistics (SPEC-integrator.md IB2), with its time when the commit is timed.
+    void didPublish(const BodyKey&, uint64_t inode, bool timed);
 
     OpenedArtifact& m_artifact;
     ProducerLock& m_producerLock;

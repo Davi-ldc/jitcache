@@ -13,6 +13,7 @@
 #include <wtf/HashFunctions.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/Vector.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringCommon.h>
@@ -766,6 +767,7 @@ std::expected<Ref<OpenedArtifact>, int> OpenedArtifact::create(int parentFd, int
         OpenedArtifact& object = artifact.get();
         Locker locker { object.m_indexLock };
         error = object.list();
+        object.m_statistics.buildNanoseconds = object.m_statistics.listingNanoseconds;
     }
     if (error)
         return std::unexpected(error);
@@ -792,8 +794,13 @@ OpenedArtifact::~OpenedArtifact()
 uint64_t OpenedArtifact::token(const BodyKey& key)
 {
     Locker locker { m_indexLock };
-    refreshIfStale();
-    return currentToken(key);
+    bool deferred = refreshIfStale();
+    uint64_t keyToken = currentToken(key);
+    // A miss while the interval defers a listing may be a body that listing would have found; the next listing counts
+    // the keys it finds (section 6.3; SPEC-integrator.md IB2).
+    if (deferred && !keyToken)
+        m_missedWhileDeferred.add(key);
+    return keyToken;
 }
 
 BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
@@ -896,6 +903,16 @@ uint64_t OpenedArtifact::indexedBodies()
     return m_index.size();
 }
 
+IndexStatistics OpenedArtifact::statistics()
+{
+    Locker locker { m_indexLock };
+    IndexStatistics statistics = m_statistics;
+    statistics.hasInotify = m_inotifyFd >= 0;
+    statistics.bodies = m_index.size();
+    statistics.tableBytes = static_cast<uint64_t>(m_index.capacity()) * sizeof(decltype(m_index)::KeyValuePairType);
+    return statistics;
+}
+
 std::span<const uint8_t, 16> OpenedArtifact::headerDigest() const
 {
     return std::span { m_headerDigest };
@@ -911,29 +928,34 @@ int OpenedArtifact::bodiesFd() const
     return m_bodiesFd;
 }
 
-void OpenedArtifact::refreshIfStale()
+bool OpenedArtifact::refreshIfStale()
 {
     using namespace ArtifactStoreInternal;
     if (!m_epoch || m_gone)
-        return;
+        return false;
     // While nothing changes, this load from a shared page is the whole cost of a lookup.
     uint64_t epoch = loadEpoch(m_epoch);
     if (epoch == m_lastEpochSeen)
-        return;
+        return false;
 
+    MonotonicTime start = MonotonicTime::now();
     if (m_inotifyFd >= 0 && !m_listingPending) {
         // The kernel queues a rename's events during the rename, before the writer bumps the epoch, so the queue holds
         // every change the new epoch covers.
         m_lastEpochSeen = epoch;
         drainEvents(true);
-        return;
+    } else if (start - m_lastListingStart < fallbackListingInterval()) {
+        // Without inotify, or with a listing pending, at most one listing starts per interval. Inside it the epoch is not
+        // recorded: the index answers as it stands, and the first lookup after the interval lists.
+        ++m_statistics.deferredRefreshes;
+        return true;
+    } else {
+        list();
     }
 
-    // Without inotify, or with a listing pending, at most one listing starts per interval. Inside it the epoch is not
-    // recorded: the index answers as it stands, and the first lookup after the interval lists.
-    if (MonotonicTime::now() - m_lastListingStart < fallbackListingInterval())
-        return;
-    list();
+    ++m_statistics.refreshes;
+    m_statistics.refreshNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
+    return false;
 }
 
 int OpenedArtifact::list()
@@ -964,19 +986,29 @@ int OpenedArtifact::list()
             index.set(*key, IndexEntry { keepsToken ? previous->value.token : nextToken++, inode });
         });
     }
+    ++m_statistics.listings;
+    m_statistics.listingNanoseconds += (MonotonicTime::now() - m_lastListingStart).nanosecondsAs<uint64_t>();
 
     if (error) {
         // The index stays as it was. The events drained above are gone, so the next epoch change lists again; until
-        // then, the bodies the index lacks are misses.
+        // then, the bodies the index lacks are misses. The listing found none of the deferral's misses.
+        ++m_statistics.failedListings;
         if (epoch)
             m_lastEpochSeen = *epoch;
         m_listingPending = true;
+        m_missedWhileDeferred.clear();
         return error;
     }
     m_index = WTF::move(index);
     if (epoch)
         m_lastEpochSeen = *epoch;
     m_listingPending = false;
+    // The bodies a deferral left as misses are the keys missed meanwhile that this listing finds (section 6.3).
+    for (auto& key : m_missedWhileDeferred) {
+        if (m_index.contains(key))
+            ++m_statistics.deferredMisses;
+    }
+    m_missedWhileDeferred.clear();
     return 0;
 }
 
@@ -1045,6 +1077,7 @@ void OpenedArtifact::drainEvents(bool listOnOverflow)
         return;
     // The descriptor stays. A listing that fails records the epoch it read and marks a listing pending; the writer's
     // index update only marks one, so no listing runs inside a capture pause.
+    ++m_statistics.queueOverflows;
     if (listOnOverflow)
         list();
     else

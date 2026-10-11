@@ -4,6 +4,7 @@
 
 #include "ArtifactStore.h"
 #include "ArtifactWriter.h"
+#include "JITCacheBench.h"
 #include "JITCacheContainer.h"
 #include "JITCacheTest.h"
 #include "ProducerBudget.h"
@@ -1107,6 +1108,105 @@ JITCACHE_TEST(writerStagingBufferLifecycle, No)
     }
     JITCACHE_CHECK(!budget->chargedBytes());
     JITCACHE_CHECK(budget->peakBytes() == 100);
+}
+
+// A commit given a CommitTiming (container sub-SPEC section 8.2) fills the parts it reaches and leaves every other part at
+// 0, whatever the timing held before. A commit that publishes times each source's stream, the reread and the publish,
+// which add up to no more than the commit's own thread CPU time, and leaves every kind it did not write at 0. One that
+// fails at a section's count leaves that section, every later one, the reread and the publish at 0; one that fails
+// before step 4 leaves every part at 0. The index statistics (SPEC-integrator.md IB2) count every writer index update and
+// time only those of timed commits.
+JITCACHE_TEST(writerCommitTimingCoversItsParts, No)
+{
+    HookScope hooks;
+    StoreTesting::setRegistrySharing(false);
+    auto artifact = WriterTestArtifact::create(context);
+    if (!artifact)
+        return;
+    RefPtr object = artifact->take(context);
+    if (!object)
+        return;
+    Ref<ProducerBudget> budget = ProducerBudget::create(1 << 20);
+    ArtifactWriter writer(*object, artifact->lock(), budget.get(), 64);
+    SectionBytes sections = makeSectionBytes(otherSizes, 141);
+    auto garbage = [] {
+        CommitTiming timing;
+        timing.streamNanoseconds.fill(UINT64_MAX);
+        timing.rereadNanoseconds = UINT64_MAX;
+        timing.publishNanoseconds = UINT64_MAX;
+        return timing;
+    };
+    uint64_t commits = 0;
+
+    IndexStatistics beforeTimed = object->statistics();
+    BodyKey timedKey = writerKey(141);
+    TestSources sources(sections, Streaming::Image, 7);
+    CommitTiming timing = garbage();
+    uint64_t start = benchThreadCPUNanoseconds();
+    auto committed = writer.commit(testStamp(timedKey), sources.commitSections(), &timing);
+    uint64_t commitNanoseconds = benchThreadCPUNanoseconds() - start;
+    ++commits;
+    if (!committed) {
+        JITCACHE_FAIL(makeString("the timed commit failed at "_s, describe(committed.error())));
+        return;
+    }
+    checkPublished(context, "the timed commit"_s, *artifact, *object, timedKey, sections, *committed);
+    uint64_t parts = timing.rereadNanoseconds + timing.publishNanoseconds;
+    for (size_t index = 0; index < numberOfSectionKinds; ++index) {
+        // A body of highest tier 1 holds every kind this build requires.
+        if (!isSectionRequired(static_cast<SectionKind>(index), 1) && timing.streamNanoseconds[index])
+            JITCACHE_FAIL(makeString("the timed commit gave "_s, sectionKindDescription(static_cast<SectionKind>(index)).name, ", which it did not write, a stream time"_s));
+        parts += timing.streamNanoseconds[index];
+    }
+    if (parts > commitNanoseconds)
+        JITCACHE_FAIL(makeString("the timed parts add up to "_s, parts, " ns, past the commit's own "_s, commitNanoseconds, " ns"_s));
+    IndexStatistics afterTimed = object->statistics();
+    JITCACHE_CHECK(afterTimed.writerUpdates == beforeTimed.writerUpdates + 1);
+    JITCACHE_CHECK(afterTimed.timedWriterUpdates == beforeTimed.timedWriterUpdates + 1);
+
+    // A commit given no timing reads no clock: its index update is counted and not timed.
+    BodyKey untimedKey = writerKey(142);
+    if (auto untimed = commitOrFail(context, "the untimed commit"_s, writer, testStamp(untimedKey), sources))
+        checkPublished(context, "the untimed commit"_s, *artifact, *object, untimedKey, sections, *untimed);
+    ++commits;
+    IndexStatistics afterUntimed = object->statistics();
+    JITCACHE_CHECK(afterUntimed.writerUpdates == afterTimed.writerUpdates + 1);
+    JITCACHE_CHECK(afterUntimed.timedWriterUpdates == afterTimed.timedWriterUpdates);
+    JITCACHE_CHECK(afterUntimed.writerUpdateNanoseconds == afterTimed.writerUpdateNanoseconds);
+
+    // A commit that fails at the image section's count, after streaming the three UCB sections.
+    {
+        TestSources miscounted(sections, Streaming::Image, 7);
+        miscounted.streamed(SectionKind::ImageBaseline).miscount = 1;
+        CommitTiming failedTiming = garbage();
+        auto failed = writer.commit(testStamp(writerKey(143)), miscounted.commitSections(), &failedTiming);
+        ++commits;
+        JITCACHE_CHECK(!failed && failed.error().check == WriterChecks::section);
+        for (size_t index = 0; index < numberOfSectionKinds; ++index) {
+            bool reached = index < static_cast<size_t>(SectionKind::ImageBaseline);
+            uint64_t nanoseconds = failedTiming.streamNanoseconds[index];
+            if (reached ? nanoseconds == UINT64_MAX : !!nanoseconds)
+                JITCACHE_FAIL(makeString("the commit that failed at image.baseline left "_s, nanoseconds, " ns for "_s, sectionKindDescription(static_cast<SectionKind>(index)).name));
+        }
+        JITCACHE_CHECK(!failedTiming.rereadNanoseconds && !failedTiming.publishNanoseconds);
+    }
+
+    // A commit that fails at step 3.
+    {
+        writer.setFaultForTesting(ArtifactWriter::FaultForTesting { WriterChecks::create, commits + 1 });
+        CommitTiming failedTiming = garbage();
+        auto failed = writer.commit(testStamp(writerKey(144)), sources.commitSections(), &failedTiming);
+        ++commits;
+        writer.setFaultForTesting(std::nullopt);
+        JITCACHE_CHECK(!failed && failed.error().check == WriterChecks::create);
+        JITCACHE_CHECK(std::ranges::all_of(failedTiming.streamNanoseconds, [](uint64_t nanoseconds) { return !nanoseconds; }));
+        JITCACHE_CHECK(!failedTiming.rereadNanoseconds && !failedTiming.publishNanoseconds);
+    }
+
+    // Neither failure reached step 8.
+    JITCACHE_CHECK(object->statistics().writerUpdates == afterUntimed.writerUpdates);
+    JITCACHE_CHECK(!artifact->temporariesInCache());
+    JITCACHE_CHECK(artifact->bodiesAre({ timedKey, untimedKey }));
 }
 
 // rewriteSection (container sub-SPEC section 8.3) overwrites bytes inside one section of the current body and commits the

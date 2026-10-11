@@ -60,6 +60,12 @@ private:
 
     RefPtr<BaselineJITCode> m_jitCode;
     bool m_jitCacheRecordsImage { false };
+    // JITCache: the native cost of harness sub-SPEC section 9.3. The constructor sets m_jitCacheMeasure on the VM thread
+    // when the VM has an open bench report. While it is set, compileInThreadImpl writes the other two on the thread that
+    // compiles, and finalize reads them on the VM thread after the worklist has handed it the plan, as it reads m_jitCode.
+    bool m_jitCacheMeasure { false };
+    bool m_jitCacheSupportGenerated { false }; // per-VM support generated during the compilation's measured span
+    uint64_t m_jitCacheCompileNanoseconds { 0 }; // thread CPU time of the compilation after its profile drain
 };
 
 } // namespace JSC

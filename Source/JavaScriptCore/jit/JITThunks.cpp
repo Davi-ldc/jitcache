@@ -213,6 +213,7 @@ MacroAssemblerCodeRef<JITThunkPtrTag> JITThunks::ctiStubImpl(ThunkGenerator key,
     }
 
     // We do two lookups on first addition to the hash table because generateThunk may add to it.
+    noteSupportGeneration(); // JITCache: a miss generates per-VM support (harness sub-SPEC section 9.3).
     MacroAssemblerCodeRef<JITThunkPtrTag> codeRef = generateThunk();
 
     bool needsCrossModifyingCodeFence = isCompilationThread();
@@ -251,6 +252,7 @@ MacroAssemblerCodeRef<JITThunkPtrTag> JITThunks::lazyCommonThunk(VM& vm, CommonJ
         Locker locker { thunk.lock };
         state = thunk.state.loadRelaxed();
         if (state == LazyThunkState::NotGenerated) {
+            noteSupportGeneration(); // JITCache: per-VM support generated on first use (harness sub-SPEC section 9.3).
             thunk.codeRef = generatorForLazyCommonThunk(thunkID)(vm);
             ASSERT(thunk.codeRef);
             state = isCompilationThread() ? LazyThunkState::GeneratedOnCompilationThread : LazyThunkState::Generated;

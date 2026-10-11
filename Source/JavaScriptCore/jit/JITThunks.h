@@ -37,6 +37,7 @@
 #include "ThunkGenerator.h"
 #include "Weak.h"
 #include "WeakHandleOwner.h"
+#include <atomic>
 #include <tuple>
 #include <wtf/Atomics.h>
 #include <wtf/HashMap.h>
@@ -242,6 +243,12 @@ public:
 
     void initialize(VM&);
 
+    // JITCache: each generation of per-VM support, counted for the bench (harness sub-SPEC section 9.3). A reader compares
+    // two reads on its own thread to learn whether support was generated in between, so relaxed order is enough.
+    // InlineCacheCompiler::generateSlowPathHandler counts from outside the class.
+    void noteSupportGeneration() { m_supportGenerations.fetch_add(1, std::memory_order_relaxed); }
+    uint64_t supportGenerations() const { return m_supportGenerations.load(std::memory_order_relaxed); }
+
 private:
     template <typename GenerateThunk>
     MacroAssemblerCodeRef<JITThunkPtrTag> ctiStubImpl(ThunkGenerator key, GenerateThunk);
@@ -308,6 +315,7 @@ private:
     CTIStubMap m_ctiStubMap;
     WeakNativeExecutableSet m_nativeExecutableSet;
     WTF::RecursiveLock m_lock;
+    std::atomic<uint64_t> m_supportGenerations { 0 };
 };
 
 } // namespace JSC

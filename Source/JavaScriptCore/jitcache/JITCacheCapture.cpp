@@ -335,6 +335,16 @@ struct CaptureTrace {
         uint64_t cbStateCapture { 0 };
     };
     std::optional<BuildTimes> build; // once every lane built its sections
+    // What a commit adds, once the writer published while the report is open: the writer's parts (section 6.3) beside
+    // each section's size, and the producer memory the commit holds (SPEC-integrator.md IB6).
+    struct CommitTrace {
+        CommitTiming timing;
+        std::array<uint64_t, numberOfSectionKinds> sectionBytes { }; // by SectionKind; 0 for a kind the body lacks
+        uint64_t budgetChargedBytes { 0 }; // the budget's charge at the commit, the capture's sections and records still held
+        uint64_t keptSummariesBytes { 0 }; // the kept summaries' charge once the commit's entry is kept
+        uint64_t indexEntryBytes { 0 }; // what step 8 charged for an index entry the writer added; 0 when the index had the key
+    };
+    std::optional<CommitTrace> commit;
 };
 
 // The first field in beats order in which two scores differ, or none.
@@ -353,10 +363,11 @@ static ASCIILiteral firstDifference(const CaptureScore& a, const CaptureScore& b
     return { };
 }
 
-// The capture event, without the writer's fields, which the CommitTiming of section 6.3 brings: the trigger, the key, how
-// the capture ended, the candidate's score with the UCB lane's exit-site units apart, the committed score once the
-// sections were built, the saved score with the first field in which the candidate's differs from it, the polymorphic
-// bit the CB lane received, and the thread CPU time of each lane's scoring and build call and of the scoring read.
+// The capture event (harness sub-SPEC section 9.2): the trigger, the key, how the capture ended, the candidate's score
+// with the UCB lane's exit-site units apart, the committed score once the sections were built, the saved score with the
+// first field in which the candidate's differs from it, the polymorphic bit the CB lane received, the thread CPU time of
+// each lane's scoring and build call and of the scoring read, and, for a commit, the writer's parts from its CommitTiming
+// beside each section's size and the producer memory the commit holds (IB6). A field the capture did not reach is null.
 static void recordCaptureEvent(BenchReport* report, const CaptureTrace& trace, ASCIILiteral outcome)
 {
     if (!report)
@@ -375,6 +386,15 @@ static void recordCaptureEvent(BenchReport* report, const CaptureTrace& trace, A
     ASCIILiteral difference = trace.saved ? firstDifference(*candidate, *trace.saved) : ASCIILiteral { };
     auto build = [&](uint64_t CaptureTrace::BuildTimes::* member) {
         return trace.build ? number((*trace.build).*member) : BenchValue { nullptr };
+    };
+    auto stream = [&](SectionKind kind) {
+        return trace.commit ? number(trace.commit->timing.streamNanoseconds[static_cast<size_t>(kind)]) : BenchValue { nullptr };
+    };
+    auto bytes = [&](SectionKind kind) {
+        return trace.commit ? number(trace.commit->sectionBytes[static_cast<size_t>(kind)]) : BenchValue { nullptr };
+    };
+    auto commit = [&](uint64_t CaptureTrace::CommitTrace::* member) {
+        return trace.commit ? number((*trace.commit).*member) : BenchValue { nullptr };
     };
     report->record("capture"_s, {
         { "trigger"_s, String { trace.trigger } },
@@ -407,6 +427,51 @@ static void recordCaptureEvent(BenchReport* report, const CaptureTrace& trace, A
         { "build.buildSections"_s, build(&CaptureTrace::BuildTimes::buildSections) },
         { "build.captureBaselineICs"_s, build(&CaptureTrace::BuildTimes::captureBaselineICs) },
         { "build.cbStateCapture"_s, build(&CaptureTrace::BuildTimes::cbStateCapture) },
+        { "writer.ucb.identity.stream"_s, stream(SectionKind::UCBIdentity) },
+        { "writer.ucb.identity.bytes"_s, bytes(SectionKind::UCBIdentity) },
+        { "writer.ucb.core.stream"_s, stream(SectionKind::UCBCore) },
+        { "writer.ucb.core.bytes"_s, bytes(SectionKind::UCBCore) },
+        { "writer.ucb.feedback.stream"_s, stream(SectionKind::UCBFeedback) },
+        { "writer.ucb.feedback.bytes"_s, bytes(SectionKind::UCBFeedback) },
+        { "writer.image.baseline.stream"_s, stream(SectionKind::ImageBaseline) },
+        { "writer.image.baseline.bytes"_s, bytes(SectionKind::ImageBaseline) },
+        { "writer.baked-facts.baseline.stream"_s, stream(SectionKind::BakedFactsBaseline) },
+        { "writer.baked-facts.baseline.bytes"_s, bytes(SectionKind::BakedFactsBaseline) },
+        { "writer.image-twins.baseline.stream"_s, stream(SectionKind::ImageTwinsBaseline) },
+        { "writer.image-twins.baseline.bytes"_s, bytes(SectionKind::ImageTwinsBaseline) },
+        { "writer.cb.state.stream"_s, stream(SectionKind::CBStateBaseline) },
+        { "writer.cb.state.bytes"_s, bytes(SectionKind::CBStateBaseline) },
+        { "writer.cb.summary.stream"_s, stream(SectionKind::CBSummaryBaseline) },
+        { "writer.cb.summary.bytes"_s, bytes(SectionKind::CBSummaryBaseline) },
+        { "writer.ICsBaseline.stream"_s, stream(SectionKind::ICsBaseline) },
+        { "writer.ICsBaseline.bytes"_s, bytes(SectionKind::ICsBaseline) },
+        { "writer.reread"_s, trace.commit ? number(trace.commit->timing.rereadNanoseconds) : BenchValue { nullptr } },
+        { "writer.publish"_s, trace.commit ? number(trace.commit->timing.publishNanoseconds) : BenchValue { nullptr } },
+        { "charges.budget"_s, commit(&CaptureTrace::CommitTrace::budgetChargedBytes) },
+        { "charges.keptSummaries"_s, commit(&CaptureTrace::CommitTrace::keptSummariesBytes) },
+        { "charges.indexEntry"_s, commit(&CaptureTrace::CommitTrace::indexEntryBytes) },
+    });
+}
+
+// The compile event (harness sub-SPEC sections 9.2 and 9.3), the native cost THREAD's installation bound compares an
+// import with: the key the parent-key registry holds for the CB's UCB, or null, whether or not the code carries an image
+// record; the compilation's thread CPU time after its profile drain; the finalization's without relinking incoming
+// calls; the code's size, its executable allocation as the native code-size sample counts it; and whether per-VM support
+// was generated during either span, which sets the body aside (IB3).
+static void recordCompileEvent(VMState& state, CodeBlock& codeBlock, const BaselineCompileTiming& timing)
+{
+    BenchReport* report = state.benchReport();
+    if (!report)
+        return;
+    using BenchValue = decltype(BenchField::value);
+    std::optional<BodyKey> key = state.registry().keyOf(*codeBlock.unlinkedCodeBlock());
+    RefPtr<JITCode> code = codeBlock.jitCode();
+    report->record("compile"_s, {
+        { "key"_s, key ? BenchValue { bodyKeyHex(*key) } : BenchValue { nullptr } },
+        { "compileNanoseconds"_s, timing.compileNanoseconds },
+        { "finalizeNanoseconds"_s, timing.finalizeNanoseconds },
+        { "codeSize"_s, static_cast<uint64_t>(code ? code->size() : 0) },
+        { "supportGenerated"_s, timing.supportGenerated },
     });
 }
 
@@ -618,8 +683,9 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
     // charge for the end of production to release.
     OpenedArtifact* artifact = state.artifact();
     ASSERT(artifact);
+    size_t indexCharge = 0;
     if (!artifact->containsKey(key)) {
-        size_t indexCharge = entryChargeBuckets * indexBucketBytes;
+        indexCharge = entryChargeBuckets * indexBucketBytes;
         if (!budget.tryCharge(indexCharge)) {
             raiseBudgetLimit(state, makeString("an index entry; "_s, bodyDetail(key)));
             return { Kind::Faulted };
@@ -634,10 +700,12 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
         return { Kind::Faulted };
     }
 
-    // Step 9.
+    // Step 9. While the bench report is open, the writer times its parts for the capture event.
     ArtifactWriter* writer = state.writer();
     ASSERT(writer);
-    auto result = writer->commit(stamp, commitSectionsFor(*ucbSections, *image, *cbState, icsBuffer.span()));
+    CommitSections sections = commitSectionsFor(*ucbSections, *image, *cbState, icsBuffer.span());
+    CommitTiming timing;
+    auto result = writer->commit(stamp, sections, clock.report() ? &timing : nullptr);
     if (!result) {
         state.raiseRecordingFault({ }, result.error().check, makeString(result.error().detail, "; "_s, bodyDetail(key)));
         return { Kind::Faulted };
@@ -652,6 +720,13 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
         addKeptEntry(state, budget, key, keptScore, keptCharge.take());
     ++state.progress().capturesCommitted;
     state.progress().bytesCommitted += result->fileSize;
+    if (clock.report()) {
+        // Every charge this capture made is still held here, the lanes' outputs and the ICs buffer included.
+        CaptureTrace::CommitTrace commitTrace { timing, { }, budget.chargedBytes(), state.keptSummaries()->chargedBytes, indexCharge };
+        for (const SectionSource& source : sections.sources())
+            commitTrace.sectionBytes[static_cast<size_t>(source.kind)] = source.size;
+        trace.commit = commitTrace;
+    }
     return { Kind::Committed, result->fileSize };
 }
 
@@ -729,6 +804,8 @@ public:
     }
 
     const Table& table() const { return m_table; }
+    // The table only grows, so its charge once phase 1 ends is its largest (IB7).
+    size_t chargedBytes() const { return m_chargedBytes; }
 
 private:
     ProducerBudget& m_budget;
@@ -743,6 +820,11 @@ struct DeltaCounts {
     uint64_t deferredKeys { 0 };
     uint64_t phase1Nanoseconds { 0 };
     uint64_t phase2Nanoseconds { 0 };
+    // What delta's duration and memory scale with (IB7): the CodeBlocks phase 1 walked, the candidates among them, and
+    // the candidate table's charge.
+    uint64_t codeBlocks { 0 };
+    uint64_t candidates { 0 };
+    uint64_t candidateTableBytes { 0 };
     bool faulted { false };
 };
 
@@ -768,10 +850,12 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
         vm.heap.forEachCodeBlockIgnoringJITPlans(locker, [&](CodeBlock* codeBlock) {
             if (pendingFault)
                 return;
+            ++counts.codeBlocks;
             auto record = candidateRecord(vm, *codeBlock);
             if (!record)
                 return;
             ++state.progress().captureCandidates;
+            ++counts.candidates;
             auto live = scoreLiveCandidate(*codeBlock, strict, clock);
             if (!live) {
                 pendingFault = PendingFault { false, description(live.error().check), bodyDetail(record->key) };
@@ -782,6 +866,7 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
         });
     }
     counts.phase1Nanoseconds = clock.now() - start;
+    counts.candidateTableBytes = candidates.chargedBytes();
     if (pendingFault) {
         if (pendingFault->refusedCharge)
             raiseBudgetLimit(state, WTF::move(pendingFault->detail));
@@ -806,7 +891,7 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
         if (saved.outcome == SavedScoring::Outcome::Deferred) {
             ++counts.deferredKeys;
             const auto& first = entry.value.first();
-            CaptureTrace trace { "delta"_s, key, first.live, std::nullopt, saved.readNanoseconds, std::nullopt, 0, first.live.hasPolymorphicSite, std::nullopt };
+            CaptureTrace trace { "delta"_s, key, first.live, std::nullopt, saved.readNanoseconds, std::nullopt, 0, first.live.hasPolymorphicSite, std::nullopt, std::nullopt };
             recordCaptureEvent(clock.report(), trace, "deferred"_s);
             continue;
         }
@@ -816,7 +901,7 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
         // A NotEligible image makes that CB an ineligible one, so the key's next candidate gets the same test, until one
         // commits or does not beat the saved body.
         for (auto& candidate : entry.value) {
-            CaptureTrace trace { "delta"_s, key, candidate.live, scoredSaved, saved.readNanoseconds, std::nullopt, 0, candidate.live.hasPolymorphicSite, std::nullopt };
+            CaptureTrace trace { "delta"_s, key, candidate.live, scoredSaved, saved.readNanoseconds, std::nullopt, 0, candidate.live.hasPolymorphicSite, std::nullopt, std::nullopt };
             if (!beats(candidate.live.score, savedScore)) {
                 recordCaptureEvent(clock.report(), trace, "beaten"_s);
                 break;
@@ -861,7 +946,7 @@ std::expected<CaptureScore, SummaryRejection> scoreSections(uint8_t tier, std::s
     return CaptureScore { tier, ucbRichness->total() + cbScore->richnessUnits, icsSummary->icSitesWithCases, cbScore->counterWithheld, cbScore->counterProgress };
 }
 
-void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const BaselineCompileTiming*)
+void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const BaselineCompileTiming* timing)
 {
     using namespace JITCacheCaptureInternal;
 #if ENABLE(JITCACHE_TWINS)
@@ -869,10 +954,16 @@ void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const Baseline
     ++codeBlock.unlinkedCodeBlock()->jitCacheEventCounts().baselineCompiles;
 #endif
 
-    // Step 2.
     VMState* state = vm.jitCacheState();
     if (!state)
         return;
+
+    // Step 1: a plan passes a timing exactly when its VM had an open bench report at the plan's construction, so a
+    // Consumer measures the native cost of the bodies it compiles too.
+    if (timing)
+        recordCompileEvent(*state, codeBlock, *timing);
+
+    // Step 2.
     CaptureInProgressScope captureInProgress(*state);
     state->releaseEndedProductionMemory();
     if (!state->productionActive())
@@ -902,7 +993,7 @@ void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const Baseline
     if (saved.outcome == SavedScoring::Outcome::Faulted)
         return;
     std::optional<CaptureScore> scoredSaved = saved.saved ? std::optional { saved.saved->score } : std::nullopt;
-    CaptureTrace trace { "finalize"_s, record->key, *live, scoredSaved, saved.readNanoseconds, std::nullopt, 0, live->hasPolymorphicSite, std::nullopt };
+    CaptureTrace trace { "finalize"_s, record->key, *live, scoredSaved, saved.readNanoseconds, std::nullopt, 0, live->hasPolymorphicSite, std::nullopt, std::nullopt };
     if (saved.outcome == SavedScoring::Outcome::Deferred) {
         recordCaptureEvent(clock.report(), trace, "deferred"_s);
         return;
@@ -957,6 +1048,9 @@ DeltaResult delta(VM& vm)
             { "outcome"_s, String { counts.faulted ? "faulted"_s : "completed"_s } },
             { "phase1Nanoseconds"_s, counts.phase1Nanoseconds },
             { "phase2Nanoseconds"_s, counts.phase2Nanoseconds },
+            { "codeBlocks"_s, counts.codeBlocks },
+            { "candidates"_s, counts.candidates },
+            { "candidateTableBytes"_s, counts.candidateTableBytes },
             { "eligibleKeys"_s, counts.eligibleKeys },
             { "committedBodies"_s, counts.committedBodies },
             { "committedBytes"_s, counts.committedBytes },

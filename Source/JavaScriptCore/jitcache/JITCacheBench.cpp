@@ -167,6 +167,30 @@ void BenchReport::flush()
         { "openBody.unusable.nanoseconds"_s, tally(Lookup::OpenBodyUnusable).nanoseconds },
     });
 
+    // The index line of the VM's own artifact (SPEC-integrator.md IB2). The VMs of a process that open one artifact share
+    // its index, so the line holds the process's totals for it, whichever VM did the work, and every VM's flush repeats
+    // them. statistics() takes the index's leaf lock and does not refresh.
+    if (m_artifact) {
+        IndexStatistics statistics = m_artifact->statistics();
+        JITCacheBenchInternal::appendLine(m_buffer, m_pid, m_vmOrdinal, "index"_s, {
+            { "inotify"_s, statistics.hasInotify },
+            { "bodies"_s, statistics.bodies },
+            { "tableBytes"_s, statistics.tableBytes },
+            { "buildNanoseconds"_s, statistics.buildNanoseconds },
+            { "listings.count"_s, statistics.listings },
+            { "listings.nanoseconds"_s, statistics.listingNanoseconds },
+            { "listings.failed"_s, statistics.failedListings },
+            { "queueOverflows"_s, statistics.queueOverflows },
+            { "refreshes.count"_s, statistics.refreshes },
+            { "refreshes.nanoseconds"_s, statistics.refreshNanoseconds },
+            { "refreshes.deferred"_s, statistics.deferredRefreshes },
+            { "deferredMisses"_s, statistics.deferredMisses },
+            { "writerUpdates.count"_s, statistics.writerUpdates },
+            { "writerUpdates.timed"_s, statistics.timedWriterUpdates },
+            { "writerUpdates.nanoseconds"_s, statistics.writerUpdateNanoseconds },
+        });
+    }
+
     // A report without a producer budget, as a Consumer's, writes zeros.
     JITCacheBenchInternal::appendLine(m_buffer, m_pid, m_vmOrdinal, "budget"_s, {
         { "limit"_s, static_cast<uint64_t>(m_budget ? m_budget->limitBytes() : 0) },
@@ -202,6 +226,11 @@ uint64_t BenchReport::takeRelinkNanoseconds()
 void BenchReport::setBudget(RefPtr<ProducerBudget>&& budget)
 {
     m_budget = WTF::move(budget);
+}
+
+void BenchReport::setArtifact(RefPtr<OpenedArtifact>&& artifact)
+{
+    m_artifact = WTF::move(artifact);
 }
 
 void BenchReport::countLookup(Lookup lookup, uint64_t nanoseconds)

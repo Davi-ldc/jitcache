@@ -2,6 +2,7 @@
 #include "ArtifactWriter.h"
 
 #include "ArtifactStore.h"
+#include "JITCacheBench.h"
 #include "JITCacheContainer.h"
 #include "JITCachePlatform.h"
 #include "ProducerBudget.h"
@@ -331,9 +332,21 @@ static CommitFailure sectionFailure(SectionKind kind, uint64_t declared, uint64_
 // Step 4: streams the sources in order to their offsets, with zeros between sections, and sets each entry's CRC from the
 // bytes as they pass. A source in memory goes through the buffer, or straight to the file when larger than it; a
 // streamed source writes through a sink that counts its bytes and refuses any past its size or after a failed write.
-static std::optional<CommitFailure> streamSections(TemporaryBody& file, std::span<uint8_t> staging, std::span<const SectionSource> sources, std::span<BodyDirectoryEntry> entries)
+// Given a timing, each source's stream time runs from the end of the previous one's, or from the start of the step, to
+// the end of its own bytes, its padding and the flushes its bytes filled included; the final flush joins the last
+// source's. A source the step did not finish keeps its 0.
+static std::optional<CommitFailure> streamSections(TemporaryBody& file, std::span<uint8_t> staging, std::span<const SectionSource> sources,
+    std::span<BodyDirectoryEntry> entries, CommitTiming* timing)
 {
     ASSERT(sources.size() == entries.size() && !entries.empty());
+    uint64_t mark = timing ? benchThreadCPUNanoseconds() : 0;
+    auto timeUntilNow = [&](SectionKind kind) {
+        if (!timing)
+            return;
+        uint64_t now = benchThreadCPUNanoseconds();
+        timing->streamNanoseconds[static_cast<size_t>(kind)] += now - mark;
+        mark = now;
+    };
     SectionStream stream(file, staging, entries[0].offset);
     auto writeFailure = [&] {
         return CommitFailure { WriterChecks::write, errorText(stream.error()) };
@@ -356,6 +369,7 @@ static std::optional<CommitFailure> streamSections(TemporaryBody& file, std::spa
             if (!written)
                 return writeFailure();
             entry.crc = ~crcState;
+            timeUntilNow(source.kind);
             continue;
         }
 
@@ -382,10 +396,12 @@ static std::optional<CommitFailure> streamSections(TemporaryBody& file, std::spa
         if (passedSize || offered != source.size || !succeeded)
             return sectionFailure(source.kind, source.size, offered, !succeeded && !passedSize && offered == source.size);
         entry.crc = ~crcState;
+        timeUntilNow(source.kind);
     }
 
     if (!stream.flush())
         return writeFailure();
+    timeUntilNow(sources.back().kind);
     return std::nullopt;
 }
 
@@ -498,8 +514,10 @@ void ArtifactWriter::releaseStagingBuffer()
     m_budget.release(m_stagingBytes);
 }
 
-std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitStamp& stamp, const CommitSections& sections)
+std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitStamp& stamp, const CommitSections& sections, CommitTiming* timing)
 {
+    if (timing)
+        *timing = { };
 #if !OS(LINUX)
     UNUSED_PARAM(stamp);
     UNUSED_PARAM(sections);
@@ -544,7 +562,7 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitSt
     reach(hooks, CommitPoint::AfterCreate);
 
     // Step 4.
-    if (auto streamFailure = streamSections(temporary, staging, sources, entries))
+    if (auto streamFailure = streamSections(temporary, staging, sources, entries, timing))
         return std::unexpected(WTF::move(*streamFailure));
     temporary.didFinishStreaming();
     reach(hooks, CommitPoint::AfterStream);
@@ -570,14 +588,18 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitSt
     reach(hooks, CommitPoint::AfterEnvelope);
 
     // Step 6.
+    uint64_t rereadStart = timing ? benchThreadCPUNanoseconds() : 0;
     BodyLayout plannedLayout { envelope.version, envelope.highestTier, envelope.llintThreshold, envelope.counterProgress, { } };
     for (auto& entry : entries)
         plannedLayout.sections[static_cast<size_t>(entry.kind)] = SectionExtent { entry.offset, entry.size };
     if (auto rereadFailure = rereadTemporary(temporary, staging, stamp.key, m_artifact.headerDigest(), *fileSize, plannedLayout))
         return std::unexpected(WTF::move(*rereadFailure));
+    if (timing)
+        timing->rereadNanoseconds = benchThreadCPUNanoseconds() - rereadStart;
     reach(hooks, CommitPoint::AfterReread);
 
     // Step 7.
+    uint64_t publishStart = timing ? benchThreadCPUNanoseconds() : 0;
     auto inode = temporary.closeForPublishing();
     if (!inode)
         return failure(WriterChecks::publish, errorText(inode.error()));
@@ -586,14 +608,19 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitSt
     reach(hooks, CommitPoint::AfterRename);
 
     // Step 8.
-    didPublish(stamp.key, *inode);
+    didPublish(stamp.key, *inode, !!timing);
+    if (timing)
+        timing->publishNanoseconds = benchThreadCPUNanoseconds() - publishStart;
     return CommitResult { envelope.version, *fileSize };
 #endif
 }
 
-void ArtifactWriter::didPublish(const BodyKey& key, uint64_t inode)
+void ArtifactWriter::didPublish(const BodyKey& key, uint64_t inode, bool timed)
 {
     Locker locker { m_artifact.m_indexLock };
+    // The update's own time, apart from the publish part that holds it, for the index statistics (SPEC-integrator.md
+    // IB2). Wall time from the vDSO, so it adds no system call to the timed commit.
+    MonotonicTime start = timed ? MonotonicTime::now() : MonotonicTime { };
     // The queue holds this commit's own event and those of changes made before the VM took the lock, which are applied
     // as a refresh applies them. An overflow or a read error marks a listing pending instead of listing inside the pause.
     m_artifact.drainEvents(false);
@@ -608,6 +635,13 @@ void ArtifactWriter::didPublish(const BodyKey& key, uint64_t inode)
     // contradict section 6.3.
     if (!m_artifact.m_gone)
         m_artifact.learn(key, inode);
+
+    IndexStatistics& statistics = m_artifact.m_statistics;
+    ++statistics.writerUpdates;
+    if (timed) {
+        ++statistics.timedWriterUpdates;
+        statistics.writerUpdateNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
+    }
 }
 
 #if ENABLE(JITCACHE_TWINS)
