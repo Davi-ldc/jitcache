@@ -801,8 +801,9 @@ const reapplyPrompt = (t, diff, exclude) => {
   const ex = exclude.map(f => ` --exclude=${f}`).join('')
   return `${COMMITTER}
 Task ${t.id} continues from earlier work. Run \`git apply --check${ex} ${diff}\` here and, if
-${diff}.bun exists, \`git -C ${BUN_REPO} apply --check ${diff}.bun\`. If every check passes, apply
-each diff the same way without --check, without committing. If any check fails, change nothing and
+${diff}.bun exists, \`git -C ${BUN_REPO} apply --check ${diff}.bun\`; an empty diff holds nothing to
+apply, so skip it. If every check passes, apply each diff the same way without --check, without
+committing, and set ok to true, also when both were empty. If any check fails, change nothing and
 set ok to false.`
 }
 
@@ -1550,11 +1551,12 @@ async function runTask(t) {
   let answer = null
   let openFindings = []
   const entry = REENTRY[t.id]
+  // An answer settles a question about the design, whatever became of the code, so it survives a
+  // diff that no longer applies; the findings name that code, so they go with it.
   if (entry) {
-    if (await reapply(t, entry.diff, [], `reapply:${t.id}`)) {
-      answer = entry.answer
-      openFindings = entry.findings
-    } else log(`${t.id}: its diff ${entry.diff} did not apply; the task starts from scratch`)
+    answer = entry.answer
+    if (await reapply(t, entry.diff, [], `reapply:${t.id}`)) openFindings = entry.findings
+    else log(`${t.id}: its diff ${entry.diff} did not apply; the task starts from scratch with its answer`)
   }
   const forHuman = []
   const minor = []
