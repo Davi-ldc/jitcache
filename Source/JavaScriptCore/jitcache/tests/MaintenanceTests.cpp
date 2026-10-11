@@ -686,6 +686,11 @@ JITCACHE_TEST(maintenanceCleanRemovesAReplacedArtifact, No)
         ::close(replacedFd);
         if (!placed)
             return;
+        // The lock file a replacing ConsumerProducer leaves, whose epoch clean bumps.
+        if (!ProducerLock::tryAcquire(artifact->parentFd())) {
+            JITCACHE_FAIL(makeString(label, ": cannot create the lock file"_s));
+            return;
+        }
         auto epochBefore = artifact->epoch();
 
         Maintenance::Report report = Maintenance::clean(artifact->path());
