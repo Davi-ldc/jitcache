@@ -2005,9 +2005,9 @@ static bool acceptsStep(HolderStep step, UnlinkedFunctionExecutable& executable)
 
 // Where a side of a variant starts. A program or a module is generated from the text, and the path starts at its UCB. A
 // builtin root is made from the text, which reads "(function (...) { ... })", by BuiltinExecutables::createExecutable with
-// the side's four builtin flags, and the path starts at that root. A direct eval of the text is generated under the side's
-// eval context type, with empty TDZ and private-name sets, and the path starts at its UCB. Each step after a UFE has been
-// reached generates that UFE's body and looks among its children.
+// the side's four builtin flags and no name, and the path starts at that root. A direct eval of the text is generated
+// under the side's eval context type, with empty TDZ and private-name sets, and the path starts at its UCB. Each step
+// after a UFE has been reached generates that UFE's body and looks among its children.
 enum class HolderOrigin : uint8_t { Program, Module, Builtin, DirectEval };
 
 struct HolderSide {
@@ -2128,7 +2128,10 @@ static constexpr std::array<HolderVariant, 26> holderVariants { {
         { .text = builtinHolderText, .origin = HolderOrigin::Builtin, .path = { }, .privateBrandRequirement = PrivateBrandRequirement::Needed }, true, false, DescriptorFlag::PrivateBrandRequirement },
     // The inner function of one text, generated inside a builtin root's body and inside a program's function. Debug builds
     // check that a builtin root's metadata is what the parser gives the same text (BuiltinExecutables::createExecutable), so
-    // the two bodies parse the same source and place the inner function alike.
+    // the two bodies parse the same source and place the inner function alike. Both outer functions are anonymous:
+    // createExecutable makes every builtin root a function expression, and a named one's body pushes a scope for its own
+    // name (BytecodeGenerator::emitPushFunctionNameScope) whose TDZ entry gives the inner function a chain link over an
+    // empty environment, which the program side lacks.
     { "whether the function is a builtin's"_s, { .text = nestingHolderText, .origin = HolderOrigin::Builtin, .path = { HolderStep::Any } },
         { .text = nestingHolderText, .origin = HolderOrigin::Program, .path = { HolderStep::Any, HolderStep::Any } }, true, false, DescriptorFlag::IsBuiltinFunction },
 } };
@@ -2225,7 +2228,7 @@ static HolderFixture generateHolderSide(VM& vm, JSGlobalObject* globalObject, co
         break;
     case HolderOrigin::Builtin:
         fixture.source = makeSource(text, SourceOrigin { }, SourceTaintedOrigin::Untainted);
-        fixture.root = Strong<UnlinkedFunctionExecutable> { vm, BuiltinExecutables::createExecutable(vm, fixture.source, Identifier::fromString(vm, "jitcacheHolderBuiltin"_s), side.implementationVisibility,
+        fixture.root = Strong<UnlinkedFunctionExecutable> { vm, BuiltinExecutables::createExecutable(vm, fixture.source, Identifier { }, side.implementationVisibility,
             ConstructorKind::None, side.constructAbility, side.inlineAttribute, NeedsClassFieldInitializer::No, side.privateBrandRequirement) };
         break;
     case HolderOrigin::DirectEval: {
