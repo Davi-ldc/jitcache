@@ -79,6 +79,17 @@ typedef Vector<PrintRecord> PrintRecordList;
 
 } // namespace Printer
 
+#if ENABLE(JITCACHE_TWINS)
+namespace JITCache {
+
+// SPEC-integrator.harness.md section 11.5: true while --jitcache-test-force-blinding is in effect, so that
+// shouldConsiderBlinding blinds every immediate the assembler considers for blinding. JITCacheTwinsHarness.cpp defines
+// it; the shell sets it before JSC::initialize, before any thread emits code, so the threads that emit read it unlocked.
+JS_EXPORT_PRIVATE bool forcesBlindingForTesting();
+
+} // namespace JITCache
+#endif
+
 using MacroAssemblerBase = TARGET_MACROASSEMBLER;
 
 class MacroAssembler : public MacroAssemblerBase {
@@ -532,6 +543,10 @@ public:
     static constexpr unsigned BlindingModulus = 64;
     bool shouldConsiderBlinding()
     {
+#if ENABLE(JITCACHE_TWINS)
+        if (JITCache::forcesBlindingForTesting()) [[unlikely]]
+            return true;
+#endif
         return !(random() & (BlindingModulus - 1));
     }
 

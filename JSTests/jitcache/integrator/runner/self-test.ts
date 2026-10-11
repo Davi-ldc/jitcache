@@ -1,16 +1,19 @@
 #!/usr/bin/env bun
-// The runner's self-tests (SPEC-integrator.harness.md section 13: H1 to H6 and H8; H7 belongs to the pin comparison).
-// A fixture case runs Tools/Scripts/run-jitcache-tests on one fixture of this directory and compares the outcome the
-// runner records in its results with the fixture's claim: a fixture that must pass passes, and one that must fail fails
-// with exactly the failures listed, by sequence, attempt, run and check, and with no other. Three cases drive processes
-// of their own: the runner's calibration with heap probes that never move (H1), testjitcache's command line (H3, and
-// H4's C++ half) and the determinism of the end-of-run description (H5). Every fixture of this directory has a case.
+// The runner's self-tests (SPEC-integrator.harness.md section 13: H1 to H8). A fixture case runs
+// Tools/Scripts/run-jitcache-tests on one fixture of this directory and compares the outcome the runner records in its
+// results with the fixture's claim: a fixture that must pass passes, and one that must fail fails with exactly the
+// failures listed, by sequence, attempt, run and check, and with no other. Other cases drive processes of their own: the
+// runner's calibration with heap probes that never move (H1), testjitcache's command line (H3, and H4's C++ half), the
+// determinism of the end-of-run description (H5), and the pin comparison of a build with itself (H7), with the crafted
+// output pairs of pin-compare-tests.ts. Every fixture of this directory has a case.
 //
-//   bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins WebKit build directory> [--jobs=<n>]
-//       [--timeout=<seconds>] [--qemu-cpu=<model>] [--filter=<regex over case names>]
+//   bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins WebKit build directory>
+//       [--plain-build=<plain WebKit build directory>] [--jobs=<n>] [--timeout=<seconds>] [--qemu-cpu=<model>]
+//       [--filter=<regex over case names>]
 //
-// H2 runs on each architecture by naming that architecture's twins build, such as one bun build.ts twins --arch=aarch64
-// made, whose processes run under QEMU.
+// H2 and H7 run on each architecture by naming that architecture's builds, such as those bun build.ts twins
+// --arch=aarch64 and bun build.ts --arch=aarch64 made, whose processes run under QEMU. H7's plain half needs
+// --plain-build and is skipped without it.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,18 +23,22 @@ import {
   type CommandContext,
   Launcher,
   MalformedScript,
+  type PinSetup,
   type ProcessEnd,
   type Script,
   StackSizes,
+  comparePinOptionSet,
   corpusRoot,
   describeEnd,
   jscArguments,
   loadBuild,
+  oracleOptionSets,
   parseScript,
   readText,
   repositoryRoot,
   runProcess,
 } from "../../../../Tools/Scripts/run-jitcache-tests";
+import { runCraftedPinTests } from "./pin-compare-tests.ts";
 
 const fixtures = import.meta.dirname;
 const runner = join(repositoryRoot, "Tools/Scripts/run-jitcache-tests");
@@ -49,9 +56,15 @@ interface FixtureCase {
   expect: "pass" | Expected[];
   listed?: RegExp; // a note the runner must list, such as a skip it let pass
   wide?: boolean; // runs its many sequences with --jobs
+  args?: (context: Context) => string[]; // the runner's options beyond the common ones
+  detail?: RegExp; // what some expected failure's detail says
 }
 
 const fail = (sequence: number, run: number, check: string, attempt = 1): Expected => ({ sequence, run, check, attempt });
+// A failure of a sequence as a whole, which the pin comparison reports.
+const sequenceFail = (sequence: number, check: string): Expected => ({ sequence, run: null, check, attempt: 1 });
+// H7: this build stands for the pin, and the options given reach this build's side of the comparison alone.
+const againstItself = (...pinOptions: string[]) => (context: Context) => [`--pin=${context.build.directory}`, ...(pinOptions.length ? [`--pin-options=${pinOptions.join(" ")}`] : [])];
 
 const fixtureCases: FixtureCase[] = [
   { fixture: "oracle-consumer-output.js", claim: "H1: a Consumer that prints differently from its Off run fails", expect: [fail(0, 1, "oracle-output")] },
@@ -92,10 +105,22 @@ const fixtureCases: FixtureCase[] = [
   { fixture: "kill-points.js", claim: "H8: each kill point ends by SIGKILL and leaves its temporaries", expect: "pass" },
   { fixture: "kill-as-abort.js", claim: "H8: jitcache-expect-exit's abort rejects a kill", expect: [fail(0, 0, "exit")] },
   { fixture: "kill-not-reached.js", claim: "H8: a kill point the run never reaches leaves exit 0, which kill rejects", expect: [fail(0, 0, "exit")] },
+  {
+    fixture: "pin-allocation.js",
+    claim: "H7: with --pin-options=--forceGCSlowPaths=true the comparison fails at the first block whose inline allocation became a jump to its slow path",
+    expect: [sequenceFail(0, "pin-code")],
+    args: againstItself("--forceGCSlowPaths=true"),
+    detail: /block main:\d+ \((new_object|create_this)\)/,
+  },
+  { fixture: "pin-output.js", claim: "H7: a script whose pin run prints something else fails the sequence", expect: [sequenceFail(0, "pin-output")], args: againstItself("--useDollarVM=false") },
+  { fixture: "pin-output-declared.js", claim: "H7: it passes once it declares jitcache-pin: off", expect: "pass", args: againstItself("--useDollarVM=false") },
+  { fixture: "pin-status.js", claim: "H7: a script whose pin run ends with another status fails the sequence", expect: [sequenceFail(0, "pin-status")], args: againstItself("--useDollarVM=false") },
+  { fixture: "pin-status-declared.js", claim: "H7: it passes once it declares jitcache-pin: off", expect: "pass", args: againstItself("--useDollarVM=false") },
 ];
 
 interface Context {
   build: Build;
+  plainBuild: Build | null;
   base: string;
   jobs: number;
   timeoutSeconds: number;
@@ -106,6 +131,7 @@ interface Context {
 interface Case {
   name: string;
   claim: string;
+  skip?: (context: Context) => string | null; // why the case cannot run with the builds it was given
   run: (context: Context) => Promise<string[]>; // the problems, none when the case passes
 }
 
@@ -156,7 +182,7 @@ function fixtureCase(spec: FixtureCase): Case {
     name: spec.fixture.replace(/\.m?js$/, ""),
     claim: spec.claim,
     async run(context) {
-      const args = [`--jobs=${spec.wide ? context.jobs : 1}`, join(fixtures, spec.fixture)];
+      const args = [`--jobs=${spec.wide ? context.jobs : 1}`, ...(spec.args?.(context) ?? []), join(fixtures, spec.fixture)];
       const outcome = await runRunner(context, spec.fixture, args);
       const problems: string[] = [];
       const script = outcome.records.find(record => record.kind === "script");
@@ -174,6 +200,8 @@ function fixtureCase(spec: FixtureCase): Case {
         for (const failure of script.failures ?? []) {
           if (!expected.has(failureKey(failure))) problems.push(`an unexpected failure ${failureKey(failure)}: ${failure.detail}`);
         }
+        if (spec.detail && !(script.failures ?? []).some((failure: { detail: string }) => spec.detail!.test(failure.detail)))
+          problems.push(`no failure's detail matches ${spec.detail}: ${(script.failures ?? []).map((failure: { detail: string }) => failure.detail).join("; ")}`);
         if (outcome.end.code !== 1) problems.push(`the runner ${describeEnd(outcome.end)}, expected 1`);
       }
       if (spec.listed && !outcome.records.some(record => record.kind === "sequence" && record.notes?.some((note: string) => spec.listed!.test(note)))) {
@@ -335,6 +363,89 @@ const determinismCase: Case = {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
+// H7: the pin comparison of a build with itself finds no difference on the runner's fixtures and the integrator corpus.
+
+// The scripts H7 compares: this directory's fixtures and the integrator corpus's scripts.
+function comparedScripts(): string[] {
+  const scriptFile = (name: string) => /\.m?js$/.test(name);
+  const integrator = join(corpusRoot, "integrator");
+  return [
+    ...readdirSync(fixtures).filter(scriptFile).map(name => join(fixtures, name)),
+    ...(existsSync(integrator) ? readdirSync(integrator).filter(scriptFile).map(name => join(integrator, name)) : []),
+  ];
+}
+
+// Through the runner, in the twins build: --pin names the build itself, and pinOptions reach this build's side alone. The
+// fixtures fail on purpose in other ways; only the comparison's records count here.
+function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
+  return {
+    name,
+    claim,
+    async run(context) {
+      const integrator = join(corpusRoot, "integrator");
+      const paths = [fixtures, ...(existsSync(integrator) ? [integrator] : [])];
+      const outcome = await runRunner(context, name, [`--jobs=${context.jobs}`, ...againstItself(...pinOptions)(context), ...paths]);
+      const problems: string[] = [];
+      const comparisons = outcome.records.filter(record => record.kind === "pin");
+      if (!comparisons.length) problems.push(`the runner compared no option set with the pin (${describeEnd(outcome.end)}):\n${outcome.output}`);
+      for (const record of comparisons.filter(record => record.outcome !== "same"))
+        problems.push(`${record.script}, sequence ${record.sequence}, option set ${record.optionSet}: ${record.check}: ${record.detail}`);
+      cleanUp(outcome, problems);
+      return problems;
+    },
+  };
+}
+
+// In a plain build the runner skips every script of integrator/, which requires twins (harness sub-SPEC section 7.4), so
+// this half drives the runner's own comparison of each Off option set directly (report/spec/integrator.17/plain-h7.md).
+const pinSelfPlainCase: Case = {
+  name: "pin-self-plain",
+  claim: "H7: a plain build compared with itself on the runner's fixtures and the integrator corpus finds no difference",
+  skip: context => (context.plainBuild ? null : "no --plain-build names a plain build"),
+  async run(context) {
+    const build = context.plainBuild!;
+    const launcher = new Launcher(build, context.timeoutSeconds, context.qemuCpu ?? "max");
+    const commands: CommandContext = { twins: false, extraOptions: [], mallocForceEnabled: false };
+    const setup: PinSetup = { context: commands, build, launcher, pin: build, pinLauncher: launcher, pinOptions: [] };
+    const problems: string[] = [];
+    let comparisons = 0;
+    const work: (() => Promise<void>)[] = [];
+    for (const path of comparedScripts()) {
+      let script: Script;
+      try {
+        script = parseScript(path);
+      } catch (error) {
+        if (!(error instanceof MalformedScript)) throw error;
+        problems.push(`${path} is malformed: ${error.message}`);
+        continue;
+      }
+      if (script.host !== "jsc" || script.pinOff !== null) continue;
+      script.sequences.forEach((runs, k) => {
+        oracleOptionSets(runs).forEach(({ options }, j) => work.push(async () => {
+          const directory = mkdtempSync(join(context.base, "pin-plain-"));
+          const paths = { artifact: join(directory, "artifact"), scratch: join(directory, "scratch"), layouts: [] };
+          mkdirSync(paths.artifact);
+          mkdirSync(paths.scratch);
+          const { difference } = await comparePinOptionSet(setup, script, k, options, paths, j, new StackSizes());
+          ++comparisons;
+          if (difference) problems.push(`${script.display}, sequence ${k}, option set ${j}: ${difference.check}: ${difference.detail}; its runs are in ${paths.scratch}`);
+          else rmSync(directory, { recursive: true, force: true });
+        }));
+      });
+    }
+    await inParallel(work, context.jobs);
+    if (!comparisons) problems.push("no script had an option set to compare");
+    return problems;
+  },
+};
+
+const pinCraftedCase: Case = {
+  name: "pin-compare-crafted",
+  claim: "H7: jitcache-pin-compare.ts reports the crafted pairs that differ and finds the same code in those that differ only in what canonical code removes",
+  run: async () => runCraftedPinTests(),
+};
+
+// ---------------------------------------------------------------------------------------------------------------------
 
 async function inParallel(work: (() => Promise<void>)[], jobs: number) {
   let next = 0;
@@ -345,6 +456,7 @@ async function inParallel(work: (() => Promise<void>)[], jobs: number) {
 
 async function main(argv: string[]): Promise<number> {
   let build: Build | null = null;
+  let plainBuild: Build | null = null;
   let jobs = 5;
   let timeoutSeconds = 600;
   let qemuCpu: string | null = null;
@@ -353,6 +465,7 @@ async function main(argv: string[]): Promise<number> {
     const equals = argument.indexOf("=");
     const [name, value] = equals < 0 ? [argument, ""] : [argument.slice(0, equals), argument.slice(equals + 1)];
     if (name === "--build" && value) build = loadBuild(value);
+    else if (name === "--plain-build" && value) plainBuild = loadBuild(value);
     else if (name === "--jobs" && /^[1-9]\d*$/.test(value)) jobs = Number(value);
     else if (name === "--timeout" && /^[1-9]\d*$/.test(value)) timeoutSeconds = Number(value);
     else if (name === "--qemu-cpu" && value) qemuCpu = value;
@@ -370,8 +483,13 @@ async function main(argv: string[]): Promise<number> {
     console.error(`self-test.ts: ${build.directory} is no twins build, and every self-test needs one`);
     return 2;
   }
+  if (plainBuild && (plainBuild.twins || plainBuild.architecture !== build.architecture)) {
+    console.error(`self-test.ts: --plain-build names ${plainBuild.directory}, which is no plain ${build.architecture} build`);
+    return 2;
+  }
   const context: Context = {
     build,
+    plainBuild,
     base: mkdtempSync(join(tmpdir(), "jitcache-runner-self-test-")),
     jobs,
     timeoutSeconds,
@@ -379,7 +497,16 @@ async function main(argv: string[]): Promise<number> {
     launcher: new Launcher(build, timeoutSeconds, qemuCpu ?? "max"),
   };
 
-  const cases = [...fixtureCases.map(fixtureCase), calibrationCase, testjitcacheCase, determinismCase];
+  const cases = [
+    ...fixtureCases.map(fixtureCase),
+    calibrationCase,
+    testjitcacheCase,
+    determinismCase,
+    pinSelfCase("pin-self", "H7: the twins build compared with itself on the runner's fixtures and the integrator corpus finds no difference", []),
+    pinSelfCase("pin-self-forced-blinding", "H7: it finds none either when this build's side blinds every immediate it considers", ["--jitcache-test-force-blinding"]),
+    pinSelfPlainCase,
+    pinCraftedCase,
+  ];
   // Every fixture of this directory belongs to a case, so none sits here untested.
   const covered = new Set(fixtureCases.map(spec => spec.fixture));
   const uncovered = readdirSync(fixtures).filter(name => /\.m?js$/.test(name) && !covered.has(name));
@@ -388,6 +515,11 @@ async function main(argv: string[]): Promise<number> {
   const selected = cases.filter(test => !filter || filter.test(test.name));
   let failed = 0;
   await inParallel(selected.map(test => async () => {
+    const skip = test.skip?.(context);
+    if (skip) {
+      console.log(`SKIP ${test.name}: ${skip}`);
+      return;
+    }
     let problems: string[];
     try {
       problems = await test.run(context);
@@ -403,7 +535,8 @@ async function main(argv: string[]): Promise<number> {
     }
   }), jobs);
 
-  console.log(`${selected.length - failed} of ${selected.length} cases passed`);
+  const ran = selected.filter(test => !test.skip?.(context)).length;
+  console.log(`${ran - failed} of ${ran} cases passed${ran < selected.length ? `, ${selected.length - ran} skipped` : ""}`);
   if (!failed) rmSync(context.base, { recursive: true, force: true });
   else console.log(`kept: ${context.base}`);
   return failed || uncovered.length ? 1 : 0;

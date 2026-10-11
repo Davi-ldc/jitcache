@@ -59,6 +59,7 @@
 #include "JSWithScope.h"
 #include "JSWrapForValidIterator.h"
 #include "JSWrapperObject.h"
+#include "MacroAssembler.h"
 #include "MarkedSpaceInlines.h"
 #include "MarkedVector.h"
 #include "MathCommon.h"

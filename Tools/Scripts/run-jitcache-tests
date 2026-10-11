@@ -2,8 +2,9 @@
 // JITCache's test runner (SPEC-integrator.harness.md section 7). It runs every JS script of the test directories as
 // sequences of jsc or Bun processes over one artifact, checks each run (exit, checkers, final status, twin report),
 // compares every run that configures JITCache with a JITCache-off run of the same script, the oracle of THREAD
-// Verification, and runs testjitcache's C++ groups. Its self-tests (JSTests/jitcache/integrator/runner/self-test.ts)
-// import it as a module, so it starts only when run as a program.
+// Verification, with --pin compares each oracle option set's code with the pin's (section 11, jitcache-pin-compare.ts),
+// and runs testjitcache's C++ groups. Its self-tests (JSTests/jitcache/integrator/runner/self-test.ts) import it as a
+// module, so it starts only when run as a program.
 
 import { spawn } from "node:child_process";
 import {
@@ -17,9 +18,20 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  type Architecture,
+  type EngineImage,
+  type PinComparison,
+  type RunCapture,
+  compareRuns,
+  loadEngineImage,
+  pinRunOptions,
+  readJITDump,
+} from "./jitcache-pin-compare.ts";
 
 export const repositoryRoot = resolve(import.meta.dirname, "../..");
 export const corpusRoot = join(repositoryRoot, "JSTests/jitcache");
@@ -68,12 +80,14 @@ const bunDroppedFlags = new Set(["--jitcache-delta-at-exit", "--jitcache-log", "
 const hostArchitecture = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;
 
 const usage = `Usage: run-jitcache-tests --build=<WebKit build directory> [--bun=<Bun executable>] [--mode=twins|plain]
+                         [--pin=<the pin's WebKit build directory>] [--pin-options="<options>"]
                          [--extra-options="<options>"] [--filter=<regex>] [--jobs=<n>] [--timeout=<seconds>]
                          [--js-only | --cpp-only] [--qemu-cpu=<model>] [<test paths>...]
 --build names <build-root>/linux-<arch>-<profile>/deps/WebKit. A test path is a script, or a directory whose .js and
-.mjs files are scripts; the default paths are JSTests/jitcache/ucb, image, cb, ics and integrator. The runner's own
-tests, whose fixtures in JSTests/jitcache/integrator/runner/ fail on purpose, run through
-bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins build>.`;
+.mjs files are scripts; the default paths are JSTests/jitcache/ucb, image, cb, ics and integrator. --pin names the
+build bun build.ts pin made, whose code each jsc-hosted script's off path must emit; --pin-options adds options to this
+build's side of that comparison alone. The runner's own tests, whose fixtures in JSTests/jitcache/integrator/runner/ fail
+on purpose, run through bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins build>.`;
 
 export class UsageError extends Error {}
 class CalibrationError extends Error {}
@@ -85,6 +99,8 @@ export interface RunnerOptions {
   build: string;
   bun: string | null;
   mode: "twins" | "plain" | null; // null: twins exactly when the build has twins
+  pin: string | null; // the pin's WebKit build directory (section 11.1)
+  pinOptions: string[]; // options this build's side of the pin comparison alone takes
   extraOptions: string[];
   filter: RegExp | null;
   jobs: number;
@@ -100,6 +116,8 @@ export function parseCommandLine(argv: string[]): RunnerOptions {
     build: "",
     bun: null,
     mode: null,
+    pin: null,
+    pinOptions: [],
     extraOptions: [],
     filter: null,
     jobs: 5,
@@ -134,6 +152,12 @@ export function parseCommandLine(argv: string[]): RunnerOptions {
         options.mode = mode;
         break;
       }
+      case "--pin":
+        options.pin = resolve(required());
+        break;
+      case "--pin-options":
+        options.pinOptions = optionList(value ?? "", "--pin-options");
+        break;
       case "--extra-options":
         options.extraOptions = optionList(value ?? "", "--extra-options");
         break;
@@ -165,6 +189,7 @@ export function parseCommandLine(argv: string[]): RunnerOptions {
   }
   if (!options.build) throw new UsageError("--build is required");
   if (options.jsOnly && options.cppOnly) throw new UsageError("--js-only and --cpp-only exclude each other");
+  if (options.pinOptions.length && !options.pin) throw new UsageError("--pin-options needs --pin");
   return options;
 }
 
@@ -654,9 +679,20 @@ export function engineEnvironment(context: CommandContext): Record<string, strin
   return context.mallocForceEnabled ? { ...process.env, WebKitMallocForceEnabled: "1" } : { ...process.env };
 }
 
+// What the pin comparison of section 11.2 starts its two runs with: this build's side and the pin's.
+export interface PinSetup {
+  readonly context: CommandContext;
+  readonly build: Build;
+  readonly launcher: Launcher;
+  readonly pin: Build;
+  readonly pinLauncher: Launcher;
+  readonly pinOptions: string[]; // this build's side alone takes them (section 7.1)
+}
+
 export class Session implements CommandContext {
   readonly mode: "twins" | "plain";
   readonly launcher: Launcher;
+  readonly pinSetup: PinSetup | null;
   readonly results: ResultsLog;
   readonly base: string; // the invocation's temporary directory
   readonly pool: Pool;
@@ -672,8 +708,17 @@ export class Session implements CommandContext {
     if (options.mode === "twins" && !build.twins) throw new UsageError(`--mode=twins needs a twins build, and ${build.directory} is none`);
     if (options.qemuCpu !== null && !build.emulated) throw new UsageError("--qemu-cpu applies only to an aarch64 build on an x86_64 host");
     this.mode = options.mode ?? (build.twins ? "twins" : "plain");
-    this.base = mkdtempSync(join(tmpdir(), "jitcache-tests-"));
     this.launcher = new Launcher(build, options.timeoutSeconds, options.qemuCpu ?? "max");
+    this.pinSetup = null;
+    if (options.pin) {
+      // Section 11.1: the pin runs on the same machine as this build, so both see one CPU feature vector, and under the
+      // same emulation when this build's architecture needs it.
+      const pin = loadBuild(options.pin);
+      if (pin.architecture !== build.architecture) throw new UsageError(`--pin names a ${pin.architecture} build, and ${build.directory} is ${build.architecture}`);
+      const pinLauncher = new Launcher(pin, options.timeoutSeconds, options.qemuCpu ?? "max");
+      this.pinSetup = { context: this, build, launcher: this.launcher, pin, pinLauncher, pinOptions: options.pinOptions };
+    }
+    this.base = mkdtempSync(join(tmpdir(), "jitcache-tests-"));
     this.results = new ResultsLog(build.resultsDirectory, this.base);
     this.pool = new Pool(options.jobs);
   }
@@ -864,8 +909,9 @@ async function runAttempt(session: Session, script: Script, k: number, attempt: 
     stderr: join(scratch, `${name}.stderr`),
   });
 
-  // Under QEMU every process of the sequence, its oracle runs included, needs a guest stack size of its own (section 7.9).
-  const processes = runs.length + oracleOptionSets(runs).length;
+  // Under QEMU every process of the sequence, its oracle runs and pin comparisons included, needs a guest stack size of
+  // its own (section 7.9).
+  const processes = runs.length + oracleOptionSets(runs).length * (comparesWithPin(session, script) ? 3 : 1);
   if (session.build.emulated && processes > guestStackSizes) {
     fail(null, "qemu-stack", `the sequence starts ${processes} processes, and only ${guestStackSizes} guest stack sizes differ under QEMU`);
     return result;
@@ -906,6 +952,7 @@ async function runAttempt(session: Session, script: Script, k: number, attempt: 
   }
 
   await runOracle(session, script, k, runs, paths, stacks, result, fail);
+  if (comparesWithPin(session, script)) await runPinComparison(session, script, k, attempt, runs, paths, stacks, result, fail);
   return result;
 }
 
@@ -982,7 +1029,7 @@ function checkTwinReports(session: Session, script: Script, k: number, i: number
 
 // Section 7.6: the oracle's option sets, numbered j in this order, each a run's options without the JITCache ones and
 // the runs that configure JITCache with them.
-function oracleOptionSets(runs: RunSpec[]): { options: string[]; runs: number[] }[] {
+export function oracleOptionSets(runs: RunSpec[]): { options: string[]; runs: number[] }[] {
   const sets = new Map<string, { options: string[]; runs: number[] }>();
   runs.forEach((run, i) => {
     if (!configuresJITCache(run.role)) return;
@@ -1025,6 +1072,76 @@ async function runOracle(session: Session, script: Script, k: number, runs: RunS
         const heap = readBytes(heapFile);
         if (!heap.equals(oracleHeap!)) fail(i, "oracle-heap", `its heap description differs from oracle ${j}'s ${firstDifference(heap, oracleHeap!)}`);
       }
+    }
+    ++j;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The pin comparison (section 11)
+
+// Section 11.2: the oracle run's command line without --jitcache-describe-heap, with the comparison's options last, so
+// they override the run's own.
+export function pinArguments(context: CommandContext, script: Script, sequence: number, options: string[], paths: SequencePaths, name: string, comparisonOptions: string[]): string[] {
+  const args = jscArguments(context, script, sequence, "Off", options, paths, name).filter(arg => !arg.startsWith("--jitcache-describe-heap="));
+  // jscArguments ends with <script> -- <role> <scratch> <artifact> <sequence>.
+  args.splice(args.length - 6, 0, ...comparisonOptions);
+  return args;
+}
+
+const comparesWithPin = (session: Session, script: Script) => session.pinSetup !== null && script.host === "jsc" && script.pinOff === null;
+
+// Runs option set j of a sequence with this build's jsc and with the pin's, keeping each side's status, output, error and
+// JIT dump as <scratch>/pin<j>.<this|pin>.*, which jitcache-pin-compare.ts reads alone too, and compares them.
+export async function comparePinOptionSet(setup: PinSetup, script: Script, sequence: number, options: string[], paths: SequencePaths, j: number, stacks: StackSizes | null): Promise<PinComparison> {
+  const sides = [
+    { side: "this", label: "this build's", build: setup.build, launcher: setup.launcher, extra: setup.pinOptions },
+    { side: "pin", label: "the pin's", build: setup.pin, launcher: setup.pinLauncher, extra: [] as string[] },
+  ];
+  const captures: RunCapture[] = [];
+  for (const { side, label, build, launcher, extra } of sides) {
+    const name = `pin${j}.${side}`;
+    const dumpDirectory = join(paths.scratch, name);
+    mkdirSync(dumpDirectory, { recursive: true }); // PerfLog writes its file there and cannot create the directory
+    const io: ProcessIO = { env: engineEnvironment(setup.context), cwd: paths.scratch, stdout: join(paths.scratch, `${name}.stdout`), stderr: join(paths.scratch, `${name}.stderr`) };
+    const args = pinArguments(setup.context, script, sequence, options, paths, name, [...pinRunOptions(dumpDirectory), ...extra]);
+    const end = await launcher.engine(build.jsc, args, io, stacks);
+    if (end.error || end.timedOut) return { difference: { check: "pin-status", detail: `${label} run ${describeEnd(end)}` }, allocations: 0, bodies: 0 };
+    const status = { code: end.code, signal: end.signal };
+    writeFileSync(join(paths.scratch, `${name}.status`), JSON.stringify(status));
+    captures.push({ status, stdout: readBytes(io.stdout), stderr: readText(io.stderr) ?? "", jitDump: readJITDump(dumpDirectory) });
+  }
+  let engines: [EngineImage, EngineImage];
+  try {
+    engines = [loadEngineImage(setup.build.jsc), loadEngineImage(setup.pin.jsc)];
+  } catch (error) {
+    return { difference: { check: "pin-unreadable", detail: (error as Error).message }, allocations: 0, bodies: 0 };
+  }
+  return compareRuns(setup.build.architecture as Architecture, { capture: captures[0], engine: engines[0] }, { capture: captures[1], engine: engines[1] });
+}
+
+// Section 11.2: after the oracle, each option set of its Off runs; the first difference fails the sequence.
+async function runPinComparison(session: Session, script: Script, k: number, attempt: number, runs: RunSpec[], paths: SequencePaths, stacks: StackSizes, result: Attempt, fail: Fail) {
+  let j = 0;
+  for (const { options } of oracleOptionSets(runs)) {
+    const comparison = await comparePinOptionSet(session.pinSetup!, script, k, options, paths, j, stacks);
+    const { difference } = comparison;
+    session.results.write({
+      kind: "pin",
+      script: script.display,
+      sequence: k,
+      attempt,
+      optionSet: j,
+      options,
+      outcome: difference ? "different" : "same",
+      check: difference?.check ?? null,
+      detail: difference?.detail ?? null,
+      allocations: comparison.allocations,
+      bodies: comparison.bodies,
+    });
+    if (difference) {
+      fail(null, difference.check, `option set ${j} (${options.join(" ") || "no options"}): ${difference.detail}`);
+      return;
     }
     ++j;
   }
@@ -1147,14 +1264,18 @@ async function runScripts(session: Session) {
       session.results.write({ kind: "script", script: display, outcome: "skip", reason: skip });
       continue;
     }
-    if (script.host === "jsc") pinScripts++;
+    if (script.host === "jsc") {
+      // Section 7.2: a script whose Off run cannot run on the pin says why, and the comparison lists it.
+      if (session.pinSetup && script.pinOff !== null) session.listed.push(`${display}: the pin comparison skips it: ${script.pinOff}`);
+      else pinScripts++;
+    }
     runnable.push(script);
   }
   if (!runnable.length) return;
   await session.calibrate();
   await Promise.all(runnable.map(script => runScript(session, script)));
   // Section 7.1: the comparison of the off path with the pin's (section 11) runs only with --pin.
-  if (pinScripts) session.listed.push(`the pin comparison of ${pinScripts} jsc-hosted scripts: no --pin names the pin's build`);
+  if (pinScripts && !session.pinSetup) session.listed.push(`the pin comparison of ${pinScripts} jsc-hosted scripts: no --pin names the pin's build`);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1273,6 +1394,7 @@ export async function main(argv: string[]): Promise<number> {
     return 2;
   }
   console.log(`build ${session.build.directory}: ${session.mode} mode, ${session.build.architecture}${session.build.emulated ? ` under QEMU (${session.options.qemuCpu ?? "max"})` : ""}`);
+  if (session.pinSetup) console.log(`pin ${session.pinSetup.pin.directory}${session.pinSetup.pinOptions.length ? `, this build's side with ${session.pinSetup.pinOptions.join(" ")}` : ""}`);
   try {
     if (!session.options.jsOnly) await runCppTests(session);
     if (!session.options.cppOnly) await runScripts(session);

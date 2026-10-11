@@ -5,18 +5,23 @@ import { availableParallelism, constants, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 
 const BUN_PIN = "744846f844374847c902b5e7fd59b4342a51ef99";
+// The webkitbun revision the Bun pin declares (skills/SKILL.md), which the pin comparison builds.
+const WEBKIT_PIN = "2e2aa2290fac856d6f451ceacb58f7f5b44dd057";
 // Each target selects a Bun profile and a ninja target; without one, Bun builds its
 // default targets, the executable and its smoke test. Targets of one profile pass
 // identical config flags, so they share build.ninja, the build directory and its WebKit.
 // The twins profile is debug-local with JITCache's test builds on (ENABLE_JITCACHE_TWINS):
-// its WebKit target builds jsc and testjitcache.
-const TARGETS = new Map<string, { profile: string; ninja?: string }>([
+// its WebKit target builds jsc and testjitcache. The pin target builds debug's jsc from a
+// worktree of this repository at WEBKIT_PIN, in a build directory of its own
+// (SPEC-integrator.harness.md section 11.1).
+const TARGETS = new Map<string, { profile: string; ninja?: string; pin?: true }>([
   ["debug", { profile: "debug-local", ninja: "WebKit" }],
   ["release", { profile: "release-local", ninja: "WebKit" }],
   ["ci-release", { profile: "ci-release", ninja: "WebKit" }],
   ["bun-debug", { profile: "debug-local" }],
   ["twins", { profile: "debug-local-twins", ninja: "WebKit" }],
   ["bun-twins", { profile: "debug-local-twins" }],
+  ["pin", { profile: "debug-local", ninja: "WebKit", pin: true }],
 ]);
 
 function fail(message: string, code = 125): never {
@@ -31,11 +36,13 @@ const keepGoing = args.includes("--keep-going");
 const positional = args.filter(arg => arg !== archOption && arg !== jobsOption && arg !== "--keep-going");
 const requested = positional[0] || "debug";
 if (requested === "-h" || requested === "--help") {
-  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|twins|bun-twins] [--arch=aarch64] [--jobs=N] [--keep-going]");
+  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|twins|bun-twins|pin] [--arch=aarch64] [--jobs=N] [--keep-going]");
   console.log("Build WebKit/JSC with Bun's build system, from a Bun checkout based on the pin. Default: debug.");
   console.log("bun-debug builds the Bun executable against local WebKit in the debug build directory.");
   console.log("twins builds jsc and testjitcache with JITCache's test builds on (ENABLE_JITCACHE_TWINS);");
   console.log("bun-twins builds the Bun executable against that WebKit, in the same build directory.");
+  console.log(`pin builds debug's jsc from the pinned webkitbun ${WEBKIT_PIN.slice(0, 12)} in JITCACHE_PIN_SOURCE`);
+  console.log("(a detached worktree, <build-root>/webkit-pin by default) into linux-<arch>-debug-local-pin.");
   console.log("--arch=aarch64 cross-compiles on an x86_64 host against the sysroot in JITCACHE_AARCH64_SYSROOT.");
   console.log("--jobs=N sets the jobs of each level; the default is as many as memory holds, at most one per CPU.");
   console.log("--keep-going reports every compile error in one build instead of stopping at the first.");
@@ -89,7 +96,24 @@ const sysroot = resolve(process.env.JITCACHE_AARCH64_SYSROOT || join(home, "coll
 if (cross && !statSync(join(sysroot, "usr/include/c++/13"), { throwIfNoEntry: false })?.isDirectory()) {
   fail(`aarch64 sysroot is missing: ${sysroot}\nPoint JITCACHE_AARCH64_SYSROOT at a sysroot like Bun's /opt/linux-sysroot-glibc-arm64, plus ICU 70.1 or newer.`);
 }
-const buildDir = join(buildRoot, `linux-${architecture}-${target.profile}`);
+// The pin comparison's engine is webkitbun at WEBKIT_PIN exactly: its source is a detached worktree at that commit
+// with no change to a tracked file, and its build directory is its own.
+let webkitSource = engineDir;
+if (target.pin) {
+  const pinSource = resolve(process.env.JITCACHE_PIN_SOURCE || join(buildRoot, "webkit-pin"));
+  const create = `Create it with: git -C ${engineDir} worktree add --detach ${pinSource} ${WEBKIT_PIN}`;
+  if (!statSync(pinSource, { throwIfNoEntry: false })?.isDirectory()) fail(`The pin's source is missing: ${pinSource}\n${create}`);
+  const pinGit = (...gitArgs: string[]) => spawnSync("git", ["-C", pinSource, ...gitArgs], { encoding: "utf8" });
+  const head = pinGit("rev-parse", "--verify", "HEAD");
+  if (head.error || head.status !== 0) fail(`Cannot read the HEAD of ${pinSource}: ${head.error?.message ?? head.stderr.trim()}\n${create}`);
+  if (head.stdout.trim() !== WEBKIT_PIN) fail(`${pinSource} is at ${head.stdout.trim()}, not at the pin ${WEBKIT_PIN}.`);
+  const changes = pinGit("diff", "--quiet", "HEAD");
+  if (changes.error) fail(`Cannot check ${pinSource} for changes: ${changes.error.message}`);
+  if (changes.status === 1) fail(`${pinSource} changes tracked files; the pin comparison needs the pin exactly.`);
+  if (changes.status !== 0) fail(`Cannot check ${pinSource} for changes: ${changes.stderr.trim() || `git exited with status ${changes.status}`}`);
+  webkitSource = realpathSync(pinSource);
+}
+const buildDir = join(buildRoot, `linux-${architecture}-${target.profile}${target.pin ? "-pin" : ""}`);
 const env = { ...process.env };
 env.PATH = `${join(home, "collo-local/tools/bin")}:${env.PATH || ""}`;
 
@@ -111,7 +135,7 @@ delete env.BUILDKITE;
 delete env.GITHUB_ACTIONS;
 env.CMAKE_BUILD_PARALLEL_LEVEL = String(JOBS);
 env.CARGO_BUILD_JOBS = String(JOBS);
-env.BUN_WEBKIT_PATH = engineDir;
+env.BUN_WEBKIT_PATH = webkitSource;
 const lockDir = resolve(process.env.XDG_CACHE_HOME || join(home, ".cache"), "jitcache");
 mkdirSync(lockDir, { recursive: true });
 const lock = ["--exclusive", "--no-fork", join(lockDir, "build.lock")];

@@ -22,11 +22,12 @@ namespace JSC::JITCache {
 // calls, host functions and body-event dump that JITCacheTwinsHost.h declares for both hosts. JITCacheTwinsHarness.cpp
 // defines everything both headers declare.
 
-// Section 11.5: forced blinding, which MacroAssembler::shouldConsiderBlinding reads to blind every immediate the assembler
-// considers for blinding. The shell sets it from --jitcache-test-force-blinding while it parses its command line, before
-// JSC::initialize and before any thread emits code, so the threads that emit read it without a lock.
+// Section 11.5: forced blinding, which MacroAssembler::shouldConsiderBlinding reads through forcesBlindingForTesting
+// (MacroAssembler.h) to blind every immediate the assembler considers for blinding. The shell sets it from
+// --jitcache-test-force-blinding while it parses its command line, before JSC::initialize and before any thread emits
+// code, so the threads that emit read it without a lock. Only runs with JITCache off take it: a producer's image twin
+// replays its draws without it.
 JS_EXPORT_PRIVATE void setForcesBlindingForTesting(bool);
-JS_EXPORT_PRIVATE bool forcesBlindingForTesting();
 
 // SPEC-image.md section 11.3: sets the Image lane's process-wide test hook from its --jitcache-test-image-hook name,
 // relocation-pairs, operation-pair, change-recorded-target or skip-patch, and returns true; any other name leaves the hook
