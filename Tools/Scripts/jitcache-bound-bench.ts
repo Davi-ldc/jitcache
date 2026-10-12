@@ -33,7 +33,8 @@ import {
 
 const jetStreamRoot = join(repositoryRoot, "PerformanceTests/JetStream2");
 
-// The values installationBoundSmallestBody may take, in bytes of codeSize.
+// The values installationBoundSmallestBody may take, in bytes of the installed image's linked size, the install
+// event's image.codeSize (SPEC-integrator.md section 16).
 const smallestBodyCandidates = [0, 128, 256, 512, 1024, 2048, 4096];
 const highestRatioCount = 10;
 // Only stops a hung process: one JetStream2 test takes minutes in a debug build.
@@ -395,7 +396,8 @@ interface ImportSample {
   request: number; // the request event's bound total, its counted field
   install: number; // the install event's total, the install function's thread CPU time
   action: string; // import or seed
-  codeSize: number;
+  imageCodeSize: number; // the image's linked size
+  allocation: number; // the installed code's executable allocation, the install event's codeSize
   fixups: number; // the image's fixup count
   steps: Record<string, number>; // the install's steps that ran, wall time that explains the total (harness section 9.1)
 }
@@ -404,7 +406,7 @@ interface NativeSample {
   nanoseconds: number; // compile + finalize
   compile: number;
   finalize: number;
-  codeSize: number;
+  allocation: number; // the native code's executable allocation, the compile event's codeSize
 }
 
 interface BodyTally {
@@ -416,8 +418,9 @@ interface BodyTally {
   compileSupportGenerated: number;
   requestedWithoutInstall: number; // import-side processes that imported the body and never installed it
   compiledOnImportSide: number; // import-side processes that compiled the body natively
-  installedCodeSize: number | null; // the first install's
-  compiledCodeSize: number | null; // the first native-side compile's
+  installedImageSize: number | null; // the first install's image.codeSize, the image's linked size
+  installedAllocation: number | null; // the first install's codeSize
+  compiledAllocation: number | null; // the first native-side compile's codeSize
 }
 
 const numberField = (event: BenchEvent, field: string) => (typeof event[field] === "number" ? (event[field] as number) : 0);
@@ -434,8 +437,9 @@ function tallyOf(tallies: Map<string, BodyTally>, key: string): BodyTally {
       compileSupportGenerated: 0,
       requestedWithoutInstall: 0,
       compiledOnImportSide: 0,
-      installedCodeSize: null,
-      compiledCodeSize: null,
+      installedImageSize: null,
+      installedAllocation: null,
+      compiledAllocation: null,
     };
     tallies.set(key, tally);
   }
@@ -457,7 +461,8 @@ function addImportSide(tallies: Map<string, BodyTally>, events: BenchEvent[]) {
   const installs = firstByKey(events, event => event.event === "install");
   for (const [key, install] of installs) {
     const tally = tallyOf(tallies, key);
-    tally.installedCodeSize ??= numberField(install, "codeSize");
+    tally.installedImageSize ??= numberField(install, "image.codeSize");
+    tally.installedAllocation ??= numberField(install, "codeSize");
     const request = requests.get(key);
     if (install.supportGenerated === true) {
       ++tally.installSupportGenerated;
@@ -478,7 +483,8 @@ function addImportSide(tallies: Map<string, BodyTally>, events: BenchEvent[]) {
       request: requestNanoseconds,
       install: installNanoseconds,
       action: String(request.action),
-      codeSize: numberField(install, "codeSize"),
+      imageCodeSize: numberField(install, "image.codeSize"),
+      allocation: numberField(install, "codeSize"),
       fixups: numberField(install, "image.fixupCount"),
       steps,
     });
@@ -494,14 +500,14 @@ function addImportSide(tallies: Map<string, BodyTally>, events: BenchEvent[]) {
 function addNativeSide(tallies: Map<string, BodyTally>, events: BenchEvent[]): number {
   for (const [key, compile] of firstByKey(events, event => event.event === "compile")) {
     const tally = tallyOf(tallies, key);
-    tally.compiledCodeSize ??= numberField(compile, "codeSize");
+    tally.compiledAllocation ??= numberField(compile, "codeSize");
     if (compile.supportGenerated === true) {
       ++tally.compileSupportGenerated;
       continue;
     }
     const compileNanoseconds = numberField(compile, "compileNanoseconds");
     const finalizeNanoseconds = numberField(compile, "finalizeNanoseconds");
-    tally.nativeSamples.push({ nanoseconds: compileNanoseconds + finalizeNanoseconds, compile: compileNanoseconds, finalize: finalizeNanoseconds, codeSize: numberField(compile, "codeSize") });
+    tally.nativeSamples.push({ nanoseconds: compileNanoseconds + finalizeNanoseconds, compile: compileNanoseconds, finalize: finalizeNanoseconds, allocation: numberField(compile, "codeSize") });
   }
   return events.filter(event => event.event === "compile" && event.key === null).length;
 }
@@ -530,8 +536,9 @@ interface BodyResult {
   workload: string;
   key: string;
   status: BodyStatus;
-  codeSize: number | null; // the installed code's size, or the native compilation's for a body never installed
-  nativeCodeSize: number | null; // the first native-side compilation's, which may differ
+  codeSize: number | null; // the installed image's linked size, which S reads; null for a body never installed
+  installedAllocation: number | null; // the installed code's executable allocation
+  nativeAllocation: number | null; // the first native-side compilation's, which may differ from the installed one
   ratio: number | null; // the import minimum over the native minimum
   import: SideValue<ImportSample> & { supportGenerated: number; withoutImportRequest: number; requestedWithoutInstall: number; compiledNatively: number };
   native: SideValue<NativeSample> & { supportGenerated: number };
@@ -567,8 +574,9 @@ function bodyResult(workload: string, tally: BodyTally): BodyResult {
     workload,
     key: tally.key,
     status,
-    codeSize: tally.installedCodeSize ?? tally.compiledCodeSize,
-    nativeCodeSize: tally.compiledCodeSize,
+    codeSize: tally.installedImageSize,
+    installedAllocation: tally.installedAllocation,
+    nativeAllocation: tally.compiledAllocation,
     ratio: status === "joined" && compiled.min ? imported.min! / compiled.min : null,
     import: {
       ...imported,
@@ -591,7 +599,7 @@ interface Coverage {
   max: number | null;
 }
 
-// The joined bodies a smallest body S covers, those whose codeSize is at least S, and their ratios.
+// The joined bodies a smallest body S covers, those whose installed image's linked size is at least S, and their ratios.
 function coverage(bodies: BodyResult[], smallestBody: number): Coverage {
   const joined = bodies.filter(body => body.status === "joined");
   const covered = joined.filter(body => body.codeSize! >= smallestBody);
@@ -707,7 +715,7 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
   if (build.twins || build.sanitized || buildProfile(build).includes("debug"))
     lines.push("This build is a debug, sanitized or twins build, whose costs say nothing about the bound a release build meets.", "");
   lines.push(
-    "A body's import cost is its import or seed request's bound total (the request event's `counted`) plus its install event's total; its native cost is its compile event's compilation plus finalization, in Consumers whose artifact holds none of the workload's bodies. Each cost is the minimum over the processes that gave the body a counting sample, and the ratio divides the import minimum by the native one; bodies.json also holds the medians. A joined body is covered at S when its codeSize, the size of the installed code, is at least S. The share is the covered bodies' native cost over that of every joined body, and p50 and p99 are nearest-rank percentiles of the covered bodies' ratios.",
+    "A body's import cost is its import or seed request's bound total (the request event's `counted`) plus its install event's total; its native cost is its compile event's compilation plus finalization, in Consumers whose artifact holds none of the workload's bodies. Each cost is the minimum over the processes that gave the body a counting sample, and the ratio divides the import minimum by the native one; bodies.json also holds the medians. A joined body is covered at S when its image size, the installed image's linked size (the install event's `image.codeSize`), is at least S. The share is the covered bodies' native cost over that of every joined body, and p50 and p99 are nearest-rank percentiles of the covered bodies' ratios.",
     "",
     "## All workloads",
     "",
@@ -741,7 +749,7 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
       const sample = body.import.minimumSample!;
       return [body.workload, `\`${shortKey(body.key)}\``, body.codeSize!, microseconds(body.native.min!), microseconds(body.import.min!), ratioText(body.ratio), microseconds(sample.request), microseconds(sample.install), sample.fixups, stepsText(sample.steps)];
     });
-    const header = ["workload", "key", "codeSize", "native (µs)", "import (µs)", "ratio", "request (µs)", "install (µs)", "fixups", "install steps (µs, wall time)"];
+    const header = ["workload", "key", "image size", "native (µs)", "import (µs)", "ratio", "request (µs)", "install (µs)", "fixups", "install steps (µs, wall time)"];
     lines.push(...markdownTable(header, rows, "llrrrrrrrl"), "");
   }
 
@@ -753,14 +761,14 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
   );
   const tallyRow = (label: string, scope: BodyResult[], artifactBodies: string, keyless: number) => {
     const count = (status: BodyStatus) => scope.filter(body => body.status === status).length;
-    const sizesDiffer = scope.filter(body => body.status === "joined" && body.nativeCodeSize !== body.codeSize).length;
+    const sizesDiffer = scope.filter(body => body.status === "joined" && body.nativeAllocation !== body.installedAllocation).length;
     return [label, artifactBodies, count("joined"), count("set aside"), count("native only"), count("import only"), keyless, sizesDiffer];
   };
   const tallyRows = [
     ...results.map(result => tallyRow(result.name, result.bodies, String(result.artifactBodies ?? "?"), result.keylessCompiles)),
     tallyRow("all", bodies, "", results.reduce((total, result) => total + result.keylessCompiles, 0)),
   ];
-  const tallyHeader = ["workload", "artifact bodies", "joined", "set aside", "native only", "import only", "compiles without a key", "joined with another native codeSize"];
+  const tallyHeader = ["workload", "artifact bodies", "joined", "set aside", "native only", "import only", "compiles without a key", "joined, native and installed allocations differ"];
   lines.push(...markdownTable(tallyHeader, tallyRows, "lrrrrrrr"), "");
   const reasons = new Map<string, number>();
   for (const body of bodies) {

@@ -1213,7 +1213,7 @@ These serve the bench loop THREAD Execution ends with. The bench report (harness
 |---|---|---|
 | `defaultProducerLimitBytes` | the limit a producing role uses when the host passes none | `std::optional<size_t>`, empty until the bench sets it; until then a producing role must pass a limit (section 3.2, step 3) |
 | `installationBoundFraction` | THREAD's fixed fraction of the native cost an import may take | set by the bench; read only by the bench, which raises an alert and fails nothing |
-| `installationBoundSmallestBody` | THREAD's smallest body the bound covers, as the body's baseline code size in bytes, the `codeSize` both its `compile` and `install` events report (harness sub-SPEC section 9.2) | set by the bench; read only by the bench, which raises an alert and fails nothing |
+| `installationBoundSmallestBody` | THREAD's smallest body the bound covers, as the linked size in bytes of the body's installed image, which its `install` event reports as `image.codeSize` (harness sub-SPEC section 9.2) | set by the bench; read only by the bench, which raises an alert and fails nothing |
 | `writerStagingBytes` | the writer's staging buffer | 64 KiB until IB5 tunes it |
 | `fallbackListingIntervalMilliseconds` | the least time between the starts of two listings that a refresh without inotify, or with a listing pending, makes (container sub-SPEC section 6.3) | 1000 until IB2 tunes it |
 | `benchConsumerProducerGenerations` | the number of ConsumerProducer runs IB10 chains between its Producer and its Consumer | set by the bench; read only by the bench |

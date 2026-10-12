@@ -144,7 +144,8 @@ private:
 
 // What the install event reports beside the times (harness sub-SPEC section 9.2). codeSize is the installed
 // BaselineJITCode's JITCode::size(), its executable allocation, which the compile event of a native compilation reports
-// the same way, so the two events of one body report one size; the image section's code size stands beside it.
+// the same way, although native code and the image can differ in size. imageCodeSize, the image's linked size, is what
+// installationBoundSmallestBody reads.
 struct InstalledBody {
     BodyKey key;
     CBCounterRestore restore;
