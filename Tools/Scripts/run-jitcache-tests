@@ -915,8 +915,12 @@ export function bunInvocation(context: CommandContext, script: Script, sequence:
       );
     }
   }
-  // --destroy-vm's counterpart, and section 7.4's default as section 7.7 spells it.
-  const env: Record<string, string | undefined> = { ...engineEnvironment(context), BUN_DESTRUCT_VM_ON_EXIT: "1" };
+  // --destroy-vm's counterpart, and section 7.4's default as section 7.7 spells it. BUN_DEBUG_QUIET_LOGS=1 turns off the
+  // scoped logs a debug Bun writes to standard output, as Bun's own test harness does: they name descriptors, pids,
+  // addresses and the process's own output file, which differ between any two processes, so section 7.6 would compare
+  // them rather than what the script prints. The apps a script starts inherit it, a release Bun ignores it, and a
+  // BUN_DEBUG_<tag> or BUN_DEBUG_ALL the caller exports still wins.
+  const env: Record<string, string | undefined> = { ...engineEnvironment(context), BUN_DESTRUCT_VM_ON_EXIT: "1", BUN_DEBUG_QUIET_LOGS: "1" };
   if (directoryDefaults(context, script, options).length) env.BUN_JSC_useConcurrentJIT = "0";
   // Bun hands a BUN_JSC_ variable that Options::setOption rejects to onCrash, so no JITCache flag goes that way.
   for (const option of [...context.extraOptions, ...options]) {
