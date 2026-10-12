@@ -2210,7 +2210,8 @@ JITCACHE_TEST_WITH_OPTIONS(imageTinyBudgetLeavesRecordsIncompleteAndReleasesEver
             JITCACHE_FAIL("jitcacheBig did not compile to baseline code"_s);
             return;
         }
-        auto& code = static_cast<BaselineJITCode&>(*codeBlock->jitCode());
+        RefPtr<JSC::JITCode> jitCode = codeBlock->jitCode();
+        auto& code = static_cast<BaselineJITCode&>(*jitCode);
         auto* record = code.m_jitCacheImageRecord.get();
         if (!record || record->state() != RecordState::Incomplete)
             JITCACHE_FAIL(makeString("jitcacheBig's record is missing or not Incomplete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ')'));
@@ -2828,7 +2829,7 @@ static Vector<uint8_t> imageSlackBytes(const void* start, size_t linkedSize, siz
         return { };
     auto slack = unsafeMakeSpan(static_cast<const uint8_t*>(start), handleSize).subspan(linkedSize);
     if (fill) {
-        Vector<uint8_t> filled(slack.size(), *fill);
+        Vector<uint8_t> filled(FillWith { }, slack.size(), *fill);
         performJITMemcpy<jitMemcpyRepatch>(const_cast<uint8_t*>(slack.data()), filled.span().data(), filled.size());
     }
     Vector<uint8_t> bytes;
