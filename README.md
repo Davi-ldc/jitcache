@@ -25,38 +25,37 @@ bun --jitcache[=<dir>] --jitcache-mode=p run server.ts
 bun --jitcache[=<dir>] --jitcache-mode=c/p-c run server.ts
 ```
 
-`c`, the default, only reads the cache. `p-c` also writes: it runs from the saved functions and keeps updating them when it learns more[^1], which is how a server keeps improving a cache, since `p` only creates new ones. Every write is atomic, so any number of processes can read a cache while one writes to it. Only one process writes at a time: a `p` or `p-c` that finds another process writing prints a warning and runs as if JITCache were off, while the workers of the writing process read what it writes. You can ship the cache directory with your deployment, as long as it was produced by the same Bun binary on machines with the same CPU features: a cache from anything else is ignored, and the process runs as if JITCache were off.
+`c` (default), just uses the cache. `p-c` also writes, updating when it learns more[^1]. Every write is atomic, so N processes can read a cache while someone writes to it. 
 
-| Flag | Values |
-|---|---|
-| `--jitcache[=<dir>]` | turns JITCache on, with the cache in `<dir>`, `./.jitcache` by default; JITCache is off without it |
-| `--jitcache-mode=<mode>` | `c` (default), `p` or `p-c` |
-| `--jitcache-max-memory=<bytes>` | the memory `p` and `p-c` may spend on recording, in bytes (with a `K`, `M` or `G` suffix) or `unlimited`, the default |
-| `--jitcache-strict` | validates everything the cache holds and every assumption JITCache makes; slower, and off by default |
-| `--jitcache-log` | prints JITCache's status to stderr at start and at exit |
-
-Two commands maintain a cache, `./.jitcache` unless you name another directory:
+If the cache came from untrusted code, use `strict` to check every body before consuming: [^2]
 
 ```sh
-bun jitcache clean [<dir>]          # remove the files of writes that never finished
-bun jitcache compact 0.25 [<dir>]   # evict the quarter of the bytes that saves the least warm-up
+bun --jitcache --jitcache-strict run server.ts
+```
+
+to maintain the artifact, you can:
+
+```sh
+bun jitcache compact 0.25 [<dir>]   # evict a quarter of the bytes
+bun jitcache clean [<dir>]          # remove the files of writes that never finished 
 ```
 
 ### Other hosts
 
-A program that embeds JavaScriptCore drives JITCache through `JavaScriptCore/JITCacheAPI.h`. It configures each VM right after creating it, before the VM's first global object, while holding the VM's API lock:
+If you are embedding JSC, drive JITCache through `JavaScriptCore/JITCacheAPI.h` and configure each `JSC::VM` right after creating it, before its first global object, holding the VM's API lock:
 
 ```cpp
 #include <JavaScriptCore/JITCacheAPI.h>
 
 JSC::JSLockHolder lock(vm);
 JSC::JITCache::Config config;
-config.artifactPath = "/var/cache/my-app"_s;
-config.role = JSC::JITCache::Role::Producer;
-auto started = JSC::JITCache::start(vm, config); // Created, Opened, Busy, Rejected or Fault
+config.artifactPath = "/var/cache/my-app"_s;         // --jitcache=<dir>
+config.role = JSC::JITCache::Role::ConsumerProducer; // --jitcache-mode: Consumer, Producer or ConsumerProducer
+config.strict = false;                               // --jitcache-strict
+auto started = JSC::JITCache::start(vm, config);     // Started, Busy, Rejected or Fault
 ```
 
-On `Busy`, another process is producing, and the host can call `start` again as a `Consumer`. `status(vm)` reports the session's state, progress and faults without doing any work. JITCache never saves on its own at exit, so a producing host chooses when to call `delta(vm)`, which saves what each function learned since its compile, usually when the instance is idle or about to stop; it calls it holding the API lock and no JSC-internal lock. The API returns results and never calls back, and `toJSON` turns any result into a log line. `JavaScriptCore/JITCacheMaintenance.h` declares `clean` and `compact`. The jsc shell takes the same flags as Bun, plus `--jitcache-delta-at-exit`.
+Before stopping a VM, you can call `delta(vm)` to save what each function learned since the last save [^3] (holding its API lock). 
 
 ## Why
 
@@ -74,9 +73,49 @@ The mechanism is incredible, but it was designed to serve the browser with ephem
 
 ### it was made
 
-Claude doesn't know much about WebKit's internals, and a lot of what it assumes is wrong. So I took a month to study JSC and its JIT and documented everything in Portuguese (skills/reference/pt/), then cut the parts only a human needs, translated the rest to English (skills/reference/) and gave each doc its own agent to drain the reports other agents file against it, always keeping each one under 40,000 bytes. Then, heavily inspired by [Jarred's threads PR](https://github.com/oven-sh/WebKit/pull/249), I discussed the core design with Claude and serialized the conversation into THREAD.md. Them:
+[![How JITCache was made: docs/, THREAD.md and the SPEC workflow (58 s video)](docs/images/making-of.png)](docs/images/making-of.mp4?raw=true)
 
-![The thread-prep workflow](docs/images/thread-prep.svg)
+That was heavily inspired by [Jarred's PR adding threads to JSC](https://github.com/oven-sh/WebKit/pull/249). The coolest thing in it are the workflow's details:
+
+<details>
+
+<summary>Writing THREAD.md</summary>
+
+* Beyond taking every hard decision and leaving no loose ends, the most important thing is keeping your intentions clear, especially long-term ones (they become constraints), and making sure you didn't leave any gaps.
+* THREAD only gets edited by a human, workflow agents can write reports requesting changes or pointing errors but you gotta keep control over it.
+* Priorities are defined in order and I tweak them whenever an agent makes a wrong tradeoff
+* I reviewed it many times double checking boundaries, making it simpler, and improving the reasoning line.
+
+PS: I would guess that it's 80% making a good technical design and 20% making sure that agents understand it
+
+</details>
+
+<details>
+
+<summary>Agents maintaining docs/</summary>
+
+* Every 10 reports, the doc's agent reorganizes and compacts (to under 40k bytes) the file, keeping the line of reasoning clear (it gets messie after many fixes).
+* Every report is duble checked, a wrong one usually means that the doc is confusing.
+* The docs never use line numbers to better survive webkit bumps.
+
+</details>
+
+<details>
+
+<summary>SPECS</summary>
+
+* Every prompt in the workflow are, max one paragraph long, if you need more than that to explain the task, there's probably a gap in THREAD/SPEC .md
+* Every decision changed after a review has its intent explained in SPEC-<lane>-history.md, to save the non-obvious insight.
+* To manage context, big subtopics go to sub-SPECs, drained by a human later btween rounds. Jarred capped each SPEC at 40k bytes with a compaction agent after every review round that end up pushing text into files no reviewer read, so i decided to compact them latter
+* Anything an agent can't settle, like conflicts btween specs go to report/spec/, drained between rounds by a human.
+
+</details>
+
+<details>
+
+<summary>Compacting specs</summary>
+
+</details>
 
 ### it works
 
@@ -97,3 +136,6 @@ We measured it. On x86_64, recording emits the same instructions as a normal com
 The cache header records the binary's build ID, the options that change code and the CPU features. A cache that does not match is rejected, and the process runs as if JITCache were off.
 
 [^1]: When a higher tier compiles a function, or when the new copy saw more types in its profiles; on a tie, the one with more inline caches filled wins, then the one closer to its next tier. A new copy comes from the save at exit, or from a recompile after the garbage collector freed the function's `CodeBlock`, the object that holds its JIT state. More in the [docs](./docs/JitCache/).
+
+[^2]: Strict checks that every patched spot holds the instruction the patch expects, that offsets and indexes fall inside the code and the bytecode, and that unused fields are zero. It does not check the instructions between those spots, which run as the producer emitted them.
+
