@@ -1006,10 +1006,13 @@ void TwinCheck::compareTables(const BaselineJITCode& twinCode, const ImageRecord
     if (!poolEqual)
         difference("constant-pool"_s, "the restored constant pool differs from the twin's"_s);
 
-    // The restored code's facts are the section's.
+    // The restored code's facts are the section's. The level is a fact only through its class, CannotCompile or not
+    // (section 7, N13). Within the class it follows the executable's inlining state (noInline) and the free inlining-cost
+    // options, which the producer and the consumer may set differently, in either direction, for the same code. The taint
+    // and the scope facts compare exactly.
     auto& sectionFacts = m_view.bakedFacts();
     auto& twinFacts = twinRecord.bakedFacts();
-    bool factsEqual = sectionFacts.capabilityLevel() == twinFacts.capabilityLevel
+    bool factsEqual = (sectionFacts.capabilityLevel() == DFG::CannotCompile) == (twinFacts.capabilityLevel == DFG::CannotCompile)
         && sectionFacts.couldBeTainted() == twinFacts.couldBeTainted
         && sectionFacts.scopeFactCount() == twinFacts.scopeFacts.size();
     for (unsigned index = 0; factsEqual && index < sectionFacts.scopeFactCount(); ++index)
