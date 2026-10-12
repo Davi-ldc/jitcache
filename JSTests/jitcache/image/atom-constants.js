@@ -8,7 +8,10 @@
 // the consumer decode it. The shell caches each function as an update of its own, whose strings decode as fresh plain
 // strings, so every string constant longer than an inline string stays plain until a property-key use makes it an atom
 // in place. Each function compares its own long constant with === or !==, as a value or as a branch, on the left or the
-// right, and returns the constant itself when asked.
+// right, and returns the constant itself when asked. The constants on the left are template literals without
+// substitutions: StrictEqualNode::emitBytecode and BinaryOpNode::emitBytecode move a string literal on the left of
+// === or !== to the right, while a template literal, which is no StringNode, stays its instruction's left operand and
+// shares the constant register of the string literal its function returns.
 // - The producer makes the "early" constants atoms before the functions compile, so their templates compare by atom; the
 //   "late" ones after they compiled and before its delta at exit, which recaptures them with an atom map that marks
 //   those constants while their images keep the generic comparison; the "plain" ones stay plain.
@@ -35,14 +38,14 @@
     function branchLeft(x, constant) {
         if (constant)
             return "jitcache-atom-constant-early-branch-left";
-        if ("jitcache-atom-constant-early-branch-left" !== x)
+        if (`jitcache-atom-constant-early-branch-left` !== x)
             return false;
         return true;
     }
     function valueLeft(x, constant) {
         if (constant)
             return "jitcache-atom-constant-late-value-left";
-        return "jitcache-atom-constant-late-value-left" !== x;
+        return `jitcache-atom-constant-late-value-left` !== x;
     }
     function branchRight(x, constant) {
         if (constant)
@@ -59,7 +62,7 @@
     function plainBranch(x, constant) {
         if (constant)
             return "jitcache-atom-constant-plain-branch";
-        if ("jitcache-atom-constant-plain-branch" === x)
+        if (`jitcache-atom-constant-plain-branch` === x)
             return true;
         return false;
     }
