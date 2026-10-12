@@ -1,6 +1,6 @@
 // jitcache-runs: Producer --diskCachePath=. --jitcache-delta-at-exit; Consumer --diskCachePath=.
 // jitcache-runs: Off --diskCachePath=.; Producer --diskCachePath=. --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --diskCachePath=. --jitcache-delta-at-exit; ConsumerProducer --diskCachePath=. --jitcache-delta-at-exit; Consumer
+// jitcache-runs: Producer --diskCachePath=.; ConsumerProducer --diskCachePath=. --jitcache-delta-at-exit; Consumer
 // jitcache-expect-no-install: 1:2
 // jitcache-pin: off its runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
@@ -17,7 +17,11 @@
 //   misses Provenance and nothing attaches, so that Consumer installs nothing.
 // - Sequence 2: generated in the Producer, decoded and seeded in a ConsumerProducer, which runs the functions further
 //   and recaptures them with jitcacheDelta, then generated in a Consumer, where each recaptured function imports. In
-//   twins runs each recaptured function's ucb.identity holds provenance Generated (section 8.2).
+//   twins runs each recaptured function's ucb.identity holds provenance Generated (section 8.2). A delta captures a
+//   function only while its baseline CodeBlock is its executable's replacement (THREAD Capture), and the 400 calls every
+//   run makes take the functions into the DFG, so the ConsumerProducer recaptures them before those calls. The Producer
+//   runs no delta, so each function's saved body is the capture its baseline compile made, whose counter has no progress,
+//   and the import leaves the function about seventy calls short of its first DFG compile (SPEC-cb.md section 5.3).
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
 
@@ -49,7 +53,9 @@ load("./resources/sections.js", "caller relative");
         return value;
     }
 
-    const functions = [];
+    // Each program's realm and its two functions, after one call of each; the 400 calls every run makes come after
+    // sequence 2's recapture.
+    const runs = [];
     for (const entry of programs) {
         const text = program(entry.prefix, entry.vars);
         const before = t.statistics();
@@ -77,29 +83,19 @@ load("./resources/sections.js", "caller relative");
             : { imports: 1 };
         const scale = realm[`${entry.prefix}Scale`];
         const label = realm[`${entry.prefix}Label`];
-        let total = measured(`${entry.prefix}Scale's first call`, () => scale(1), functionExpectations);
+        const total = measured(`${entry.prefix}Scale's first call`, () => scale(1), functionExpectations);
         const labelled = measured(`${entry.prefix}Label's first call`, () => label(1), functionExpectations);
-        for (let i = 0; i < 400; ++i)
-            total = (total + scale(i) + label(i).length) | 0;
-        print(`${entry.label}: ${realm[entry.vars[1]]}, ${total}, ${labelled}`);
-        functions.push(scale, label);
+        runs.push({ entry, realm, scale, label, total, labelled });
     }
-
-    // Sequence 1: a second evaluation's CodeCache hit meets the generated program, whose attach never reaches the
-    // provenance comparison: the program reached the baseline, so its parked code stops the attach first (section 7.3.4
-    // step 2), and once a collection has released that code, the stamp its import's Provenance miss left at the current
-    // index token does (step 3). Either way nothing attaches and nothing is digested
-    // (SPEC-ucb.md section 13.3, this script's row).
-    if (t.sequence === 1)
-        measured("evaluating the small program again", () => runString(program(programs[0].prefix, programs[0].vars)), t.imports ? {
-            attaches: 0, imports: 0, "misses.Provenance": 0, contextDigests: 0, sourceDigests: 0,
-        } : null);
+    const functions = runs.flatMap(run => [run.scale, run.label]);
 
     if (t.sequence === 2 && role === "ConsumerProducer") {
         // Run the seeded functions further, with argument types the Producer never passed, so that the recapture is
-        // richer than the saved body and replaces it.
+        // richer than the saved body and replaces it. A new type sets its bit in the arithmetic profile of the
+        // function's mul or add at its first call, and the UCB's feedback carries those profiles, so eight calls are
+        // enough and stay far below the seventy the imported counters allow.
         let further = 0;
-        for (let i = 0; i < 400; ++i) {
+        for (let i = 0; i < 8; ++i) {
             further += String(functions[0](i + 0.5)).length;
             further += functions[1]({ toString: () => "object" }).length;
             further += functions[2](i + 0.25);
@@ -107,6 +103,11 @@ load("./resources/sections.js", "caller relative");
         }
         t.check(Number.isFinite(further), "the further runs gave no number");
         if (t.twins) {
+            // A function in the DFG has no baseline replacement for the delta to capture.
+            functions.forEach(fn => {
+                const events = t.events(fn);
+                t.check(events && events.dfgCompiles === 0, () => `${fn.name} reached the DFG before jitcacheDelta, with events ${t.describe(events)}`);
+            });
             const saved = functions.map(fn => t.readSection(t.bodyKey(fn), "ucb.feedback"));
             const result = t.captureDelta();
             t.check(result.committedBodies >= functions.length, () => `jitcacheDelta committed ${t.describe(result)}`);
@@ -119,5 +120,22 @@ load("./resources/sections.js", "caller relative");
             });
         }
     }
+
+    for (const { entry, realm, scale, label, labelled, total: first } of runs) {
+        let total = first;
+        for (let i = 0; i < 400; ++i)
+            total = (total + scale(i) + label(i).length) | 0;
+        print(`${entry.label}: ${realm[entry.vars[1]]}, ${total}, ${labelled}`);
+    }
+
+    // Sequence 1: a second evaluation's CodeCache hit meets the generated program, whose attach never reaches the
+    // provenance comparison: the program reached the baseline, so its parked code stops the attach first (section 7.3.4
+    // step 2), and once a collection has released that code, the stamp its import's Provenance miss left at the current
+    // index token does (step 3). Either way nothing attaches and nothing is digested
+    // (SPEC-ucb.md section 13.3, this script's row).
+    if (t.sequence === 1)
+        measured("evaluating the small program again", () => runString(program(programs[0].prefix, programs[0].vars)), t.imports ? {
+            attaches: 0, imports: 0, "misses.Provenance": 0, contextDigests: 0, sourceDigests: 0,
+        } : null);
     t.finish();
 })(...arguments);

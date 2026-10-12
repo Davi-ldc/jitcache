@@ -38,11 +38,12 @@ var invalidMaterialCases = (function () {
         {
             return x + 1;
         }
-        // Its optimized code exits with two kinds, BadType on a string and Overflow at its add, so its UCB records two
-        // exit sites.
+        // Its optimized code exits with two kinds, BadType at its argument check on a string and Overflow at its add on
+        // 0x7fffffff, so its UCB records two exit sites. It returns the sum as is: under a `| 0` the DFG truncates the
+        // add and drops its overflow check, and only BadType remains.
         function imExits(x)
         {
-            return (x + 1) | 0;
+            return x + 1;
         }
         function imLinkTime(f, x)
         {

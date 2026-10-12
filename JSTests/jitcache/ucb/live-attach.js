@@ -41,11 +41,18 @@ load("./resources/ucb.js", "caller relative");
     const t = ucbTest(role, scratch, artifact, sequence);
     const programText = "function laF(x, during) { let total = x; for (let i = 0; i < 4; ++i) total = (total * 5 + i) | 0; during(); return total; }";
     const loopText = "{ let laTotal = 0; for (let i = 0; i < 3000; ++i) laTotal = (laTotal + i * 3) | 0; laDuring(); laTotal; }";
-    // What laF calls outside a window: a native function, which has no body to request and is a function like every
-    // window's callback, so laF's argument profile holds one type from its first call on. A later capture of laF, such as
-    // the one that follows the native compile the CodeBlocks born in the LLInt after a miss reach, is then no richer than
-    // the saved body and writes nothing, so the window it falls in computes no digest.
+    // Every value laF's profiles sample falls in a category its first call already sampled, so a later capture of laF,
+    // such as the one that follows the native compile the CodeBlocks born in the LLInt after a miss reach, ties the
+    // saved body: it is no richer, and a capture at a baseline compile lists no IC case and carries no counter
+    // progress. A tie keeps the saved body, so that capture writes nothing and the window it falls in computes no
+    // digest. laF's arithmetic sees only Int32s and never overflows, and each argument has one category: `this` is a
+    // realm's global proxy; `during` is a function, a window's callback or, outside a window, a native one, which has
+    // no body to request; and x starts at firstX, because 0 and 1 are SpecBoolInt32 and every other Int32 is
+    // SpecNonBoolInt32. An argument profile keeps only its last sample until a collection, a baseline compile or a
+    // tier-up check folds it into the prediction, whenever that happens, so an x of 0 or 1 would reach some captures
+    // and miss others.
     const idle = Math.abs;
+    const firstX = 2;
     const loopResult = 13495500;
     const laF = x => {
         let total = x;
@@ -70,14 +77,15 @@ load("./resources/ucb.js", "caller relative");
         return progress ? progress.installs : 0;
     }
 
-    // Calls laF of a new realm `count` times and checks its results; the last call runs `during` before it returns. The
-    // realm dies once this returns.
+    // Calls laF of a new realm `count` times, with x from firstX up, and checks its results; the last call runs
+    // `during` before it returns. The realm dies once this returns.
     function runInNewRealm(count, during = idle)
     {
         const realm = runString(programText);
         for (let i = 0; i < count; ++i) {
-            const value = realm.laF(i, i === count - 1 ? during : idle);
-            t.check(value === laF(i), () => `laF(${i}) gave ${value}`);
+            const x = firstX + i;
+            const value = realm.laF(x, i === count - 1 ? during : idle);
+            t.check(value === laF(x), () => `laF(${x}) gave ${value}`);
         }
     }
 
@@ -166,7 +174,7 @@ load("./resources/ucb.js", "caller relative");
         // so the UCB parks no code and the second request needs no release.
         if (t.twins) {
             const realm = runString(programText);
-            realm.laF(0, idle);
+            realm.laF(firstX, idle);
             const key = t.bodyKey(realm.laF);
             const identity = t.readSection(key, "ucb.identity");
             t.check(identity, "laF has no ucb.identity");

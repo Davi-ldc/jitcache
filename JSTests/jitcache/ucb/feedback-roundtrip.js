@@ -107,18 +107,23 @@ load("./resources/sections.js", "caller relative");
         for (let i = 0; i < 600; ++i)
             optimizing.frMakeAdder(i)(i);
 
-        // The second realm's CodeBlocks take the parked baseline code and stay in the baseline, where delta captures the
-        // UCBs whose first realm's code is optimized.
-        for (let i = 0; i < 20; ++i) {
-            baseline.frLoop(4);
-            baseline.frTier(i);
-            baseline.frExit(i);
-        }
+        // The second realm's CodeBlocks of frLoop, frTier and frExit take the parked baseline code and stay in the
+        // baseline, where delta captures the UCBs whose first realm's code is optimized. Each of the three runs once
+        // there: the quick DFG bit that the first realm set for frLoop and frTier scales their new CodeBlocks' threshold
+        // by quickDFGTierUpThresholdFactor (CodeBlock::optimizeAfterWarmUpImpl) to about 200 execution-counter points,
+        // and a call adds 15 plus one per loop iteration. Where richness ties, that call's progress lets delta's capture
+        // beat the one the body got at its baseline compilation, whose counter had no progress yet.
+        baseline.frLoop(4);
+        baseline.frTier(1);
+        baseline.frExit(1);
         for (let i = 0; i < 60; ++i)
             baseline.frDead({ p: i });
 
-        if (t.twins && t.produces)
+        if (t.twins && t.produces) {
+            for (const name of ["frLoop", "frTier", "frExit"])
+                t.check(numberOfDFGCompiles(baseline[name]) === 0, `the second realm's ${name} left the baseline`);
             jitcacheDelta();
+        }
     }
 
     if (t.produces)

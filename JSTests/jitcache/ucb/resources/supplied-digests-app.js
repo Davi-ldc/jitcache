@@ -7,8 +7,14 @@
 //
 // Bun creates some of its own JS builtins while it creates the global object, after JITCache's start, and their roots are
 // hashed from their text: each builtin's source is a range of one provider that holds them all, so none spans its
-// provider (section 3.5, form 3). The counts at the app's first statement therefore do not single out the entry module,
-// and the digest checks are made over the windows below, around the loads they name.
+// provider (section 3.5, form 3). The counts of computed and supplied digests at the app's first statement therefore do
+// not single out the entry module, and those checks are made over the windows below, around the loads they name.
+
+// The statistics at the entry module's first statement, read before the app loads any other module. A Consumer that
+// imports a function of an internal module verifies that module's own supplied digest with strict on (section 3.5,
+// form 2), so after the requires below the verification count would no longer single out the entry module's import.
+// bun:jsc is native, so loading it runs no internal module's code.
+const atFirstStatement = require("bun:jsc").jitcacheUCBStatistics?.();
 const path = require("node:path");
 const Module = require("node:module");
 const { appContext } = require("./ucb-bun.js");
@@ -18,14 +24,18 @@ const decodes = t.sequence <= 1;
 const strict = t.sequence !== 1;
 const hasRecord = t.sequence !== 3;
 const overrides = (t.sequence === 4 && t.role === "Producer") || (t.sequence === 5 && t.role !== "Producer");
+// 2 and 3 are ES builds, where the bundler makes the CommonJS embedded module an ES module whose default export is its
+// `module.exports` (`export default require_...()`), and require of an ES module returns its namespace.
+const esBuild = t.sequence === 2 || t.sequence === 3;
 
-// At the app's first statistics read, the entry module has been decoded or imported. Without --bytecode its body was
-// captured, so the Consumer imported it, and with strict on that import verified the digest its key rests on.
-const atStart = t.statistics();
+// At its first statement, the entry module has been decoded or imported. Without --bytecode its body was captured, so
+// the Consumer imported it, and with strict on that import verified the digest its key rests on, the run's first
+// verification.
+const atStart = t.observes ? atFirstStatement : null;
 if (atStart && t.imports && !decodes) {
     t.check(atStart.imports >= 1, "the entry module did not import");
-    const verified = hasRecord && strict ? atStart.suppliedDigestVerifications >= 1 : atStart.suppliedDigestVerifications === 0;
-    t.check(verified, () => `the entry module's import made ${atStart.suppliedDigestVerifications} verifications`);
+    const verifications = hasRecord && strict ? 1 : 0;
+    t.check(atStart.suppliedDigestVerifications === verifications, () => `the entry module's import made ${atStart.suppliedDigestVerifications} verifications, expected ${verifications}`);
 }
 
 // What a function's first call in the Consumer does: a decoded function is seeded, a generated one imports.
@@ -49,12 +59,17 @@ else if (t.configured && t.sequence >= 4)
     loadExpectations = { sourceDigests: 0, suppliedSourceDigests: [">=", 1] };
 else if (t.configured)
     loadExpectations = { suppliedSourceDigests: [">=", 1] };
+// The embedded module sits beside the entry module in the executable, whose path is Bun.main. A bundle inlines
+// `__dirname` as the directory the app was built from, so path.join(__dirname, ...) would load the module's source file
+// from disk, without its recorded digest or its bytecode.
+const embeddedModule = path.join(path.dirname(Bun.main), "supplied-digests-module.js");
 const loaded = t.window("loading node:querystring and the embedded module", () => {
     const querystring = require("node:querystring");
     // Bun applies Module.wrapper when it evaluates a CommonJS module; nothing in its loader calls Module.wrap.
     if (overrides)
         Module.wrapper = [wrapperStart, wrapperEnd];
-    return { querystring, module: require(path.join(__dirname, "supplied-digests-module.js")) };
+    const embedded = require(embeddedModule);
+    return { querystring, module: esBuild ? embedded.default : embedded };
 }, loadExpectations);
 
 function sdHot(x)
