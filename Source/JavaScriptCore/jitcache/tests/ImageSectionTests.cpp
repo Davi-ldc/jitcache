@@ -1726,6 +1726,24 @@ JITCACHE_TEST(imageTwinsSectionChecks, Yes)
     expectUCBFailure(context, "a strict equality without its input"_s, mutatedInputs([&](Vector<CompileInput>& inputs) {
         inputs.removeAt(atomEqualityInput);
     }), unlinkedCodeBlock, ImageCheck::W4);
+
+    // T18: the valid section's input names 'delta', the atom equality's right operand, while the UCB holds that constant as
+    // a plain string with the same characters, as a decode from a bytecode cache leaves a constant longer than an inline
+    // string until a property-key use or the decoder's string table makes it an atom (N25). The constant comes back
+    // afterwards. The section's UCBConstantAtom fixup names another constant, so U7 still passes.
+    auto& deltaSlot = unlinkedCodeBlock.constantRegister(unlinkedCodeBlock.instructions().at(BytecodeIndex(body->atomEqualityOffset))->as<OpStricteq>().m_rhs);
+    JSValue deltaAtom = deltaSlot.get();
+    const StringImpl* deltaImpl = deltaAtom.isString() ? asString(deltaAtom)->tryGetValueImpl() : nullptr;
+    if (!deltaImpl || !deltaImpl->isAtom() || deltaAtom == unlinkedCodeBlock.constantRegisters()[body->atomConstant].get()) {
+        JITCACHE_FAIL("the atom equality's operand is no atom constant apart from the one the UCBConstantAtom fixup names"_s);
+        return;
+    }
+    Ref<StringImpl> plainCharacters = deltaImpl->is8Bit() ? StringImpl::create(deltaImpl->span8()) : StringImpl::create(deltaImpl->span16());
+    JSString* plainDelta = jsString(vm, String(WTF::move(plainCharacters)));
+    JITCACHE_CHECK(!plainDelta->tryGetValueImpl()->isAtom());
+    deltaSlot.set(vm, &unlinkedCodeBlock, plainDelta);
+    expectUCBFailure(context, "a strict-equality input naming a plain string"_s, valid, unlinkedCodeBlock, ImageCheck::W4);
+    deltaSlot.set(vm, &unlinkedCodeBlock, deltaAtom);
 }
 
 } // namespace JSC::JITCache::Tests

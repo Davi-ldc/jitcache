@@ -7,6 +7,7 @@
 #include "BaselineJITPlan.h"
 #include "BaselineJITRegisters.h"
 #include "BinarySwitch.h"
+#include "BuiltinExecutableCreator.h"
 #include "BytecodeStructs.h"
 #include "CCallHelpers.h"
 #include "CallLinkInfo.h"
@@ -14,6 +15,7 @@
 #include "Completion.h"
 #include "DeferGC.h"
 #include "DisallowMacroScratchRegisterUsage.h"
+#include "ExecutableAllocator.h"
 #include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
 #include "ImageCapture.h"
@@ -22,13 +24,16 @@
 #include "ImageRecord.h"
 #include "ImageRecorder.h"
 #include "ImageSection.h"
+#include "ImageSupport.h"
 #include "ImageTwins.h"
 #include "JIT.h"
+#include "JITCacheAPI.h"
 #include "JITCacheTest.h"
 #include "JITThunks.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
+#include "JSLock.h"
 #include "LLIntEntrypoint.h"
 #include "LinkBuffer.h"
 #include "ProducerBudget.h"
@@ -37,9 +42,25 @@
 #include "TopExceptionScope.h"
 #include "TwinReport.h"
 #include "UnlinkedCodeBlock.h"
+#include "UnlinkedFunctionExecutable.h"
 #include <algorithm>
 #include <array>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <wtf/ASCIICType.h>
+#include <wtf/DataLog.h>
+#include <wtf/FileSystem.h>
+#include <wtf/HashSet.h>
+#include <wtf/Lock.h>
+#include <wtf/SafeStrerror.h>
+#include <wtf/StringPrintStream.h>
+#include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringBuilder.h>
+#include <wtf/text/StringToIntegerConversion.h>
+#include <wtf/text/StringView.h>
 
 namespace JSC::JITCache::Tests {
 
@@ -1785,58 +1806,77 @@ static bool collectSection(Vector<uint8_t>& bytes, const Write& write)
     return write(sink);
 }
 
-// T21's import and check, in a frame of their own so that the test's frame never holds the twin. producerBody's
-// CodeBlock compiles under a twin recorder, the one recorder a compilation outside production can have (T20), is
-// installed and is captured with strict on. importBody, the same text in the same scope, so that its UCB has the
-// producer's index spaces (R-UCB-1) and its scope accesses resolve alike, gets a newborn CodeBlock, which takes the
-// prepared image as the install glue gives it, through native setup and installCode (SPEC-integrator.md section 7.2),
-// before Twins::checkImage checks it.
-static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& producerFunction, JSFunction& importFunction)
+// A capture's three sections, each in a buffer of its own, beside the code it captured.
+struct CapturedImage {
+    RefPtr<BaselineJITCode> code;
+    Vector<uint8_t> image;
+    Vector<uint8_t> bakedFacts;
+    Vector<uint8_t> twins;
+};
+
+// Captures captured.code, the baseline code codeBlock runs, with strict on, which runs S1 to S4, into captured's three
+// sections.
+static bool imageCaptureInto(TestContext& context, VM& vm, CodeBlock& codeBlock, CapturedImage& captured)
+{
+    Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
+    auto capture = captureImage(vm, codeBlock, *captured.code, budget.get(), true);
+    if (!capture) {
+        JITCACHE_FAIL(makeString("the capture failed with outcome "_s, static_cast<unsigned>(capture.error().outcome), " at "_s, description(capture.error().check)));
+        return false;
+    }
+    bool written = collectSection(captured.image, [&](const ImageSectionSink& sink) { return capture->writeImageSection(sink); })
+        && collectSection(captured.bakedFacts, [&](const ImageSectionSink& sink) { return capture->writeBakedFactsSection(sink); })
+        && collectSection(captured.twins, [&](const ImageSectionSink& sink) { return capture->writeTwinsSection(sink); });
+    if (!written) {
+        JITCACHE_FAIL("writing the captured sections failed"_s);
+        return false;
+    }
+    JITCACHE_CHECK(captured.image.size() == capture->imageSectionSize());
+    JITCACHE_CHECK(captured.bakedFacts.size() == capture->bakedFactsSectionSize());
+    JITCACHE_CHECK(captured.twins.size() == capture->twinsSectionSize());
+    return true;
+}
+
+// producerFunction's CodeBlock, still in the LLInt, compiles under a twin recorder, the one recorder a compilation outside
+// production can have (T20), is installed and is captured with strict on, which runs S1 to S4.
+static NEVER_INLINE std::optional<CapturedImage> imageCompileAndCapture(TestContext& context, VM& vm, JSFunction& producerFunction)
 {
     CodeBlock* producer = producerFunction.jsExecutable()->codeBlockForCall();
     if (!producer || JITCode::isJIT(producer->jitType())) {
-        JITCACHE_FAIL("producerBody has no CodeBlock in the LLInt"_s);
-        return false;
+        JITCACHE_FAIL("the producing function has no CodeBlock in the LLInt"_s);
+        return std::nullopt;
     }
 
     TwinSeeds seeds { };
     seeds.assembler = assemblerSeed;
     TwinCompileInputs noInputs { };
-    RefPtr<BaselineJITCode> producerCode;
+    CapturedImage captured;
     {
         Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(producer));
         JIT jit(vm, plan.get(), producer);
         jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, noInputs);
-        producerCode = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
-        if (!producerCode || JIT::finalizeOnMainThread(producer, plan.get(), producerCode) != CompilationResult::CompilationSuccessful) {
+        captured.code = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
+        if (!captured.code || JIT::finalizeOnMainThread(producer, plan.get(), captured.code) != CompilationResult::CompilationSuccessful) {
             JITCACHE_FAIL("the producer's compilation failed"_s);
-            return false;
+            return std::nullopt;
         }
     }
     producer->ownerExecutable()->installCode(producer);
 
-    Vector<uint8_t> imageBytes;
-    Vector<uint8_t> bakedFactsBytes;
-    Vector<uint8_t> twinsBytes;
-    {
-        Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-        auto capture = captureImage(vm, *producer, *producerCode, budget.get(), true);
-        if (!capture) {
-            JITCACHE_FAIL(makeString("the capture failed with outcome "_s, static_cast<unsigned>(capture.error().outcome), " at "_s, description(capture.error().check)));
-            return false;
-        }
-        bool written = collectSection(imageBytes, [&](const ImageSectionSink& sink) { return capture->writeImageSection(sink); })
-            && collectSection(bakedFactsBytes, [&](const ImageSectionSink& sink) { return capture->writeBakedFactsSection(sink); })
-            && collectSection(twinsBytes, [&](const ImageSectionSink& sink) { return capture->writeTwinsSection(sink); });
-        if (!written) {
-            JITCACHE_FAIL("writing the captured sections failed"_s);
-            return false;
-        }
-        JITCACHE_CHECK(imageBytes.size() == capture->imageSectionSize());
-        JITCACHE_CHECK(bakedFactsBytes.size() == capture->bakedFactsSectionSize());
-        JITCACHE_CHECK(twinsBytes.size() == capture->twinsSectionSize());
-    }
+    if (!imageCaptureInto(context, vm, *producer, captured))
+        return std::nullopt;
+    return captured;
+}
 
+// importFunction, the producer's text in the producer's scope, so that its UCB has the producer's index spaces (R-UCB-1)
+// and its scope accesses resolve alike, gets a newborn CodeBlock. The newborn takes the image prepareImage restores from
+// the captured sections with strict on, which runs S5, as the install glue gives it, through native setup and installCode
+// (SPEC-integrator.md section 7.2), and Twins::checkImage then checks it. inspect sees the restored code and the parsed
+// sections before setup, and aroundCheck receives a function that runs the check, which it calls once. Returns whether
+// the import installed.
+template<typename Inspect, typename AroundCheck>
+static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& importFunction, const CapturedImage& captured, const Inspect& inspect, const AroundCheck& aroundCheck)
+{
     // The install function's deferral keeps the newborn alive until installCode publishes it.
     DeferGCForAWhile deferGC(vm);
     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
@@ -1844,18 +1884,18 @@ static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, J
     CodeBlock* newborn = importExecutable->newCodeBlockFor(CodeSpecializationKind::CodeForCall, &importFunction, importFunction.scope());
     if (scope.exception() || !newborn) {
         scope.clearException();
-        JITCACHE_FAIL("newCodeBlockFor gave importBody no newborn CodeBlock"_s);
+        JITCACHE_FAIL("newCodeBlockFor gave the importing function no newborn CodeBlock"_s);
         return false;
     }
     UnlinkedCodeBlock& unlinkedCodeBlock = *newborn->unlinkedCodeBlock();
 
-    auto view = parseImageSections(ImageSectionSpans { .image = imageBytes.span(), .bakedFacts = bakedFactsBytes.span(), .twins = twinsBytes.span() }, true);
+    auto view = parseImageSections(ImageSectionSpans { .image = captured.image.span(), .bakedFacts = captured.bakedFacts.span(), .twins = captured.twins.span() }, true);
     if (!view) {
         JITCACHE_FAIL(makeString("the captured sections fail "_s, description(view.error())));
         return false;
     }
     if (auto valid = validateImageSectionsAgainst(*view, unlinkedCodeBlock); !valid) {
-        JITCACHE_FAIL(makeString("the captured sections fail "_s, description(valid.error()), " against importBody's UCB"_s));
+        JITCACHE_FAIL(makeString("the captured sections fail "_s, description(valid.error()), " against the importing function's UCB"_s));
         return false;
     }
     if (compareBakedFacts(*view, *newborn) != BakedFactsResult::Match) {
@@ -1868,6 +1908,7 @@ static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, J
         return false;
     }
     Ref<BaselineJITCode> restored = WTF::move(*prepared).commit(vm, *newborn);
+    inspect(restored.get(), *view);
     newborn->setupWithUnlinkedBaselineCode(restored.copyRef());
     importExecutable->installCode(newborn);
 
@@ -1876,14 +1917,32 @@ static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, J
         JITCACHE_FAIL("the twin report cannot be opened"_s);
         return false;
     }
+    size_t twinsBefore = imageTwinCountForTesting();
     Twins twins;
-    twins.checkImage(vm, *newborn, importFunction.scope(), restored.get(), *view, *report);
+    aroundCheck([&] {
+        twins.checkImage(vm, *newborn, importFunction.scope(), restored.get(), *view, *report);
+    });
     // The image is its own twin's: both preconditions hold, so nothing is skipped, and nothing differs.
     if (report->differences() || report->skips())
         JITCACHE_FAIL(makeString("the twin check reported "_s, report->differences(), " differences and "_s, report->skips(), " skips"_s));
     // The check returned, dropping its hold, so nothing reaches the twin, but nothing has swept it yet.
-    JITCACHE_CHECK(imageTwinCountForTesting() == 1);
+    JITCACHE_CHECK(imageTwinCountForTesting() == twinsBefore + 1);
     return true;
+}
+
+template<typename Inspect>
+static bool imageImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& importFunction, const CapturedImage& captured, const Inspect& inspect)
+{
+    return imageImportAndCheckTwin(context, vm, importFunction, captured, inspect, [](const auto& check) {
+        check();
+    });
+}
+
+// T21's capture, import and check, in a frame of their own so that the test's frame never holds the twin.
+static NEVER_INLINE bool imageCaptureImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& producerFunction, JSFunction& importFunction)
+{
+    auto captured = imageCompileAndCapture(context, vm, producerFunction);
+    return captured && imageImportAndCheckTwin(context, vm, importFunction, *captured, [](BaselineJITCode&, const ImageSectionsView&) { });
 }
 
 // A CodeBlock of importBody's UCB linked natively, never installed and left unreachable as the twin is.
@@ -1937,7 +1996,7 @@ JITCACHE_TEST_WITH_OPTIONS(imageTwinDiesWithoutWritingDidOptimize, Yes, "--useCo
     }
     JITCACHE_CHECK(!imageTwinCountForTesting());
 
-    if (!imageImportAndCheckTwin(context, vm, *producerFunction, *importFunction))
+    if (!imageCaptureImportAndCheckTwin(context, vm, *producerFunction, *importFunction))
         return;
     UnlinkedCodeBlock* unlinkedCodeBlock = importFunction->jsExecutable()->codeBlockForCall()->unlinkedCodeBlock();
     JITCACHE_CHECK(unlinkedCodeBlock->didOptimize() == TriState::Indeterminate);
@@ -1954,6 +2013,1315 @@ JITCACHE_TEST_WITH_OPTIONS(imageTwinDiesWithoutWritingDidOptimize, Yes, "--useCo
     imageClearDeadStack();
     vm.heap.collectNow(Synchronousness::Sync, CollectionScope::Full);
     JITCACHE_CHECK(unlinkedCodeBlock->didOptimize() == TriState::False);
+}
+
+namespace ImageRecordingTestsInternal {
+
+// A compilation of codeBlock under a twin recorder, the one recorder a compilation outside production can have (T20),
+// seeded for the assembler alone and charging budget. Null when no executable memory was left.
+static RefPtr<BaselineJITCode> compileUnderTwinRecorder(VM& vm, CodeBlock& codeBlock, Ref<ProducerBudget>&& budget)
+{
+    TwinSeeds seeds { };
+    seeds.assembler = assemblerSeed;
+    TwinCompileInputs compileInputs { };
+    Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(&codeBlock));
+    JIT jit(vm, plan.get(), &codeBlock);
+    jit.setJITCacheTwin(WTF::move(budget), seeds, compileInputs);
+    return jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
+}
+
+static RefPtr<BaselineJITCode> compileUnderTwinRecorder(VM& vm, CodeBlock& codeBlock)
+{
+    return compileUnderTwinRecorder(vm, codeBlock, ProducerBudget::createUnlimited());
+}
+
+static JSFunction* globalFunction(JSGlobalObject& globalObject, ASCIILiteral name)
+{
+    VM& vm = globalObject.vm();
+    return dynamicDowncast<JSFunction>(globalObject.get(&globalObject, Identifier::fromString(vm, name)));
+}
+
+// A VM of the test's own, with its API lock held, destroyed under that lock when the object goes, as testjitcache destroys
+// a test's VM, so that VM::~VM runs JITCache's teardown hooks while the test still runs.
+class OwnedVM {
+    WTF_MAKE_NONCOPYABLE(OwnedVM);
+public:
+    OwnedVM()
+        : m_vm(VM::create(HeapType::Large).leakRef())
+        , m_locker(m_vm)
+    {
+        // The holder's reference is the last, which ~JSLockHolder drops before unlocking.
+        m_vm.derefSuppressingSaferCPPChecking();
+    }
+
+    VM& vm() { return m_vm; }
+
+private:
+    VM& m_vm;
+    JSLockHolder m_locker;
+};
+
+// A fresh directory for an artifact, removed with everything in it when the object goes. Its path is empty when mkdtemp
+// failed, and error() says why.
+class TemporaryArtifactDirectory {
+    WTF_MAKE_NONCOPYABLE(TemporaryArtifactDirectory);
+public:
+    TemporaryArtifactDirectory()
+    {
+        const char* base = getenv("TMPDIR");
+        CString pattern = makeString(String::fromUTF8(base && *base ? base : "/tmp"), "/jitcache-image-XXXXXX"_s).utf8();
+        Vector<char> path;
+        path.append(pattern.spanIncludingNullTerminator());
+        if (mkdtemp(path.mutableSpan().data()))
+            m_path = String::fromUTF8(path.span().data());
+        else
+            m_error = errno;
+    }
+
+    ~TemporaryArtifactDirectory()
+    {
+        if (!m_path.isEmpty())
+            FileSystem::deleteNonEmptyDirectory(m_path);
+    }
+
+    const String& path() const { return m_path; }
+    int error() const { return m_error; }
+
+private:
+    String m_path;
+    int m_error { 0 };
+};
+
+// A program whose function jitcacheBig needs many of kRecordChargeStep's steps of record: 160 property loads, each feeding
+// a mul and an add MathIC, with their slow calls, profile writes and exception checks. The program's own loops stay in the
+// LLInt, so jitcacheBig is the first body that compiles.
+static String bigBodySource()
+{
+    StringBuilder source;
+    source.append("function jitcacheBig(o) {\n    var sum = 0;\n"_s);
+    for (unsigned index = 0; index < 160; ++index)
+        source.append("    sum = sum + o.p"_s, index, " * "_s, index + 1, ";\n"_s);
+    source.append("    return sum;\n}\n"_s);
+    source.append("var jitcacheBigObject = {};\nfor (var k = 0; k < 160; ++k)\n    jitcacheBigObject['p' + k] = k;\n"_s);
+    source.append("for (var i = 0; i < 60; ++i)\n    jitcacheBig(jitcacheBigObject);\n"_s);
+    return source.toString();
+}
+
+} // namespace ImageRecordingTestsInternal
+
+// T11 (SPEC-image.md section 4.1). A body whose emission meets a reason of section 4.1 compiles under a recorder into code
+// whose record is Unrecordable for that reason, which isImageCapturable refuses, so no capture ever reads it. A body
+// generated after VM::enableControlFlowProfiler, as Bun's coverage turns the profiler on, holds op_profile_control_flow,
+// whose emitter clears m_isShareable (N29, census C24). A builtin-mode function made with createBuiltinExecutable, as
+// $vm.createBuiltin makes one, is where @superSamplerBegin and @superSamplerEnd lex (census C20). The two guards of section
+// 4.4, triggered through their hooks, are imageGuardsMarkUnannotatedLinks's and imageSharedHelpersMarkUnannotatedReferences's.
+JITCACHE_TEST(imageUnrecordableBodiesAreNeverCaptured, Yes)
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    auto run = [&](ASCIILiteral source) {
+        NakedPtr<Exception> exception;
+        evaluate(globalObject, makeSource(source, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+        if (exception)
+            JITCACHE_FAIL(makeString("evaluating \""_s, source, "\" threw"_s));
+        return !exception;
+    };
+
+    // The builtin's body is generated at its first call, before the profiler changes the code-generation mode of the bodies
+    // generated after it (JSGlobalObject::defaultCodeGenerationMode), so the super-sampler opcodes are the one reason its
+    // emission meets.
+    SourceCode builtinSource = makeSource("(function () { @superSamplerBegin(); var sampled = 1; @superSamplerEnd(); return sampled; })"_s, SourceOrigin(), SourceTaintedOrigin::Untainted);
+    UnlinkedFunctionExecutable* builtin = createBuiltinExecutable(vm, builtinSource, Identifier::fromString(vm, "jitcacheSampled"_s), ImplementationVisibility::Public, ConstructorKind::None, ConstructAbility::CannotConstruct, InlineAttribute::None);
+    globalObject->putDirect(vm, Identifier::fromString(vm, "jitcacheSampled"_s), JSFunction::create(vm, globalObject, builtin->link(vm, nullptr, builtinSource), globalObject));
+    if (!run("jitcacheSampled();"_s))
+        return;
+    vm.enableControlFlowProfiler();
+    if (!run("function jitcacheCovered(a) { if (a) return 1; return 2; } jitcacheCovered(1);"_s))
+        return;
+
+    struct Case {
+        ASCIILiteral function;
+        Unrecordable reason;
+    };
+    for (auto& unrecordable : { Case { "jitcacheSampled"_s, Unrecordable::SuperSamplerOpcode }, Case { "jitcacheCovered"_s, Unrecordable::NotShareable } }) {
+        auto* function = globalFunction(*globalObject, unrecordable.function);
+        CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
+        if (!codeBlock) {
+            JITCACHE_FAIL(makeString(unrecordable.function, " has no CodeBlock"_s));
+            continue;
+        }
+        auto code = compileUnderTwinRecorder(vm, *codeBlock);
+        if (!code) {
+            JITCACHE_FAIL("no executable memory for the recorded compilation"_s);
+            return;
+        }
+        auto* record = code->m_jitCacheImageRecord.get();
+        if (!record || record->state() != RecordState::Unrecordable || record->unrecordableReason() != unrecordable.reason)
+            JITCACHE_FAIL(makeString(unrecordable.function, "'s record is missing or not Unrecordable for its reason (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ", reason "_s, record ? static_cast<unsigned>(record->unrecordableReason()) : 0u, ')'));
+        JITCACHE_CHECK(!isImageCapturable(*code));
+        if (unrecordable.reason == Unrecordable::NotShareable)
+            JITCACHE_CHECK(!code->m_isShareable);
+    }
+}
+
+// T12 (SPEC-image.md sections 4.8 and 13, I14), the part a script cannot see. In a Producer whose limit admits two of
+// kRecordChargeStep's steps, jitcacheBig records until a later step is refused: its code links and runs, its record is
+// Incomplete, which isImageCapturable refuses, the finalize capture raises the recording fault at budget.limit and
+// commits nothing, and once the VM is destroyed, with its records and its production memory, the budget holds no charge.
+// LeakSanitizer checks the rest when testjitcache exits; image/budget.js runs the limits as a producer would.
+JITCACHE_TEST_WITH_OPTIONS(imageTinyBudgetLeavesRecordsIncompleteAndReleasesEverything, No, "--useConcurrentJIT=false")
+{
+    TemporaryArtifactDirectory directory;
+    if (directory.path().isEmpty()) {
+        JITCACHE_FAIL(makeString("mkdtemp failed: "_s, String::fromUTF8(safeStrerror(directory.error()).data())));
+        return;
+    }
+    RefPtr<ProducerBudget> budget;
+    {
+        OwnedVM producer;
+        VM& vm = producer.vm();
+        JITCache::Config config;
+        config.artifactPath = makeString(directory.path(), "/artifact"_s);
+        config.role = Role::Producer;
+        config.producerLimitBytes = 2 * kRecordChargeStep;
+        config.strict = true;
+        StartResult started = JITCache::start(vm, config);
+        if (started.outcome != StartOutcome::Started) {
+            JITCACHE_FAIL(makeString("the producer did not start: "_s, toJSON(started)));
+            return;
+        }
+        ProducerContext* production = JITCache::producerContext(vm);
+        if (!production) {
+            JITCACHE_FAIL("the started producer has no producer context"_s);
+            return;
+        }
+        budget = production->budget();
+
+        auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+        NakedPtr<Exception> exception;
+        evaluate(globalObject, makeSource(bigBodySource(), SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+        if (exception) {
+            JITCACHE_FAIL("evaluating the big body threw"_s);
+            return;
+        }
+        auto* function = globalFunction(*globalObject, "jitcacheBig"_s);
+        CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
+        if (!codeBlock || codeBlock->jitType() != JITType::BaselineJIT) {
+            JITCACHE_FAIL("jitcacheBig did not compile to baseline code"_s);
+            return;
+        }
+        auto& code = static_cast<BaselineJITCode&>(*codeBlock->jitCode());
+        auto* record = code.m_jitCacheImageRecord.get();
+        if (!record || record->state() != RecordState::Incomplete)
+            JITCACHE_FAIL(makeString("jitcacheBig's record is missing or not Incomplete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ')'));
+        JITCACHE_CHECK(!isImageCapturable(code));
+        JITCACHE_CHECK(budget->hasRefused());
+
+        Status reported = JITCache::status(vm);
+        JITCACHE_CHECK(reported.production == ProductionState::Ended);
+        JITCACHE_CHECK(reported.productionFault && reported.productionFault->stepName() == "budget.limit"_s);
+        JITCACHE_CHECK(!reported.progress.capturesCommitted);
+        JITCACHE_CHECK(!reported.progress.bytesCommitted);
+    }
+    // The VM is gone: every record and all production memory gave back what they charged (I14).
+    JITCACHE_CHECK(budget && !budget->chargedBytes());
+}
+
+namespace ImageRecordingTestsInternal {
+
+// The body of T12's sweep. Each of its 160 statements loads a property, multiplies and adds it, whose MathICs' slow calls
+// end with exception checks in the slow paths, and concatenates a constant string, a site with no inline code (N17), so
+// its operation call and exception check sit in the main pass. jitcacheSweep runs once, in the LLInt, which fills the
+// profiles those shapes follow. It holds no switch and no strict equality, so a twin recorder answers nothing from its
+// seeds and inputs but the assembler's seed.
+static String sweepBodySource()
+{
+    constexpr unsigned statements = 160;
+    StringBuilder source;
+    source.append("function jitcacheSweep(o, s) {\n    var sum = 0;\n    var text = \"\";\n"_s);
+    for (unsigned index = 0; index < statements; ++index)
+        source.append("    sum = sum + o.p"_s, index, " * "_s, index + 1, ";\n    text = \"k\" + s;\n"_s);
+    source.append("    return sum + text.length;\n}\n"_s);
+    source.append("var jitcacheSweepObject = {};\nfor (var k = 0; k < "_s, statements, "; ++k)\n    jitcacheSweepObject['p' + k] = k;\njitcacheSweep(jitcacheSweepObject, 's');\n"_s);
+    return source.toString();
+}
+
+#if CPU(ARM64)
+// An exception check's jump to HandleException. Deferred while the recorder records, it reaches the thunk through a
+// veneer, the b emitVeneers placed at the image's tail; deferred after the recorder stopped, it is linked natively, by
+// its own branch or, when compaction kept the inverted form, by the b right after it.
+struct ExceptionCheckJump {
+    uint32_t offset;
+    bool throughVeneer;
+};
+
+// The conditional branches that reach handleException in [start, arityEntry), the image's prologue, main pass and slow
+// paths, which the passes emitted, and so deferred, in code order. allocationEnd bounds the image's allocation. Nullopt
+// when a conditional branch there targets itself, the form the assembler emits for one that nothing linked.
+static std::optional<Vector<ExceptionCheckJump>> exceptionCheckJumps(uintptr_t start, uintptr_t arityEntry, uintptr_t allocationEnd, uintptr_t handleException)
+{
+    auto isConditional = [](uint32_t word) {
+        return (word & 0xff000010) == 0x54000000 || (word & 0x7e000000) == 0x34000000 || (word & 0x7e000000) == 0x36000000;
+    };
+    Vector<ExceptionCheckJump> jumps;
+    for (uintptr_t address = start; address < arityEntry; address += 4) {
+        if (!isConditional(readWord(address)))
+            continue;
+        uintptr_t target = *arm64BranchTarget(address);
+        if (target == address)
+            return std::nullopt;
+        // The inverted form branches over the b that takes the jump.
+        if (target == address + 8 && (readWord(address + 4) & 0xfc000000) == 0x14000000)
+            target = *arm64BranchTarget(address + 4);
+        if (!reaches(target, handleException))
+            continue;
+        bool throughVeneer = target >= arityEntry && target < allocationEnd;
+        jumps.append(ExceptionCheckJump { static_cast<uint32_t>(address - start), throughVeneer });
+    }
+    return jumps;
+}
+#endif
+
+} // namespace ImageRecordingTestsInternal
+
+// T12 (SPEC-image.md sections 4.5 and 4.8, I14, I19), the main pass and the slow paths. jitcacheSweep compiles under a
+// twin recorder whose budget admits one more kRecordChargeStep each time, until its record is complete. Every compilation
+// whose budget refused a charge leaves an Incomplete record, which isImageCapturable refuses, and once its code dies the
+// budget holds nothing (I14). On ARM64 the exception checks show where the refusal fell: those deferred before it reach
+// HandleException through veneers and those deferred after it natively, so in code order no veneered one follows a native
+// one, no conditional branch is left unlinked, and each image keeps as many as the complete compilation. The sweep must
+// refuse inside the main pass at least once, between a veneered and a native jump before the last instruction, and
+// inside the slow paths at least once, between a veneered and a native jump after it. x86_64 links every
+// conditional external jump natively as it records it, so there only the records and the balances are checked. A refusal
+// inside emitVeneers is imageRefusalInsideEmitVeneersLinksEveryVeneer's, and one inside a MathIC snippet
+// imageRefusedRegenerationLinksItsSnippet's.
+JITCACHE_TEST(imageBudgetSweepLinksEveryExceptionCheck, Yes)
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    NakedPtr<Exception> exception;
+    evaluate(globalObject, makeSource(sweepBodySource(), SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    if (exception) {
+        JITCACHE_FAIL("evaluating the sweep's body threw"_s);
+        return;
+    }
+    auto* function = globalFunction(*globalObject, "jitcacheSweep"_s);
+    CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
+    if (!codeBlock || JITCode::isJIT(codeBlock->jitType())) {
+        JITCACHE_FAIL("jitcacheSweep has no CodeBlock in the LLInt"_s);
+        return;
+    }
+
+#if CPU(ARM64)
+    auto handleException = reinterpret_cast<uintptr_t>(commonThunk(vm, CommonJITThunkID::HandleException).untaggedPtr());
+    // An image's exception checks, and the offset of its last instruction, the end of the main pass.
+    struct Scan {
+        Vector<ExceptionCheckJump> jumps;
+        uint32_t lastInstruction { 0 };
+    };
+    auto scan = [&](BaselineJITCode& code) -> std::optional<Scan> {
+        auto start = reinterpret_cast<uintptr_t>(code.start());
+        auto arityEntry = reinterpret_cast<uintptr_t>(code.addressForCall(ArityCheckMode::MustCheckArity).untaggedPtr());
+        auto jumps = exceptionCheckJumps(start, arityEntry, start + code.size(), handleException);
+        if (!jumps) {
+            JITCACHE_FAIL("a conditional branch of jitcacheSweep's image targets itself"_s);
+            return std::nullopt;
+        }
+        Scan result { WTF::move(*jumps), 0 };
+        code.m_jitCodeMap.forEach([&](BytecodeIndex, CodeLocationLabel<JSEntryPtrTag> location) {
+            result.lastInstruction = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(location.untaggedPtr()) - start);
+        });
+        return result;
+    };
+
+    // The complete compilation defers every exception check while it records.
+    size_t exceptionChecks = 0;
+    {
+        auto code = compileUnderTwinRecorder(vm, *codeBlock);
+        auto* record = code ? code->m_jitCacheImageRecord.get() : nullptr;
+        if (!record || record->state() != RecordState::Complete) {
+            JITCACHE_FAIL("the unlimited compilation of jitcacheSweep left no complete record"_s);
+            return;
+        }
+        auto complete = scan(*code);
+        if (!complete)
+            return;
+        for (auto& jump : complete->jumps) {
+            if (!jump.throughVeneer) {
+                JITCACHE_FAIL(makeString("the complete compilation links the exception check at "_s, jump.offset, " natively"_s));
+                return;
+            }
+        }
+        exceptionChecks = complete->jumps.size();
+        if (!exceptionChecks) {
+            JITCACHE_FAIL("jitcacheSweep's image holds no exception check"_s);
+            return;
+        }
+    }
+    unsigned mainPassRefusals = 0;
+    unsigned slowPathRefusals = 0;
+#endif
+
+    bool completed = false;
+    constexpr unsigned maximumSteps = 512;
+    for (unsigned steps = 1; steps <= maximumSteps && !completed; ++steps) {
+        auto budget = ProducerBudget::create(steps * kRecordChargeStep);
+        {
+            auto code = compileUnderTwinRecorder(vm, *codeBlock, budget.copyRef());
+            if (!code) {
+                JITCACHE_FAIL("no executable memory for the sweep's compilation"_s);
+                return;
+            }
+            auto* record = code->m_jitCacheImageRecord.get();
+            if (!record || (record->state() != RecordState::Complete && record->state() != RecordState::Incomplete)) {
+                JITCACHE_FAIL(makeString("at "_s, steps, " steps, the record is missing or neither complete nor incomplete"_s));
+                return;
+            }
+            completed = record->state() == RecordState::Complete;
+            if (!completed)
+                JITCACHE_CHECK(!isImageCapturable(*code));
+#if CPU(ARM64)
+            auto result = scan(*code);
+            if (!result)
+                return;
+            auto& jumps = result->jumps;
+            if (jumps.size() != exceptionChecks) {
+                JITCACHE_FAIL(makeString("at "_s, steps, " steps, the image holds "_s, jumps.size(), " exception checks instead of "_s, exceptionChecks));
+                return;
+            }
+            size_t firstNative = jumps.size();
+            for (size_t index = 0; index < jumps.size(); ++index) {
+                if (!jumps[index].throughVeneer) {
+                    firstNative = index;
+                    break;
+                }
+            }
+            for (size_t index = firstNative; index < jumps.size(); ++index) {
+                if (jumps[index].throughVeneer) {
+                    JITCACHE_FAIL(makeString("at "_s, steps, " steps, the exception check at "_s, jumps[index].offset, " reaches a veneer after a native one"_s));
+                    return;
+                }
+            }
+            if (completed && firstNative < jumps.size())
+                JITCACHE_FAIL(makeString("the complete compilation at "_s, steps, " steps links an exception check natively"_s));
+            // A refusal between two exception checks of one pass: a veneered one, then a native one.
+            if (firstNative && firstNative < jumps.size()) {
+                if (jumps[firstNative].offset < result->lastInstruction)
+                    ++mainPassRefusals;
+                else if (jumps[firstNative - 1].offset > result->lastInstruction)
+                    ++slowPathRefusals;
+            }
+#endif
+        }
+        // The code is gone, and its record with it.
+        JITCACHE_CHECK(!budget->chargedBytes());
+    }
+    JITCACHE_CHECK(completed);
+#if CPU(ARM64)
+    if (!mainPassRefusals || !slowPathRefusals)
+        JITCACHE_FAIL(makeString("the sweep refused "_s, mainPassRefusals, " times inside the main pass and "_s, slowPathRefusals, " times inside the slow paths"_s));
+#endif
+}
+
+#if CPU(ARM64)
+// T12, the refusal inside emitVeneers (SPEC-image.md sections 4.5 and 4.8, I19). emitVeneers charges only to record a
+// veneer's fixup, and only when the fixup vector is full, so a real compilation refuses there only by chance. Here each
+// try's recorder, under a budget of one kRecordChargeStep, defers a conditional jump to each of two thunks, records a
+// number of Pointer fixups and emits the veneers. emitVeneers emits and links each veneer before recordJump charges for
+// its fixup. So at the first count whose refusal falls inside emitVeneers, the first veneer's fixup takes the vector's
+// last free entry, and the refused charge is the last veneer's, once both veneers exist. At the next count the vector is
+// full as emitVeneers begins: the first veneer's charge is refused, the record never holds a veneer fixup, and the second
+// veneer is emitted and linked by a recorder that has stopped. One count more is refused before the veneers, which shows
+// that the vector was full there. At both counts inside, each jump must reach its thunk through a veneer of its own.
+JITCACHE_TEST(imageRefusalInsideEmitVeneersLinksEveryVeneer, Yes)
+{
+    VM& vm = *context.vm();
+    auto body = makeBody(context, vm);
+    if (!body)
+        return;
+    std::array keys { commonThunkKey(CommonJITThunkID::HandleException), commonThunkKey(CommonJITThunkID::ThrowStackOverflowAtPrologue) };
+    std::array thunks {
+        reinterpret_cast<uintptr_t>(commonThunk(vm, CommonJITThunkID::HandleException).untaggedPtr()),
+        reinterpret_cast<uintptr_t>(commonThunk(vm, CommonJITThunkID::ThrowStackOverflowAtPrologue).untaggedPtr()),
+    };
+
+    enum class Refusal : uint8_t {
+        None,
+        BeforeVeneers,
+        InsideVeneers,
+    };
+    struct Attempt {
+        Refusal refusal { Refusal::None };
+        std::array<uint32_t, 2> sites { }; // The two jumps' labels in the linked code, when refused inside the veneers.
+        std::optional<LinkedCode> linked;
+    };
+    // One try with pointers Pointer fixups recorded between the deferrals and the veneers. Nullopt when no executable
+    // memory was left for the code.
+    auto attempt = [&](unsigned pointers) -> std::optional<Attempt> {
+        auto budget = ProducerBudget::create(kRecordChargeStep);
+        Attempt result;
+        {
+            ImageRecorder recorder(RecordingScope::MathICSnippet, vm, *body->unlinkedCodeBlock, budget.copyRef());
+            CCallHelpers jit;
+            recorder.attachTo(jit);
+            std::array<MacroAssembler::Jump, 2> jumps;
+            for (size_t index = 0; index < jumps.size(); ++index) {
+                jumps[index] = jit.branch32(index ? CCallHelpers::NotEqual : CCallHelpers::Equal, GPRInfo::regT0, GPRInfo::regT1);
+                linkJumpToSupport(jit, vm, jumps[index], keys[index]);
+            }
+            for (unsigned index = 0; index < pointers; ++index)
+                moveReference(jit, ImageReference::vmAddress(vm, VMAddress::VM), GPRInfo::regT2);
+            jit.ret();
+            if (!recorder.isRecording())
+                result.refusal = Refusal::BeforeVeneers;
+            else {
+                recorder.emitVeneers(jit);
+                if (!recorder.isRecording()) {
+                    result.refusal = Refusal::InsideVeneers;
+                    JITCACHE_CHECK(recorder.state() == RecordState::Incomplete);
+                    LinkBuffer linkBuffer(jit, nullptr, LinkBuffer::Profile::Uncategorized, JITCompilationCanFail);
+                    if (linkBuffer.didFailToAllocate()) {
+                        JITCACHE_FAIL("no executable memory for the test code"_s);
+                        return std::nullopt;
+                    }
+                    for (size_t index = 0; index < jumps.size(); ++index)
+                        result.sites[index] = linkBuffer.offsetOf(jumps[index].assemblerLabel());
+                    auto bytes = unsafeMakeSpan(static_cast<const uint8_t*>(linkBuffer.debugAddress()), linkBuffer.size());
+                    result.linked.emplace(LinkedCode { linkBuffer.finalizeCodeWithoutDisassembly<JITStubRoutinePtrTag>("JITCache image recording test"_s), bytes });
+                    JITCACHE_CHECK(!recorder.finishSnippet(linkBuffer));
+                }
+            }
+        }
+        // The recorder released everything it charged (I14).
+        JITCACHE_CHECK(!budget->chargedBytes());
+        return result;
+    };
+    // Each jump of a try refused inside the veneers reaches its thunk through a veneer of its own.
+    auto reachesThroughOwnVeneers = [&](const Attempt& refused, unsigned pointers) {
+        auto codeAddress = reinterpret_cast<uintptr_t>(refused.linked->bytes.data());
+        auto codeEnd = codeAddress + refused.linked->bytes.size();
+        std::array<uintptr_t, 2> veneers { };
+        for (size_t index = 0; index < refused.sites.size(); ++index) {
+            auto veneer = arm64ConditionalTarget(codeAddress + refused.sites[index]);
+            bool throughVeneer = veneer && *veneer >= codeAddress && *veneer < codeEnd && (readWord(*veneer) & 0xfc000000) == 0x14000000;
+            if (!throughVeneer || !reaches(*veneer, thunks[index])) {
+                JITCACHE_FAIL(makeString("with "_s, pointers, " pointers the conditional jump at "_s, refused.sites[index], " does not reach its thunk through a veneer"_s));
+                return false;
+            }
+            veneers[index] = *veneer;
+        }
+        if (veneers[0] == veneers[1]) {
+            JITCACHE_FAIL(makeString("with "_s, pointers, " pointers both jumps reach their thunks through one veneer"_s));
+            return false;
+        }
+        return true;
+    };
+
+    for (unsigned pointers = 0; pointers < 1024; ++pointers) {
+        // The first count refused at all.
+        auto lastVeneerRefused = attempt(pointers);
+        if (!lastVeneerRefused)
+            return;
+        if (lastVeneerRefused->refusal == Refusal::None)
+            continue;
+        if (lastVeneerRefused->refusal == Refusal::BeforeVeneers) {
+            JITCACHE_FAIL(makeString("with "_s, pointers, " pointers the budget refused before the veneers, and no smaller count refused inside them"_s));
+            return;
+        }
+        if (!reachesThroughOwnVeneers(*lastVeneerRefused, pointers))
+            return;
+
+        auto firstVeneerRefused = attempt(pointers + 1);
+        if (!firstVeneerRefused)
+            return;
+        if (firstVeneerRefused->refusal != Refusal::InsideVeneers) {
+            JITCACHE_FAIL(makeString("with "_s, pointers + 1, " pointers the budget did not refuse inside the veneers"_s));
+            return;
+        }
+        if (!reachesThroughOwnVeneers(*firstVeneerRefused, pointers + 1))
+            return;
+
+        // One more Pointer fixup is refused, so the vector was full as emitVeneers began the try before, and the first
+        // veneer's fixup was the charge it refused.
+        auto pastFull = attempt(pointers + 2);
+        if (!pastFull)
+            return;
+        if (pastFull->refusal != Refusal::BeforeVeneers)
+            JITCACHE_FAIL(makeString("with "_s, pointers + 2, " pointers the budget did not refuse before the veneers, so with "_s, pointers + 1, " the first veneer's charge was not the refused one"_s));
+        return;
+    }
+    JITCACHE_FAIL("no count of recorded pointers made the budget refuse inside emitVeneers"_s);
+}
+#endif
+
+// T12, the refusal inside a MathIC snippet (SPEC-image.md sections 4.8 and 6.2, I19). In a Producer, jitcacheRegenerated
+// compiles from int32 profiles with a Complete record, which its finalize capture commits. The test then charges the
+// budget until less than one kRecordChargeStep is left: the next regeneration's log entry still fits, its snippet
+// recorder's first step does not. The first double regenerates the add's full snippet under a recorder that stops before
+// it records anything, so the snippet links every jump back into the image natively, and the record becomes Incomplete.
+// Each later call takes a path of that snippet, back to the image's done location or, for a string and for an operand
+// whose valueOf throws, through its conditional jumps to the image's slow path, and must return or throw what the engine
+// computes. delta then raises the refusal at budget.limit, and once the VM is destroyed the budget holds nothing.
+JITCACHE_TEST_WITH_OPTIONS(imageRefusedRegenerationLinksItsSnippet, No, "--useConcurrentJIT=false")
+{
+    TemporaryArtifactDirectory directory;
+    if (directory.path().isEmpty()) {
+        JITCACHE_FAIL(makeString("mkdtemp failed: "_s, String::fromUTF8(safeStrerror(directory.error()).data())));
+        return;
+    }
+    RefPtr<ProducerBudget> budget;
+    {
+        OwnedVM producer;
+        VM& vm = producer.vm();
+        JITCache::Config config;
+        config.artifactPath = makeString(directory.path(), "/artifact"_s);
+        config.role = Role::Producer;
+        config.producerLimitBytes = 64 * MB;
+        config.strict = true;
+        StartResult started = JITCache::start(vm, config);
+        if (started.outcome != StartOutcome::Started) {
+            JITCACHE_FAIL(makeString("the producer did not start: "_s, toJSON(started)));
+            return;
+        }
+        ProducerContext* production = JITCache::producerContext(vm);
+        if (!production) {
+            JITCACHE_FAIL("the started producer has no producer context"_s);
+            return;
+        }
+        budget = production->budget();
+
+        auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+        auto run = [&](ASCIILiteral source) {
+            NakedPtr<Exception> exception;
+            evaluate(globalObject, makeSource(source, SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+            if (exception)
+                JITCACHE_FAIL(makeString("evaluating \""_s, source, "\" threw"_s));
+            return !exception;
+        };
+        if (!run("function jitcacheRegenerated(a, b) { return a + b; }\nfor (var i = 0; i < 40; ++i)\n    jitcacheRegenerated(i, 1);\n"_s))
+            return;
+        auto* function = globalFunction(*globalObject, "jitcacheRegenerated"_s);
+        CodeBlock* codeBlock = function ? function->jsExecutable()->codeBlockForCall() : nullptr;
+        if (!codeBlock || codeBlock->jitType() != JITType::BaselineJIT) {
+            JITCACHE_FAIL("jitcacheRegenerated did not compile to baseline code"_s);
+            return;
+        }
+        RefPtr<JSC::JITCode> jitCode = codeBlock->jitCode();
+        auto& code = static_cast<BaselineJITCode&>(*jitCode);
+        auto* record = code.m_jitCacheImageRecord.get();
+        if (!record || record->state() != RecordState::Complete) {
+            JITCACHE_FAIL("jitcacheRegenerated's record is missing or not complete"_s);
+            return;
+        }
+        JITCACHE_CHECK(JITCache::status(vm).progress.capturesCommitted);
+
+        size_t exhausting = budget->limitBytes() - budget->chargedBytes() - (kRecordChargeStep - 1);
+        if (!budget->tryCharge(exhausting)) {
+            JITCACHE_FAIL("the test could not charge the budget"_s);
+            return;
+        }
+        bool regenerated = run("if (jitcacheRegenerated(1.5, 2) !== 3.5) throw new Error('1.5 + 2');"_s);
+        JITCACHE_CHECK(regenerated);
+        JITCACHE_CHECK(budget->hasRefused());
+        JITCACHE_CHECK(record->state() == RecordState::Incomplete);
+        bool hasSnippet = false;
+        code.forEachMathIC([&](auto& mathIC) {
+            hasSnippet |= !!mathIC.m_code;
+        });
+        JITCACHE_CHECK(hasSnippet);
+
+        bool tookEveryPath = run(
+            "if (jitcacheRegenerated(2.5, 0.25) !== 2.75) throw new Error('2.5 + 0.25');\n"
+            "if (jitcacheRegenerated(1, 2.5) !== 3.5) throw new Error('1 + 2.5');\n"
+            "if (jitcacheRegenerated(2147483647, 1) !== 2147483648) throw new Error('2147483647 + 1');\n"
+            "if (jitcacheRegenerated('a', 1) !== 'a1') throw new Error('a + 1');\n"
+            "var jitcacheThrew = false;\n"
+            "try { jitcacheRegenerated({ valueOf() { throw new Error('valueOf throws'); } }, 1); } catch (error) { jitcacheThrew = error.message === 'valueOf throws'; }\n"
+            "if (!jitcacheThrew) throw new Error('the exception valueOf threw did not reach the caller');\n"_s);
+        JITCACHE_CHECK(tookEveryPath);
+        JITCACHE_CHECK(function->jsExecutable()->codeBlockForCall() == codeBlock);
+        JITCACHE_CHECK(codeBlock->jitType() == JITType::BaselineJIT);
+
+        DeltaResult result = JITCache::delta(vm);
+        JITCACHE_CHECK(result.outcome == DeltaOutcome::Faulted);
+        JITCACHE_CHECK(result.fault && result.fault->stepName() == "budget.limit"_s);
+        budget->release(exhausting);
+    }
+    // The VM is gone, with every record and all production memory.
+    JITCACHE_CHECK(budget && !budget->chargedBytes());
+}
+
+namespace ImageRecordingTestsInternal {
+
+// The distance T13 puts between an image and its support code: the reach of an ARM64 bl or b, beyond which patching
+// places jump islands. x86_64's rel32 reaches the whole pool, so the same distance needs none there.
+static constexpr size_t islandDistance = 128 * MB;
+#if CPU(ARM64)
+static_assert(islandDistance == MacroAssembler::nearJumpRange);
+#endif
+
+// The thunk a Call or Jump fixup branches to, through the native lookup its support key names; nullopt for a Pointer and
+// for a branch whose target lies in the image or its snippets.
+static std::optional<uintptr_t> supportBranchTarget(VM& vm, const ImageFixup& fixup)
+{
+    if (fixup.form == FixupForm::Pointer)
+        return std::nullopt;
+    switch (fixup.target.kind) {
+    case TargetKind::CommonThunk:
+    case TargetKind::BaselineThunk:
+    case TargetKind::SlowPathThunk:
+    case TargetKind::InlineCacheSlowPathThunk:
+    case TargetKind::VirtualCallThunk:
+    case TargetKind::ProcessThunk:
+        return reinterpret_cast<uintptr_t>(resolveSupport(vm, fixup.target).untaggedPtr());
+    default:
+        return std::nullopt;
+    }
+}
+
+// Every support branch of an image reaches its thunk the way an image that far from its thunks must: through a jump
+// island on ARM64 and directly on x86_64. Returns how many it checked.
+template<typename Fixups>
+static unsigned checkFarSupportBranches(TestContext& context, VM& vm, ASCIILiteral image, std::span<const uint8_t> code, const Fixups& fixups)
+{
+    unsigned checked = 0;
+    for (size_t index = 0; index < fixups.size(); ++index) {
+        ImageFixup fixup = fixups[index];
+        auto support = supportBranchTarget(vm, fixup);
+        if (!support)
+            continue;
+        ++checked;
+        auto direct = decodeFixup(code, fixup);
+#if CPU(ARM64)
+        bool reachesFarThunk = direct && *direct != *support && reaches(*direct, *support);
+#else
+        bool reachesFarThunk = direct && *direct == *support;
+#endif
+        if (!reachesFarThunk) {
+            JITCACHE_FAIL(makeString(image, ": the support branch at "_s, fixup.site, " does not reach its thunk the way a far image must"_s));
+            break;
+        }
+    }
+    return checked;
+}
+
+// Two functions with one text in one scope, as T21's bodies, each 1000 statements of property loads and arithmetic with
+// their slow calls and exception checks. Their image is larger than the pages the JIT heap shares among its small and
+// medium allocations, so every allocation of its size comes from the heap's large-object free lists, which give each the
+// lowest free range that holds it. jitcacheFarProducer runs once, in the LLInt.
+static String farBodiesSource()
+{
+    constexpr unsigned statements = 1000;
+    StringBuilder text;
+    text.append("function (o) {\n    var sum = 0;\n"_s);
+    for (unsigned index = 0; index < statements; ++index)
+        text.append("    sum = sum + o.p"_s, index % 64, " * "_s, index + 1, ";\n"_s);
+    text.append("    return sum;\n}"_s);
+    String body = text.toString();
+    return makeString("var jitcacheFarProducer, jitcacheFarImport;\n(function makeFarBodies() {\n    jitcacheFarProducer = "_s, body,
+        ";\n    jitcacheFarImport = "_s, body, ";\n})();\nvar jitcacheFarObject = {};\nfor (var k = 0; k < 64; ++k)\n    jitcacheFarObject['p' + k] = k;\njitcacheFarProducer(jitcacheFarObject);\n"_s);
+}
+
+} // namespace ImageRecordingTestsInternal
+
+// T13 (SPEC-image.md sections 3.2, 9 and 10.3). In the ASan builds that run this test the executable pool is the libpas
+// JIT heap, where useRandomizingExecutableIslandAllocation only allocates and frees a few blocks before each allocation,
+// so no option puts an image out of a bl's reach of its thunks, and the test makes the distance itself. A first
+// compilation of jitcacheFarProducer generates every thunk its image calls or jumps to. Blocks of the image's size then
+// fill the pool until one starts more than islandDistance past the farthest of those thunks, and stay allocated until the
+// test ends, so every image allocated after them lies out of reach too: the producer's, captured with strict on, whose
+// S1 follows its islands; the one prepareImage restores for jitcacheFarImport with strict on, which the writers patch
+// through islands and whose S5 follows them; and the twin that Twins::checkImage compiles and compares with it, through
+// the islands of both. Every support branch of the producer's and the restored image must reach its thunk through an
+// island on ARM64, and directly on x86_64, whose rel32 reaches the whole pool.
+JITCACHE_TEST_WITH_OPTIONS(imageImportPatchesThroughIslandsToFarSupport, Yes, "--useConcurrentJIT=false")
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    NakedPtr<Exception> exception;
+    evaluate(globalObject, makeSource(farBodiesSource(), SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    if (exception) {
+        JITCACHE_FAIL("evaluating the far bodies threw"_s);
+        return;
+    }
+    auto* producerFunction = globalFunction(*globalObject, "jitcacheFarProducer"_s);
+    auto* importFunction = globalFunction(*globalObject, "jitcacheFarImport"_s);
+    CodeBlock* producer = producerFunction ? producerFunction->jsExecutable()->codeBlockForCall() : nullptr;
+    if (!producer || !importFunction || importFunction->jsExecutable()->codeBlockForCall()) {
+        JITCACHE_FAIL("a far body is missing, or jitcacheFarImport was called"_s);
+        return;
+    }
+
+    // The thunks every compilation of the body branches to, and the size of its image.
+    uintptr_t farthestSupport = 0;
+    size_t codeSize = 0;
+    {
+        auto code = compileUnderTwinRecorder(vm, *producer);
+        auto* record = code ? code->m_jitCacheImageRecord.get() : nullptr;
+        if (!record || record->state() != RecordState::Complete) {
+            JITCACHE_FAIL("the first compilation of jitcacheFarProducer left no complete record"_s);
+            return;
+        }
+        codeSize = record->codeSize();
+        for (auto& fixup : record->fixups()) {
+            if (auto support = supportBranchTarget(vm, fixup))
+                farthestSupport = std::max(farthestSupport, *support);
+        }
+    }
+    if (!farthestSupport) {
+        JITCACHE_FAIL("jitcacheFarProducer's image branches to no thunk"_s);
+        return;
+    }
+    uintptr_t reach = farthestSupport + islandDistance;
+
+    Vector<RefPtr<ExecutableMemoryHandle>> fill;
+    while (true) {
+        auto block = ExecutableAllocator::singleton().allocate(codeSize, JITCompilationCanFail);
+        if (!block) {
+            JITCACHE_FAIL(makeString("the pool held "_s, fill.size(), " blocks of "_s, codeSize, " bytes, none out of the thunks' reach"_s));
+            return;
+        }
+        auto start = reinterpret_cast<uintptr_t>(block->start().untaggedPtr());
+        fill.append(WTF::move(block));
+        if (start > reach)
+            break;
+    }
+    auto isFar = [&](const void* start) {
+        return reinterpret_cast<uintptr_t>(start) > reach;
+    };
+
+    auto captured = imageCompileAndCapture(context, vm, *producerFunction);
+    if (!captured)
+        return;
+    auto* producerRecord = captured->code->m_jitCacheImageRecord.get();
+    if (!producerRecord || producerRecord->state() != RecordState::Complete || !isFar(captured->code->start())) {
+        JITCACHE_FAIL("the producer's image is not complete, or lies within reach of its thunks"_s);
+        return;
+    }
+    auto producerCode = unsafeMakeSpan(static_cast<const uint8_t*>(captured->code->start()), producerRecord->codeSize());
+    JITCACHE_CHECK(checkFarSupportBranches(context, vm, "the producer's image"_s, producerCode, producerRecord->fixups()));
+
+    bool imported = imageImportAndCheckTwin(context, vm, *importFunction, *captured, [&](BaselineJITCode& restored, const ImageSectionsView& view) {
+        if (!isFar(restored.start())) {
+            JITCACHE_FAIL("the restored image lies within reach of its thunks"_s);
+            return;
+        }
+        auto restoredCode = unsafeMakeSpan(static_cast<const uint8_t*>(restored.start()), view.header().codeSize);
+        JITCACHE_CHECK(checkFarSupportBranches(context, vm, "the restored image"_s, restoredCode, view.fixups()));
+    });
+    JITCACHE_CHECK(imported);
+}
+
+namespace ImageRecordingTestsInternal {
+
+// T17's fills, one per side, for the bytes each allocation holds past its linked size. None is zero, so the check of
+// performJITMemcpy for runs of zeros never objects.
+static constexpr uint8_t producerSlackFill = 0xa5;
+static constexpr uint8_t restoredSlackFill = 0x5a;
+static constexpr uint8_t twinSlackFill = 0xc3;
+
+// The bytes an allocation of handleSize bytes at start holds past its linkedSize, after writing fill over them when one is
+// given. Empty when the handle ends at the linked size.
+static Vector<uint8_t> imageSlackBytes(const void* start, size_t linkedSize, size_t handleSize, std::optional<uint8_t> fill)
+{
+    if (!start || handleSize <= linkedSize)
+        return { };
+    auto slack = unsafeMakeSpan(static_cast<const uint8_t*>(start), handleSize).subspan(linkedSize);
+    if (fill) {
+        Vector<uint8_t> filled(slack.size(), *fill);
+        performJITMemcpy<jitMemcpyRepatch>(const_cast<uint8_t*>(slack.data()), filled.span().data(), filled.size());
+    }
+    Vector<uint8_t> bytes;
+    bytes.append(slack);
+    return bytes;
+}
+
+// Whether section is the canonical form (SPEC-image.md section 8.4) of exactly linkedCode under its fixups.
+static bool imageSectionHoldsLinkedBytes(std::span<const uint8_t> section, std::span<const uint8_t> linkedCode, std::span<const ImageFixup> fixups)
+{
+    Vector<uint8_t> canonical;
+    auto append = [&](std::span<const uint8_t> bytes) {
+        canonical.append(bytes);
+        return true;
+    };
+    ImageSectionSink sink = append;
+    ImageSectionWriter writer(sink);
+    return writer.writeCanonicalCode(linkedCode, fixups) && equalSpans(canonical.span(), section);
+}
+
+// An allocation a LinkBuffer announced: its name and its handle, [start, start + handleSize).
+struct ImageAnnouncedAllocation {
+    String name;
+    uintptr_t start { 0 };
+    size_t handleSize { 0 };
+};
+
+// The allocation in one line LinkBuffer::finalizeCodeWithDisassemblyImpl prints while logJIT is on, "Generated JIT code
+// for <name>: [<start>, <end>) <size> bytes", where [start, end) is the allocation's whole handle; nullopt for any other
+// line.
+static std::optional<ImageAnnouncedAllocation> imageParseAnnouncedAllocation(StringView line)
+{
+    constexpr auto prefix = "Generated JIT code for "_s;
+    if (!line.startsWith(prefix))
+        return std::nullopt;
+    size_t bracket = line.reverseFind(": ["_s);
+    if (bracket == notFound || bracket < prefix.length())
+        return std::nullopt;
+    StringView range = line.substring(static_cast<unsigned>(bracket + 3));
+    size_t comma = range.find(", "_s);
+    size_t close = range.find(')');
+    if (comma == notFound || close == notFound || close < comma + 2)
+        return std::nullopt;
+    auto address = [](StringView text) -> std::optional<uint64_t> {
+        if (!text.startsWith("0x"_s))
+            return std::nullopt;
+        return parseInteger<uint64_t>(text.substring(2), 16);
+    };
+    auto start = address(range.left(static_cast<unsigned>(comma)));
+    auto end = address(range.substring(static_cast<unsigned>(comma + 2), static_cast<unsigned>(close - comma - 2)));
+    if (!start || !end || *end < *start)
+        return std::nullopt;
+    StringView name = line.substring(static_cast<unsigned>(prefix.length()), static_cast<unsigned>(bracket - prefix.length()));
+    return ImageAnnouncedAllocation { name.toString(), static_cast<uintptr_t>(*start), static_cast<size_t>(*end - *start) };
+}
+
+// The allocations LinkBuffer announces through dataLog while logJIT is on (imageParseAnnouncedAllocation), each on the
+// thread that linked it, right after linking and before anything else reads the code. Installed as the process's data
+// file, it lets T17 reach the twin image and twin snippets Twins::checkImage links and frees before it returns. While
+// armed, it fills each one's bytes past the linked size it was told with twinSlackFill and keeps what they then hold:
+// the first baseline image is the twin's, and each snippet after it the replay of the next regeneration in log order.
+class ImageTwinSlackLog final : public PrintStream {
+    WTF_MAKE_NONCOPYABLE(ImageTwinSlackLog);
+public:
+    ImageTwinSlackLog() = default;
+
+    void arm(uint32_t imageLinkedSize, Vector<uint32_t>&& snippetLinkedSizes)
+    {
+        m_armed = true;
+        m_imageLinkedSize = imageLinkedSize;
+        m_snippetLinkedSizes = WTF::move(snippetLinkedSizes);
+        m_twinImageSlack = std::nullopt;
+        m_twinSnippetSlacks.clear();
+    }
+
+    void disarm() { m_armed = false; }
+
+    // Nullopt when the check announced no baseline image.
+    const std::optional<Vector<uint8_t>>& twinImageSlack() const { return m_twinImageSlack; }
+    const Vector<Vector<uint8_t>>& twinSnippetSlacks() const { return m_twinSnippetSlacks; }
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+    void vprintf(const char* format, va_list argumentList) final WTF_ATTRIBUTE_PRINTF(2, 0)
+    {
+        // Complete lines are acted on once the lock is released, since filling calls into the engine.
+        Vector<String> lines;
+        {
+            Locker locker { m_lock };
+            StringPrintStream formatted;
+            formatted.vprintf(format, argumentList);
+            m_partialLine.append(formatted.toString());
+            String text = m_partialLine.toString();
+            m_partialLine.clear();
+            unsigned lineStart = 0;
+            for (size_t newline = text.find('\n'); newline != notFound; newline = text.find('\n', lineStart)) {
+                lines.append(text.substring(lineStart, static_cast<unsigned>(newline) - lineStart));
+                lineStart = static_cast<unsigned>(newline) + 1;
+            }
+            m_partialLine.append(StringView(text).substring(lineStart));
+        }
+        for (auto& line : lines)
+            announce(line);
+    }
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+
+private:
+    void announce(StringView line)
+    {
+        if (!m_armed)
+            return;
+        auto allocation = imageParseAnnouncedAllocation(line);
+        if (!allocation)
+            return;
+        auto* start = reinterpret_cast<const void*>(allocation->start);
+        if (allocation->name.startsWith("Baseline JIT code for "_s)) {
+            if (!m_twinImageSlack)
+                m_twinImageSlack = imageSlackBytes(start, m_imageLinkedSize, allocation->handleSize, twinSlackFill);
+            return;
+        }
+        if (allocation->name.startsWith("JITMathIC: generating out of line"_s) && allocation->handleSize && m_twinSnippetSlacks.size() < m_snippetLinkedSizes.size())
+            m_twinSnippetSlacks.append(imageSlackBytes(start, m_snippetLinkedSizes[m_twinSnippetSlacks.size()], allocation->handleSize, twinSlackFill));
+    }
+
+    Lock m_lock;
+    StringBuilder m_partialLine;
+    bool m_armed { false };
+    uint32_t m_imageLinkedSize { 0 };
+    Vector<uint32_t> m_snippetLinkedSizes;
+    std::optional<Vector<uint8_t>> m_twinImageSlack;
+    Vector<Vector<uint8_t>> m_twinSnippetSlacks;
+};
+
+// Makes stream the process's data file while the scope lives, then gives standard error back. WTF::setDataFile keeps the
+// stream it is handed without ever deleting it, so its owner keeps owning it.
+class ImageDataFileScope {
+    WTF_MAKE_NONCOPYABLE(ImageDataFileScope);
+public:
+    explicit ImageDataFileScope(PrintStream& stream)
+    {
+        WTF::setDataFile(std::unique_ptr<PrintStream>(&stream));
+    }
+
+    ~ImageDataFileScope()
+    {
+        WTF::setDataFile(static_cast<const char*>(nullptr));
+    }
+};
+
+static constexpr unsigned slackBodyCount = 24;
+
+// T17's bodies: pairs of one text in one scope, as T21's, the first of each pair the producer's and the second never
+// called, so its first CodeBlock is the import's newborn. Body k stores 2k + 1 properties, so the images' linked sizes
+// spread over many offsets from the allocator's size classes, and returns one arithmetic operation, whose MathIC is the
+// body's only one and whose kind and operands cycle with k, so the snippets' linked sizes vary too. The program calls
+// each producer 40 times with int32s, which compiles it from int32 profiles, and once more with a double, which
+// regenerates its MathIC's full snippet.
+static String slackBodiesSource()
+{
+    static constexpr std::array operations { "x + o.p0"_s, "o.p0 - x"_s, "x * o.p0"_s, "-x"_s, "x + 7"_s, "9 - x"_s, "x * 3"_s, "o.p1 + x"_s };
+    StringBuilder makers;
+    for (unsigned index = 0; index < slackBodyCount; ++index) {
+        StringBuilder body;
+        body.append("function (o, x) {\n"_s);
+        for (unsigned statement = 0; statement <= 2 * index; ++statement)
+            body.append("        o.s"_s, statement, " = o.p"_s, statement % 8, ";\n"_s);
+        body.append("        return "_s, operations[index % operations.size()], ";\n    }"_s);
+        String text = body.toString();
+        makers.append("    jitcacheSlackProducers.push("_s, text, ");\n    jitcacheSlackImports.push("_s, text, ");\n"_s);
+    }
+    return makeString("var jitcacheSlackProducers = [], jitcacheSlackImports = [];\n(function makeSlackBodies() {\n"_s, makers.toString(), "})();\n"
+        "var jitcacheSlackObject = { p0: 1, p1: 2, p2: 3, p3: 4, p4: 5, p5: 6, p6: 7, p7: 8 };\n"
+        "for (var i = 0; i < 40; ++i) {\n    for (var k = 0; k < jitcacheSlackProducers.length; ++k)\n        jitcacheSlackProducers[k](jitcacheSlackObject, i);\n}\n"
+        "for (var k = 0; k < jitcacheSlackProducers.length; ++k)\n    jitcacheSlackProducers[k](jitcacheSlackObject, 0.5);\n"_s);
+}
+
+// What each side holds past the linked size of one body's image and of its snippet: the producer's, the restored image's
+// and the twin's.
+struct ImageSlackOfBody {
+    Vector<uint8_t> producerImage;
+    Vector<uint8_t> restoredImage;
+    Vector<uint8_t> twinImage;
+    Vector<uint8_t> producerSnippet;
+    Vector<uint8_t> restoredSnippet;
+    Vector<uint8_t> twinSnippet;
+};
+
+// T17 for one body. producerFunction's code, whose record must be complete with its one MathIC regenerated, gets the
+// producer's fill past its linked sizes and is captured with strict on, and the sections must hold exactly the linked
+// bytes. importFunction's newborn CodeBlock then imports them: the restored image and snippet get the restored fill before
+// setup, and the twin's get the twin fill as the check links them. Returns what each side holds past its linked sizes
+// once the check reported nothing.
+static NEVER_INLINE std::optional<ImageSlackOfBody> imageCheckSlackOfBody(TestContext& context, VM& vm, JSFunction& producerFunction, JSFunction& importFunction, ImageTwinSlackLog& log)
+{
+    CodeBlock* codeBlock = producerFunction.jsExecutable()->codeBlockForCall();
+    if (!codeBlock || codeBlock->jitType() != JITType::BaselineJIT) {
+        JITCACHE_FAIL("a slack body did not compile to baseline code"_s);
+        return std::nullopt;
+    }
+    CapturedImage captured;
+    captured.code = static_cast<BaselineJITCode*>(codeBlock->jitCode().get());
+    auto* record = captured.code->m_jitCacheImageRecord.get();
+    if (!record || record->state() != RecordState::Complete || record->mathICs().size() != 1 || !record->mathICs()[0].snippet) {
+        JITCACHE_FAIL("a slack body's record is missing, not complete, or not one regenerated MathIC"_s);
+        return std::nullopt;
+    }
+    const MathICRecord& mathIC = record->mathICs()[0];
+    uint32_t codeSize = record->codeSize();
+    uint32_t snippetSize = mathIC.snippet->size;
+    MathICCodeState producerSnippet = mathICCodeState(mathIC.kind, mathIC.mathIC);
+    if (producerSnippet.snippetStart != mathIC.snippet->start) {
+        JITCACHE_FAIL("a slack body's MathIC holds another snippet than its record describes"_s);
+        return std::nullopt;
+    }
+
+    // A capture that read past a linked size would carry the producer's fill.
+    imageSlackBytes(captured.code->start(), codeSize, captured.code->size(), producerSlackFill);
+    imageSlackBytes(producerSnippet.snippetStart, snippetSize, producerSnippet.snippetHandleSize, producerSlackFill);
+    if (!imageCaptureInto(context, vm, *codeBlock, captured))
+        return std::nullopt;
+
+    auto view = parseImageSections(ImageSectionSpans { .image = captured.image.span(), .bakedFacts = captured.bakedFacts.span(), .twins = captured.twins.span() }, true);
+    if (!view) {
+        JITCACHE_FAIL(makeString("the captured sections fail "_s, description(view.error())));
+        return std::nullopt;
+    }
+    auto linkedImage = unsafeMakeSpan(static_cast<const uint8_t*>(captured.code->start()), codeSize);
+    if (view->header().codeSize != codeSize || !imageSectionHoldsLinkedBytes(view->code(), linkedImage, record->fixups().span()))
+        JITCACHE_FAIL("the image section's code is not exactly the image's linked bytes"_s);
+    unsigned snippets = 0;
+    view->forEachSnippet([&](unsigned, const ImageSnippet& snippet) {
+        ++snippets;
+        auto linkedSnippet = unsafeMakeSpan(static_cast<const uint8_t*>(mathIC.snippet->start), snippetSize);
+        if (snippet.code.size() != snippetSize || !imageSectionHoldsLinkedBytes(snippet.code, linkedSnippet, mathIC.snippet->fixups.span()))
+            JITCACHE_FAIL("the image section's snippet is not exactly the snippet's linked bytes"_s);
+    });
+    JITCACHE_CHECK(snippets == 1);
+
+    RefPtr<BaselineJITCode> restored;
+    MathICCodeState restoredSnippet;
+    bool imported = imageImportAndCheckTwin(context, vm, importFunction, captured, [&](BaselineJITCode& code, const ImageSectionsView&) {
+        restored = &code;
+        code.forEachMathIC([&](auto& restoredMathIC) {
+            if (restoredMathIC.m_code) {
+                restoredSnippet.snippetStart = restoredMathIC.m_code.code().untaggedPtr();
+                restoredSnippet.snippetHandleSize = restoredMathIC.m_code.size();
+            }
+        });
+        imageSlackBytes(code.start(), codeSize, code.size(), restoredSlackFill);
+        imageSlackBytes(restoredSnippet.snippetStart, snippetSize, restoredSnippet.snippetHandleSize, restoredSlackFill);
+    }, [&](const auto& check) {
+        log.arm(codeSize, Vector<uint32_t> { snippetSize });
+        check();
+        log.disarm();
+    });
+    if (!imported || !restored || !restoredSnippet.snippetStart) {
+        if (imported)
+            JITCACHE_FAIL("the restored image has no snippet"_s);
+        return std::nullopt;
+    }
+    if (!log.twinImageSlack() || log.twinSnippetSlacks().size() != 1) {
+        JITCACHE_FAIL(makeString("the twin check announced "_s, log.twinImageSlack() ? 1u : 0u, " images and "_s, log.twinSnippetSlacks().size(), " snippets, not one of each"_s));
+        return std::nullopt;
+    }
+
+    ImageSlackOfBody slack;
+    slack.producerImage = imageSlackBytes(captured.code->start(), codeSize, captured.code->size(), std::nullopt);
+    slack.restoredImage = imageSlackBytes(restored->start(), codeSize, restored->size(), std::nullopt);
+    slack.twinImage = *log.twinImageSlack();
+    slack.producerSnippet = imageSlackBytes(producerSnippet.snippetStart, snippetSize, producerSnippet.snippetHandleSize, std::nullopt);
+    slack.restoredSnippet = imageSlackBytes(restoredSnippet.snippetStart, snippetSize, restoredSnippet.snippetHandleSize, std::nullopt);
+    slack.twinSnippet = log.twinSnippetSlacks()[0];
+    return slack;
+}
+
+} // namespace ImageRecordingTestsInternal
+
+// T17 (SPEC-image.md sections 3.1, 8.4 and 11.4, N20). An allocation's handle (JITCodeWithCodeRef::size, a MathIC's
+// m_code.size()) can end past what its LinkBuffer wrote, the linked size the record keeps, and those bytes hold whatever
+// the pool held. In a Producer, every body of slackBodiesSource compiles with a complete record and regenerates its one
+// MathIC. For each, the producer's image and snippet are filled past their linked sizes and captured with strict on, and
+// the sections must hold exactly the linked bytes; the import then fills the restored image and snippet past theirs, and
+// the twin's are filled as Twins::checkImage links them, so wherever two sides have slack it differs while the check
+// compares, and the check must report nothing. Afterwards each side's slack must still hold its own fill, and at least
+// one body's image and one body's snippet must have slack on all three sides.
+JITCACHE_TEST_WITH_OPTIONS(imageSlackStaysOutsideCaptureAndTwinCheck, No, "--useConcurrentJIT=false --logJIT=true")
+{
+    ImageTwinSlackLog log;
+    ImageDataFileScope dataFile(log);
+    TemporaryArtifactDirectory directory;
+    if (directory.path().isEmpty()) {
+        JITCACHE_FAIL(makeString("mkdtemp failed: "_s, String::fromUTF8(safeStrerror(directory.error()).data())));
+        return;
+    }
+    OwnedVM producer;
+    VM& vm = producer.vm();
+    JITCache::Config config;
+    config.artifactPath = makeString(directory.path(), "/artifact"_s);
+    config.role = Role::Producer;
+    config.producerLimitBytes = 64 * MB;
+    config.strict = true;
+    StartResult started = JITCache::start(vm, config);
+    if (started.outcome != StartOutcome::Started) {
+        JITCACHE_FAIL(makeString("the producer did not start: "_s, toJSON(started)));
+        return;
+    }
+
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    NakedPtr<Exception> exception;
+    evaluate(globalObject, makeSource(slackBodiesSource(), SourceOrigin(), SourceTaintedOrigin::Untainted), JSValue(), exception);
+    if (exception) {
+        JITCACHE_FAIL("evaluating the slack bodies threw"_s);
+        return;
+    }
+    auto* producers = globalObject->get(globalObject, Identifier::fromString(vm, "jitcacheSlackProducers"_s)).getObject();
+    auto* imports = globalObject->get(globalObject, Identifier::fromString(vm, "jitcacheSlackImports"_s)).getObject();
+    if (!producers || !imports) {
+        JITCACHE_FAIL("the slack bodies' arrays are missing"_s);
+        return;
+    }
+
+    auto holdsOwnFill = [&](unsigned index, ASCIILiteral side, const Vector<uint8_t>& slack, uint8_t fill) {
+        if (!slack.isEmpty() && !std::ranges::all_of(slack.span(), [&](uint8_t byte) { return byte == fill; }))
+            JITCACHE_FAIL(makeString("body "_s, index, ": "_s, side, " no longer holds its fill past its linked size"_s));
+    };
+    unsigned imageCandidates = 0;
+    unsigned snippetCandidates = 0;
+    StringBuilder slackSizes;
+    for (unsigned index = 0; index < slackBodyCount; ++index) {
+        auto* producerFunction = dynamicDowncast<JSFunction>(producers->get(globalObject, index));
+        auto* importFunction = dynamicDowncast<JSFunction>(imports->get(globalObject, index));
+        if (!producerFunction || !importFunction || importFunction->jsExecutable()->codeBlockForCall()) {
+            JITCACHE_FAIL(makeString("slack body "_s, index, " is missing, or its import was called"_s));
+            return;
+        }
+        // The earlier bodies' twins die and are swept here, so no allocation of this body's check sweeps one and changes
+        // the twin count the check compares.
+        imageClearDeadStack();
+        vm.heap.collectNow(Synchronousness::Sync, CollectionScope::Full);
+        auto slack = imageCheckSlackOfBody(context, vm, *producerFunction, *importFunction, log);
+        if (!slack)
+            return;
+        holdsOwnFill(index, "the producer's image"_s, slack->producerImage, producerSlackFill);
+        holdsOwnFill(index, "the restored image"_s, slack->restoredImage, restoredSlackFill);
+        holdsOwnFill(index, "the twin's image"_s, slack->twinImage, twinSlackFill);
+        holdsOwnFill(index, "the producer's snippet"_s, slack->producerSnippet, producerSlackFill);
+        holdsOwnFill(index, "the restored snippet"_s, slack->restoredSnippet, restoredSlackFill);
+        holdsOwnFill(index, "the twin's snippet"_s, slack->twinSnippet, twinSlackFill);
+        imageCandidates += !slack->producerImage.isEmpty() && !slack->restoredImage.isEmpty() && !slack->twinImage.isEmpty();
+        snippetCandidates += !slack->producerSnippet.isEmpty() && !slack->restoredSnippet.isEmpty() && !slack->twinSnippet.isEmpty();
+        slackSizes.append(index ? "; "_s : ""_s, "image "_s, slack->producerImage.size(), '/', slack->restoredImage.size(), '/', slack->twinImage.size(),
+            ", snippet "_s, slack->producerSnippet.size(), '/', slack->restoredSnippet.size(), '/', slack->twinSnippet.size());
+    }
+    if (!imageCandidates || !snippetCandidates)
+        JITCACHE_FAIL(makeString("no body has slack on all three sides for its image ("_s, imageCandidates, " do) or its snippet ("_s, snippetCandidates, " do); slack bytes, producer/restored/twin: "_s, slackSizes.toString()));
+}
+
+namespace ImageRecordingTestsInternal {
+
+// The exported headers the Image lane edits (SPEC-image.md section 14.4), by the names their copies carry.
+static constexpr std::array imageEditedExportedHeaders {
+    "AbstractMacroAssembler.h"_s,
+    "LinkBuffer.h"_s,
+    "MacroAssemblerARM64.h"_s,
+    "AssemblyHelpers.h"_s,
+    "BaselineJITCode.h"_s,
+    "CCallHelpers.h"_s,
+    "JIT.h"_s,
+    "JITCodeMap.h"_s,
+    "JITMathIC.h"_s,
+    "JITOperations.h"_s,
+};
+
+static std::optional<String> imageReadText(const String& path)
+{
+    auto bytes = FileSystem::readEntireFile(path);
+    if (!bytes)
+        return std::nullopt;
+    return String(bytes->span());
+}
+
+// The file each #include directive of a header names, without its directories: "X.h" for "X.h", "jitcache/X.h" and
+// <JavaScriptCore/X.h>. Every directive counts, whatever preprocessor condition it sits under, since another build's
+// switches can turn it on.
+static Vector<String> imageIncludedFileNames(StringView text)
+{
+    Vector<String> names;
+    for (StringView line : text.split('\n')) {
+        unsigned index = 0;
+        auto skipSpaces = [&] {
+            while (index < line.length() && isASCIIWhitespace(line[index]))
+                ++index;
+        };
+        skipSpaces();
+        if (index >= line.length() || line[index] != '#')
+            continue;
+        ++index;
+        skipSpaces();
+        constexpr auto include = "include"_s;
+        if (!line.substring(index).startsWith(include))
+            continue;
+        index += static_cast<unsigned>(include.length());
+        skipSpaces();
+        if (index >= line.length() || (line[index] != '"' && line[index] != '<'))
+            continue;
+        char16_t close = line[index] == '"' ? '"' : '>';
+        unsigned start = index + 1;
+        size_t end = line.find(close, start);
+        if (end == notFound)
+            continue;
+        StringView path = line.substring(start, static_cast<unsigned>(end) - start);
+        size_t slash = path.reverseFind('/');
+        names.append((slash == notFound ? path : path.substring(static_cast<unsigned>(slash) + 1)).toString());
+    }
+    return names;
+}
+
+// The source root CMake configured the build from, which Bun's recipe sets to this repository.
+static String imageCMakeHomeDirectory(const String& buildDirectory)
+{
+    auto cache = imageReadText(FileSystem::pathByAppendingComponent(buildDirectory, "CMakeCache.txt"_s));
+    if (!cache)
+        return { };
+    constexpr auto prefix = "CMAKE_HOME_DIRECTORY:INTERNAL="_s;
+    for (StringView line : StringView(*cache).split('\n')) {
+        if (line.startsWith(prefix))
+            return line.substring(static_cast<unsigned>(prefix.length())).toString();
+    }
+    return { };
+}
+
+} // namespace ImageRecordingTestsInternal
+
+// T19 (SPEC-image.md section 14.4, I21; SPEC-integrator.md II18), the check over the copied headers; the other half, Bun's
+// build against those copies, is a build. Bun compiles against the copies JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS puts in
+// <build>/JavaScriptCore/PrivateHeaders/JavaScriptCore and against no source directory, so no header the Image lane edits
+// may include a jitcache/ header, and every jitcache/ header any copy includes must be a copy itself. testjitcache runs
+// from <build>/bin, and the build's CMake cache names the source root whose jitcache/ directory lists the module's
+// headers.
+JITCACHE_TEST(imageExportedHeadersIncludeOnlyExportedJITCacheHeaders, No)
+{
+    String executable = FileSystem::realPath("/proc/self/exe"_s);
+    String buildDirectory = FileSystem::parentPath(FileSystem::parentPath(executable));
+    String sourceRoot = imageCMakeHomeDirectory(buildDirectory);
+    if (sourceRoot.isEmpty()) {
+        JITCACHE_FAIL(makeString("no CMAKE_HOME_DIRECTORY in the CMake cache of "_s, buildDirectory, ", the build testjitcache ("_s, executable, ") runs from"_s));
+        return;
+    }
+    std::array<StringView, 3> jitcacheComponents { "Source"_s, "JavaScriptCore"_s, "jitcache"_s };
+    String jitcacheDirectory = FileSystem::pathByAppendingComponents(sourceRoot, jitcacheComponents);
+    std::array<StringView, 3> copiesComponents { "JavaScriptCore"_s, "PrivateHeaders"_s, "JavaScriptCore"_s };
+    String copiesDirectory = FileSystem::pathByAppendingComponents(buildDirectory, copiesComponents);
+
+    auto headersIn = [](const String& directory) {
+        HashSet<String> headers;
+        for (auto& name : FileSystem::listDirectory(directory)) {
+            if (name.endsWith(".h"_s))
+                headers.add(name);
+        }
+        return headers;
+    };
+    HashSet<String> jitcacheHeaders = headersIn(jitcacheDirectory);
+    HashSet<String> copies = headersIn(copiesDirectory);
+    if (!jitcacheHeaders.contains("ImageRecorder.h"_s) || !jitcacheHeaders.contains("JITCacheAPI.h"_s)) {
+        JITCACHE_FAIL(makeString(jitcacheDirectory, " does not list the module's headers"_s));
+        return;
+    }
+    if (!copies.contains("JITCacheAPI.h"_s)) {
+        JITCACHE_FAIL(makeString(copiesDirectory, " holds no copy of the exported JITCacheAPI.h"_s));
+        return;
+    }
+    for (auto edited : imageEditedExportedHeaders) {
+        if (!copies.contains(edited))
+            JITCACHE_FAIL(makeString("the exported header "_s, edited, " has no copy in "_s, copiesDirectory));
+    }
+
+    for (auto& copy : copies) {
+        auto text = imageReadText(FileSystem::pathByAppendingComponent(copiesDirectory, copy));
+        if (!text) {
+            JITCACHE_FAIL(makeString("the copy "_s, copy, " cannot be read"_s));
+            continue;
+        }
+        bool editedByImageLane = std::ranges::any_of(imageEditedExportedHeaders, [&](ASCIILiteral edited) { return copy == edited; });
+        for (auto& included : imageIncludedFileNames(*text)) {
+            if (!jitcacheHeaders.contains(included))
+                continue;
+            // I21: the headers this lane edits reach recording only through the hooks they declare themselves.
+            if (editedByImageLane)
+                JITCACHE_FAIL(makeString("I21: the exported header "_s, copy, " includes the jitcache/ header "_s, included));
+            // II18: a jitcache/ header an exported header includes must resolve among the copies Bun sees.
+            if (!copies.contains(included))
+                JITCACHE_FAIL(makeString("II18: the exported header "_s, copy, " includes "_s, included, ", a jitcache/ header that is not exported"_s));
+        }
+    }
 }
 
 } // namespace JSC::JITCache::Tests
