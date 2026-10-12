@@ -347,7 +347,14 @@ static bool sameEmission(CCallHelpers& a, CCallHelpers& b)
 {
     auto bytesOf = [](CCallHelpers& jit) {
         auto& buffer = jit.m_assembler.buffer();
+#if CPU(ARM64)
+        // ARM64's AssemblerBuffer declares no data(). releaseAssemblerData() returns an rvalue reference to the
+        // buffer's storage, and a const reference bound to it moves nothing, so the buffer keeps its bytes.
+        const AssemblerData& storage = buffer.releaseAssemblerData();
+        return unsafeMakeSpan(reinterpret_cast<const uint8_t*>(storage.buffer()), buffer.codeSize());
+#else
         return unsafeMakeSpan(static_cast<const uint8_t*>(buffer.data()), buffer.codeSize());
+#endif
     };
     if (!equalSpans(bytesOf(a), bytesOf(b)))
         return false;
@@ -3112,8 +3119,8 @@ static NEVER_INLINE std::optional<ImageSlackOfBody> imageCheckSlackOfBody(TestCo
 // MathIC. For each, the producer's image and snippet are filled past their linked sizes and captured with strict on, and
 // the sections must hold exactly the linked bytes; the import then fills the restored image and snippet past theirs, and
 // the twin's are filled as Twins::checkImage links them, so wherever two sides have slack it differs while the check
-// compares, and the check must report nothing. Afterwards each side's slack must still hold its own fill, and at least
-// one body's image and one body's snippet must have slack on all three sides.
+// compares, and the check must report nothing. Afterwards each side's slack must still hold its own fill, at least one
+// body's image must have slack on all three sides, and on ARM64 at least one body's snippet must too.
 JITCACHE_TEST_WITH_OPTIONS(imageSlackStaysOutsideCaptureAndTwinCheck, No, "--useConcurrentJIT=false --logJIT=true")
 {
     ImageTwinSlackLog log;
@@ -3182,7 +3189,14 @@ JITCACHE_TEST_WITH_OPTIONS(imageSlackStaysOutsideCaptureAndTwinCheck, No, "--use
         slackSizes.append(index ? "; "_s : ""_s, "image "_s, slack->producerImage.size(), '/', slack->restoredImage.size(), '/', slack->twinImage.size(),
             ", snippet "_s, slack->producerSnippet.size(), '/', slack->restoredSnippet.size(), '/', slack->twinSnippet.size());
     }
-    if (!imageCandidates || !snippetCandidates)
+    // On x86_64 a handle ends past its linked size, which LinkBuffer pads to jitAllocationGranule, only when the JIT
+    // heap serves the request from a larger size class (N20). For an allocation as small as a snippet the heap usually
+    // has a class of exactly its size, and whether it uses a larger one depends on the sizes the process allocated
+    // first. On ARM64, compaction shortens a snippet after its LinkBuffer allocated it and the JIT heap does not shrink
+    // an allocation that small, so the producer's and the twin's snippets keep slack; the restored snippet, allocated
+    // at the linked size, has slack when that size is off the heap's 16-byte alignment, which the varied operations
+    // make likely. So the check requires a snippet with slack only on ARM64.
+    if (!imageCandidates || (isARM64() && !snippetCandidates))
         JITCACHE_FAIL(makeString("no body has slack on all three sides for its image ("_s, imageCandidates, " do) or its snippet ("_s, snippetCandidates, " do); slack bytes, producer/restored/twin: "_s, slackSizes.toString()));
 }
 
