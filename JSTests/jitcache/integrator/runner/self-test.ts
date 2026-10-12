@@ -397,7 +397,7 @@ function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
 }
 
 // In a plain build the runner skips every script of integrator/, which requires twins (harness sub-SPEC section 7.4), so
-// this half drives the runner's own comparison of each Off option set directly (report/spec/integrator.17/plain-h7.md).
+// this half drives the runner's own comparison of each Off option set directly (harness sub-SPEC section 13, H7).
 const pinSelfPlainCase: Case = {
   name: "pin-self-plain",
   claim: "H7: a plain build compared with itself on the runner's fixtures and the integrator corpus finds no difference",

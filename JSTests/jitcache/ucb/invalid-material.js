@@ -64,7 +64,7 @@
 //   past the stream (the stream's count shortened by one).
 // No same-size rewrite can give a section the wrong size; SPEC-ucb.md U5 checks that rule. jitcacheRewriteSection never
 // changes a section's size, so a truncation is written as a root record offset that leaves no room for the record, which
-// the decode reads as the payload ending there (report/spec/ucb.11/invalid-material-truncation.md).
+// the decode reads as the payload ending there (SPEC-ucb.md section 13.3, this script's row).
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
 load("./resources/invalid-material-cases.js", "caller relative");

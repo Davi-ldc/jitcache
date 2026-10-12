@@ -89,7 +89,7 @@ load("./resources/sections.js", "caller relative");
     // provenance comparison: the program reached the baseline, so its parked code stops the attach first (section 7.3.4
     // step 2), and once a collection has released that code, the stamp its import's Provenance miss left at the current
     // index token does (step 3). Either way nothing attaches and nothing is digested
-    // (report/spec/ucb.11/context-miss-attach-provenance.md).
+    // (SPEC-ucb.md section 13.3, this script's row).
     if (t.sequence === 1)
         measured("evaluating the small program again", () => runString(program(programs[0].prefix, programs[0].vars)), t.imports ? {
             attaches: 0, imports: 0, "misses.Provenance": 0, contextDigests: 0, sourceDigests: 0,

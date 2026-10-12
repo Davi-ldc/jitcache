@@ -22,7 +22,7 @@
 //    written it: its modules' digests are computed from their text, and they import as before, verifying nothing.
 // 4. and 5. Built as CommonJS without --bytecode, so that the embedded module is CommonJS and require evaluates it through
 //    JSCommonJSModule::evaluate; a build without --format=cjs makes it an ES module, which no module wrapper touches. The
-//    app overrides the module wrapper (Module.wrapper; report/spec/ucb.11/supplied-digests-module-wrap.md) before it loads
+//    app overrides the module wrapper (Module.wrapper; SPEC-ucb.md section 13.3, this script's row) before it loads
 //    that module, in the Producer (4) or in the Consumer (5). The overridden text no longer has the recorded digest, which
 //    JSCommonJSModule::evaluate clears, so the overriding run computes the module's digest from its text and keys its bodies
 //    by it: neither run imports a body the other captured, and strict raises no invalid material.

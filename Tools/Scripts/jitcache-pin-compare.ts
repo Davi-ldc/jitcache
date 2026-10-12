@@ -21,7 +21,7 @@
 //   x86_64 the near jmp.
 // - On x86_64 a body's branch displacements come from the JIT dump except where an inline rewrite of the same run covers
 //   them, since the dump copies the bytes on a queue of its own, after the rewrite or before it
-//   (report/spec/integrator.17/jit-dump-copy.md).
+//   (SPEC-integrator.harness.md N19 and section 11.3, Targets).
 //
 // Standalone, on the files a runner kept:
 //   bun Tools/Scripts/jitcache-pin-compare.ts --this=<this build's WebKit directory> --pin=<the pin's WebKit directory>

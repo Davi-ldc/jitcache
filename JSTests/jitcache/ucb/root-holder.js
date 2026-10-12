@@ -20,7 +20,7 @@
 //
 // A builtin root. Array.prototype.findLast is created in this realm and in a second one, from the one UFE
 // BuiltinExecutables keeps per VM. Each realm links a FunctionExecutable of its own and creates one function from it, so
-// no run creates a second function of one executable for a builtin (report/spec/ucb.11/root-holder-second-function.md).
+// no run creates a second function of one executable for a builtin (SPEC-ucb.md section 13.3, this script's row).
 //
 // The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
 load("./resources/ucb.js", "caller relative");
