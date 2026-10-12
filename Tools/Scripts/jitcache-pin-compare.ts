@@ -22,6 +22,14 @@
 // - On x86_64 a body's branch displacements come from the JIT dump except where an inline rewrite of the same run covers
 //   them, since the dump copies the bytes on a queue of its own, after the rewrite or before it
 //   (SPEC-integrator.harness.md N19 and section 11.3, Targets).
+// - A header ends at the first line that ends in its range, and a baseline dump's header at the first that ends in its
+//   instructions size, since a name may span lines: AccessCase::dump starts each of an access stub's cases on a new
+//   line, and a CodeBlock's name starts with its function's, which may hold newlines. Yarr's own dump header, a
+//   `Generated JIT code for` line ended by `:` and then `    Code at [s, e):`, opens a listing whose allocation's header
+//   comes after it.
+//
+// An identity drops every address its name prints, not only hexadecimal numbers (identityName), which widens section
+// 11.3's rule.
 //
 // Standalone, on the files a runner kept:
 //   bun Tools/Scripts/jitcache-pin-compare.ts --this=<this build's WebKit directory> --pin=<the pin's WebKit directory>
@@ -302,7 +310,7 @@ interface DumpBlock {
 interface Allocation {
   index: number;
   name: string;
-  identity: string; // the name with every hexadecimal number replaced by 0x?, and its ordinal among that name's
+  identity: string; // the name without the addresses it prints (identityName), and its ordinal among that name's
   start: bigint;
   end: bigint; // the header's range, [start, end)
   codeEnd: bigint; // the end of its code: a body's dump's, an inline rewrite's listing's, or else the header's
@@ -311,13 +319,43 @@ interface Allocation {
   dump: DumpBlock[] | null; // a baseline body's per-bytecode dump, which JIT::link prints before the header
 }
 
-const headerPattern = /^Generated JIT code for (.*): \[(0x[0-9a-f]+), (0x[0-9a-f]+)\) (\d+) bytes([.:])$/;
-const dumpPattern = /^Generated Baseline JIT code for (.*), instructions size = \d+$/;
+// A header pattern matches the header's lines joined by newlines, and its end pattern the last of them.
+const headerPrefix = "Generated JIT code for ";
+const headerPattern = /^Generated JIT code for (.*): \[(0x[0-9a-f]+), (0x[0-9a-f]+)\) (\d+) bytes([.:])$/s;
+const headerEndPattern = /: \[0x[0-9a-f]+, 0x[0-9a-f]+\) \d+ bytes[.:]$/;
+const dumpPrefix = "Generated Baseline JIT code for ";
+const dumpPattern = /^Generated Baseline JIT code for (.*), instructions size = \d+$/s;
+const dumpEndPattern = /, instructions size = \d+$/;
+// The line after the name in JITDisassembler::dumpHeader and in YarrDisassembler::dumpHeader.
+const sourcePrefix = "   Source: ";
+const listingCodeAtPattern = /^ {4}Code at \[0x[0-9a-f]+, 0x[0-9a-f]+\):$/;
 const codeAtPattern = /^ {3}Code at \[(0x[0-9a-f]+), (0x[0-9a-f]+)\):$/;
 const instructionPattern = /^\s+(?:<(\d+)>\s+)?(0x[0-9a-f]+): ?(.*)$/;
 const bytecodePattern = /^ {4}(\(S\) )?\[\s*(\d+)\] (\S+)/;
 
 const clip = (text: string) => JSON.stringify(text.length > 160 ? `${text.slice(0, 160)}…` : text);
+
+// An allocation's name without the addresses it prints, which with its ordinal identifies it across runs (section 11.3).
+// Besides hexadecimal numbers, the engine prints an address as a Structure's StringHashDumpContext id (%AQ:), a hash of
+// Structure::dump, which prints the Structure's address, and as SlowPathCallKey::dump's indirectOffset, which reads the
+// low half of a direct call's operation address through a union and prints it in decimal. Ids go first, since an id
+// such as %B0xa: holds a hexadecimal number.
+function identityName(name: string): string {
+  return name
+    .replace(/%[A-Za-z0-9]{2,5}:/g, "%?:")
+    .replace(/indirectOffset = -?\d+/g, "indirectOffset = ?")
+    .replace(/0x[0-9a-fA-F]+/g, "0x?");
+}
+
+const startsHeader = (text: string) => text.startsWith(headerPrefix) || text.startsWith(dumpPrefix);
+
+// The line that ends the header at line n: the first that end matches. The search stops before the next header and
+// before a line that stop matches, and the line it then returns does not match end.
+function headerEnd(lines: readonly string[], n: number, end: RegExp, stop: (text: string) => boolean): number {
+  let last = n;
+  while (!end.test(lines[last]) && last + 1 < lines.length && !startsHeader(lines[last + 1]) && !stop(lines[last + 1])) ++last;
+  return last;
+}
 
 // The instruction as the disassembler printed it, without the annotation A64DOpcode appends and the comment either
 // disassembler appends.
@@ -353,14 +391,22 @@ function parseAllocations(stderr: string): Allocation[] {
   for (let n = 0; n < lines.length; ++n) {
     const text = lines[n];
     const line = n + 1;
-    if (text.startsWith("Generated JIT code for ")) {
+    if (text.startsWith(headerPrefix)) {
       listing = null;
-      const match = headerPattern.exec(text);
-      if (!match) throw new Unreadable(`line ${line}: an allocation header it cannot parse: ${clip(text)}`);
+      const last = headerEnd(lines, n, headerEndPattern, next => listingCodeAtPattern.test(next));
+      // A `Code at` line before the range closes Yarr's own dump header instead, whose listing the tool does not read.
+      if (!headerEndPattern.test(lines[last]) && lines[last].endsWith(":") && listingCodeAtPattern.test(lines[last + 1] ?? "")) {
+        n = last + 1;
+        continue;
+      }
+      const header = lines.slice(n, last + 1).join("\n");
+      const match = headerPattern.exec(header);
+      if (!match) throw new Unreadable(`line ${line}: an allocation header it cannot parse: ${clip(header)}`);
+      n = last;
       const start = BigInt(match[2]);
       const end = BigInt(match[3]);
-      if (end - start !== BigInt(match[4])) throw new Unreadable(`line ${line}: an allocation header whose range and size disagree: ${clip(text)}`);
-      const name = match[1].replace(/0x[0-9a-fA-F]+/g, "0x?");
+      if (end - start !== BigInt(match[4])) throw new Unreadable(`line ${line}: an allocation header whose range and size disagree: ${clip(header)}`);
+      const name = identityName(match[1]);
       const ordinal = ordinals.get(name) ?? 0;
       ordinals.set(name, ordinal + 1);
       const allocation: Allocation = { index: allocations.length, name: match[1], identity: `${name} #${ordinal}`, start, end, codeEnd: end, line, disassembly: null, dump: null };
@@ -377,10 +423,14 @@ function parseAllocations(stderr: string): Allocation[] {
       allocations.push(allocation);
       continue;
     }
-    const dumpMatch = dumpPattern.exec(text);
-    if (dumpMatch) {
+    if (text.startsWith(dumpPrefix)) {
       listing = null;
       if (dump) throw new Unreadable(`line ${dump.line}: the baseline dump of ${dump.codeBlock} has no allocation header`);
+      const last = headerEnd(lines, n, dumpEndPattern, next => next.startsWith(sourcePrefix));
+      const header = lines.slice(n, last + 1).join("\n");
+      const dumpMatch = dumpPattern.exec(header);
+      if (!dumpMatch) throw new Unreadable(`line ${line}: a baseline dump header it cannot parse: ${clip(header)}`);
+      n = last;
       dump = { codeBlock: dumpMatch[1], start: null, end: null, blocks: [], current: null, phase: "header", line };
       continue;
     }
@@ -1574,8 +1624,9 @@ export function compareRuns(architecture: Architecture, current: PinSide, pin: P
   for (let i = 0; i < count; ++i) {
     const a = left.allocations[i];
     const b = right.allocations[i];
+    // An identity may hold newlines, which the quotes print escaped.
     if (!a || !b || a.identity !== b.identity)
-      return result("pin-allocations", `allocation ${i}: this build finalized ${a ? a.identity : "nothing more"}, the pin ${b ? b.identity : "nothing more"}`, i, bodies);
+      return result("pin-allocations", `allocation ${i}: this build finalized ${a ? JSON.stringify(a.identity) : "nothing more"}, the pin ${b ? JSON.stringify(b.identity) : "nothing more"}`, i, bodies);
     let units: [Unit | null, Unit | null];
     try {
       units = [left.unitAt(i), null];

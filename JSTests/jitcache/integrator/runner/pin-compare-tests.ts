@@ -6,7 +6,9 @@
 // differ only in the addresses of the same objects, in nops, in blinded forms, in ARM64 materialization lengths and
 // temporary reuse, in the two forms of an ARM64 conditional branch to a thunk, or in a super_construct main path. Other
 // cases cover what the engine prints around the code: a header the JIT heap rounds up past the dump, the padding after a
-// body's last instruction, and a MathIC inline rewrite, whose header prints an empty range.
+// body's last instruction, a MathIC inline rewrite, whose header prints an empty range, names that span lines, Yarr's
+// own dump header before its allocation's, names that print addresses as Structure ids and in decimal, and a header that
+// never reaches its range.
 //
 //   bun JSTests/jitcache/integrator/runner/pin-compare-tests.ts
 // self-test.ts runs them too, as its pin-compare-crafted case.
@@ -39,11 +41,13 @@ interface Block {
   lines: Line[];
 }
 
-// rewrite: a MathIC inline rewrite, whose header prints [p, p) 0 bytes and which writes no JIT dump record. pad: the
-// breakpoint bytes past a body's last instruction that its `Code at` range holds and its dump does not print. round: the
-// granule its header's range rounds up to, as the JIT heap rounds an allocation.
+// rewrite: a MathIC inline rewrite, whose header prints [p, p) 0 bytes and which writes no JIT dump record. preamble:
+// the name Yarr's own dump header gives the listing, which it prints with its `Code at` line before the allocation's
+// header, which then ends in '.'. pad: the breakpoint bytes past a body's last instruction that its `Code at` range holds
+// and its dump does not print. round: the granule its header's range rounds up to, as the JIT heap rounds an allocation.
+// A name may hold newlines, as an access stub's does.
 type Item =
-  | { kind: "listing"; name: string; at: string; lines: Line[]; rewrite?: boolean }
+  | { kind: "listing"; name: string; at: string; lines: Line[]; rewrite?: boolean; preamble?: string }
   | { kind: "body"; codeBlock: string; at: string; blocks: Block[]; pad?: number; round?: number };
 
 interface Run {
@@ -54,6 +58,7 @@ interface Run {
   status?: RunStatus;
   stdout?: string;
   dropRecords?: boolean; // a JIT dump without the bodies' records
+  preface?: string[]; // lines the run prints before its first allocation
 }
 
 const hex = (value: bigint) => (value < 0n ? `-0x${(-value).toString(16)}` : `0x${value.toString(16)}`);
@@ -95,7 +100,7 @@ function craft(run: Run): PinSide {
       ? `${prefix}${hex(address).padStart(16)}: ${text}`
       : `${prefix}${`<${address - start}> ${hex(address)}`.padStart(24)}:    ${text}`;
 
-  const stderr: string[] = [];
+  const stderr: string[] = [...(run.preface ?? [])];
   const records: JITDumpRecord[] = [];
   for (const { item, start, end, lines } of placed) {
     const codeEnd = item.kind === "body" ? end + BigInt(item.pad ?? 0) : end;
@@ -113,6 +118,11 @@ function craft(run: Run): PinSide {
         for (const placedLine of lines.filter(entry => entry.block === b))
           stderr.push(instructionLine("        ", start, placedLine.address, substitute(placedLine.line.text, placedLine.address, placedLine.length)));
       });
+      stderr.push(`Generated JIT code for ${name}: ${range}.`);
+    } else if (item.preamble !== undefined) {
+      name = substitute(item.name);
+      stderr.push(`Generated JIT code for ${substitute(item.preamble)}:`, `    Code at [${hex(start)}, ${hex(end)}):`);
+      for (const placedLine of lines) stderr.push(instructionLine("      ", start, placedLine.address, substitute(placedLine.line.text, placedLine.address, placedLine.length)));
       stderr.push(`Generated JIT code for ${name}: ${range}.`);
     } else {
       name = substitute(item.name);
@@ -162,6 +172,11 @@ const layoutThis: Record<string, bigint> = {
   thunkB: 0x7f3a10000100n,
   body: 0x7f3a10001000n,
   snippet: 0x7f3a10003000n,
+  stub: 0x7f3a10005000n,
+  exit: 0x7f3a10005400n,
+  slowPathThunk: 0x7f3a10005800n,
+  regexp: 0x7f3a10006000n,
+  matchOnlyRegexp: 0x7f3a10006400n,
   codeBlock: 0x7f3aa0000000n,
   executable: 0x7f3aa0000200n,
   vm: 0x7f3ab0000000n,
@@ -176,6 +191,11 @@ const layoutPin: Record<string, bigint> = {
   thunkB: 0x7f9150000200n,
   body: 0x7f9150004000n,
   snippet: 0x7f9150008000n,
+  stub: 0x7f915000c000n,
+  exit: 0x7f915000c800n,
+  slowPathThunk: 0x7f915000d000n,
+  regexp: 0x7f915000e000n,
+  matchOnlyRegexp: 0x7f915000e800n,
   codeBlock: 0x7f91e0000000n,
   executable: 0x7f91e0000300n,
   vm: 0x7f91f0000000n,
@@ -190,6 +210,7 @@ const line = (text: string, length: number, extra: Partial<Line> = {}): Line => 
 
 interface X86Shape {
   main: Line[]; // block [2]
+  codeBlock?: string; // the body's CodeBlock, f#AbCdEf by default
   entryNop?: boolean;
   thunks?: "AB" | "BA";
   extraBlocks?: Block[]; // after block [2]
@@ -204,7 +225,7 @@ function x86Items(shape: X86Shape): Item[] {
   const thunkB: Item = { kind: "listing", name: "thunk: ThrowStackOverflowAtPrologue", at: "thunkB", lines: [line("ud2", 2)] };
   const body: Item = {
     kind: "body",
-    codeBlock: "f#AbCdEf:[{=codeBlock}->{=executable}, BaselineFunctionCall, 12]",
+    codeBlock: shape.codeBlock ?? "f#AbCdEf:[{=codeBlock}->{=executable}, BaselineFunctionCall, 12]",
     at: "body",
     blocks: [
       {
@@ -313,6 +334,30 @@ const snippetAndRewrite = (rewriteTarget = "=snippet"): Item[] => [
 // before the rewrite or after it.
 const inlineRegion = (rel32: string): Line[] => [line("jmp {@slow2}", 5, { label: "inline2", rel32 }), line("movq %rax, -0x38(%rbp)", 4)];
 
+// Allocations whose names the engine prints on several lines or with addresses that are not hexadecimal.
+// InlineCacheCompiler names a stub "Access stub handler for <CB> <origin>: " and its cases, and AccessCase::dump starts
+// each case on a new line.
+const accessStub = (offset = 0): Item => ({
+  kind: "listing",
+  name: `Access stub handler for f#AbCdEf:[{=codeBlock}->{=executable}, BaselineFunctionCall, 12] bc#2: \nLoad: {ident = 'x', offset = ${offset}\n  structure = {=heapA}:[0x1c0/448, Object, (1/6, 0/0){x:${offset}}, NonArray, PropertyAddition, Proto:{=heapB}, Leaf]}`,
+  at: "stub",
+  lines: [line("push %rbp", 1), line("ret", 1)],
+});
+// YarrDisassembler::dumpHeader prints the pattern as written, so a pattern made with new RegExp can hold a newline.
+const regexps: Item[] = [
+  { kind: "listing", name: "8-bit regular expression", preamble: "8-bit regular expression /a(b+)c/g", at: "regexp", lines: [line("push %rbp", 1), line("ret", 1)] },
+  { kind: "listing", name: "Match-only 8-bit regular expression", preamble: "Match-only 8-bit regular expression /a\nb/", at: "matchOnlyRegexp", lines: [line("ret", 1)] },
+];
+// A DFG OSR exit names each operand's Structure by its StringHashDumpContext id, a hash of a dump that prints the
+// Structure's address; SlowPathCallKey::dump prints indirectOffset, which for a direct call is the low half of the
+// operation's address, in decimal.
+const exitAndSlowPathThunk = (id: string, layout: Record<string, bigint>, className = "global"): Item[] => [
+  { kind: "listing", name: `DFG OSR exit #2 (D@25, bc#7, BadCache) from f#AbCdEf:[{=codeBlock}->{=executable}, DFGFunctionCall, 12], with operands = arg0:*this loc5:[Object: {=heapA} with butterfly (nil) (Structure %${id}:${className}), StructureID: 448]`, at: "exit", lines: [line("ret", 1)] },
+  { kind: "listing", name: `thunk: FTL slow path call thunk for <usedRegisters = [], offset = 8, indirectOffset = ${layout.foo & 0xffffffffn}, callTarget = {=foo}>`, at: "slowPathThunk", lines: [line("ret", 1)] },
+];
+// A CodeBlock's name starts with its function's, which a string or computed key can give a newline.
+const multiLineCodeBlock = "a\nb#AbCdEf:[{=codeBlock}->{=executable}, BaselineFunctionCall, 12]";
+
 const cases: Case[] = [
   // Pairs that compare equal.
   pair("addresses of the same objects", "same",
@@ -362,6 +407,12 @@ const cases: Case[] = [
     current: x86Run({ main: inlineRegion("@slow2"), afterBody: snippetAndRewrite() }, "this"),
     pin: x86Run({ main: inlineRegion("=snippet"), afterBody: snippetAndRewrite() }, "pin"),
   },
+  pair("an allocation header whose name spans lines", "same", { main: [], afterBody: [accessStub()] }, { main: [], afterBody: [accessStub()] }),
+  pair("Yarr's own dump header before its allocation's", "same", { main: [], afterBody: regexps }, { main: [], afterBody: regexps }),
+  // An id is 2 to 5 characters of [A-Za-z0-9], the first from A to E, so it can hold a hexadecimal number.
+  pair("names that print addresses as Structure ids and in decimal", "same",
+    { main: [], afterBody: exitAndSlowPathThunk("B0xa", layoutThis) },
+    { main: [], afterBody: exitAndSlowPathThunk("Bl", layoutPin) }),
 
   // Pairs that differ.
   pair("an operation's symbol", "pin-code",
@@ -386,6 +437,16 @@ const cases: Case[] = [
   pair("a register", "pin-code", same([line("movq -0x30(%rbp), %rax", 4)]), same([line("movq -0x30(%rbp), %rcx", 4)])),
   pair("a mnemonic", "pin-code", same([line("add $0x1, %eax", 3)]), same([line("sub $0x1, %eax", 3)])),
   pair("the order of finalized allocations", "pin-allocations", { main: [line("add $0x1, %eax", 3)] }, { main: [line("add $0x1, %eax", 3)], thunks: "BA" }),
+  pair("a name that spans lines and holds another offset", "pin-allocations", { main: [], afterBody: [accessStub(0)] }, { main: [], afterBody: [accessStub(1)] }),
+  pair("a name with a Structure of another class", "pin-allocations",
+    { main: [], afterBody: exitAndSlowPathThunk("AQ", layoutThis) },
+    { main: [], afterBody: exitAndSlowPathThunk("AQ", layoutPin, "Object") }),
+  // Both of a body's headers span lines when its CodeBlock's name does, and its code is still compared.
+  pair("a body whose name spans lines", "pin-code",
+    { codeBlock: multiLineCodeBlock, main: [line("add $0x1, %eax", 3)] },
+    { codeBlock: multiLineCodeBlock, main: [line("add $0x2, %eax", 3)] }),
+  // A header ends at its range, so one that the next header interrupts is output the tool cannot read.
+  pair("an allocation header that never reaches its range", "pin-unreadable", same([]), same([]), { preface: ["Generated JIT code for an allocation whose header ends early"] }),
   // The folding rules keep what the blinded forms compute: a form that computes another constant differs.
   pair("a blinded move of another int32", "pin-code",
     same([line("mov $0x12345, %eax", 5), line("movq %rax, -0x38(%rbp)", 4)]),
