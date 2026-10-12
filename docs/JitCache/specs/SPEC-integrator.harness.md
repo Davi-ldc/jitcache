@@ -123,13 +123,14 @@ In twins builds `CommandLine::parseArguments` also recognizes:
 | `--jitcache-test-writer-fault=<check>@<n>` | the writer's fault injection (container sub-SPEC section 8.3) |
 | `--jitcache-test-kill=<point>@<n>` | the writer's kill point (section 12; container sub-SPEC section 8.3), with `<point>` one of the names of section 12's table |
 | `--jitcache-test-force-blinding` | `jscmain` calls `setForcesBlindingForTesting(true)` before `JSC::initialize`, which blinds every immediate the assembler considers for blinding; for runs with JITCache off only (section 11.5) |
+| `--jitcache-test-no-shell-functions` | `GlobalObject::finishCreation` registers none of section 5.2's functions, `jitcacheUCBStatistics` included, in every realm the shell creates, so the global object has the pin shell's properties; the pin comparison's runs of a twins build take it (section 11.2) |
 | `--jitcache-test-store-fault=<call>:<error>[@<n>]` | the store's fault hook (container sub-SPEC section 7.5): `<call>` is `openBody` or `scoring`, since `bodyVersion` makes no system call, `<error>` is `EMFILE`, `ENFILE`, `ENOMEM` or `EIO`, and without `@<n>` every call fails |
 | `--jitcache-test-image-hook=<name>` | `jscmain` calls `setImageTestHookNamed(name)` (`JITCacheTwinsHarness.h`) before `JSC::initialize`, which sets the Image lane's test hook for the process (SPEC-image.md R-INT-11 and section 11.3): `relocation-pairs`, `operation-pair`, `change-recorded-target` or `skip-patch`; any other name is malformed |
 | `--jitcache-test-twin-entry=<kind>` | H1's own hook: right after `start` returns, when the shell VM's `twinReportSink()` is non-null, `runJSC` writes one entry of part `Integrator` and check `test-entry`, a difference for `difference`, a skip for `skip`, and a relocation coincidence for `coincidence:<domain>`, with a domain spelled as in section 2; any other kind is malformed |
 
 ### 5.2 jsc functions
 
-`GlobalObject::finishCreation` (`jsc.cpp`) registers, in twins builds:
+`GlobalObject::finishCreation` (`jsc.cpp`) registers, in twins builds unless the shell has `--jitcache-test-no-shell-functions` (section 5.1):
 
 | function | length | behavior |
 |---|---|---|
@@ -616,7 +617,7 @@ When the runner has `--pin` (section 7.1), it runs the comparison after each seq
 --useJITDump=true --jitDumpDirectory=<scratch>/pin<j>.<this|pin>
 ```
 
-last, so they override the run's own options, and this build's run then takes `--pin-options` (section 7.1). The dump and log options leave the emitted bytes unchanged (options.md). The other two change when things happen, not what a compilation emits. Concurrent JIT off compiles every body at a fixed point of the script. With `useGC` off, `notifyIsSafeToCollect` and every collection request return early (N21), so nothing the code references dies or moves during the run, and each address names one object from the first time a body references it to the end.
+last, so they override the run's own options, and this build's run then takes `--pin-options` (section 7.1). The run of each side whose build is a twins build also takes `--jitcache-test-no-shell-functions` (section 5.1): this build's run in a twins build, and the pin's run too when `--pin` names a twins build, as in H7's twins half. Otherwise the eleven functions a twins shell registers would move every later global's property offset, link each mention of their names as a global property, and flip the `typeof` guards R-ALL-4 prescribes ([history](SPEC-integrator-history.md#the-pin-comparison-runs-without-the-shell-functions)). The dump and log options leave the emitted bytes unchanged (options.md). The other two change when things happen, not what a compilation emits. Concurrent JIT off compiles every body at a fixed point of the script. With `useGC` off, `notifyIsSafeToCollect` and every collection request return early (N21), so nothing the code references dies or moves during the run, and each address names one object from the first time a body references it to the end.
 
 Each run's standard error holds, in finalization order: the header `logJIT` prints for every finalized allocation, `Generated JIT code for <name>: [<start>, <end>) <size> bytes`; the per-bytecode dump of each baseline compilation (`JITDisassembler::dump`: a header naming the CB, the prologue, one block per bytecode headed by its index and opcode, `(End Of Main Path)`, the slow-path blocks marked `(S)`, `(End Of Slow Path)` and the tail); and the disassembly of every MathIC snippet and every MathIC inline rewrite, which `JITMathIC::generateOutOfLine` finalizes with `LinkBuffer`s of their own. The JIT dump file holds a record of every finalized allocation except an inline rewrite, with the bytes the profiler's queue copied, which a later inline rewrite may already have changed (N19).
 
