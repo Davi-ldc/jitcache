@@ -167,8 +167,9 @@ p codeBlock->dumpBytecode()
 
 Use `bun build.ts [debug|release|ci-release]` for incremental builds and regeneration after
 changes to `BytecodeList.rb`. The launcher uses Bun's pinned WebKit recipe, builds only `jsc`,
-limits both build layers to five jobs and serializes builds across profiles. Keep headers
-and binaries from the same profile. See the JITCache section of the root [CLAUDE.md](../../CLAUDE.md)
+runs as many jobs at each build level as memory holds, about 3 GiB per job and at most one per
+CPU (`--jobs=N` overrides), and serializes builds across profiles. Keep headers and binaries
+from the same profile. See the JITCache section of the root [CLAUDE.md](../../CLAUDE.md)
 for toolchain requirements and path overrides.
 
 ## Testing
