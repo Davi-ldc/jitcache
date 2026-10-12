@@ -9,7 +9,7 @@
 // - sequence 0: a Producer captures them, and they import in a Consumer and in a ConsumerProducer (statistics);
 // - sequence 1: a Producer only creates the artifact, a ConsumerProducer generates the bodies, which miss, and commits
 //   them, so it has nothing to install, and a Consumer imports them.
-// The Bun variant, a program evaluated after vm.compileFunction left a global scope extension, is role-keys-bun.js.
+// The Bun variant, an indirect eval evaluated after vm.compileFunction left a global scope extension, is role-keys-bun.js.
 //
 // The Producer of sequence 1 skips the bodies, so the script prints only what every run prints and checks the results
 // itself; the bodies leave no binding behind.
