@@ -668,10 +668,10 @@ const doneBlock = t => t.deps.length
 // A task that re-enters from a run that stopped brings that run's open review findings, which are
 // reviewers' findings and not the human's decisions.
 const openFindingsBlock = findings => findings && findings.length ? `
-The run that stopped left these open findings from this task's last review, filed against the code
-now in your files. They are reviewers' findings, not the human's decisions: verify each against the
-code, THREAD and the SPEC, fix the real ones, and refute the others in refuted with file:line
-evidence.
+This task's last review left these findings open, filed against the code now in your files: a run
+stopped, or the review parked the task, before an amender took them.
+They are reviewers' findings, not the human's decisions: verify each against the code, THREAD and the
+SPEC, fix the real ones, and refute the others in refuted with file:line evidence.
 ${fence('open_findings', findings, FINDINGS_PROMPT_LIMIT)}` : ''
 
 const implementPrompt = (t, answer, openFindings) => `${CONTEXT}${authority([t.part], 'in full')}
@@ -921,8 +921,10 @@ const corporaRung = bun => `the runner (Tools/Scripts/run-jitcache-tests) in twi
   : 'without --bun, since no current Bun build with the JITCache host exists: the runner skips and lists the Bun-hosted scripts'};
     then the runner's own self-tests, H1 to H6 and H8 of that SPEC's section 13, as that section runs them.`
 const PIN_RUNG = `give V3's runner run --pin, naming the WebKit build that target pin made from ${PIN_SOURCE}:
-    its pin comparison of every script, then the runner's self-test H7. V3 and V4 come from one run of
-    the runner: report its pin comparison and H7 as V4 and the rest as V3.`
+    its pin comparison of every script, then the runner's self-test H7 as SPEC-integrator.harness.md
+    section 13 runs it, with --plain-build naming the debug build under ${SNAPSHOT_ROOT} when that build
+    exists; without it, H7's plain half prints SKIP, which a cycle accepts and Verify reports as not run.
+    V3 and V4 come from one run of the runner: report its pin comparison and H7 as V4 and the rest as V3.`
 
 // A cycle's ladder once its unit tests pass: the smoke, then the corpora once the runner has
 // landed, then the pin comparison once its task has, stopping at the first failing rung.
@@ -1152,7 +1154,9 @@ async function implementTask(t, answer, attempt, openFindings) {
     minor.push(...findings.filter(f => f.severity === 'minor'))
     if (missing.length) return fail(`reviewers missing: ${missing.join(', ')}`, { forHuman, minor })
     const design = designByMajority(kindsByReviewer)
-    if (design.length) return { status: 'parked', designFiles: design, wroteConflicts, reports, arm64, forHuman, minor }
+    // A park comes before the amend, so the pass's serious findings travel with it to the attempt the
+    // answer starts.
+    if (design.length) return { status: 'parked', designFiles: design, openFindings: bySeverity(serious(findings)), wroteConflicts, reports, arm64, forHuman, minor }
     const found = serious(findings)
     perPass.push(found.length)
     if (!found.length) {
@@ -1563,7 +1567,8 @@ async function runTask(t) {
   const reports = []
   let wroteConflicts = false
   for (let attempt = 1; ; attempt++) {
-    const outcome = (await implementTask(t, answer, attempt, attempt === 1 ? openFindings : [])) || { status: 'failed', reason: 'its agents threw' }
+    const outcome = (await implementTask(t, answer, attempt, openFindings)) || { status: 'failed', reason: 'its agents threw' }
+    openFindings = []
     forHuman.push(...(outcome.forHuman || []))
     minor.push(...(outcome.minor || []))
     reports.push(...(outcome.reports || []))
@@ -1581,8 +1586,8 @@ async function runTask(t) {
       park.answered = true
       TIMELINE.push(`${t.id}:answered`)
       log(`${t.id}: answered; continuing from its parked work`)
-      if (!(await reapply(t, parkedDiff(t), outcome.designFiles, `reapply:${t.id}:a${attempt + 1}`)))
-        log(`${t.id}: its parked diff did not apply; the task starts over with the answer`)
+      if (await reapply(t, parkedDiff(t), outcome.designFiles, `reapply:${t.id}:a${attempt + 1}`)) openFindings = outcome.openFindings || []
+      else log(`${t.id}: its parked diff did not apply; the task starts over with the answer`)
       continue
     }
     if (outcome.status !== 'passed') {
