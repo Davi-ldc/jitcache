@@ -1182,7 +1182,10 @@ export function pinArguments(context: CommandContext, script: Script, sequence: 
 const comparesWithPin = (session: Session, script: Script) => session.pinSetup !== null && script.host === "jsc" && script.pinOff === null;
 
 // Runs option set j of a sequence with this build's jsc and with the pin's, keeping each side's status, output, error and
-// JIT dump as <scratch>/pin<j>.<this|pin>.*, which jitcache-pin-compare.ts reads alone too, and compares them.
+// JIT dump as <scratch>/pin<j>.<this|pin>.*, which jitcache-pin-compare.ts reads alone too, and compares them. Each side
+// whose build is a twins build runs with --jitcache-test-no-shell-functions, so its global object has the pin shell's
+// properties (section 11.2); the side's build decides, not the session's mode, because a twins build registers the shell
+// functions in either mode and a plain build rejects the flag.
 export async function comparePinOptionSet(setup: PinSetup, script: Script, sequence: number, options: string[], paths: SequencePaths, j: number, stacks: StackSizes | null): Promise<PinComparison> {
   const sides = [
     { side: "this", label: "this build's", build: setup.build, launcher: setup.launcher, extra: setup.pinOptions },
@@ -1194,7 +1197,8 @@ export async function comparePinOptionSet(setup: PinSetup, script: Script, seque
     const dumpDirectory = join(paths.scratch, name);
     mkdirSync(dumpDirectory, { recursive: true }); // PerfLog writes its file there and cannot create the directory
     const io: ProcessIO = { env: engineEnvironment(setup.context), cwd: paths.scratch, stdout: join(paths.scratch, `${name}.stdout`), stderr: join(paths.scratch, `${name}.stderr`) };
-    const args = pinArguments(setup.context, script, sequence, options, paths, name, [...pinRunOptions(dumpDirectory), ...extra]);
+    const noShellFunctions = build.twins ? ["--jitcache-test-no-shell-functions"] : [];
+    const args = pinArguments(setup.context, script, sequence, options, paths, name, [...pinRunOptions(dumpDirectory), ...noShellFunctions, ...extra]);
     const end = await launcher.engine(build.jsc, args, io, stacks);
     if (end.error || end.timedOut) return { difference: { check: "pin-status", detail: `${label} run ${describeEnd(end)}` }, allocations: 0, bodies: 0 };
     const status = { code: end.code, signal: end.signal };

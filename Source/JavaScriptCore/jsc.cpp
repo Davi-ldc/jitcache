@@ -539,12 +539,13 @@ public:
     bool m_jitCacheMaintenance { false };
     String m_jitCacheBenchReport;
 #if ENABLE(JITCACHE_TWINS)
-    // The test builds' flags that runJSC and jscmain read (harness sub-SPEC section 5.1); the flags that set
-    // process-wide hooks hand them to JITCacheTwinsHarness while they are parsed.
+    // The test builds' flags that runJSC, jscmain and GlobalObject::finishCreation read (harness sub-SPEC section 5.1);
+    // the flags that set process-wide hooks hand them to JITCacheTwinsHarness while they are parsed.
     String m_jitCacheTwinsReport;
     String m_jitCacheRecordLayout;
     Vector<String> m_jitCacheAvoidLayouts;
     bool m_jitCacheFixedHeapProbes { false };
+    bool m_jitCacheNoShellFunctions { false };
     String m_jitCacheDescribeHeap;
     String m_jitCacheBodyEvents;
 #endif
@@ -917,20 +918,25 @@ private:
 
 #if ENABLE(JITCACHE_TWINS)
         // JITCache's shell functions (harness sub-SPEC section 5.2), with bun:jsc's jitcacheUCBStatistics under the
-        // name both hosts give it (section 5.3). Plain builds register none of them (SPEC-integrator.md R-ALL-4).
+        // name both hosts give it (section 5.3). Plain builds register none of them (SPEC-integrator.md R-ALL-4), and
+        // neither does any realm of a shell given --jitcache-test-no-shell-functions, so that the pin comparison's runs
+        // of a twins build have the pin shell's global properties (section 11.2). Every realm reads mainCommandLine,
+        // which jscmain constructs before the first GlobalObject; workers' command lines parse no arguments.
+        if (!mainCommandLine->m_jitCacheNoShellFunctions) {
 #if ENABLE(JIT)
-        addFunction(vm, "jitcacheICsSnapshot"_s, JITCache::ICs::functionSnapshotBaselineICs, 2);
+            addFunction(vm, "jitcacheICsSnapshot"_s, JITCache::ICs::functionSnapshotBaselineICs, 2);
 #endif
-        addFunction(vm, "jitcacheDelta"_s, JITCache::functionJITCacheDelta, 0);
-        addFunction(vm, "jitcacheStatus"_s, JITCache::functionJITCacheStatus, 0);
-        addFunction(vm, "jitcacheStartOutcome"_s, JITCache::functionJITCacheStartOutcome, 0);
-        addFunction(vm, "jitcacheProgress"_s, JITCache::functionJITCacheProgress, 0);
-        addFunction(vm, "jitcacheBodyKey"_s, JITCache::functionJITCacheBodyKey, 2);
-        addFunction(vm, "jitcacheBodyEvents"_s, JITCache::functionJITCacheBodyEvents, 2);
-        addFunction(vm, "jitcacheReadSection"_s, JITCache::functionJITCacheReadSection, 2);
-        addFunction(vm, "jitcacheRewriteSection"_s, JITCache::functionJITCacheRewriteSection, 4);
-        addFunction(vm, "jitcacheDescribeHeap"_s, JITCache::functionJITCacheDescribeHeap, 1);
-        addFunction(vm, "jitcacheUCBStatistics"_s, JITCache::functionJITCacheUCBStatistics, 1);
+            addFunction(vm, "jitcacheDelta"_s, JITCache::functionJITCacheDelta, 0);
+            addFunction(vm, "jitcacheStatus"_s, JITCache::functionJITCacheStatus, 0);
+            addFunction(vm, "jitcacheStartOutcome"_s, JITCache::functionJITCacheStartOutcome, 0);
+            addFunction(vm, "jitcacheProgress"_s, JITCache::functionJITCacheProgress, 0);
+            addFunction(vm, "jitcacheBodyKey"_s, JITCache::functionJITCacheBodyKey, 2);
+            addFunction(vm, "jitcacheBodyEvents"_s, JITCache::functionJITCacheBodyEvents, 2);
+            addFunction(vm, "jitcacheReadSection"_s, JITCache::functionJITCacheReadSection, 2);
+            addFunction(vm, "jitcacheRewriteSection"_s, JITCache::functionJITCacheRewriteSection, 4);
+            addFunction(vm, "jitcacheDescribeHeap"_s, JITCache::functionJITCacheDescribeHeap, 1);
+            addFunction(vm, "jitcacheUCBStatistics"_s, JITCache::functionJITCacheUCBStatistics, 1);
+        }
 #endif
 
         if (Options::exposeCustomSettersOnGlobalObjectForTesting()) {
@@ -4471,6 +4477,7 @@ static void runInteractive(GlobalObject* globalObject)
     fprintf(stderr, "  --jitcache-test-writer-fault=<check>@<n>  Fails the writer's n-th commit at check\n");
     fprintf(stderr, "  --jitcache-test-kill=<point>@<n>   Kills the process at point of the writer's n-th commit\n");
     fprintf(stderr, "  --jitcache-test-force-blinding     Blinds every immediate the assembler considers for blinding (JITCache off only)\n");
+    fprintf(stderr, "  --jitcache-test-no-shell-functions  Registers none of JITCache's shell functions in any realm, as the pin's shell has none\n");
     fprintf(stderr, "  --jitcache-test-store-fault=openBody|scoring:EMFILE|ENFILE|ENOMEM|EIO[@<n>]  Fails the store's opens with that error\n");
     fprintf(stderr, "  --jitcache-test-image-hook=<name>  Sets the image test hook: relocation-pairs, operation-pair, change-recorded-target or skip-patch\n");
     fprintf(stderr, "  --jitcache-test-twin-entry=difference|skip|coincidence:<domain>  Writes a test entry to the twin report after start\n");
@@ -4706,7 +4713,8 @@ bool CommandLine::parseJITCacheArgument(const char* arg, bool& malformed)
         || valueFlag("--jitcache-test-image-hook", JITCache::setImageTestHookNamed)
         || valueFlag("--jitcache-test-twin-entry", JITCache::setTwinEntryFlag)
         || bareFlag("--jitcache-test-fixed-heap-probes", [&] { m_jitCacheFixedHeapProbes = true; })
-        || bareFlag("--jitcache-test-force-blinding", [] { JITCache::setForcesBlindingForTesting(true); }))
+        || bareFlag("--jitcache-test-force-blinding", [] { JITCache::setForcesBlindingForTesting(true); })
+        || bareFlag("--jitcache-test-no-shell-functions", [&] { m_jitCacheNoShellFunctions = true; }))
         return true;
 
     if (auto flag = jitCacheFlagValue(arg, "--jitcache-twins-avoid-layout")) {
