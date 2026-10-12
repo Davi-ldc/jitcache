@@ -1,0 +1,16 @@
+mechanical
+
+Requirement. SPEC-ucb.md section 13.3, `root-holder.js`: "a `new Function` text whose function is created twice from one executable, and a builtin whose function is created twice per realm, in the producer: in the consumer each root's bodies import at their first call (statistics), the root UFE's own singleton bit is false until the consumer creates a second function of one executable, as in the JITCache-off run, and the results equal that run". This conflict concerns only the builtin half. The bit is the root UFE's `m_singletonHasBeenInvalidated`, which section 5.1 keeps local after THREAD Restoration.
+
+Why the code cannot meet it as written. No builtin's `FunctionExecutable` creates a second function, in any run. Only `FunctionExecutable::notifyCreation` sets the root UFE's bit, and it does so when one `FunctionExecutable` creates its second `JSFunction`. A JSC builtin's generator, `codeName##Generator(vm)`, links a new `FunctionExecutable` from the UFE that `BuiltinExecutables` keeps per VM on every call, and a realm calls it once for each function object it installs. No realm keeps a builtin's `FunctionExecutable` to create further functions from it, and `JSPromiseConstructor::create` likewise links anew. Bun's `generateInternalModule` links once and creates one function per module. So a builtin is never "created twice per realm" from one executable, and its root UFE's bit stays false in the producer, the consumer and the JITCache-off run alike.
+
+The `new Function` half is met as written: two Function-constructor calls with one text in one realm, with no other such call between them, share one `FunctionExecutable` through `JSGlobalObject::tryGetCachedFunctionExecutableForFunctionConstructor`.
+
+What the code does instead. `JSTests/jitcache/ucb/root-holder.js` reads "created twice per realm" for the builtin as once in each of two realms. `Array.prototype.findLast` runs in the test's realm and in a `runString` realm, which gives two `FunctionExecutable`s of the one builtin UFE. In the consumer the builtin's body imports at its first call (statistics), and the results must equal the JITCache-off run. The test asserts nothing about a builtin's bit, since no run can set it. It checks the bit on a Function-constructor root instead, where a second function exists: the generator form's wrapper reads its callee, so its DFG compile watches the executable's singleton, and creating the second function must jettison that compile exactly once in every role. Nothing is asked of other tasks.
+
+Evidence.
+- `FunctionExecutable::notifyCreation` (`runtime/FunctionExecutableInlines.h`), the only caller of `UnlinkedFunctionExecutable::setSingletonHasBeenInvalidated`.
+- `DEFINE_BUILTIN_GENERATOR` (`Scripts/wkbuiltins/builtins_templates.py`), whose generator calls `UnlinkedFunctionExecutable::link` on each call, and `BuiltinExecutables::m_unlinkedExecutables` (`builtins/BuiltinExecutables.h`), one UFE per builtin per VM.
+- `JSPromiseConstructor::create` (`runtime/JSPromiseConstructor.cpp`).
+- `generateInternalModule` (`~/bun/src/jsc/bindings/InternalModuleRegistry.cpp`).
+- `FunctionExecutable::fromGlobalCode` (`runtime/FunctionExecutable.cpp`) and `JSGlobalObject::tryGetCachedFunctionExecutableForFunctionConstructor` (`runtime/JSGlobalObject.cpp`), which serve the `new Function` half.
