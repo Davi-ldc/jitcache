@@ -51,7 +51,7 @@ const produces = (role: Role) => role === "Producer" || role === "ConsumerProduc
 const imports = (role: Role) => role === "Consumer" || role === "ConsumerProducer";
 
 // Section 7.4: the sequence a script that declares none runs, and whether the directory's scripts need a twins build.
-// In twins mode every directory's runs also get --useConcurrentJIT=false unless their options set it.
+// In either mode every directory's runs also get --useConcurrentJIT=false unless their options set it.
 const laneDefaults: Record<Lane, { sequence: string; twinsRequired: boolean }> = {
   ucb: { sequence: "Producer --jitcache-delta-at-exit; Consumer", twinsRequired: false },
   image: { sequence: "Producer --jitcache-delta-at-exit; Consumer", twinsRequired: false },
@@ -867,9 +867,11 @@ export interface SequencePaths {
   layouts: string[]; // the layout files earlier runs of the sequence wrote
 }
 
-// Section 7.4: in twins mode, --useConcurrentJIT=false unless the run's options set useConcurrentJIT.
+// Section 7.4: in either mode, --useConcurrentJIT=false unless the run's options set useConcurrentJIT. A producer captures
+// only what has finalized, so with concurrent JIT on, what a fast release run commits depends on whether its plans
+// finished before it exited.
 function directoryDefaults(context: CommandContext, script: Script, options: string[]): string[] {
-  if (!context.twins || !script.lane || booleanOption(options, "useConcurrentJIT") !== null) return [];
+  if (!script.lane || booleanOption(options, "useConcurrentJIT") !== null) return [];
   return ["--useConcurrentJIT=false"];
 }
 
