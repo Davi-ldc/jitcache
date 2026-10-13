@@ -50,8 +50,10 @@ NODE_ENV=production <bun> --jitcache=/tmp/macro-api --jitcache-bench-report=/tmp
 `Tools/Scripts/jitcache-macro-bench.ts` runs the cases with a Bun that has JITCache, normally the release build from `bun build.ts bun-release`:
 
 ```sh
-bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun executable> [--cases=api,elysia,ingest,ssr] [--processes=M] [--passes=P] [--out=<directory>] [--timeout=<seconds>]
+bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun executable> [--cases=api,elysia,ingest,ssr] [--processes=M] [--passes=P] [--out=<directory>] [--timeout=<seconds>] [--check]
 ```
+
+`--check` checks a build's correctness without measuring it, for instance a shipping build while another compiles: it takes no build lock, runs 1 process per mode and 3 passes unless told otherwise, and applies every check below; its times mean nothing, and its summary says so.
 
 M is 5 and P is 34 by default. For each case the driver first runs one producer with `--jitcache=<fresh artifact> --jitcache-mode=p`, then M processes with JITCache off alternating with M consumers of the producer's artifact, so drift on the machine spreads over both. It runs one process at a time, in this directory, with `NODE_ENV=production`, `BUN_DEBUG_QUIET_LOGS=1` (a debug Bun's scoped logs would otherwise mix with the events) and no `JSC_` or `BUN_JSC_` variable. Every JITCache process writes a bench report. The driver holds the build lock, `${XDG_CACHE_HOME:-$HOME/.cache}/jitcache/build.lock`, while it measures, and says so when it has to wait for a build. A process that runs longer than `--timeout`, 1800 seconds by default, is killed.
 
