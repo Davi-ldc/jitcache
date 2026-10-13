@@ -1027,7 +1027,10 @@ V6  ARM64: natively on the Ampere A1, reached and laid out as ${A1_NOTES} says. 
     architecture and twins mode from the directory names: the aarch64 twins build, the aarch64 pin
     build (\`bun build.ts pin --arch=aarch64\` in the snapshot, once: the pin does not change), and
     the runner's files (Tools/Scripts/run-jitcache-tests, Tools/Scripts/jitcache-pin-compare.ts,
-    JSTests/jitcache/). Run there, in the background on the VM so a dropped connection does not end
+    JSTests/jitcache/), and Source/JavaScriptCore/jitcache/. A C++ test reads the source tree through
+    the build's CMake cache (imageExportedHeadersIncludeOnlyExportedJITCacheHeaders reads
+    CMAKE_HOME_DIRECTORY), so after each copy set CMAKE_HOME_DIRECTORY in the VM's copy of the twins
+    build's CMakeCache.txt to the VM's copy of the snapshot. Run there, in the background on the VM so a dropped connection does not end
     it, the runner in twins mode with --pin over every directory, then the self-tests
     SPEC-integrator.harness.md section 13 runs on each architecture (placement and pin-*); poll, and
     copy every log and results file back under ${RUN_DIR}/verify-r<round>/a1/. Then, on this machine,
