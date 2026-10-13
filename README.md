@@ -71,7 +71,7 @@ The mechanism is incredible, but it was designed to serve the browser with ephem
 
 ### it was made
 
-[![How JITCache was made)](docs/images/making-of.png)](docs/images/making-of.mp4?raw=true)
+https://github.com/user-attachments/assets/fe4d86b7-9e90-4d64-b8ef-36aa77349b26
 
 That was heavily inspired by [Jarred's PR adding threads to JSC](https://github.com/oven-sh/WebKit/pull/249). The coolest things in it are the workflow's details:
 
