@@ -46,8 +46,9 @@ function commandLine(argv: string[]): { name: string; passes: number } | string 
   for (const option of options) {
     const match = /^--passes=(.*)$/.exec(option);
     if (!match) return `unknown option ${option}`;
+    // 0 measures startup alone: the process ends right after its ready line.
     passes = Number(match[1]);
-    if (!/^\d+$/.test(match[1]) || passes < 1) return `--passes takes a positive integer, not ${match[1]}`;
+    if (!/^\d+$/.test(match[1])) return `--passes takes a non-negative integer, not ${match[1]}`;
   }
   // A deployment runs with NODE_ENV=production. React reads it when it loads, and Bun's JSX transform reads it when the
   // process starts, so a script cannot set it for itself: a hand run without it would measure React's development build.
