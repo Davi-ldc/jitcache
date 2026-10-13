@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const benchDirectory = join(repositoryRoot, "PerformanceTests/JITCache");
 
-const caseNames = ["api", "elysia", "ingest", "ssr"] as const;
+const caseNames = ["hono", "elysia", "react-ssr", "preact-ssr", "pdf", "webhook"] as const;
 type CaseName = (typeof caseNames)[number];
 // A JITCache mode is spelled as the bench report's start event spells its role.
 type Mode = "off" | "producer" | "consumer";
@@ -22,8 +22,8 @@ const warmedPasses = 5;
 // HARNESS.md leaves catchUpMargin unset; the summary names the first pass within this candidate.
 const candidateMargin = 1.1;
 
-const usage = `Usage: bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun executable> [--cases=api,elysia,ingest,ssr]
-           [--processes=M] [--passes=P] [--out=<directory>] [--timeout=<seconds>] [--check]
+const usage = `Usage: bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun executable>
+           [--cases=${caseNames.join(",")}] [--processes=M] [--passes=P] [--out=<directory>] [--timeout=<seconds>] [--check]
 Runs each case as one producer and, alternating, M processes with JITCache off and M consumers, each for P passes;
 M is 5 and P is 34 by default. --out defaults to jitcache-macro/<time> in the directory that holds the Bun executable.
 A process that runs longer than --timeout, 1800 seconds by default, is killed and fails its case.

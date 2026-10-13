@@ -1,0 +1,182 @@
+[
+  {
+    "id": "everyday-backpack",
+    "name": "Everyday Backpack",
+    "category": "Bags",
+    "price": 89,
+    "description": "A 20-liter pack with a padded laptop sleeve, a water bottle pocket and straps that stay put on a bike.",
+    "image": "/images/everyday-backpack.jpg",
+    "inStock": true
+  },
+  {
+    "id": "weekender-duffel",
+    "name": "Weekender Duffel",
+    "category": "Bags",
+    "price": 129,
+    "description": "Waxed canvas, leather handles and a separate shoe compartment. Fits most overhead bins.",
+    "image": "/images/weekender-duffel.jpg",
+    "inStock": true
+  },
+  {
+    "id": "canvas-tote",
+    "name": "Canvas Tote",
+    "category": "Bags",
+    "price": 32,
+    "description": "Heavy cotton canvas with an inside pocket for keys. Holds a week of groceries.",
+    "image": "/images/canvas-tote.jpg",
+    "inStock": false
+  },
+  {
+    "id": "merino-crew",
+    "name": "Merino Crew Sweater",
+    "category": "Clothing",
+    "price": 98,
+    "description": "Fine-gauge merino wool that keeps you warm without bulk. Machine washable on a cold cycle.",
+    "image": "/images/merino-crew.jpg",
+    "inStock": true
+  },
+  {
+    "id": "rain-shell",
+    "name": "Packable Rain Shell",
+    "category": "Clothing",
+    "price": 149,
+    "description": "A waterproof, breathable jacket that packs into its own pocket. Taped seams and an adjustable hood.",
+    "image": "/images/rain-shell.jpg",
+    "inStock": true
+  },
+  {
+    "id": "organic-tee",
+    "name": "Organic Cotton Tee",
+    "category": "Clothing",
+    "price": 28,
+    "description": "A relaxed-fit t-shirt in soft organic cotton, garment dyed so it will not shrink.",
+    "image": "/images/organic-tee.jpg",
+    "inStock": true
+  },
+  {
+    "id": "trail-runners",
+    "name": "Trail Runners",
+    "category": "Shoes",
+    "price": 135,
+    "description": "Grippy lugs, a rock plate and a roomy toe box for long days on rough trails.",
+    "image": "/images/trail-runners.jpg",
+    "inStock": true
+  },
+  {
+    "id": "leather-sneakers",
+    "name": "Leather Sneakers",
+    "category": "Shoes",
+    "price": 110,
+    "description": "Full-grain leather uppers on a stitched rubber sole. They get better with every wear.",
+    "image": "/images/leather-sneakers.jpg",
+    "inStock": false
+  },
+  {
+    "id": "wool-socks",
+    "name": "Wool Hiking Socks",
+    "category": "Shoes",
+    "price": 18,
+    "description": "Cushioned merino socks that stay dry and do not smell after a long hike. Sold as a pair.",
+    "image": "/images/wool-socks.jpg",
+    "inStock": true
+  },
+  {
+    "id": "insulated-bottle",
+    "name": "Insulated Bottle",
+    "category": "Kitchen",
+    "price": 35,
+    "description": "Keeps drinks cold for 24 hours or hot for 12. Stainless steel with a leakproof lid.",
+    "image": "/images/insulated-bottle.jpg",
+    "inStock": true
+  },
+  {
+    "id": "pour-over-set",
+    "name": "Pour-Over Coffee Set",
+    "category": "Kitchen",
+    "price": 64,
+    "description": "A ceramic dripper, a glass carafe and 100 paper filters. Everything you need for a better cup.",
+    "image": "/images/pour-over-set.jpg",
+    "inStock": true
+  },
+  {
+    "id": "cast-iron-skillet",
+    "name": "Cast Iron Skillet",
+    "category": "Kitchen",
+    "price": 45,
+    "description": "A pre-seasoned 10-inch skillet that goes from the stove to the oven to the campfire.",
+    "image": "/images/cast-iron-skillet.jpg",
+    "inStock": true
+  },
+  {
+    "id": "camp-mug",
+    "name": "Enamel Camp Mug",
+    "category": "Kitchen",
+    "price": 16,
+    "description": "A classic enamel mug that holds 12 ounces and survives being dropped on rocks.",
+    "image": "/images/camp-mug.jpg",
+    "inStock": false
+  },
+  {
+    "id": "two-person-tent",
+    "name": "Two-Person Tent",
+    "category": "Camping",
+    "price": 299,
+    "description": "A freestanding tent with two doors and two vestibules. Sets up in five minutes and weighs 1.6 kg.",
+    "image": "/images/two-person-tent.jpg",
+    "inStock": true
+  },
+  {
+    "id": "down-sleeping-bag",
+    "name": "Down Sleeping Bag",
+    "category": "Camping",
+    "price": 249,
+    "description": "Rated to -5 °C with responsibly sourced 650-fill down. Compresses to the size of a loaf of bread.",
+    "image": "/images/down-sleeping-bag.jpg",
+    "inStock": true
+  },
+  {
+    "id": "headlamp",
+    "name": "Rechargeable Headlamp",
+    "category": "Camping",
+    "price": 39,
+    "description": "350 lumens, a red night mode and a USB-C battery that lasts a whole weekend.",
+    "image": "/images/headlamp.jpg",
+    "inStock": true
+  },
+  {
+    "id": "camp-chair",
+    "name": "Folding Camp Chair",
+    "category": "Camping",
+    "price": 75,
+    "description": "Packs down to the size of a water bottle and holds up to 145 kg.",
+    "image": "/images/camp-chair.jpg",
+    "inStock": true
+  },
+  {
+    "id": "linen-throw",
+    "name": "Linen Throw Blanket",
+    "category": "Home",
+    "price": 85,
+    "description": "Stonewashed European linen that is light in summer and layers well in winter.",
+    "image": "/images/linen-throw.jpg",
+    "inStock": true
+  },
+  {
+    "id": "ceramic-planter",
+    "name": "Ceramic Planter",
+    "category": "Home",
+    "price": 42,
+    "description": "A hand-glazed planter with a drainage hole and a matching saucer. Fits a 15 cm pot.",
+    "image": "/images/ceramic-planter.jpg",
+    "inStock": true
+  },
+  {
+    "id": "desk-lamp",
+    "name": "Brass Desk Lamp",
+    "category": "Home",
+    "price": 120,
+    "description": "A solid brass lamp with an adjustable arm and a warm, dimmable LED bulb included.",
+    "image": "/images/desk-lamp.jpg",
+    "inStock": false
+  }
+]
