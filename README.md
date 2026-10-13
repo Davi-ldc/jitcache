@@ -1,6 +1,6 @@
 # JITCache
 
-JITCache lets bun save jit code and all its related state to disk resulting in ~2x faster runs for a small cost in the beginning of each function.
+JITCache lets Bun save JIT code and all its related state to disk resulting in ~2x faster runs for a small cost in the beginning of each function.
 
 ## Getting started
 
@@ -19,15 +19,15 @@ To generate a cache, run:
 bun --jitcache[=<dir>] --jitcache-mode=p run server.ts
 ```
 
-`p` creates the cache (default dir is `./.jitcache`) and saves each function's JIT code as it is compiled. To use the cached code:
+`p` creates the cache (default dir is `./.jitcache`) and saves each function's JIT code as it is compiled, [then again at exit with what it learned since](#delta). To use cached code:
 
 ```sh
-bun --jitcache[=<dir>] --jitcache-mode=c/p-c run server.ts
+bun --jitcache[=<dir>] --jitcache-mode=c|p-c run server.ts
 ```
 
-`c` (default), just uses the cache. `p-c` also writes, updating when it learns more[^1]. Every write is atomic, so N processes can read a cache while someone writes to it. 
+`c` (default) just uses the cache. `p-c` also writes, updating when it learns more [^1]. Every write is atomic, so N processes can read a cache while one is writing.
 
-If the cache came from untrusted code, use `strict` to check every body before consuming: [^2]
+To avoid crashes `--jitcache-strict` adds validation for the full structure of everything we read and the assumptions we make about the current process, costing [bench]
 
 ```sh
 bun --jitcache --jitcache-strict run server.ts
@@ -55,7 +55,7 @@ config.strict = false;                               // --jitcache-strict
 auto started = JSC::JITCache::start(vm, config);     // Started, Busy, Rejected or Fault
 ```
 
-Before stopping a VM, you can call `delta(vm)` to save what each function learned since the last save [^3] (holding its API lock). 
+Before stopping a VM, you can call `delta(vm)` to save what each function learned since the last save while holding its API lock ([explanation](#delta))
 
 ## Why
 
@@ -65,17 +65,15 @@ JavaScript engines like JavaScriptCore and V8 have some of the best compiler tec
 
 [This post](https://webkit.org/blog/10308/speculation-in-javascriptcore/) from [@filpizlo](https://x.com/filpizlo) explains it :)
 
-The mechanism is incredible, but it was designed to serve the browser with ephemeral tabs and state-dependent code. Even though, today, [two-thirds of developers use JavaScript](https://survey.stackoverflow.co/2025/technology) and [it powers a third of every lambda function](https://www.datadoghq.com/state-of-serverless-2021/). Every instance has to climb the optimisation mountain from scratch, and all the knowledge it collects is thrown away when it dies, or ignored when other workers start. JITCache solves that.
-
-<img src="docs/images/sisifo.jpg" alt="Sisyphus pushing a boulder up a slope" width="50%">
+The mechanism is incredible, but it was designed to serve the browser with ephemeral tabs and state-dependent code. Yet today, [two-thirds of developers use JavaScript](https://survey.stackoverflow.co/2025/technology) and [it powers a third of all Lambda functions](https://www.datadoghq.com/state-of-serverless-2021/). Every instance has to climb the optimisation mountain from scratch, and all the knowledge it collects is thrown away when it dies, or ignored when other workers start. JITCache solves that.
 
 ## How 
 
 ### it was made
 
-[![How JITCache was made: docs/, THREAD.md and the SPEC workflow (58 s video)](docs/images/making-of.png)](docs/images/making-of.mp4?raw=true)
+[![How JITCache was made)](docs/images/making-of.png)](docs/images/making-of.mp4?raw=true)
 
-That was heavily inspired by [Jarred's PR adding threads to JSC](https://github.com/oven-sh/WebKit/pull/249). The coolest thing in it are the workflow's details:
+That was heavily inspired by [Jarred's PR adding threads to JSC](https://github.com/oven-sh/WebKit/pull/249). The coolest things in it are the workflow's details:
 
 <details>
 
@@ -94,8 +92,8 @@ PS: I would guess that it's 80% making a good technical design and 20% making su
 
 <summary>Agents maintaining docs/</summary>
 
-* Every 10 reports, the doc's agent reorganizes and compacts (to under 40k bytes) the file, keeping the line of reasoning clear (it gets messie after many fixes).
-* Every report is duble checked, a wrong one usually means that the doc is confusing.
+* Every 10 reports, the doc's agent reorganizes and compacts (to under 40k bytes) the file, keeping the line of reasoning clear (it gets messier after many fixes).
+* Every report is double checked, a wrong one usually means that the doc is confusing.
 * The docs never use line numbers to better survive webkit bumps.
 
 </details>
@@ -104,10 +102,10 @@ PS: I would guess that it's 80% making a good technical design and 20% making su
 
 <summary>SPECS</summary>
 
-* Every prompt in the workflow are, max one paragraph long, if you need more than that to explain the task, there's probably a gap in THREAD/SPEC .md
+* Every prompt in the workflow is at most one paragraph long, if you need more than that to explain the task, there's probably a gap in THREAD/SPEC .md
 * Every decision changed after a review has its intent explained in SPEC-<lane>-history.md, to save the non-obvious insight.
-* To manage context, big subtopics go to sub-SPECs, drained by a human later btween rounds. Jarred capped each SPEC at 40k bytes with a compaction agent after every review round that end up pushing text into files no reviewer read, so i decided to compact them latter
-* Anything an agent can't settle, like conflicts btween specs go to report/spec/, drained between rounds by a human.
+* To manage context, big subtopics go to sub-SPECs, and we compact them all later. Jarred capped each SPEC at 40k bytes with a compaction agent after every review round, which ended up pushing text into files no reviewer read.
+* Anything an agent can't settle, like a SPEC requirement the code can't meet as written, goes to report/spec/, drained between rounds by a human.
 
 </details>
 
@@ -115,27 +113,39 @@ PS: I would guess that it's 80% making a good technical design and 20% making su
 
 <summary>Compacting specs</summary>
 
+* Coolest insight is that we plan everything first, thinking of what to cut, based on file's intent (SPEC should be implementable alone, history for whoever revisits a decision), and the order the reasoning should take (following a dependency graph).
+
 </details>
+
+<details>
+
+<summary>implement</summary>
+
+* Implementers never run any slow command (build/git) aadversarial reviewer has a better ROI.
+* gaps and problems in thread/specs .md or between lanes are written in report/spec/, read by every later agent, and drained by a human whenever that SPEC is free/not being read by any agent. 
+* A design question parks its task. It waits until a human drains the report and answers it in an inbox/, then continues from its saved diff with the answer in its prompt, while every other task goes on.
+</details>
+
 
 ### it works
 
-A producer records each function's baseline code while JavaScriptCore compiles it, marking every byte that depends on an address, and right after the compile saves it to a file of its own, with the function's bytecode and what the engine learned about it: type profiles, counters, and what each inline cache and call site has seen. Every write is atomic, so a crash never leaves half a function behind, and only one process produces at a time while any number consume. When the producer exits, Bun walks the live functions and saves each one again if it learned more since it compiled.
+JSC compiles each function independently, starting with the top level, which holds other functions as descriptors (with name and code) that get parsed on the first call. We hook into those points, on the first run of any function (top level included), JITCache checks whether the cache holds a file for it and, if so, loads the machine code, bytecode and engine state ([profiles](./skills/reference/knowledge/common/profiles.md) and [inline caches](./skills/reference/knowledge/common/inlinecaches.md)). If not, it takes the native path.
 
-A consumer that needs a function's bytecode reads it from the cache instead of parsing and generating it. At the function's first call, JITCache copies the saved code into executable memory, patches every recorded byte to this process's addresses, puts the saved profiles and counters back, and runs the function in baseline code from that call on. DFG and FTL, the optimizing tiers, still compile in each process, but they start from the producer's warm state, so they arrive sooner. Only baseline code is saved today; DFG and FTL code come next. A function whose source, options or binary differ misses and runs as it would without JITCache, and a damaged cache turns JITCache off for the process.
+To be serializable, we take a note of every absolute address, saving what it points to, and emit it in a fixed form [^2] to be relocated later. That way, almost everything goes back to its original state, counters and [profiles](./skills/reference/knowledge/common/profiles.md) are restored and the code stays the same, except for [inline caches](./skills/reference/knowledge/common/inlinecaches.md). They come back empty, as a recipe (bc they hold pointers to objects that might not exist yet) and are recreated on their first use.
 
-## FAQ
+<a id="delta"></a> 
+`delta(JSC::VM)` saves everything that happened after the compilation (inline caches [make your code faster] and profiles and counters [make the function tier up sooner and better]): it goes through every function the VM holds and updates it in the cache, unless it has a <= version [^3]. Normally, it's called at bun's exit
 
-### Why not change the emitted code itself?
+## Limitations
+- currently only baseline, the first tier, can be cached (DFG and FTL are coming soon :)
+- producer and consumer need to have the same cpu features, architecture and run the same binary (Bun 1.4.2).
+- a bug in JITCache can easily become an RCE
+-not every jsc option is supported. Check [options.md](./docs/JitCache/options.md)
 
-(to read addresses from a table or to shrink each slot to its shortest encoding)
+## Footnotes
 
-We measured it. On x86_64, recording emits the same instructions as a normal compile. On ARM64 it adds at most one instruction on opcodes that make up 0.05% of Baseline executions. Each function has about 45 address-dependent spots, patched once at import, and the assembler's own link writers already pick the short branch form when the target is in range. A table would add a load per reference and new instruction forms on both architectures. We will revisit it if patching shows up in import time.
+[^1]: `p-c` imports what the cache holds and keeps recording, rewriting functions that compile better code (check [^3]) and adding new ones.
 
-### What happens if the binary, the options or the CPU change?
+[^2]: The engine normally picks the shortest encoding for each address but, on ARM, the number of instructions depends on the address itself. So, because we dont know where it's gonna be, it always has to be emitted in the full-length form.
 
-The cache header records the binary's build ID, the options that change code and the CPU features. A cache that does not match is rejected, and the process runs as if JITCache were off.
-
-[^1]: When a higher tier compiles a function, or when the new copy saw more types in its profiles; on a tie, the one with more inline caches filled wins, then the one closer to its next tier. A new copy comes from the save at exit, or from a recompile after the garbage collector freed the function's `CodeBlock`, the object that holds its JIT state. More in the [docs](./docs/JitCache/).
-
-[^2]: Strict checks that every patched spot holds the instruction the patch expects, that offsets and indexes fall inside the code and the bytecode, and that unused fields are zero. It does not check the instructions between those spots, which run as the producer emitted them.
-
+[^3]: A version is better when it has seen more, more types in its profiles, array flags and exit sites. Ties go to the one with more inline caches, then to more counter progress, then to the incumbent.
