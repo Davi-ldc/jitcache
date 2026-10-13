@@ -4,11 +4,13 @@
 #include "BuiltinExecutables.h"
 #include "DirectEvalExecutable.h"
 #include "GlobalExecutable.h"
+#include "JITCacheBench.h"
 #include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "SourceCode.h"
 #include "SourceCodeKey.h"
 #include "UCBImport.h"
+#include "UCBRegistry.h"
 #include "UnlinkedEvalCodeBlock.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
@@ -50,6 +52,118 @@ static RequestKind ucbRequestKindFor(SourceCodeType codeType)
     return RequestKind::Program;
 }
 
+// The generate event (harness sub-SPEC section 9.2) times what the native path generates after an import missed: the
+// thread CPU time from tryImport's miss to didGenerate's start, which holds the parse and the bytecode generation and
+// nothing JITCache does. Without a bench report it costs one load and one test.
+static void noteImportMissed(RequestState& state)
+{
+    VMState* vmState = state.vm.jitCacheState();
+    if (vmState && vmState->benchReport())
+        state.missNanoseconds = benchThreadCPUNanoseconds();
+}
+
+static std::optional<uint64_t> generationEnd(const RequestState& state)
+{
+    if (!state.missNanoseconds)
+        return std::nullopt;
+    return benchThreadCPUNanoseconds();
+}
+
+static ASCIILiteral generatedKindName(const RequestState& state)
+{
+    if (state.key && *state.key) {
+        switch ((*state.key)->identityKind()) {
+        case IdentityKind::Program:
+            return "program"_s;
+        case IdentityKind::Module:
+            return "module"_s;
+        case IdentityKind::IndirectEval:
+            return "indirectEval"_s;
+        case IdentityKind::FunctionConstructor:
+            return "functionConstructor"_s;
+        case IdentityKind::Builtin:
+            return "builtin"_s;
+        case IdentityKind::Child:
+            return "child"_s;
+        case IdentityKind::DirectEval:
+            return "directEval"_s;
+        }
+    }
+    // Without a key the request's own kind is all there is; a UFE body of unknown identity says "function".
+    switch (state.kind) {
+    case RequestKind::Program:
+        return "program"_s;
+    case RequestKind::Module:
+        return "module"_s;
+    case RequestKind::IndirectEval:
+        return "indirectEval"_s;
+    case RequestKind::FunctionBody:
+        return "function"_s;
+    case RequestKind::DirectEval:
+        return "directEval"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+    return "function"_s;
+}
+
+static ASCIILiteral missReasonName(std::optional<MissReason> reason)
+{
+    if (!reason)
+        return "none"_s;
+    switch (*reason) {
+    case MissReason::NoKey:
+        return "noKey"_s;
+    case MissReason::NoBody:
+        return "noBody"_s;
+    case MissReason::BodyUnchanged:
+        return "bodyUnchanged"_s;
+    case MissReason::RequestKey:
+        return "requestKey"_s;
+    case MissReason::Context:
+        return "context"_s;
+    case MissReason::Provenance:
+        return "provenance"_s;
+    case MissReason::Holder:
+        return "holder"_s;
+    case MissReason::AtomMap:
+        return "atomMap"_s;
+    case MissReason::CoreDigest:
+        return "coreDigest"_s;
+    case MissReason::Stack:
+        return "stack"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+    return "none"_s;
+}
+
+static void recordGenerateEvent(const RequestState& state, const UnlinkedCodeBlock& codeBlock, std::optional<uint64_t> end)
+{
+    if (!end)
+        return;
+    VMState* vmState = state.vm.jitCacheState();
+    BenchReport* report = vmState ? vmState->benchReport() : nullptr;
+    if (!report)
+        return;
+    using BenchValue = decltype(BenchField::value);
+    BenchValue key = nullptr;
+    if (state.key && *state.key)
+        key = bodyKeyHex(**state.key);
+    BenchValue specialization = nullptr;
+    if (state.kind == RequestKind::FunctionBody)
+        specialization = String { state.specialization == CodeSpecializationKind::CodeForCall ? "call"_s : "construct"_s };
+    SourceProvider* provider = state.source.provider();
+    report->record("generate"_s, {
+        { "key"_s, key },
+        { "kind"_s, String { generatedKindName(state) } },
+        { "specialization"_s, specialization },
+        { "miss"_s, String { missReasonName(state.missReason) } },
+        { "nanoseconds"_s, *end - *state.missNanoseconds },
+        { "sourceCharacters"_s, static_cast<uint64_t>(state.source.length()) },
+        { "instructionBytes"_s, static_cast<uint64_t>(codeBlock.instructions().sizeInBytes()) },
+        { "url"_s, provider ? provider->sourceURL() : String { } },
+    });
+}
+
 RequestState::RequestState(VM& vm, RequestKind kind, const SourceCode& source, OptionSet<CodeGenerationMode> requestMode, LexicallyScopedFeatures requestFeatures)
     : vm(vm)
     , kind(kind)
@@ -89,14 +203,19 @@ UnlinkedGlobalCodeBlock* GlobalRequest::tryImport()
     if (!ucbRequestActs(m_state))
         return nullptr;
     // The core decodes as the kind the key implies (codec section 3), which is the request's class.
-    return uncheckedDowncast<UnlinkedGlobalCodeBlock>(importBody(m_state));
+    UnlinkedCodeBlock* imported = importBody(m_state);
+    if (!imported)
+        noteImportMissed(m_state);
+    return uncheckedDowncast<UnlinkedGlobalCodeBlock>(imported);
 }
 
 void GlobalRequest::didGenerate(UnlinkedGlobalCodeBlock& codeBlock)
 {
     if (!ucbRequestActs(m_state))
         return;
+    std::optional<uint64_t> end = generationEnd(m_state);
     recordGenerated(m_state, codeBlock);
+    recordGenerateEvent(m_state, codeBlock, end);
 }
 
 FunctionBodyRequest::FunctionBodyRequest(VM& vm, UnlinkedFunctionExecutable& executable, const SourceCode& source, CodeSpecializationKind specialization, OptionSet<CodeGenerationMode> codeGenerationMode)
@@ -132,14 +251,19 @@ UnlinkedFunctionCodeBlock* FunctionBodyRequest::tryImport()
 {
     if (!ucbRequestActs(m_state))
         return nullptr;
-    return uncheckedDowncast<UnlinkedFunctionCodeBlock>(importBody(m_state));
+    UnlinkedCodeBlock* imported = importBody(m_state);
+    if (!imported)
+        noteImportMissed(m_state);
+    return uncheckedDowncast<UnlinkedFunctionCodeBlock>(imported);
 }
 
 void FunctionBodyRequest::didGenerate(UnlinkedFunctionCodeBlock& codeBlock)
 {
     if (!ucbRequestActs(m_state))
         return;
+    std::optional<uint64_t> end = generationEnd(m_state);
     recordGenerated(m_state, codeBlock);
+    recordGenerateEvent(m_state, codeBlock, end);
 }
 
 // DirectEvalExecutable::create constructs the request before it generates, so the snapshot is the call site's features.
@@ -162,14 +286,19 @@ UnlinkedEvalCodeBlock* DirectEvalRequest::tryImport()
 {
     if (!ucbRequestActs(m_state))
         return nullptr;
-    return uncheckedDowncast<UnlinkedEvalCodeBlock>(importBody(m_state));
+    UnlinkedCodeBlock* imported = importBody(m_state);
+    if (!imported)
+        noteImportMissed(m_state);
+    return uncheckedDowncast<UnlinkedEvalCodeBlock>(imported);
 }
 
 void DirectEvalRequest::didGenerate(UnlinkedEvalCodeBlock& codeBlock)
 {
     if (!ucbRequestActs(m_state))
         return;
+    std::optional<uint64_t> end = generationEnd(m_state);
     recordGenerated(m_state, codeBlock);
+    recordGenerateEvent(m_state, codeBlock, end);
 }
 
 // Root hooks (sections 7.2.4 and 7.3.6). Each runs before link reads the UFE and before any holder publishes it, looks up

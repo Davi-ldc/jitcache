@@ -118,8 +118,15 @@ public:
         switchTo(previous);
     }
 
+    // The size of the core the decode reads, which the request event reports beside the request's source (B2).
+    void noteCoreBytes(size_t bytes)
+    {
+        if (m_measurements)
+            m_measurements->coreBytes = bytes;
+    }
+
     // Closes the counted span, then writes the request event; nothing it does after that clock read is measured.
-    void record(ASCIILiteral action, const BodyKey&, bool strict);
+    void record(ASCIILiteral action, const BodyKey&, bool strict, uint64_t sourceCharacters);
 
 private:
     struct Measurements {
@@ -135,6 +142,7 @@ private:
         std::array<uint64_t, numberOfCostAccounts> accountNanoseconds { };
         std::array<uint64_t, numberOfRequestParts> partNanoseconds { };
         std::array<bool, numberOfRequestParts> partRan { };
+        std::optional<uint64_t> coreBytes; // set when the request decodes a core
     };
 
     CostAccount switchTo(CostAccount account)
@@ -161,7 +169,7 @@ private:
     std::optional<Measurements> m_measurements;
 };
 
-void RequestTimer::record(ASCIILiteral action, const BodyKey& key, bool strict)
+void RequestTimer::record(ASCIILiteral action, const BodyKey& key, bool strict, uint64_t sourceCharacters)
 {
     if (!m_measurements)
         return;
@@ -205,6 +213,8 @@ void RequestTimer::record(ASCIILiteral action, const BodyKey& key, bool strict)
         { "parseFields"_s, partValue(RequestPart::ParseFields) },
         { "extraMemory"_s, partValue(RequestPart::ExtraMemory) },
         { "records"_s, partValue(RequestPart::Records) },
+        { "sourceCharacters"_s, sourceCharacters },
+        { "coreBytes"_s, measurements.coreBytes ? BenchValue { *measurements.coreBytes } : BenchValue { nullptr } },
     });
 }
 
@@ -611,6 +621,7 @@ static ASCIILiteral decodeFailureDescription(CoreDecodeFailure failure)
 static UnlinkedCodeBlock* decodeCore(VMState& vmState, RequestState& state, ValidatedBody& body, const BodyKey& key, RequestTimer& timer)
 {
     std::span<const uint8_t> core = body.section(SectionKind::UCBCore);
+    timer.noteCoreBytes(core.size());
     CachePayload::Destructor releaseBody = [pinned = RefPtr<ValidatedBody> { &body }](const void*) mutable {
         pinned = nullptr;
     };
@@ -936,6 +947,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     // RangeError it throws with JITCache off, and a later request at a shallower depth imports. Nothing is computed.
     if (!vm.isSafeToRecurse()) {
         countMiss(*vmState, MissReason::Stack);
+        state.missReason = MissReason::Stack;
         return nullptr;
     }
     bool strict = vmState->strict();
@@ -945,6 +957,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     std::optional<BodyKey> key = requestKeyMeasured(state, state.requestMode, &timer);
     if (!key) {
         countMiss(*vmState, MissReason::NoKey);
+        state.missReason = MissReason::NoKey;
         return nullptr;
     }
 
@@ -959,6 +972,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     }
     if (!indexToken) {
         countMiss(*vmState, MissReason::NoBody);
+        state.missReason = MissReason::NoBody;
         return nullptr;
     }
     // Unusable: the integrator has raised the fault.
@@ -967,6 +981,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     // Missing: the index lists a body the artifact no longer holds, as after compact.
     if (lookup->kind() == BodyLookup::Kind::Missing) {
         countMiss(*vmState, MissReason::NoBody);
+        state.missReason = MissReason::NoBody;
         state.missedBodyVersion = indexToken;
         return nullptr;
     }
@@ -977,6 +992,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     // A miss from step 4 on remembers the index token, which didGenerate's record keeps (section 7.3.5).
     auto miss = [&](MissReason reason) -> UnlinkedCodeBlock* {
         countMiss(*vmState, reason);
+        state.missReason = reason;
         state.missedBodyVersion = indexToken;
         return nullptr;
     };
@@ -1076,7 +1092,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     }
     ++statisticsOf(*vmState).imports;
     state.settled = true;
-    timer.record("import"_s, *key, strict);
+    timer.record("import"_s, *key, strict, state.source.length());
 
     // Step 13.
 #if ENABLE(JITCACHE_TWINS)
@@ -1224,7 +1240,7 @@ void seedDecoded(RequestState& state, UnlinkedCodeBlock& codeBlock)
     }
     ++statisticsOf(*vmState).seededDecodes;
     state.settled = true;
-    timer.record("seed"_s, *key, strict);
+    timer.record("seed"_s, *key, strict, state.source.length());
 
     // Step 8.
 #if ENABLE(JITCACHE_TWINS)
@@ -1342,7 +1358,7 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
         return;
     ++statisticsOf(*vmState).attaches;
     state.settled = true;
-    timer.record("attach"_s, record->key, vmState->strict());
+    timer.record("attach"_s, record->key, vmState->strict(), state.source.length());
 
     // Step 8.
 #if ENABLE(JITCACHE_TWINS)
