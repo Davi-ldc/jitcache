@@ -919,8 +919,26 @@ JITCACHE_TEST(imageHelpersRecordFixedFootprints, Yes)
     JITCACHE_CHECK(provenance->start == linked->bytes.data());
     JITCACHE_CHECK(provenance->size == linkedSize);
     JITCACHE_CHECK(provenance->fixups.size() == expectations.size());
-    for (size_t i = 1; i < provenance->fixups.size(); ++i)
-        JITCACHE_CHECK(provenance->fixups[i - 1].site < provenance->fixups[i].site);
+    // Footprint order (SPEC-image.md section 3): by site, and at a shared site the Call first. Only ARM64 shares a site,
+    // since a Call's site ends its footprint while a Pointer's or a Jump's starts it; the bl of nearCallSupport followed
+    // at once by the b of nearTailCallSupport above is such a pair.
+    bool sawSharedSite = false;
+    for (size_t i = 1; i < provenance->fixups.size(); ++i) {
+        auto& previous = provenance->fixups[i - 1];
+        auto& fixup = provenance->fixups[i];
+        bool sharedSite = previous.site == fixup.site && previous.form == FixupForm::Call && fixup.form != FixupForm::Call;
+        sawSharedSite |= sharedSite;
+#if CPU(ARM64)
+        JITCACHE_CHECK(previous.site < fixup.site || sharedSite);
+#else
+        JITCACHE_CHECK(previous.site < fixup.site);
+#endif
+    }
+#if CPU(ARM64)
+    JITCACHE_CHECK(sawSharedSite);
+#else
+    JITCACHE_CHECK(!sawSharedSite);
+#endif
 
     for (auto& fixup : provenance->fixups) {
         auto decoded = decodeFixup(linked->bytes, fixup);
