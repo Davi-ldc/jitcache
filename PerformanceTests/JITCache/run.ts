@@ -12,9 +12,9 @@ export interface Workload {
 // Each loader imports one case alone, so a process loads only the libraries its case uses.
 const cases: Record<string, () => Promise<{ setup(): Promise<Workload> }>> = {
   api: () => import("./cases/api.ts"),
+  elysia: () => import("./cases/elysia.ts"),
+  ingest: () => import("./cases/ingest.ts"),
   ssr: () => import("./cases/ssr.tsx"),
-  markdown: () => import("./cases/markdown.ts"),
-  tsc: () => import("./cases/tsc.ts"),
 };
 
 const defaultPasses = 34;
