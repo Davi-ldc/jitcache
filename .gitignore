@@ -105,3 +105,6 @@ BenchmarkTemp
 # Local workflow reference material.
 /reference/
 /jared.md
+
+# Internal drafts and the review document, never published.
+/docs/JitCache/drafts/
