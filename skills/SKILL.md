@@ -39,7 +39,7 @@ A SPEC is for the implementer, who builds from it alone. It states every decisio
 
 ## Internal docs
 
-Unless a document explicitly says "in upstream WebKit", it refers to webkitbun, Bun's WebKit.
+The documents describe the engine as it stands in the current state of the JITCache repository ([Davi-ldc/jitcache](https://github.com/Davi-ldc/jitcache)): webkitbun at the pin plus our commits, which change some engine behavior. Where the code and a document disagree, the code wins and the document needs a report. A document says "in upstream WebKit" or "at the pin" when it means another version.
 
 These documents explain JSC's internal processes and structures so you can spend time on our logic rather than rediscovering theirs. They are product agnostic: they describe only the engine and never mention JITCache, while JITCache decides what they cover and how deep they go. Text a report proposes for them follows the same rule. Read them (full file) in the order below. The common files and basics are mandatory; the rest depend on the tier you are working on. The links below are the English versions, the only ones maintained. Agents and subagents ignore `reference/pt/`: do not read, cite or edit anything under it.
 
@@ -54,7 +54,7 @@ These documents explain JSC's internal processes and structures so you can spend
 
 If you find a documentation error, or an addition important to JITCache as a whole rather than only to your current task, create a new Markdown file in repository-root `report/`. Use one file per point, briefly describing the affected documentation, proposed change and supporting reasoning or evidence. Each report names one documentation file; split a point that affects several files into one report per file. When a report you resolve also concerns another file, fix your part and rewrite the report so it names only that other file.
 
-Do not search existing reports for duplicates. Use a descriptive, unique filename and add it without modifying existing reports or the documentation itself. Task-local implementation findings belong in the assigned SPEC.
+Do not search existing reports for duplicates. Name the report after the documentation file it names, without `.md`, then a hyphen and a short description of the point: `inlinecaches-<point>.md`. The two `compiler.md` files add their folder: `baseline-compiler-<point>.md` and `dfg-compiler-<point>.md`. Each document's maintainer finds its reports by that prefix. Add the report without modifying existing reports or the documentation itself. Task-local implementation findings belong in the assigned SPEC.
 
 The docs and the reports describe mechanisms, which outlive any single pin. Point to code by symbol (function, class, field, option), which a grep finds. Never cite line numbers. Cite a file path only when it is stable across WebKit versions and the symbol alone would not locate the code. Each doc is limited to 40,000 bytes, measured with `wc -c`; make room by condensing before adding.
 

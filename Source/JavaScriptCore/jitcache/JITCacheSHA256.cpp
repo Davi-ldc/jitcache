@@ -528,4 +528,4 @@ bool runSHA256SelfTest(String& failure)
 
 #endif // ENABLE(JITCACHE_TWINS)
 
-} // namespace JSC::JITCache
+} // namespace JSC::JITCache    

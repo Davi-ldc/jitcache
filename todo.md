@@ -68,3 +68,14 @@ Transportar as previsões dos buffers de `catch`, hoje omitidas. O buffer nasce 
 otimizar ics
 
 Voltar em execeções tipo RepatchingPropertyInlineCache quando for implementar ics. 
+
+
+**Producer limit: saturate instead of ending production.** Today a charge past `producerLimitBytes` is a recording fault that ends production for good, so a host can only use the limit as a large safety net. Instead, a compilation whose recording would pass the limit is not recorded: it runs natively and is not captured from that code. A capture whose buffers do not fit is skipped, and production goes on. Refusals are not sticky, so memory freed when code dies is reused. `status` reports the peak and the counts of unrecorded compilations and skipped captures. Startup code compiles first, so a saturated producer still captures what matters most for a cold start, and Bun can get a finite default from the bench. The change reuses `ProducerBudget` and the Image recorder's unrecordable outcome; it changes THREAD Failures, the refusal paths and their tests. Later, if records dominate, evict by compact's (L + P) / B score.
+
+Não li o `todo.md` nesta sessão, então talvez seja preciso ajustar ao formato das outras entradas.
+
+
+ajustar isso:
+config.producerLimitBytes = SIZE_MAX;                // --jitcache-max-memory; unlimited, as in Bun
+
+e adicionar no readme. (so pra host)

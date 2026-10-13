@@ -16,6 +16,7 @@ xcuserdata
 DerivedData
 .mailmap
 results
+!/docs/JitCache/results/
 saving
 # Ignore Buildstream local files
 /Tools/buildstream/.bst2

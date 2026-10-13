@@ -1657,9 +1657,11 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     state.clearBodyLookupForTesting();
 }
 
-// The start event of harness sub-SPEC section 9.2. A start that configures the VM keeps its report, which
-// flushBenchReport writes out with the summary lines, the producer budget's limit among them; a rejected start closes the
-// report again with its start event written and no summary line.
+// T-BENCH: the start event and the summary lines of harness sub-SPEC section 9.2. A rejected start closes its report
+// again with its start event written and no summary line. A start that configures the VM keeps its report and hands it
+// the artifact and, for a producing role, the producer budget (section 3.2, step 10). flushBenchReport then writes the
+// index line for every role, so a Consumer's names the one body its artifact holds, and a ConsumerProducer's budget
+// line holds the producer limit.
 JITCACHE_TEST(integratorStartBenchEvent, Yes)
 {
     ProcessHooksScope hooks;
@@ -1667,8 +1669,13 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
     if (!directory)
         return;
     String artifact = directory->path("artifact"_s);
-    if (!createTestArtifact(context, artifact))
-        return;
+    {
+        ExtraVM producer;
+        if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), strictConfig(artifact, Role::Producer)), StartOutcome::Started))
+            return;
+        if (!commitTestBody(context, *producer.vm().jitCacheState(), testKey(23), 23))
+            return;
+    }
 
     String rejectedReport = directory->path("rejected.jsonl"_s);
     {
@@ -1682,6 +1689,21 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
     JITCACHE_CHECK(rejectedLines.contains("\"outcome\":\"rejected\",\"role\":\"consumer\",\"nanoseconds\":"_s));
     JITCACHE_CHECK(rejectedLines.contains("\"indexedBodies\":0}"_s));
     JITCACHE_CHECK(!rejectedLines.contains("\"event\":\"budget\""_s));
+    JITCACHE_CHECK(!rejectedLines.contains("\"event\":\"index\""_s));
+
+    // No line but the index line writes bodies.
+    String consumerReport = directory->path("consumer.jsonl"_s);
+    {
+        ExtraVM consumer;
+        Config config = strictConfig(artifact, Role::Consumer);
+        config.benchReportPath = consumerReport;
+        if (!startsAs(context, "a Consumer with a bench report"_s, JITCache::start(consumer.vm(), config), StartOutcome::Started))
+            return;
+        flushBenchReport(consumer.vm());
+        String consumerLines = readTextFile(consumerReport);
+        JITCACHE_CHECK(consumerLines.contains("\"event\":\"index\""_s));
+        JITCACHE_CHECK(consumerLines.contains("\"bodies\":1,"_s));
+    }
 
     VM& vm = *context.vm();
     String startedReport = directory->path("started.jsonl"_s);

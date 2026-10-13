@@ -363,16 +363,15 @@ const determinismCase: Case = {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
-// H7: the pin comparison of a build with itself finds no difference on the runner's fixtures and the integrator corpus.
+// H7: a build compared with itself finds no difference on the runner's fixtures, the integrator corpus and cb/.
 
-// The scripts H7 compares: this directory's fixtures and the integrator corpus's scripts.
+// The directories H7 compares. cb/'s Off runs cache ICs, so they print the access stubs' headers, which span lines
+// (harness sub-SPEC section 11.3); no fixture and no integrator script caches one.
+const comparedDirectories = [fixtures, join(corpusRoot, "integrator"), join(corpusRoot, "cb")];
+
+// Their scripts: each directory's own .js and .mjs files, as the runner collects them.
 function comparedScripts(): string[] {
-  const scriptFile = (name: string) => /\.m?js$/.test(name);
-  const integrator = join(corpusRoot, "integrator");
-  return [
-    ...readdirSync(fixtures).filter(scriptFile).map(name => join(fixtures, name)),
-    ...(existsSync(integrator) ? readdirSync(integrator).filter(scriptFile).map(name => join(integrator, name)) : []),
-  ];
+  return comparedDirectories.flatMap(directory => readdirSync(directory).filter(name => /\.m?js$/.test(name)).map(name => join(directory, name)));
 }
 
 // Through the runner, in the twins build: --pin names the build itself, and pinOptions reach this build's side alone. The
@@ -382,9 +381,7 @@ function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
     name,
     claim,
     async run(context) {
-      const integrator = join(corpusRoot, "integrator");
-      const paths = [fixtures, ...(existsSync(integrator) ? [integrator] : [])];
-      const outcome = await runRunner(context, name, [`--jobs=${context.jobs}`, ...againstItself(...pinOptions)(context), ...paths]);
+      const outcome = await runRunner(context, name, [`--jobs=${context.jobs}`, ...againstItself(...pinOptions)(context), ...comparedDirectories]);
       const problems: string[] = [];
       const comparisons = outcome.records.filter(record => record.kind === "pin");
       if (!comparisons.length) problems.push(`the runner compared no option set with the pin (${describeEnd(outcome.end)}):\n${outcome.output}`);
@@ -400,7 +397,7 @@ function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
 // this half drives the runner's own comparison of each Off option set directly (harness sub-SPEC section 13, H7).
 const pinSelfPlainCase: Case = {
   name: "pin-self-plain",
-  claim: "H7: a plain build compared with itself on the runner's fixtures and the integrator corpus finds no difference",
+  claim: "H7: a plain build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference",
   skip: context => (context.plainBuild ? null : "no --plain-build names a plain build"),
   async run(context) {
     const build = context.plainBuild!;
@@ -502,8 +499,8 @@ async function main(argv: string[]): Promise<number> {
     calibrationCase,
     testjitcacheCase,
     determinismCase,
-    pinSelfCase("pin-self", "H7: the twins build compared with itself on the runner's fixtures and the integrator corpus finds no difference", []),
-    pinSelfCase("pin-self-forced-blinding", "H7: it finds none either when this build's side blinds every immediate it considers", ["--jitcache-test-force-blinding"]),
+    pinSelfCase("pin-self", "H7: the twins build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference", []),
+    pinSelfCase("pin-self-forced-blinding", "H7: the twins build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference either when this build's side blinds every immediate it considers", ["--jitcache-test-force-blinding"]),
     pinSelfPlainCase,
     pinCraftedCase,
   ];

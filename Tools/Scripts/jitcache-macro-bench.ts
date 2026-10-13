@@ -23,7 +23,7 @@ const warmedPasses = 5;
 const candidateMargin = 1.1;
 
 const usage = `Usage: bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun executable>
-           [--cases=${caseNames.join(",")}] [--processes=M] [--passes=P] [--out=<directory>] [--timeout=<seconds>] [--check]
+           [--cases=${caseNames.join(",")}] [--processes=M] [--passes=P] [--producer-passes=K] [--out=<directory>] [--timeout=<seconds>] [--check]
 Runs each case as one producer and, alternating, M processes with JITCache off and M consumers, each for P passes;
 M is 5 and P is 34 by default. --out defaults to jitcache-macro/<time> in the directory that holds the Bun executable.
 A process that runs longer than --timeout, 1800 seconds by default, is killed and fails its case.
@@ -40,6 +40,7 @@ interface Options {
   cases: CaseName[];
   processes: number;
   passes: number;
+  producerPasses: number; // the producer's passes before Bun's exit hook calls delta
   out: string;
   timeoutSeconds: number;
   check: boolean; // correctness only: no build lock, and times that measure nothing
@@ -51,6 +52,7 @@ function parseCommandLine(argv: string[]): Options {
   let cases: CaseName[] = [...caseNames];
   let processes: number | null = null;
   let passes: number | null = null;
+  let producerPasses: number | null = null;
   let timeoutSeconds = 1800;
   let check = false;
   for (const argument of argv) {
@@ -73,6 +75,9 @@ function parseCommandLine(argv: string[]): Options {
         break;
       case "--passes":
         passes = positiveInteger(required(), name);
+        break;
+      case "--producer-passes":
+        producerPasses = positiveInteger(required(), name);
         break;
       case "--out":
         out = resolve(required());
@@ -99,7 +104,8 @@ function parseCommandLine(argv: string[]): Options {
   const existing = out ? statSync(out, { throwIfNoEntry: false }) : undefined;
   if (out && existing && (!existing.isDirectory() || readdirSync(out).length)) throw new UsageError(`--out names a file or a directory that is not empty: ${out}`);
   out ??= join(dirname(bun), "jitcache-macro", new Date().toISOString().replace(/[:.]/g, "-"));
-  return { bun, cases, processes: processes ?? (check ? 1 : 5), passes: passes ?? (check ? 3 : 34), out, timeoutSeconds, check };
+  passes ??= check ? 3 : 34;
+  return { bun, cases, processes: processes ?? (check ? 1 : 5), passes, producerPasses: producerPasses ?? passes, out, timeoutSeconds, check };
 }
 
 function parseCases(text: string): CaseName[] {
@@ -337,7 +343,10 @@ async function runProcess(run: CaseRun, mode: Mode, index: number): Promise<Proc
   const files = { stdout: join(directory, `${mode}-${index}.stdout`), stderr: join(directory, `${mode}-${index}.stderr`), report: join(directory, `${mode}-${index}.bench.jsonl`) };
   // JITCache's flags go before the script, where Bun reads its own. A consumer takes the default mode.
   const flags = mode === "off" ? [] : [`--jitcache=${artifact}`, ...(mode === "producer" ? ["--jitcache-mode=p"] : []), `--jitcache-bench-report=${files.report}`];
-  const command = [options.bun, ...flags, "run.ts", name, `--passes=${options.passes}`];
+  // A producer may run fewer passes than the others, so its exit-time delta captures bodies while they still run in
+  // baseline, before most of them tier up to the DFG and leave baseline code no later capture can take.
+  const passes = mode === "producer" ? options.producerPasses : options.passes;
+  const command = [options.bun, ...flags, "run.ts", name, `--passes=${passes}`];
   const record: ProcessRecord = {
     kind: "process",
     case: name,
@@ -389,7 +398,7 @@ async function runProcess(run: CaseRun, mode: Mode, index: number): Promise<Proc
   if (record.timedOut) record.problems.push(`killed after ${plural(options.timeoutSeconds, "second", "seconds")}`);
   else if (record.signal) record.problems.push(`ended by ${record.signal}`);
   else if (record.exitCode !== 0) record.problems.push(`exited with ${record.exitCode}`);
-  readEvents(readText(files.stdout) ?? "", options.passes, record);
+  readEvents(readText(files.stdout) ?? "", passes, record);
   const stderrText = readText(files.stderr) ?? "";
   if (record.problems.length && stderrText.trim()) record.problems.push(`standard error ends with: ${tail(stderrText)}`);
 
@@ -698,7 +707,7 @@ function summaryText(options: Options, revision: string, before: number[], after
   return [
     "# JITCache macro benches",
     "",
-    `Bun ${options.bun}, ${revision}. ${plural(options.processes, "process", "processes")} per mode, ${plural(options.passes, "pass", "passes")} each, on ${hostname()} (${cpus().length} CPUs, ${cpus()[0]?.model ?? "unknown CPU"}, ${mebibytes(totalmem())}). Load average ${load(before)} before and ${load(after)} after.`,
+    `Bun ${options.bun}, ${revision}. ${plural(options.processes, "process", "processes")} per mode, ${plural(options.passes, "pass", "passes")} each${options.producerPasses !== options.passes ? ` (the producer ${plural(options.producerPasses, "pass", "passes")})` : ""}, on ${hostname()} (${cpus().length} CPUs, ${cpus()[0]?.model ?? "unknown CPU"}, ${mebibytes(totalmem())}). Load average ${load(before)} before and ${load(after)} after.`,
     "",
     "Times are wall time. A cell over several processes gives the minimum and, in parentheses, the median; Ck and Nk are the minimum over the consumers and over the off processes of pass k. The JITCache counts come from each process's bench report, and a consumer cell gives the median over the consumers, with the range when they differ. Peak memory is the kernel's peak resident set for each process.",
     "",
@@ -747,7 +756,7 @@ async function main(argv: string[]): Promise<number> {
   try {
     const probe = Bun.spawnSync([options.bun, "--revision"], { env: environment, stdout: "pipe", stderr: "pipe" });
     revision = probe.stdout.toString().trim() || `--revision failed: ${probe.stderr.toString().trim()}`;
-    results.write({ kind: "run", bun: options.bun, revision, cases: options.cases, processes: options.processes, passes: options.passes, check: options.check, out: options.out, started: new Date().toISOString(), host: hostname(), cpus: cpus().length, cpuModel: cpus()[0]?.model ?? null, memoryBytes: totalmem(), loadAverage: before });
+    results.write({ kind: "run", bun: options.bun, revision, cases: options.cases, processes: options.processes, passes: options.passes, producerPasses: options.producerPasses, check: options.check, out: options.out, started: new Date().toISOString(), host: hostname(), cpus: cpus().length, cpuModel: cpus()[0]?.model ?? null, memoryBytes: totalmem(), loadAverage: before });
     console.log(`bun ${options.bun} (${revision}): ${options.cases.join(", ")}, ${plural(options.processes, "process", "processes")} per mode, ${plural(options.passes, "pass", "passes")}`);
     for (const name of options.cases) {
       const { summary, records } = await runCase(options, name, results, environment);
