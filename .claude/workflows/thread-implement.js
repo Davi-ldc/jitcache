@@ -830,7 +830,7 @@ appears. Never end your turn, or wait for a notification, while it runs.`
 
 const SNAPSHOT_STEP = `The build snapshot ${SNAPSHOT} is a sparse git worktree of this repository that holds
 the committed tree only, so no file an implementer is still writing reaches a build. Bring it to the
-latest commit first, with \`flock ${COMMIT_LOCK} git -C ${SNAPSHOT} checkout --detach --quiet public\`,
+latest commit first, with \`flock ${COMMIT_LOCK} git -C ${SNAPSHOT} checkout --detach --quiet main\`,
 the only git you run; then run every build from ${SNAPSHOT} as
 \`JITCACHE_BUILD_ROOT=${SNAPSHOT_ROOT} JITCACHE_PIN_SOURCE=${PIN_SOURCE} bun build.ts <target>\`, with the
 target's options.`

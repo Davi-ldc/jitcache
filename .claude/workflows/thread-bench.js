@@ -184,7 +184,7 @@ skills/SKILL.md only: this task needs neither its references, THREAD nor any SPE
 edit no file of either repository.
 The build snapshot ${SNAPSHOT} is a sparse git worktree of this repository that holds the
 committed tree only. Bring it to the latest commit first, with
-\`flock ${COMMIT_LOCK} git -C ${SNAPSHOT} checkout --detach --quiet public\`; besides it, the only git you
+\`flock ${COMMIT_LOCK} git -C ${SNAPSHOT} checkout --detach --quiet main\`; besides it, the only git you
 run is \`git -C ${SNAPSHOT} rev-parse HEAD\`, whose full hash you report in commit. Then, from
 ${SNAPSHOT}, run \`JITCACHE_BUILD_ROOT=${SNAPSHOT_ROOT} bun build.ts release\`, which takes the build lock
 itself. ${LONG_COMMANDS} The log is ${MILESTONE_DIR}/build.log; create its directory first.
