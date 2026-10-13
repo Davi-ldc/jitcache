@@ -1024,7 +1024,9 @@ V4  pin: ${PIN_RUNG}
 V5  plain: the runner in plain mode on the debug build, every directory.
 V6  ARM64: natively on the Ampere A1, reached and laid out as ${A1_NOTES} says. Copy there with
     rsync, keeping their paths relative to the snapshot and its build root so the runner reads the
-    architecture and twins mode from the directory names: the aarch64 twins build, the aarch64 pin
+    architecture and twins mode from the directory names, and the builds with --copy-links: their
+    exported header copies (JavaScriptCore/PrivateHeaders) are symlinks into this machine's source
+    tree, which a C++ test reads. Copy the aarch64 twins build, the aarch64 pin
     build (\`bun build.ts pin --arch=aarch64\` in the snapshot, once: the pin does not change), and
     the runner's files (Tools/Scripts/run-jitcache-tests, Tools/Scripts/jitcache-pin-compare.ts,
     JSTests/jitcache/), and Source/JavaScriptCore/jitcache/. A C++ test reads the source tree through
