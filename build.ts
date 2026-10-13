@@ -19,6 +19,7 @@ const TARGETS = new Map<string, { profile: string; ninja?: string; pin?: true }>
   ["release", { profile: "release-local", ninja: "WebKit" }],
   ["ci-release", { profile: "ci-release", ninja: "WebKit" }],
   ["bun-debug", { profile: "debug-local" }],
+  ["bun-release", { profile: "release-local" }],
   ["twins", { profile: "debug-local-twins", ninja: "WebKit" }],
   ["bun-twins", { profile: "debug-local-twins" }],
   ["pin", { profile: "debug-local", ninja: "WebKit", pin: true }],
@@ -36,9 +37,10 @@ const keepGoing = args.includes("--keep-going");
 const positional = args.filter(arg => arg !== archOption && arg !== jobsOption && arg !== "--keep-going");
 const requested = positional[0] || "debug";
 if (requested === "-h" || requested === "--help") {
-  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|twins|bun-twins|pin] [--arch=aarch64] [--jobs=N] [--keep-going]");
+  console.log("Usage: bun build.ts [debug|release|ci-release|bun-debug|bun-release|twins|bun-twins|pin] [--arch=aarch64] [--jobs=N] [--keep-going]");
   console.log("Build WebKit/JSC with Bun's build system, from a Bun checkout based on the pin. Default: debug.");
-  console.log("bun-debug builds the Bun executable against local WebKit in the debug build directory.");
+  console.log("bun-debug builds the Bun executable against local WebKit in the debug build directory;");
+  console.log("bun-release does the same in the release build directory, for the macro benches.");
   console.log("twins builds jsc and testjitcache with JITCache's test builds on (ENABLE_JITCACHE_TWINS);");
   console.log("bun-twins builds the Bun executable against that WebKit, in the same build directory.");
   console.log(`pin builds debug's jsc from the pinned webkitbun ${WEBKIT_PIN.slice(0, 12)} in JITCACHE_PIN_SOURCE`);

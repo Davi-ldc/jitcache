@@ -40,6 +40,7 @@ Run `bun build.ts` from the physical checkout root (`~/jitcache` here). It deleg
 | `bun build.ts release` | `release-local`; RelWithDebInfo, without LTO. |
 | `bun build.ts ci-release` | `ci-release` with local WebKit; LTO and target settings come from Bun. |
 | `bun build.ts bun-debug` | `debug-local`; builds the Bun executable `<build-root>/linux-<arch>-debug-local/bun-debug`, sharing its WebKit build with `bun build.ts`. |
+| `bun build.ts bun-release` | `release-local`; builds the Bun executable `<build-root>/linux-<arch>-release-local/bun-profile` and its stripped copy `bun`, sharing its WebKit build with `bun build.ts release`, for the macro benches. |
 | `bun build.ts twins` | `debug-local-twins`: the debug build with JITCache's test builds on (`ENABLE_JITCACHE_TWINS`); builds `jsc` and `testjitcache`. |
 | `bun build.ts bun-twins` | `debug-local-twins`; builds the Bun executable against that WebKit, in the same build directory. |
 | `bun build.ts pin` | `debug-local` from the pinned webkitbun in `JITCACHE_PIN_SOURCE`, into `linux-<arch>-debug-local-pin`, for the pin comparison (integrator task 17 adds this target). |
