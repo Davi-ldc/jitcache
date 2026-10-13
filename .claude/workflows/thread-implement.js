@@ -1298,8 +1298,16 @@ const carried = new Map()   // file -> errors that showed elsewhere and were tra
 const rejected = new Map()  // file -> fixes reviewers rejected, with their objections
 const waitsFor = new Map()  // file -> the tasks not yet landed that its remaining errors need
 const deciding = new Map()  // file -> the wait for the human's answer to its fix's conflict
-const answers = new Map()   // file -> that answer, for its next proposer
+const answers = new Map()   // file -> that answer, until its next proposer takes it
+// An answer has come that no proposer has taken yet: the next cycle runs for it. A cycle's start clears
+// it, and so does a proposer that takes the last answer, so an answer that a later round of the same
+// cycle used asks for no cycle of its own.
 let answersPending = false
+const takeAnswer = file => {
+  const answer = answers.get(file) || null
+  if (answers.delete(file) && !answers.size) answersPending = false
+  return answer
+}
 const isWaiting = file => waitsFor.has(file) && [...waitsFor.get(file)].some(id => !isSettled(id))
 function decide(file, ownerId, phaseName) {
   const wait = awaitAnswer(ownerId, phaseName)
@@ -1347,8 +1355,7 @@ async function fixItems(raws, tag, phaseName, kind, unresolved) {
   const outcomes = await parallel(items.map(it => async () => {
     const tasks = unique([it.task, ...it.owners.map(t => t.id)]).map(id => byId.get(id))
     const parts = unique(tasks.map(t => t.part))
-    const answer = it.scope.map(f => answers.get(f)).filter(Boolean).join('\n\n') || null
-    for (const f of it.scope) answers.delete(f)
+    const answer = it.scope.map(takeAnswer).filter(Boolean).join('\n\n') || null
     const prop = await run(proposeVerifyPrompt(it, parts, tasks, answer),
       { label: `propose:${tag}:${it.id}`, phase: phaseName, schema: PROPOSAL, ...AGENT })
     if (!prop) return { outcome: 'unresolved', reason: 'the proposer returned no result' }
@@ -1497,8 +1504,7 @@ async function buildLoop(name, targets, everyOne, maxRounds, phaseName, waitForD
     const outcomes = await parallel(batch.map(item => async () => {
       const owners = order.filter(t => isPassed(t.id) && ownedBy(t.files, item.file))
       const parts = owners.length ? unique(owners.map(t => t.part)) : PARTS
-      const answer = answers.get(item.file) || null
-      answers.delete(item.file)
+      const answer = takeAnswer(item.file)
       const prop = await run(proposeBuildPrompt(item, owners, parts, logPath, rejected.get(item.file) || [], answer),
         { label: `propose:${tag}:${base(item.file)}`, phase: phaseName, schema: PROPOSAL, ...AGENT })
       if (!prop) return { outcome: 'unresolved', reason: 'the proposer returned no result' }
@@ -1716,18 +1722,19 @@ function markBlocked() {
 const readyTasks = () => order.filter(t => !state.has(t.id) && t.deps.every(d => isPassed(d.id)) && (smokeGreen || !SMOKE_GATED.includes(t.id)))
   .sort((a, b) => ((FIRST.indexOf(a.id) + 1 || Infinity) - (FIRST.indexOf(b.id) + 1 || Infinity)) || (weight(b) - weight(a)))
 
-// The committed tree builds whenever something new has landed, an answer has come for a fix that
-// waited on one, or the test tasks wait for the smoke: an incremental x86 twins build with its
-// unit tests and the smoke, plus aarch64 while ARM64-only code that landed has not built clean,
-// Bun's twins build while Bun code that landed has not, and a short fix loop. A run that takes
-// over landed tasks starts with a cycle, so their tests run while the first tasks are written.
-// After MAX_SMOKE_CYCLES cycles that the test tasks waited through without a green smoke, they are
-// blocked by the smoke and the run goes on.
+// The committed tree builds whenever something new has landed, an answer has come that no proposer
+// has taken yet (answersPending), or the test tasks wait for the smoke: an incremental x86 twins
+// build with its unit tests and the smoke, plus aarch64 while ARM64-only code that landed has not
+// built clean, Bun's twins build while Bun code that landed has not, and a short fix loop. A run
+// that takes over landed tasks starts with a cycle when tasks remain to be written, so the landed
+// tests run while the first tasks are written; with none left, Build and Verify run every check a
+// cycle would. After MAX_SMOKE_CYCLES cycles that the test tasks waited through without a green
+// smoke, they are blocked by the smoke and the run goes on.
 async function buildDaemon() {
   let built = 0
   let armDirty = false
   let bunDirty = false
-  let startCycle = LANDED.length > 0
+  let startCycle = LANDED.length > 0 && order.some(t => !isPassed(t.id))
   for (let cycle = 1; ; ) {
     const seen = events
     if (gitFailure || capReached) return
