@@ -2,9 +2,10 @@
 // Harness sub-SPEC H7: jitcache-pin-compare.ts's own tests, on crafted output pairs for both architectures. Each case
 // writes two runs as the engine prints them (logJIT headers, baseline dumps, listings, JIT dump records) and checks that
 // compareRuns reports pairs that differ in an operation's symbol, an allocation's identity, an h number, an immediate, a
-// displacement, a register, a mnemonic or the order of finalized allocations, and finds the same code in pairs that
-// differ only in the addresses of the same objects, in nops, in blinded forms, in ARM64 materialization lengths and
-// temporary reuse, in the two forms of an ARM64 conditional branch to a thunk, or in a super_construct main path. Other
+// displacement, a register, a mnemonic, the order of finalized allocations or a breakpoint inside a listing's code, and
+// finds the same code in pairs that differ only in the addresses of the same objects, in nops, in the breakpoints that
+// pad a listing, in blinded forms, in ARM64 materialization lengths and temporary reuse, in the two forms of an ARM64
+// conditional branch to a thunk, or in a super_construct main path. Other
 // cases cover what the engine prints around the code: a header the JIT heap rounds up past the dump, the padding after a
 // body's last instruction, a MathIC inline rewrite, whose header prints an empty range, names that span lines, Yarr's
 // own dump header before its allocation's, names that print addresses as Structure ids and in decimal, and a header that
@@ -283,7 +284,7 @@ const arm64Layouts = {
   pin: { ...layoutPin, heapA: 0xffff00002000n }, // one halfword fewer to materialize
 };
 
-function arm64Items(main: Line[], layout: { pad?: number; round?: number }): Item[] {
+function arm64Items(main: Line[], layout: { pad?: number; round?: number }, afterBody: Item[]): Item[] {
   return [
     { kind: "listing", name: "thunk: Baseline: op_add slow path", at: "thunkA", lines: [{ text: "ret" }] },
     { kind: "listing", name: "thunk: ThrowStackOverflowAtPrologue", at: "thunkB", lines: [{ text: "brk\t#0x1" }] },
@@ -302,11 +303,12 @@ function arm64Items(main: Line[], layout: { pad?: number; round?: number }): Ite
       ],
       ...layout,
     },
+    ...afterBody,
   ];
 }
 
-function arm64Run(main: Line[], side: "this" | "pin", layout: { pad?: number; round?: number } = {}): Run {
-  return { architecture: "aarch64", items: arm64Items(main, layout), values: arm64Layouts[side], engine: side === "this" ? engineThis : enginePin };
+function arm64Run(main: Line[], side: "this" | "pin", layout: { pad?: number; round?: number } = {}, afterBody: Item[] = []): Run {
+  return { architecture: "aarch64", items: arm64Items(main, layout, afterBody), values: arm64Layouts[side], engine: side === "this" ? engineThis : enginePin };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -333,6 +335,17 @@ const snippetAndRewrite = (rewriteTarget = "=snippet"): Item[] => [
 // The inline region: a jump to the slow path, as an empty profile leaves it, whose JIT dump record holds the bytes
 // before the rewrite or after it.
 const inlineRegion = (rel32: string): Line[] => [line("jmp {@slow2}", 5, { label: "inline2", rel32 }), line("movq %rax, -0x38(%rbp)", 4)];
+
+// A MathIC snippet's listing prints its whole LinkBuffer: the code, then the breakpoints LinkBuffer::allocate pads it
+// with up to the 32-byte allocation granule, as many as the code's length leaves room for. Its last jump returns into
+// the body, which makes it the body's snippet, so its code is compared.
+const granule = 32;
+const breakpoint = (architecture: Architecture): Line => (architecture === "x86_64" ? line("int3", 1) : { text: "brk\t#0" });
+function paddedSnippet(architecture: Architecture, code: Line[]): Item {
+  const size = code.reduce((total, entry) => total + (architecture === "x86_64" ? entry.length ?? 1 : 4), 0);
+  const padding = ((granule - (size % granule)) % granule) / (architecture === "x86_64" ? 1 : 4);
+  return { kind: "listing", name: "JITMathIC: generating out of line IC snippet", at: "snippet", lines: [...code, ...Array.from({ length: padding }, () => breakpoint(architecture))] };
+}
 
 // Allocations whose names the engine prints on several lines or with addresses that are not hexadecimal.
 // InlineCacheCompiler names a stub "Access stub handler for <CB> <origin>: " and its cases, and AccessCase::dump starts
@@ -407,6 +420,10 @@ const cases: Case[] = [
     current: x86Run({ main: inlineRegion("@slow2"), afterBody: snippetAndRewrite() }, "this"),
     pin: x86Run({ main: inlineRegion("=snippet"), afterBody: snippetAndRewrite() }, "pin"),
   },
+  // The blinded pointer is 4 bytes longer, so its listing holds 4 fewer padding breakpoints.
+  pair("a snippet whose blinded form leaves other padding", "same",
+    { main: [], afterBody: [paddedSnippet("x86_64", [line("mov ${=heapA}, %r11", 10), line("orw $0x1b, (%r11)", 5), line("jmp {@ret7}", 5)])] },
+    { main: [], afterBody: [paddedSnippet("x86_64", [line(`mov $${hex(rotateLeft(pinHeapA, 8))}, %r11`, 10), line("ror $0x8, %r11", 4), line("orw $0x1b, (%r11)", 5), line("jmp {@ret7}", 5)])] }),
   pair("an allocation header whose name spans lines", "same", { main: [], afterBody: [accessStub()] }, { main: [], afterBody: [accessStub()] }),
   pair("Yarr's own dump header before its allocation's", "same", { main: [], afterBody: regexps }, { main: [], afterBody: regexps }),
   // An id is 2 to 5 characters of [A-Za-z0-9], the first from A to E, so it can hold a hexadecimal number.
@@ -459,6 +476,10 @@ const cases: Case[] = [
   pair("a constant unfolded through a register overwritten later in its run", "pin-code",
     same([line("mov $0x2710, %edx", 5), line("add %edx, %eax", 2), line("mov %esi, %edx", 2)]),
     same([line("add $0x2710, %eax", 5), line("mov %esi, %edx", 2)])),
+  // Only the breakpoints that end a listing pad it; one before its last other instruction is code.
+  pair("a breakpoint inside a snippet's code", "pin-code",
+    { main: [], afterBody: [paddedSnippet("x86_64", [line("add $0x1, %eax", 3), line("jmp {@ret7}", 5)])] },
+    { main: [], afterBody: [paddedSnippet("x86_64", [line("add $0x1, %eax", 3), line("int3", 1), line("jmp {@ret7}", 5)])] }),
   pair("a final near jmp to another thunk, after int3 padding", "pin-code",
     { main: [line("add $0x1, %eax", 3)], pad: 24, round: 256 },
     { main: [line("add $0x1, %eax", 3)], pad: 24, round: 256, overflow: "=thunkA" }),
@@ -518,6 +539,19 @@ const cases: Case[] = [
     expect: "same",
     current: arm64Run([{ text: "add\tx0, x1, #0x8" }], "this", { pad: 8, round: 512 }),
     pin: arm64Run([{ text: "add\tx0, x1, #0x8" }], "pin", { pad: 8, round: 512 }),
+  },
+  {
+    // The pin's address takes one movk fewer, so its listing holds one more padding brk.
+    name: "ARM64 snippet whose materialization leaves other padding",
+    expect: "same",
+    current: arm64Run([], "this", {}, [paddedSnippet("aarch64", [...materialize("x17", arm64Layouts.this.heapA), { text: "ldrh\tw16, [x17, xzr]" }, { text: "orr\tw16, w16, w5" }, { text: "sturh\tw16, [x17]" }, { text: "b\t{@ret7}" }])]),
+    pin: arm64Run([], "pin", {}, [paddedSnippet("aarch64", [...materialize("x17", arm64Layouts.pin.heapA), { text: "ldrh\tw16, [x17, xzr]" }, { text: "orr\tw16, w16, w5" }, { text: "sturh\tw16, [x17]" }, { text: "b\t{@ret7}" }])]),
+  },
+  {
+    name: "ARM64 breakpoint inside a snippet's code",
+    expect: "pin-code",
+    current: arm64Run([], "this", {}, [paddedSnippet("aarch64", [{ text: "ldr\tx0, [x2]" }, { text: "b\t{@ret7}" }])]),
+    pin: arm64Run([], "pin", {}, [paddedSnippet("aarch64", [{ text: "ldr\tx0, [x2]" }, { text: "brk\t#0" }, { text: "b\t{@ret7}" }])]),
   },
   {
     name: "ARM64 conditional branch to a thunk, near and far",

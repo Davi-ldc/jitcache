@@ -607,6 +607,9 @@ function isConditional(architecture: Architecture, operation: string): boolean {
 
 const isNop = (operation: string) => /^nop/.test(operation);
 
+// MacroAssembler::breakpoint: x86_64's int3, and ARM64's brk, whose immediate is the build's WTF_FATAL_CRASH_CODE.
+const isBreakpoint = (architecture: Architecture, operation: string) => operation === (architecture === "x86_64" ? "int3" : "brk");
+
 function parseX86Operand(text: string, branch: boolean): Operand | null {
   let prefix = "";
   let body = text;
@@ -1515,9 +1518,12 @@ class RunContext {
     return { kind: "body", allocation, ordinal: this.bodyOrdinals.get(allocation.index)!, place: "", blocks: rendered, namer, blockAt };
   }
 
+  // Rule 1: a listing prints its LinkBuffer whole, and the breakpoints after its last other instruction are those
+  // LinkBuffer::allocate padded it with, as many as the code's length leaves room for.
   private listing(allocation: Allocation): Instruction[] {
     if (!allocation.disassembly) throw new Unreadable(`line ${allocation.line}: ${allocation.identity} printed no disassembly`);
     const instructions = this.instructionsOf(allocation.disassembly, 0, allocation);
+    while (instructions.length && isBreakpoint(this.architecture, instructions.at(-1)!.operation)) instructions.pop();
     this.measure(instructions, allocation);
     return instructions;
   }
