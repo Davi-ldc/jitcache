@@ -1,12 +1,12 @@
 export const meta = {
   name: 'thread-implement',
-  description: 'JITCache step 2: implement every task of the five SPECs as soon as its dependencies pass and its files are free, review each until a clean pass and commit it, and whenever something new lands build the committed tree and run the verification ladder over whatever exists, then build everything and run the ladder once more with plain mode and QEMU, sending each failure back to the code that caused it',
+  description: 'JITCache step 2: implement every task of the five SPECs as soon as its dependencies pass and its files are free, review each until a clean pass and commit it, and whenever something new lands build the committed tree and run the verification ladder over whatever exists, then build everything and run the ladder once more with plain mode and the aarch64 runs on the Ampere A1, sending each failure back to the code that caused it',
   whenToUse: 'After thread-prep and spec-compaction, with THREAD and the SPECs sealed and committed. args: { landed: the tasks earlier runs committed, as { id, summary } (the last result gives them) or bare ids; planCache: the last result\'s planCache; reentry: { <task>: diff path, or { diff, answer, findings } }; first: ids to admit first; buildOnly: build and fix the landed tasks and stop; runDir: where logs and diffs go }.',
   phases: [
     { title: 'Plan', detail: 'The task graph from the five task lists, verbatim, cached per SPEC and re-extracted only where a task list changed; an unresolved or unknown dependency, a cycle or a gap stops the run' },
     { title: 'Implement', detail: 'Each task starts when its dependencies have passed and its files are free: write -> 3 adversarial reviewers -> amend, until a clean pass, then one commit; a design conflict waits in the run for its answer. Whenever something new lands, a cycle runs the verification ladder over whatever exists, stopping at its first failing rung: build, unit tests, the Producer-then-Consumer smoke the test tasks wait for, the corpora once the runner has landed, the pin comparison once its task has' },
     { title: 'Build', detail: 'The full build of the committed tree: twins, plain debug and Bun twins, then aarch64 once x86 is green; per round, a fix proposal per file -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
-    { title: 'Verify', detail: 'The cycles\' ladder once more over everything, plus plain mode and QEMU: build, unit tests, smoke, corpora, pin comparison, plain mode, QEMU, stopping at the first failing rung -> an item per failure of that rung, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
+    { title: 'Verify', detail: 'The cycles\' ladder once more over everything, plus plain mode and ARM64: build, unit tests, smoke, corpora, pin comparison, plain mode, the aarch64 runs on the Ampere A1 with QEMU for CPU models, stopping at the first failing rung -> an item per failure of that rung, for the task that caused it -> proposal -> 3 adversarial reviewers -> apply the approved ones; one commit per task per round' },
   ],
 }
 
@@ -72,7 +72,8 @@ export const meta = {
 // - Once every task has ended, the Build phase builds everything: twins, plain debug and Bun twins,
 //   then aarch64 once x86 is green. args.buildOnly runs that phase alone over the landed tasks.
 //   Verify is the cycles' ladder once more, over everything, plus what is too costly for every
-//   cycle: the corpora in plain mode and the runs under QEMU. A round fixes only the first failing
+//   cycle: the corpora in plain mode and the aarch64 runs, natively on the Ampere A1 with a short QEMU
+//   run for the CPU models the A1 cannot vary. A round fixes only the first failing
 //   rung's failures; the concurrency family and the benches wait for the milestones. A failure goes back
 //   to the code that caused it: a cause in another file moves the failure there, never into a
 //   workaround where it shows. A fix lands only when a majority of its three reviewers approves
@@ -125,6 +126,8 @@ const PIN_HOST = 'integrator.17'
 const SNAPSHOT = '~/collo-local/build/jitcache-snapshot/webkit'
 const SNAPSHOT_ROOT = '~/collo-local/build/jitcache-snapshot/build'
 const PIN_SOURCE = '~/collo-local/build/jitcache/webkit-pin'
+// The Ampere A1 that runs the aarch64 builds natively: how to reach it and where the runner's tree lives there.
+const A1_NOTES = '~/collo-local/build/jitcache/a1/NOTES.md'
 const TWINS_BIN = `${SNAPSHOT_ROOT}/linux-x86_64-debug-local-twins/deps/WebKit/bin`
 const SYMBOLIZER = '~/collo-local/tools/llvm-21/usr/lib/llvm-21/bin/llvm-symbolizer'
 
@@ -1006,7 +1009,7 @@ Apply the proposal incorporating the amendments.${conflictFile ? ` Record its sp
 ${CONFLICT_FILE}.` : ''} Set applied to false if you wrote nothing.`
 
 // Verify is the cycles' ladder run once more over everything that exists, plus what is too costly
-// for every cycle: the corpora in plain mode and the runs under QEMU. Each rung runs only once
+// for every cycle: the corpora in plain mode and the aarch64 runs on the A1. Each rung runs only once
 // every rung below it passes, so a round's fixes all answer one rung's failures.
 const rungs = () => `
 Run the rungs IN ORDER and stop at the first one that fails at all: report every rung after it as
@@ -1019,9 +1022,18 @@ V2  smoke: ${smokeDue() ? SMOKE_STEPS : `notRun, since the jsc host (${SMOKE_HOS
 V3  corpora: ${corporaRung(isPassed(BUN_HOST))}
 V4  pin: ${PIN_RUNG}
 V5  plain: the runner in plain mode on the debug build, every directory.
-V6  QEMU: the runner in twins mode on the aarch64 twins build under QEMU, as its command line
-    allows: every directory, and the self-tests SPEC-integrator.harness.md section 13 runs on
-    each architecture.
+V6  ARM64: natively on the Ampere A1, reached and laid out as ${A1_NOTES} says. Copy there with
+    rsync, keeping their paths relative to the snapshot and its build root so the runner reads the
+    architecture and twins mode from the directory names: the aarch64 twins build, the aarch64 pin
+    build (\`bun build.ts pin --arch=aarch64\` in the snapshot, once: the pin does not change), and
+    the runner's files (Tools/Scripts/run-jitcache-tests, Tools/Scripts/jitcache-pin-compare.ts,
+    JSTests/jitcache/). Run there, in the background on the VM so a dropped connection does not end
+    it, the runner in twins mode with --pin over every directory, then the self-tests
+    SPEC-integrator.harness.md section 13 runs on each architecture (placement and pin-*); poll, and
+    copy every log and results file back under ${RUN_DIR}/verify-r<round>/a1/. Then, on this machine,
+    under QEMU on the aarch64 twins build, the scripts that declare jitcache-qemu-cpu
+    (integrator/cpu-vector.js), as their declarations ask: QEMU's CPU models are the one thing the A1,
+    a single CPU model, cannot vary.
 ${LONG_COMMANDS} Keep every log under ${RUN_DIR}/verify-r<round>/. The builds live under ${SNAPSHOT_ROOT};
 run the runner, the checks and the tests from ${SNAPSHOT}.
 Crashes: collect stack traces (debug build asserts are evidence, paste them).`
