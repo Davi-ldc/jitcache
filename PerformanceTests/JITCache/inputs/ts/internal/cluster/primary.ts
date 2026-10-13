@@ -1,0 +1,356 @@
+const EventEmitter = require("node:events");
+const Worker = require("internal/cluster/Worker");
+const { kHandle } = require("internal/shared");
+
+const sendHelper = $newRustFunction("node_cluster_binding.rs", "sendHelperPrimary", 4);
+const onInternalMessage = $newRustFunction("node_cluster_binding.rs", "onInternalMessagePrimary", 3);
+const { UV_EINVAL, UV_ENOBUFS } = process.binding("uv");
+
+let child_process;
+let RoundRobinHandle;
+let SharedHandle;
+
+const ArrayPrototypeSlice = Array.prototype.slice;
+const ObjectValues = Object.values;
+const ObjectKeys = Object.keys;
+
+const cluster = new EventEmitter();
+const intercom = new EventEmitter();
+const SCHED_NONE = 1;
+const SCHED_RR = 2;
+
+export default cluster;
+
+const handles = new Map();
+cluster.isWorker = false;
+cluster.isMaster = true; // Deprecated alias. Must be same as isPrimary.
+cluster.isPrimary = true;
+cluster.Worker = Worker;
+cluster.workers = {};
+cluster.settings = {};
+cluster.SCHED_NONE = SCHED_NONE; // Leave it to the operating system.
+cluster.SCHED_RR = SCHED_RR; // Primary distributes connections.
+
+let ids = 0;
+let initialized = false;
+
+// XXX(bnoordhuis) Fold cluster.schedulingPolicy into cluster.settings?
+const schedulingPolicyEnv = process.env.NODE_CLUSTER_SCHED_POLICY;
+let schedulingPolicy = 0;
+if (schedulingPolicyEnv === "rr") schedulingPolicy = SCHED_RR;
+else if (schedulingPolicyEnv === "none") schedulingPolicy = SCHED_NONE;
+else schedulingPolicy = SCHED_RR;
+cluster.schedulingPolicy = schedulingPolicy;
+
+cluster.setupPrimary = function (options) {
+  const settings = {
+    args: ArrayPrototypeSlice.$call(process.argv, 2),
+    exec: process.argv[1],
+    execArgv: process.execArgv,
+    silent: false,
+    ...cluster.settings,
+    ...options,
+  };
+
+  cluster.settings = settings;
+
+  if (initialized === true) return process.nextTick(setupSettingsNT, settings);
+
+  initialized = true;
+  schedulingPolicy = cluster.schedulingPolicy; // Freeze policy.
+  if (!(schedulingPolicy === SCHED_NONE || schedulingPolicy === SCHED_RR))
+    throw new Error(`Bad cluster.schedulingPolicy: ${schedulingPolicy}`);
+
+  process.nextTick(setupSettingsNT, settings);
+};
+
+// Deprecated alias must be same as setupPrimary
+cluster.setupMaster = cluster.setupPrimary;
+
+function setupSettingsNT(settings) {
+  cluster.emit("setup", settings);
+}
+
+function createWorkerProcess(id, env) {
+  const workerEnv = { ...process.env, ...env, NODE_UNIQUE_ID: `${id}` };
+  const execArgv = [...cluster.settings.execArgv];
+
+  child_process ??= require("node:child_process");
+  return child_process.fork(cluster.settings.exec, cluster.settings.args, {
+    cwd: cluster.settings.cwd,
+    env: workerEnv,
+    serialization: cluster.settings.serialization,
+    silent: cluster.settings.silent,
+    windowsHide: cluster.settings.windowsHide,
+    execArgv: execArgv,
+    stdio: cluster.settings.stdio,
+    gid: cluster.settings.gid,
+    uid: cluster.settings.uid,
+  });
+}
+
+function removeWorker(worker) {
+  if (!worker) throw new Error("ERR_INTERNAL_ASSERTION");
+  delete cluster.workers[worker.id];
+
+  if (ObjectKeys(cluster.workers).length === 0) {
+    if (!(handles.size === 0)) throw new Error("Resource leak detected.");
+    intercom.emit("disconnect");
+  }
+}
+
+// channelGone: the channel is closed, so nothing the worker still holds can be acked (a primary disconnect() keeps it up until the acks arrive).
+function removeHandlesForWorker(worker, channelGone) {
+  if (!worker) throw new Error("ERR_INTERNAL_ASSERTION");
+
+  handles.forEach((handle, key) => {
+    if (handle.remove(worker, channelGone)) handles.delete(key);
+  });
+}
+
+cluster.fork = function (env) {
+  cluster.setupPrimary();
+  const id = ++ids;
+  const workerProcess = createWorkerProcess(id, env);
+  const worker = new Worker({
+    id: id,
+    process: workerProcess,
+  });
+
+  worker.on("message", function (message, handle) {
+    cluster.emit("message", this, message, handle);
+  });
+
+  // FIXME: throwing an error in this function does not get caught
+  // at least in the cases where #handle has become null
+  // may be always; don't have time to investigate right now
+  worker.process.once("exit", (exitCode, signalCode) => {
+    /*
+     * Remove the worker from the workers list only
+     * if it has disconnected, otherwise we might
+     * still want to access it.
+     */
+    if (!worker.isConnected()) {
+      removeHandlesForWorker(worker, true);
+      removeWorker(worker);
+    }
+
+    worker.exitedAfterDisconnect = !!worker.exitedAfterDisconnect;
+    worker.state = "dead";
+    worker.emit("exit", exitCode, signalCode);
+    cluster.emit("exit", worker, exitCode, signalCode);
+  });
+
+  worker.process.once("disconnect", () => {
+    worker.process.channel = null;
+    /*
+     * Now is a good time to remove the handles
+     * associated with this worker because it is
+     * not connected to the primary anymore.
+     */
+    removeHandlesForWorker(worker, true);
+
+    /*
+     * Remove the worker from the workers list only
+     * if its process has exited. Otherwise, we might
+     * still want to access it.
+     */
+    if (worker.isDead()) removeWorker(worker);
+
+    worker.exitedAfterDisconnect = !!worker.exitedAfterDisconnect;
+    worker.state = "disconnected";
+    worker.emit("disconnect");
+    cluster.emit("disconnect", worker);
+  });
+
+  onInternalMessage(worker.process[kHandle], worker, onmessage);
+  process.nextTick(emitForkNT, worker);
+  cluster.workers[worker.id] = worker;
+  return worker;
+};
+
+function emitForkNT(worker) {
+  cluster.emit("fork", worker);
+}
+
+cluster.disconnect = function (cb) {
+  const workers = ObjectKeys(cluster.workers);
+
+  if (workers.length === 0) {
+    process.nextTick(() => intercom.emit("disconnect"));
+  } else {
+    for (const worker of ObjectValues(cluster.workers)) {
+      if (worker.isConnected()) {
+        worker.disconnect();
+      }
+    }
+  }
+
+  if (typeof cb === "function") intercom.once("disconnect", cb);
+};
+
+const methodMessageMapping = {
+  close,
+  exitedAfterDisconnect,
+  listening,
+  online,
+  queryServer,
+};
+
+function onmessage(message, _handle) {
+  const worker = this;
+
+  const fn = methodMessageMapping[message.act];
+
+  if (typeof fn === "function") fn(worker, message);
+}
+
+function online(worker) {
+  worker.state = "online";
+  worker.emit("online");
+  cluster.emit("online", worker);
+}
+
+function exitedAfterDisconnect(worker, message) {
+  worker.exitedAfterDisconnect = true;
+  send(worker, { ack: message.seq });
+}
+
+function queryServer(worker, message) {
+  // Stop processing if worker already disconnecting
+  if (worker.exitedAfterDisconnect) return;
+
+  RoundRobinHandle ??= require("internal/cluster/RoundRobinHandle");
+  SharedHandle ??= require("internal/cluster/SharedHandle");
+
+  const key =
+    `${message.address}:${message.port}:${message.addressType}:${message.fd}` +
+    (message.port === 0 ? `:${message.index}` : "");
+  const cachedHandle = handles.get(key);
+  let handle;
+  if (cachedHandle && !cachedHandle.has(worker)) handle = cachedHandle;
+
+  const kSharedOnlyHint =
+    "TLS and non-TLS cluster workers cannot share the same address:port under SCHED_RR " +
+    "(Bun's TLS accept is native and cannot adopt round-robin connection fds)";
+  if (handle !== undefined && message.sharedOnly === true && handle instanceof RoundRobinHandle) {
+    send(worker, { errno: UV_EINVAL, key, ack: message.seq, data: handle.data, bunHint: kSharedOnlyHint }, null);
+    return;
+  }
+  if (
+    schedulingPolicy === SCHED_RR &&
+    handle !== undefined &&
+    message.sharedOnly !== true &&
+    handle instanceof SharedHandle &&
+    handle.sharedOnly &&
+    message.addressType !== "udp4" &&
+    message.addressType !== "udp6"
+  ) {
+    send(worker, { errno: UV_EINVAL, key, ack: message.seq, data: handle.data, bunHint: kSharedOnlyHint }, null);
+    return;
+  }
+
+  if (handle === undefined) {
+    let address = message.address;
+
+    // Find shortest path for unix sockets because of the ~100 byte limit
+    if (message.port < 0 && typeof address === "string" && process.platform !== "win32") {
+      address = require("node:path").relative(process.cwd(), address);
+
+      if (message.address.length < address.length) address = message.address;
+    }
+
+    // UDP is exempt from round-robin connection balancing for what should
+    // be obvious reasons: it's connectionless. There is nothing to send to
+    // the workers except raw datagrams and that's pointless.
+    if (process.platform === "win32" && (message.addressType === "udp4" || message.addressType === "udp6")) {
+      const error = new Error(`write ENOTSUP - cannot share a dgram socket with a worker on Windows`);
+      error.code = "ENOTSUP";
+      error.syscall = "write";
+      worker.emit("error", error);
+      return;
+    }
+    if (
+      schedulingPolicy !== SCHED_RR ||
+      message.sharedOnly === true ||
+      message.addressType === "udp4" ||
+      message.addressType === "udp6"
+    ) {
+      handle = new SharedHandle(key, address, message);
+    } else {
+      handle = new RoundRobinHandle(key, address, message);
+    }
+
+    if (!cachedHandle) handles.set(key, handle);
+  }
+
+  if (!handle.data) handle.data = message.data;
+
+  // Set custom server data
+  handle.add(worker, (errno, reply, serverHandle) => {
+    const data = handles.get(key)?.data;
+
+    if (errno && !cachedHandle) handles.delete(key);
+
+    const sent = send(
+      worker,
+      {
+        errno,
+        key,
+        ack: message.seq,
+        data,
+        ...reply,
+      },
+      serverHandle,
+    );
+    if (sent === null && serverHandle !== null && serverHandle !== undefined) {
+      send(worker, { errno: UV_ENOBUFS, key, ack: message.seq, data }, null);
+      // The worker never got the handle, so it will never send act:close for it.
+      if (handle.remove(worker) && handles.get(key) === handle) handles.delete(key);
+    }
+    if (cachedHandle && handle !== cachedHandle && !errno) handle.remove(worker);
+  });
+}
+
+function listening(worker, message) {
+  const info = {
+    addressType: message.addressType,
+    address: message.address,
+    port: message.port,
+    fd: message.fd,
+  };
+
+  worker.state = "listening";
+  worker.emit("listening", info);
+  cluster.emit("listening", worker, info);
+}
+
+// Server in worker is closing, remove from list. The handle may have been
+// removed by a prior call to removeHandlesForWorker() so guard against that.
+function close(worker, message) {
+  const key = message.key;
+  const handle = handles.get(key);
+
+  if (handle && handle.remove(worker)) handles.delete(key);
+}
+
+function send(worker, message, handle?, cb?) {
+  return sendHelper(worker.process[kHandle], message, handle, cb);
+}
+
+// Extend generic Worker with methods specific to the primary process.
+Worker.prototype.disconnect = function () {
+  this.exitedAfterDisconnect = true;
+  send(this, { act: "disconnect" });
+  this.process.disconnect();
+  removeHandlesForWorker(this, false);
+  removeWorker(this);
+  return this;
+};
+
+Worker.prototype.destroy = function (signo) {
+  const proc = this.process;
+  const signal = signo || "SIGTERM";
+
+  proc.kill(signal);
+};

@@ -1,0 +1,531 @@
+const { isIPv4 } = require("internal/net/isIP");
+
+const { setServerCustomOptions, setServerAppFlags, drainMicrotasks } = $cpp(
+  "NodeHTTP.cpp",
+  "createNodeHTTPInternalBinding",
+) as {
+  setServerCustomOptions: (
+    server: any,
+    requireHostHeader: boolean,
+    useStrictMethodValidation: boolean,
+    lenientHttpFlags: number,
+    maxHeaderSize: number,
+    onClientError: (ssl: boolean, socket: any, errorCode: number, rawPacket: ArrayBuffer) => undefined,
+    onConnection?: (socketHandle: any) => undefined,
+  ) => void;
+  setServerAppFlags: (
+    server: any,
+    requireHostHeader: boolean,
+    useStrictMethodValidation: boolean,
+    lenientHttpFlags: number,
+    httpAllowHalfOpen: boolean,
+  ) => void;
+  drainMicrotasks: () => void;
+};
+
+const abortedSymbol = Symbol("aborted");
+const headerStateSymbol = Symbol("headerState");
+const eofInProgress = Symbol("eofInProgress");
+const fakeSocketSymbol = Symbol("fakeSocket");
+const isTlsSymbol = Symbol("is_tls");
+const kHandle = Symbol("handle");
+const kRealListen = Symbol("kRealListen");
+const noBodySymbol = Symbol("noBody");
+const optionsSymbol = Symbol("options");
+const tlsSymbol = Symbol("tls");
+const typeSymbol = Symbol("type");
+const kAbortController = Symbol.for("kAbortController");
+const kInternalSocketData = Symbol.for("::bunternal::");
+const serverSymbol = Symbol.for("::bunternal::");
+const kPendingCallbacks = Symbol("pendingCallbacks");
+const kRequest = Symbol("request");
+const kCloseCallback = Symbol("closeCallback");
+
+export const enum NodeHTTPResponseAbortEvent {
+  none = 0,
+  abort = 1,
+  timeout = 2,
+}
+export const enum NodeHTTPIncomingRequestType {
+  FetchRequest,
+  FetchResponse,
+  NodeHTTPResponse,
+}
+export const enum NodeHTTPBodyReadState {
+  none,
+  pending = 1 << 1,
+  done = 1 << 2,
+  hasBufferedDataDuringPause = 1 << 3,
+}
+
+// Must be kept in sync with NodeHTTPResponse.Flags
+export const enum NodeHTTPResponseFlags {
+  socket_closed = 1 << 0,
+  request_has_completed = 1 << 1,
+  ended = 1 << 2,
+  upgraded = 1 << 3,
+
+  closed_or_completed = socket_closed | request_has_completed,
+}
+
+export const enum NodeHTTPHeaderState {
+  none,
+  assigned,
+  sent,
+}
+
+function emitErrorNextTickIfErrorListenerNT(self, err, cb) {
+  process.nextTick(emitErrorNextTickIfErrorListener, self, err, cb);
+}
+
+function emitErrorNextTickIfErrorListener(self, err, cb) {
+  if ($isCallable(cb)) {
+    // This is to keep backward compatible behavior.
+    // An error is emitted only if there are listeners attached to the event.
+    if (self.listenerCount("error") == 0) {
+      cb();
+    } else {
+      cb(err);
+    }
+  }
+}
+
+function callCloseCallback(self) {
+  if (self[kCloseCallback]) {
+    self[kCloseCallback]();
+    self[kCloseCallback] = undefined;
+  }
+}
+function emitCloseNT(self) {
+  if (!self._closed) {
+    self.destroyed = true;
+    self._closed = true;
+    callCloseCallback(self);
+    self.emit("close");
+  }
+}
+
+function emitEOFIncomingMessageOuter(self) {
+  self.complete = true;
+  // node:http server: trailer fields received after a chunked request body
+  // populate req.trailers/rawTrailers before 'end' is emitted, like Node's
+  // parserOnMessageComplete. Native moved the section onto THIS request's
+  // handle at its body fin, so pipelined requests can neither inherit nor
+  // overwrite another request's trailers.
+  // Trailers can only follow a chunked request body: a no-body request has
+  // none, so skip the native call (and the socket/server option walk) for the
+  // common GET/HEAD case.
+  if (self[kHandle] !== undefined && !self[noBodySymbol]) {
+    // The lenient (insecureHTTPParser) value bytes must match what the parser
+    // accepted on the wire, or a CTL byte in a trailer value would vanish here.
+    let rawTrailers = self[kHandle].takeRequestTrailers(self.socket?.server?.insecureHTTPParser === true);
+    if (rawTrailers !== undefined) {
+      // Apply server.maxHeadersCount to trailers like Node's parserOnHeaders
+      // does (the same maxHeaderPairs limit covers both). The parser hard-caps
+      // at 199 fields; Node's C++ imposes no count limit, only this JS clamp.
+      const maxHeadersCount = self.socket?.server?.maxHeadersCount;
+      if (typeof maxHeadersCount === "number" && maxHeadersCount > 0 && rawTrailers.length > maxHeadersCount * 2) {
+        rawTrailers.length = maxHeadersCount * 2;
+      }
+      self._addHeaderLines(rawTrailers, rawTrailers.length);
+    }
+  }
+  // The parser shim must not retain the request once it has ended. Node clears
+  // parser.incoming on the tick after 'end' so 'end' listeners still see
+  // `parser.incoming === req` (test-http-server-keepalive-end). push(null)
+  // schedules 'end' via nextTick (endReadableNT); a second nextTick scheduled
+  // here runs after that.
+  self.push(null);
+  const socket = self.socket;
+  if (socket != null) {
+    const parser = socket.parser;
+    if (parser != null && parser.incoming === self) {
+      process.nextTick(clearServerParserIncoming, parser, self);
+    }
+  }
+}
+function clearServerParserIncoming(parser, req) {
+  if (parser.incoming === req) parser.incoming = null;
+}
+function emitEOFIncomingMessage(self) {
+  self[eofInProgress] = true;
+  process.nextTick(emitEOFIncomingMessageOuter, self);
+}
+
+function onDataIncomingMessage(this: any, chunk, isLast, aborted: NodeHTTPResponseAbortEvent) {
+  if (aborted === NodeHTTPResponseAbortEvent.abort) {
+    // The request is aborted from the socket's #onClose (like Node.js's
+    // socketOnClose → abortIncoming), which the native close path always
+    // reaches right after this callback; destroying here would drop the
+    // ECONNRESET and emit req 'close' before res 'close'.
+    return;
+  }
+
+  // Incoming request-body bytes are socket activity: push the connection's
+  // inactivity timeout (socket.setTimeout / server.timeout) further out, like
+  // Node.js does for reads on the socket.
+  const socket = this.socket;
+  socket?._unrefTimer?.();
+
+  if (chunk && !this._dumped) {
+    if (!this.push(chunk)) {
+      // Like Node's parserOnBody: pause the connection once the buffer fills.
+      // Upgrade-with-body routes through its own handle so the socket's flow
+      // state stays with the upgrade listener; _read() balances it.
+      if (this.upgrade) this[kHandle]?.pause();
+      else if (socket && !socket.writableEnded) socket.pause();
+    }
+  }
+
+  if (isLast) {
+    emitEOFIncomingMessage(this);
+    // Like Node's parserOnMessageComplete: any readStop above left the shared
+    // socket's flowing=false, which would swallow the next request's 'pause'.
+    if (!this.upgrade && socket && !socket._paused && socket.readable) socket.resume();
+  }
+}
+
+function validateMsecs(numberlike: any, field: string) {
+  if (typeof numberlike !== "number" || numberlike < 0) {
+    throw $ERR_INVALID_ARG_TYPE(field, "number", numberlike);
+  }
+
+  return numberlike;
+}
+
+const METHODS = [
+  "ACL",
+  "BIND",
+  "CHECKOUT",
+  "CONNECT",
+  "COPY",
+  "DELETE",
+  "GET",
+  "HEAD",
+  "LINK",
+  "LOCK",
+  "M-SEARCH",
+  "MERGE",
+  "MKACTIVITY",
+  "MKCALENDAR",
+  "MKCOL",
+  "MOVE",
+  "NOTIFY",
+  "OPTIONS",
+  "PATCH",
+  "POST",
+  "PROPFIND",
+  "PROPPATCH",
+  "PURGE",
+  "PUT",
+  "QUERY",
+  "REBIND",
+  "REPORT",
+  "SEARCH",
+  "SOURCE",
+  "SUBSCRIBE",
+  "TRACE",
+  "UNBIND",
+  "UNLINK",
+  "UNLOCK",
+  "UNSUBSCRIBE",
+];
+
+const STATUS_CODES = {
+  100: "Continue",
+  101: "Switching Protocols",
+  102: "Processing",
+  103: "Early Hints",
+  200: "OK",
+  201: "Created",
+  202: "Accepted",
+  203: "Non-Authoritative Information",
+  204: "No Content",
+  205: "Reset Content",
+  206: "Partial Content",
+  207: "Multi-Status",
+  208: "Already Reported",
+  226: "IM Used",
+  300: "Multiple Choices",
+  301: "Moved Permanently",
+  302: "Found",
+  303: "See Other",
+  304: "Not Modified",
+  305: "Use Proxy",
+  307: "Temporary Redirect",
+  308: "Permanent Redirect",
+  400: "Bad Request",
+  401: "Unauthorized",
+  402: "Payment Required",
+  403: "Forbidden",
+  404: "Not Found",
+  405: "Method Not Allowed",
+  406: "Not Acceptable",
+  407: "Proxy Authentication Required",
+  408: "Request Timeout",
+  409: "Conflict",
+  410: "Gone",
+  411: "Length Required",
+  412: "Precondition Failed",
+  413: "Payload Too Large",
+  414: "URI Too Long",
+  415: "Unsupported Media Type",
+  416: "Range Not Satisfiable",
+  417: "Expectation Failed",
+  418: "I'm a Teapot",
+  421: "Misdirected Request",
+  422: "Unprocessable Entity",
+  423: "Locked",
+  424: "Failed Dependency",
+  425: "Too Early",
+  426: "Upgrade Required",
+  428: "Precondition Required",
+  429: "Too Many Requests",
+  431: "Request Header Fields Too Large",
+  451: "Unavailable For Legal Reasons",
+  500: "Internal Server Error",
+  501: "Not Implemented",
+  502: "Bad Gateway",
+  503: "Service Unavailable",
+  504: "Gateway Timeout",
+  505: "HTTP Version Not Supported",
+  506: "Variant Also Negotiates",
+  507: "Insufficient Storage",
+  508: "Loop Detected",
+  509: "Bandwidth Limit Exceeded",
+  510: "Not Extended",
+  511: "Network Authentication Required",
+};
+
+function hasServerResponseFinished(self, chunk, callback) {
+  const finished = self.finished;
+
+  if (chunk) {
+    const destroyed = self.destroyed;
+
+    if (finished || destroyed) {
+      let err;
+      if (finished) {
+        err = $ERR_STREAM_WRITE_AFTER_END();
+      } else if (destroyed) {
+        err = $ERR_STREAM_DESTROYED("Stream is destroyed");
+      }
+
+      if (!destroyed) {
+        process.nextTick(emitErrorNt, self, err, callback);
+      } else if ($isCallable(callback)) {
+        process.nextTick(callback, err);
+      }
+
+      return true;
+    }
+  } else if (finished) {
+    if ($isCallable(callback)) {
+      if (!self.writableFinished) {
+        self.on("finish", callback);
+      } else {
+        callback($ERR_STREAM_ALREADY_FINISHED("end"));
+      }
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+function emitErrorNt(msg, err, callback) {
+  if ($isCallable(callback)) {
+    callback(err);
+  }
+  if ($isCallable(msg.emit) && !msg.destroyed) {
+    msg.emit("error", err);
+  }
+}
+const setMaxHTTPHeaderSize = $newRustFunction("node_http_binding.rs", "setMaxHTTPHeaderSize", 1);
+const getMaxHTTPHeaderSize = $newRustFunction("node_http_binding.rs", "getMaxHTTPHeaderSize", 0);
+const kOutHeaders = Symbol("kOutHeaders");
+const kNeedDrain = Symbol("kNeedDrain");
+const kProxyConfig = Symbol("kProxyConfig");
+const kWaitForProxyTunnel = Symbol("kWaitForProxyTunnel");
+
+// Cached HTTP Date header value, refreshed once a second like Node.js does.
+// https://github.com/nodejs/node/blob/v26.3.0/lib/internal/http.js
+let utcCache;
+function utcDate() {
+  if (!utcCache) cacheUTCDate();
+  return utcCache;
+}
+function cacheUTCDate() {
+  const d = new Date();
+  utcCache = d.toUTCString();
+  const timer = setTimeout(resetUTCCache, 1000 - d.getMilliseconds());
+  if (typeof timer.unref === "function") timer.unref();
+}
+function resetUTCCache() {
+  utcCache = undefined;
+}
+
+function ipToInt(ip) {
+  const octets = ip.split(".");
+  let result = 0;
+  for (let i = 0; i < octets.length; i++) result = (result << 8) + Number.parseInt(octets[i]);
+  return result >>> 0;
+}
+
+class ProxyConfig {
+  href;
+  protocol;
+  auth;
+  bypassList;
+  proxyConnectionOptions;
+
+  constructor(proxyUrl, keepAlive, noProxyList) {
+    let parsedURL;
+    try {
+      parsedURL = new URL(proxyUrl);
+    } catch {
+      throw $ERR_PROXY_INVALID_CONFIG(`Invalid proxy URL: ${proxyUrl}`);
+    }
+    const { hostname, port, protocol, username, password } = parsedURL;
+
+    this.href = proxyUrl;
+    this.protocol = protocol;
+
+    if (username || password) {
+      // If username or password is provided, prepare the proxy-authorization header.
+      const auth = `${decodeURIComponent(username)}:${decodeURIComponent(password)}`;
+      this.auth = `Basic ${Buffer.from(auth).toString("base64")}`;
+    }
+    if (noProxyList) {
+      this.bypassList = noProxyList.split(",").map(entry => entry.trim().toLowerCase());
+    } else {
+      this.bypassList = [];
+    }
+
+    this.proxyConnectionOptions = {
+      // The host name comes from parsed URL so if it starts with '[' it must be an IPv6 address ending with ']'. Remove the brackets for net.connect().
+      host: hostname[0] === "[" ? hostname.slice(1, -1) : hostname,
+      // The port comes from parsed URL so it is either '' or a valid number string.
+      port: port ? Number(port) : protocol === "https:" ? 443 : 80,
+    };
+  }
+
+  // See: https://about.gitlab.com/blog/we-need-to-talk-no-proxy
+  shouldUseProxy(hostname, port) {
+    const bypassList = this.bypassList;
+    if (this.bypassList.length === 0) return true; // No bypass list, always use the proxy.
+    const host = hostname.toLowerCase();
+    const hostWithPort = port ? `${host}:${port}` : host;
+
+    for (let i = 0; i < bypassList.length; i++) {
+      const entry = bypassList[i];
+
+      if (entry === "*") return false; // * bypasses all hosts.
+      if (entry === host || entry === hostWithPort) return false; // Matching host and host:port
+
+      // Follow curl's behavior: strip leading dot before matching suffixes.
+      if (entry.startsWith(".")) {
+        const suffix = entry.substring(1);
+        if (host === suffix || (host.endsWith(suffix) && host[host.length - suffix.length - 1] === ".")) return false;
+      }
+
+      // Handle wildcards like *.example.com
+      if (entry.startsWith("*.") && host.endsWith(entry.substring(1))) return false;
+
+      // Handle IP ranges (simple format like 192.168.1.0-192.168.1.255)
+      // TODO: support IPv6.
+      if (entry.includes("-") && isIPv4(host)) {
+        let { 0: startIP, 1: endIP } = entry.split("-");
+        startIP = startIP.trim();
+        endIP = endIP.trim();
+        if (startIP && endIP && isIPv4(startIP) && isIPv4(endIP)) {
+          const hostInt = ipToInt(host);
+          const startInt = ipToInt(startIP);
+          const endInt = ipToInt(endIP);
+          if (hostInt >= startInt && hostInt <= endInt) return false;
+        }
+      }
+
+      // It might be useful to support CIDR notation, but it's not so widely supported
+      // in other tools as a de-facto standard to follow, so we don't implement it for now.
+    }
+
+    return true;
+  }
+}
+
+function parseProxyUrl(env, protocol) {
+  // Get the proxy url - following the most popular convention, lower case takes precedence.
+  // See https://about.gitlab.com/blog/we-need-to-talk-no-proxy/#http_proxy-and-https_proxy
+  const proxyUrl = protocol === "https:" ? env.https_proxy || env.HTTPS_PROXY : env.http_proxy || env.HTTP_PROXY;
+  // No proxy settings from the environment, ignore.
+  if (!proxyUrl) {
+    return null;
+  }
+
+  if (proxyUrl.includes("\r") || proxyUrl.includes("\n")) {
+    throw $ERR_PROXY_INVALID_CONFIG(`Invalid proxy URL: ${proxyUrl}`);
+  }
+
+  return proxyUrl;
+}
+
+function parseProxyConfigFromEnv(env, protocol, keepAlive) {
+  // We only support proxying for HTTP and HTTPS requests.
+  if (protocol !== "http:" && protocol !== "https:") return null;
+  const proxyUrl = parseProxyUrl(env, protocol);
+  if (proxyUrl === null) return null;
+
+  // Only http:// and https:// proxies are supported. Ignore instead of throw, in case other protocols are supposed to be handled by the user land.
+  if (!proxyUrl.startsWith("http://") && !proxyUrl.startsWith("https://")) return null;
+  return new ProxyConfig(proxyUrl, keepAlive, env.no_proxy || env.NO_PROXY);
+}
+
+function checkShouldUseProxy(proxyConfig: ProxyConfig, reqOptions: any) {
+  if (!proxyConfig) return false;
+  if (reqOptions.socketPath) return false; // If socketPath is set, the endpoint is a Unix domain socket, which can't be proxied.
+  return proxyConfig.shouldUseProxy(reqOptions.host || "localhost", reqOptions.port);
+}
+
+export {
+  METHODS,
+  STATUS_CODES,
+  abortedSymbol,
+  callCloseCallback,
+  checkShouldUseProxy,
+  drainMicrotasks,
+  emitCloseNT,
+  emitEOFIncomingMessage,
+  emitErrorNextTickIfErrorListenerNT,
+  eofInProgress,
+  fakeSocketSymbol,
+  getMaxHTTPHeaderSize,
+  hasServerResponseFinished,
+  headerStateSymbol,
+  isTlsSymbol,
+  kAbortController,
+  kCloseCallback,
+  kHandle,
+  kInternalSocketData,
+  kNeedDrain,
+  kOutHeaders,
+  kPendingCallbacks,
+  kProxyConfig,
+  kRealListen,
+  kRequest,
+  kWaitForProxyTunnel,
+  noBodySymbol,
+  onDataIncomingMessage,
+  optionsSymbol,
+  parseProxyConfigFromEnv,
+  parseProxyUrl,
+  serverSymbol,
+  setMaxHTTPHeaderSize,
+  setServerAppFlags,
+  setServerCustomOptions,
+  tlsSymbol,
+  typeSymbol,
+  utcDate,
+  validateMsecs,
+};
