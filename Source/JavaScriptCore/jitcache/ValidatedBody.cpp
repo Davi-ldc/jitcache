@@ -1,6 +1,7 @@
 #include "config.h"
 #include "ValidatedBody.h"
 
+#include "ArtifactStore.h"
 #include <wtf/Assertions.h>
 #include <wtf/TZoneMallocInlines.h>
 
@@ -21,7 +22,20 @@ ValidatedBody::ValidatedBody(const BodyKey& key, uint64_t version, uint8_t highe
     , m_highestTier(highestTier)
     , m_llintThreshold(llintThreshold)
     , m_counterProgress(counterProgress)
-    , m_bytes(WTF::move(bytes))
+    , m_buffer(WTF::move(bytes))
+    , m_bytes(m_buffer.span())
+    , m_sections(sections)
+{
+}
+
+ValidatedBody::ValidatedBody(const BodyKey& key, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress, Ref<MappedPack>&& pack, std::span<const uint8_t> bytes, const SectionSpans& sections)
+    : m_key(key)
+    , m_version(version)
+    , m_highestTier(highestTier)
+    , m_llintThreshold(llintThreshold)
+    , m_counterProgress(counterProgress)
+    , m_pack(WTF::move(pack))
+    , m_bytes(bytes)
     , m_sections(sections)
 {
 }
@@ -67,7 +81,7 @@ std::span<const uint8_t> ValidatedBody::section(SectionKind kind) const
 
 size_t ValidatedBody::fileSize() const
 {
-    return m_bytes.span().size();
+    return m_bytes.size();
 }
 
 #if ENABLE(JITCACHE_TWINS)

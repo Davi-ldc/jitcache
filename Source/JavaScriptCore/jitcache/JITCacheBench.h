@@ -97,8 +97,8 @@ BenchReport* benchReport(VM&);
 // begins and ends.
 uint64_t benchThreadCPUNanoseconds();
 
-// A key as every event writes it: the lowercase hex of its 40 canonical bytes, which is also its body file's name
-// without ".bin" (container sub-SPEC section 1.1).
+// A key as every event writes it: the lowercase hex of its 40 canonical bytes, which the shell's jitcacheReadSection
+// and jitcacheRewriteSection take back.
 String bodyKeyHex(const BodyKey&);
 
 // A scope around ScriptExecutable::installCode's relink of incoming calls (section 9.3). It reads the thread CPU clock

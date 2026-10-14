@@ -5,70 +5,54 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
-#include <cmath>
 #include <limits>
 #include <mutex>
 #include <wtf/ASCIICType.h>
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/HashFunctions.h>
-#include <wtf/MallocSpan.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/Vector.h>
 #include <wtf/text/CString.h>
-#include <wtf/text/MakeString.h>
 #include <wtf/text/StringCommon.h>
 
 #if OS(LINUX)
 #include <dirent.h>
 #include <fcntl.h>
-#include <limits.h>
-#include <stddef.h>
 #include <sys/file.h>
-#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
 
-// The artifact in a process (container sub-SPEC sections 1.1, 2 and 5 to 7): the names, the producer lock, the registry,
-// the opened artifact with its index, listings and refresh, and the store's three reads.
+// The artifact in a process: the names, the producer lock, the registry, the pack's mapping, and the opened artifact
+// that follows the pack's root.
 //
-// Every system call sits behind OS(LINUX) (SPEC-integrator.md section 11). Elsewhere start rejects at start.platform and
-// maintenance fails with platform before either reaches the store, so the calls that would reach the operating system
-// fail with ENOSYS, no lock, opened artifact or saved summary is ever built, and the other definitions only keep the
-// store's interface compiling and linking.
+// Every system call sits behind OS(LINUX). Elsewhere start rejects at start.platform and maintenance fails with platform
+// before either reaches the store, so the calls that would reach the operating system fail with ENOSYS and the other
+// definitions only keep the store's interface compiling and linking.
 
 namespace JSC::JITCache {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ProducerLock);
+WTF_MAKE_TZONE_ALLOCATED_IMPL(MappedPack);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SavedSummaries);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(OpenedArtifact);
 
 namespace ArtifactStoreInternal {
 
-// The names of section 1.1.
-static constexpr std::array<char, 4> bodyNameSuffix { '.', 'b', 'i', 'n' };
 static constexpr std::array<char, 4> temporaryNameSuffix { '.', 't', 'm', 'p' };
-static constexpr std::array<char, 1> bodyTemporaryPrefix { '.' };
 static constexpr std::array<char, 8> headerTemporaryPrefix { '.', 'h', 'e', 'a', 'd', 'e', 'r', '.' };
+static constexpr std::array<char, 6> packTemporaryPrefix { '.', 'p', 'a', 'c', 'k', '.' };
 static constexpr size_t temporaryRandomBytes = 16; // 128 bits, 32 hex digits
 static_assert(headerTemporaryPrefix.size() + 2 * temporaryRandomBytes + temporaryNameSuffix.size() == maximumTemporaryFileNameLength);
-static_assert(bodyFileNameLength == 2 * BodyKey::byteSize + bodyNameSuffix.size());
 
-// The bytes of a body key the index's hash reads (SPEC-ucb.md section 3.1): kind, specialization and mode, then the
-// identity digest from offset 8.
+// The bytes of a body key the index's hash reads: kind, specialization and mode, then the identity digest from offset 8.
 static constexpr size_t keyKindOffset = 1;
 static constexpr size_t keySpecializationOffset = 2;
 static constexpr size_t keyModeOffset = 3;
 static constexpr size_t keyIdentityDigestOffset = 8;
 
-static uint64_t loadEpoch(const uint64_t* epoch)
-{
-    return __atomic_load_n(epoch, __ATOMIC_ACQUIRE);
-}
-
-// Hex digits as section 1.1 spells them: lowercase only.
 static std::optional<uint8_t> lowercaseHexDigitValue(char character)
 {
     if (isASCIIDigit(character))
@@ -87,19 +71,6 @@ static void writeLowercaseHex(std::span<char> destination, std::span<const uint8
     }
 }
 
-static bool readLowercaseHex(std::span<const char> digits, std::span<uint8_t> bytes)
-{
-    RELEASE_ASSERT(digits.size() == 2 * bytes.size());
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        auto high = lowercaseHexDigitValue(digits[2 * index]);
-        auto low = lowercaseHexDigitValue(digits[2 * index + 1]);
-        if (!high || !low)
-            return false;
-        bytes[index] = static_cast<uint8_t>(*high << 4 | *low);
-    }
-    return true;
-}
-
 static bool isLowercaseHex(std::span<const char> digits)
 {
     return std::ranges::all_of(digits, [](char character) {
@@ -107,32 +78,27 @@ static bool isLowercaseHex(std::span<const char> digits)
     });
 }
 
-// The store's three calls that open a file (section 7.5), which the twins builds' fault hook can fail.
-enum class StoreCall : uint8_t { Open, ReadSavedSummaries, Listing };
+enum class StoreCall : uint8_t { Open, ReadSavedSummaries, PackMap };
 
 #if ENABLE(JITCACHE_TWINS)
 static_assert(static_cast<uint8_t>(StoreTesting::Call::Open) == static_cast<uint8_t>(StoreCall::Open));
 static_assert(static_cast<uint8_t>(StoreTesting::Call::ReadSavedSummaries) == static_cast<uint8_t>(StoreCall::ReadSavedSummaries));
-static_assert(static_cast<uint8_t>(StoreTesting::Call::Listing) == static_cast<uint8_t>(StoreCall::Listing));
+static_assert(static_cast<uint8_t>(StoreTesting::Call::PackMap) == static_cast<uint8_t>(StoreCall::PackMap));
 
-// Every hook is made of atomics: the listing's hook is read under m_indexLock, which is a leaf, and the shell sets the
-// hooks from its own thread. A test sets a hook while the store is idle, so the fields need no joint update; armed is
-// stored last and loaded first.
+// A test sets a hook while the store is idle, so the fields need no joint update; armed is stored last and loaded first.
 struct StoreFaultHook {
     std::atomic<bool> armed { false };
     std::atomic<uint8_t> call { 0 };
     std::atomic<int> error { 0 };
     std::atomic<uint64_t> n { 0 }; // 0: every call
-    std::atomic<uint64_t> calls { 0 }; // the calls of that kind since the hook was set
+    std::atomic<uint64_t> calls { 0 };
 };
 static StoreFaultHook storeFaultHook;
 static std::atomic<bool> storeRegistrySharing { true };
-static std::atomic<bool> storeInotifyEnabled { true };
-static std::atomic<double> storeListingIntervalSeconds { std::numeric_limits<double>::quiet_NaN() }; // NaN: the parameter
 #endif
 
-// The error the fault hook makes the call's openat fail with, or 0.
-static int injectedOpenError(StoreCall call)
+// The error the fault hook makes the call fail with, or 0.
+static int injectedError(StoreCall call)
 {
 #if ENABLE(JITCACHE_TWINS)
     if (!storeFaultHook.armed.load())
@@ -150,38 +116,50 @@ static int injectedOpenError(StoreCall call)
 #endif
 }
 
-static Seconds fallbackListingInterval()
+static bool registryShares()
 {
 #if ENABLE(JITCACHE_TWINS)
-    double seconds = storeListingIntervalSeconds.load();
-    if (!std::isnan(seconds))
-        return Seconds(seconds);
+    return storeRegistrySharing.load();
+#else
+    return true;
 #endif
-    return Seconds::fromMilliseconds(static_cast<double>(fallbackListingIntervalMilliseconds));
+}
+
+static StoreFailure failureOfError(int error)
+{
+    return { "container.io"_s, error, { } };
+}
+
+static StoreOutcome outcomeOfError(int error)
+{
+    if (error == ENOENT)
+        return StoreOutcome::Absent;
+    if (error == EMFILE || error == ENFILE || error == ENOMEM)
+        return StoreOutcome::Unavailable;
+    return StoreOutcome::Invalid;
+}
+
+static uint64_t freshPackIdentifier()
+{
+    uint64_t identifier = 0;
+    while (!identifier)
+        cryptographicallyRandomValues(asMutableByteSpan(identifier));
+    return identifier;
 }
 
 #if OS(LINUX)
 
-// The lock file (container sub-SPEC section 2): the tag, the layout version, four zero bytes, the commit epoch and 40
-// zero bytes.
 static constexpr size_t lockFileBytes = 64;
 static constexpr std::array<uint8_t, 8> lockFileTag { 'J', 'I', 'T', 'C', 'L', 'O', 'C', 'K' };
 static constexpr uint32_t lockFileLayoutVersion = 1;
 static constexpr size_t lockFileVersionOffset = 8;
-static constexpr size_t lockFileEpochOffset = 16;
-static_assert(!(lockFileEpochOffset % alignof(uint64_t)), "the epoch is loaded and bumped atomically through the page-aligned mapping");
+static constexpr size_t lockFileHeaderBytes = 12;
 
-// The summary sections a score reads (section 7.3), which the scoring read checksums.
+// The summary sections a score reads, which the scoring read checksums.
 static constexpr std::array<SectionKind, 3> summarySectionKinds { SectionKind::UCBFeedback, SectionKind::CBSummaryBaseline, SectionKind::ICsBaseline };
 
-// The pinned descriptors (section 5.2).
 static constexpr int directoryFlags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
 static constexpr int pinnedParentFlags = O_PATH | O_DIRECTORY | O_CLOEXEC;
-
-// One read of the inotify queue holds at least one event with the longest name.
-static constexpr size_t inotifyBufferBytes = 4096;
-static_assert(inotifyBufferBytes >= sizeof(struct inotify_event) + NAME_MAX + 1);
-static constexpr uint32_t watchedEvents = IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR;
 
 static int openAt(int directoryFd, const char* name, int flags, mode_t mode = 0)
 {
@@ -192,33 +170,11 @@ static int openAt(int directoryFd, const char* name, int flags, mode_t mode = 0)
     return fd;
 }
 
-// Closes a descriptor and keeps errno, so a caller can close before it reports the error of an earlier call.
 static void closeKeepingErrno(int fd)
 {
     int error = errno;
     ::close(fd);
     errno = error;
-}
-
-static bool isTransientError(int error)
-{
-    return error == EMFILE || error == ENFILE || error == ENOMEM;
-}
-
-static StoreOutcome outcomeOfError(int error)
-{
-    if (error == ENOENT)
-        return StoreOutcome::Absent;
-    if (isTransientError(error))
-        return StoreOutcome::Unavailable;
-    return StoreOutcome::Invalid;
-}
-
-static StoreFailure failureOfError(int error)
-{
-    if (outcomeOfError(error) != StoreOutcome::Invalid)
-        return { };
-    return { "container.io"_s, error };
 }
 
 // Reads exactly bytes.size() bytes at offset. Returns 0, the errno of a failed read, or EIO at an early end of file.
@@ -249,33 +205,27 @@ static int writeExactly(int fd, std::span<const uint8_t> bytes, off_t offset)
                 continue;
             return errno;
         }
+        if (!count)
+            return EIO;
         bytes = bytes.subspan(static_cast<size_t>(count));
         offset += count;
     }
     return 0;
 }
 
-static bool holdsLockFileHeader(std::span<const uint8_t> bytes)
-{
-    ASSERT(bytes.size() >= lockFileEpochOffset);
-    uint32_t version = 0;
-    memcpySpan(asMutableByteSpan(version), bytes.subspan(lockFileVersionOffset, sizeof(version)));
-    return equalSpans(bytes.first(lockFileTag.size()), std::span { lockFileTag }) && version == lockFileLayoutVersion;
-}
-
-// With the lock held, a lock file shorter than 64 bytes, or with another tag or version, is set up in place: ftruncate to
-// 64 bytes, then the whole layout with a zero epoch, so its reserved bytes are zero too. A valid file keeps its epoch.
-// Returns 0 or the errno of the call that failed.
+// With the lock held, a lock file shorter than 64 bytes, or with another tag or version, is set up in place.
 static int setUpLockFile(int fd)
 {
     struct stat status;
     if (fstat(fd, &status))
         return errno;
     if (status.st_size >= static_cast<off_t>(lockFileBytes)) {
-        std::array<uint8_t, lockFileEpochOffset> head { };
+        std::array<uint8_t, lockFileHeaderBytes> head { };
         if (int error = readExactly(fd, head, 0))
             return error;
-        if (holdsLockFileHeader(head))
+        uint32_t version = 0;
+        memcpySpan(asMutableByteSpan(version), std::span { head }.subspan(lockFileVersionOffset, sizeof(version)));
+        if (equalSpans(std::span { head }.first(lockFileTag.size()), std::span { lockFileTag }) && version == lockFileLayoutVersion)
             return 0;
     }
     if (ftruncate(fd, static_cast<off_t>(lockFileBytes)))
@@ -287,212 +237,74 @@ static int setUpLockFile(int fd)
     return writeExactly(fd, layout, 0);
 }
 
-// The epoch of the lock file, mapped PROT_READ and MAP_SHARED, or null when the object gets none (section 2). A missing
-// file, one shorter than 64 bytes or with another tag or version, or one that cannot be opened or mapped, only changes
-// how the index refreshes: it never does.
-static const uint64_t* mapEpochForReading(int parentFd)
-{
-    int fd = openAt(parentFd, ArtifactNames::lockFile.characters(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return nullptr;
-    void* page = MAP_FAILED;
-    struct stat status;
-    if (!fstat(fd, &status) && status.st_size >= static_cast<off_t>(lockFileBytes))
-        page = mmap(nullptr, lockFileBytes, PROT_READ, MAP_SHARED, fd, 0);
-    ::close(fd);
-    if (page == MAP_FAILED)
-        return nullptr;
-    auto bytes = unsafeMakeSpan(static_cast<const uint8_t*>(page), lockFileBytes);
-    if (!holdsLockFileHeader(bytes)) {
-        munmap(page, lockFileBytes);
-        return nullptr;
-    }
-    return reinterpret_cast<const uint64_t*>(bytes.subspan(lockFileEpochOffset).data());
-}
-
-static void unmapEpoch(const uint64_t* epoch)
-{
-    auto* page = reinterpret_cast<const uint8_t*>(epoch) - lockFileEpochOffset;
-    munmap(const_cast<uint8_t*>(page), lockFileBytes);
-}
-
 static bool isDotOrDotDot(std::span<const char> name)
 {
     return (name.size() == 1 && name[0] == '.') || (name.size() == 2 && name[0] == '.' && name[1] == '.');
 }
 
-static bool registryShares()
+static uint64_t pageRounded(uint64_t bytes)
 {
-#if ENABLE(JITCACHE_TWINS)
-    return storeRegistrySharing.load();
-#else
-    return true;
-#endif
-}
-
-// The inotify watch on the pinned bodies/ directory (section 6.3), or -1, in which case the object refreshes by listing.
-static int watchBodies(int bodiesFd)
-{
-#if ENABLE(JITCACHE_TWINS)
-    if (!storeInotifyEnabled.load())
-        return -1;
-#endif
-    int fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-    if (fd < 0)
-        return -1;
-    // The watch names the descriptor, so it follows the directory whose header the VM checked, whatever its path does.
-    CString path = makeString("/proc/self/fd/"_s, bodiesFd).utf8();
-    if (inotify_add_watch(fd, path.data(), watchedEvents) < 0) {
-        ::close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-// Reads the inotify queue until EAGAIN and drops what it read: a listing reads the directory those events describe.
-static void discardEvents(int inotifyFd)
-{
-    if (inotifyFd < 0)
-        return;
-    std::array<uint8_t, inotifyBufferBytes> buffer;
-    while (true) {
-        ssize_t count = ::read(inotifyFd, buffer.data(), buffer.size());
-        if (count > 0)
-            continue;
-        if (count < 0 && errno == EINTR)
-            continue;
-        return;
-    }
-}
-
-struct MapFailure {
-    int error { 0 }; // the errno of openat, fstat, mmap, malloc or pread; 0 when check names the failure
-    ContainerCheck check; // B1, for a file shorter than an envelope or than the size fstat gave
-};
-
-// The scoring read's access (section 7.3): opens the key's body name relative to bodiesFd, takes its size with fstat, maps
-// the whole file privately and read-only without populating it, and closes the descriptor. The caller owns the mapping.
-static std::expected<std::span<const uint8_t>, MapFailure> mapBodyFile(StoreCall call, int bodiesFd, const BodyKey& key)
-{
-    if (int injected = injectedOpenError(call))
-        return std::unexpected(MapFailure { injected, { } });
-    BodyFileName name = bodyFileName(key);
-    int fd = openAt(bodiesFd, name.data(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return std::unexpected(MapFailure { errno, { } });
-
-    struct stat status;
-    if (fstat(fd, &status)) {
-        closeKeepingErrno(fd);
-        return std::unexpected(MapFailure { errno, { } });
-    }
-    // B1: a file shorter than the envelope holds no envelope to read, and an empty one cannot be mapped.
-    if (status.st_size < static_cast<off_t>(bodyEnvelopeBytes)) {
-        ::close(fd);
-        return std::unexpected(MapFailure { 0, ContainerChecks::size });
-    }
-    size_t size = static_cast<size_t>(status.st_size);
-    void* address = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
-    closeKeepingErrno(fd);
-    if (address == MAP_FAILED)
-        return std::unexpected(MapFailure { errno, { } });
-    return unsafeMakeSpan(static_cast<const uint8_t*>(address), size);
-}
-
-// Opens the key's body name relative to bodiesFd, takes its size with fstat, reads the whole file with pread into a buffer
-// the caller owns, and closes the descriptor. A file that ends before the size fstat gave fails B1, as one shorter than an
-// envelope does: JITCache never truncates a published body, so only another writer of the directory can cause it.
-static std::expected<MallocSpan<uint8_t>, MapFailure> readBodyFile(StoreCall call, int bodiesFd, const BodyKey& key)
-{
-    if (int injected = injectedOpenError(call))
-        return std::unexpected(MapFailure { injected, { } });
-    BodyFileName name = bodyFileName(key);
-    int fd = openAt(bodiesFd, name.data(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        return std::unexpected(MapFailure { errno, { } });
-
-    struct stat status;
-    if (fstat(fd, &status)) {
-        closeKeepingErrno(fd);
-        return std::unexpected(MapFailure { errno, { } });
-    }
-    // B1: a file shorter than the envelope holds no envelope to read.
-    if (status.st_size < static_cast<off_t>(bodyEnvelopeBytes)) {
-        ::close(fd);
-        return std::unexpected(MapFailure { 0, ContainerChecks::size });
-    }
-    auto bytes = MallocSpan<uint8_t>::tryMalloc(static_cast<size_t>(status.st_size));
-    if (!bytes.span().data()) {
-        ::close(fd);
-        return std::unexpected(MapFailure { ENOMEM, { } });
-    }
-    std::span<uint8_t> remaining = bytes.mutableSpan();
-    off_t offset = 0;
-    while (!remaining.empty()) {
-        ssize_t count = ::pread(fd, remaining.data(), remaining.size(), offset);
-        if (count < 0) {
-            if (errno == EINTR)
-                continue;
-            closeKeepingErrno(fd);
-            return std::unexpected(MapFailure { errno, { } });
-        }
-        if (!count) {
-            ::close(fd);
-            return std::unexpected(MapFailure { 0, ContainerChecks::size });
-        }
-        remaining = remaining.subspan(static_cast<size_t>(count));
-        offset += count;
-    }
-    ::close(fd);
-    return bytes;
-}
-
-static void unmap(std::span<const uint8_t> mapping)
-{
-    int result = munmap(const_cast<uint8_t*>(mapping.data()), mapping.size());
-    ASSERT_UNUSED(result, !result);
-}
-
-static std::span<const uint8_t> sectionIn(std::span<const uint8_t> file, const BodyLayout& layout, SectionKind kind)
-{
-    auto& extent = layout.sections[static_cast<size_t>(kind)];
-    if (!extent)
-        return { };
-    return file.subspan(static_cast<size_t>(extent->offset), static_cast<size_t>(extent->size));
-}
-
-#else // !OS(LINUX)
-
-// No object has an inotify descriptor here.
-static void discardEvents(int inotifyFd)
-{
-    ASSERT_UNUSED(inotifyFd, inotifyFd < 0);
+    uint64_t page = static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
+    return (bytes + page - 1) / page * page;
 }
 
 #endif // OS(LINUX)
 
-} // namespace ArtifactStoreInternal
-
-// Names (container sub-SPEC section 1.1).
-
-BodyFileName bodyFileName(const BodyKey& key)
+// A body's record in a mapped pack, checked against the entry that names it: the record header repeats the entry's key,
+// size and commit identifier, then the body's own checks run in the read's mode with the entry's key as the expected key.
+struct ReadBody {
+    std::span<const uint8_t> bytes;
+    BodyLayout layout;
+};
+static std::expected<ReadBody, StoreFailure> readBody(const MappedPack& pack, const PackIndexEntry& entry, std::span<const uint8_t, 16> headerDigest,
+    ValidationMode mode, std::optional<std::span<const SectionKind>> checksummedKinds)
 {
-    using namespace ArtifactStoreInternal;
-    BodyFileName name;
-    auto characters = std::span { name.characters };
-    writeLowercaseHex(characters.first(2 * BodyKey::byteSize), key.bytes());
-    memcpySpan(characters.subspan(2 * BodyKey::byteSize, bodyNameSuffix.size()), std::span { bodyNameSuffix });
-    return name;
+    auto header = decodePackRecordHeader(pack.bytes(entry.offset, packRecordHeaderBytes).first<packRecordHeaderBytes>());
+    if (!header)
+        return std::unexpected(StoreFailure { ContainerChecks::pack, 0, header.error() });
+    if (header->key != entry.key || header->size != entry.size || header->version != entry.version)
+        return std::unexpected(StoreFailure { ContainerChecks::pack, 0, "a record differs from the index entry that names it"_s });
+    auto bytes = pack.bytes(entry.offset + packRecordHeaderBytes, entry.size);
+    auto layout = checksummedKinds ? validateBodyFraming(bytes, entry.key, headerDigest, mode, *checksummedKinds) : validateBody(bytes, entry.key, headerDigest, mode);
+    if (!layout)
+        return std::unexpected(StoreFailure { layout.error(), 0, { } });
+    if (mode == ValidationMode::Full && !packEntryRepeatsEnvelope(entry, *layout))
+        return std::unexpected(StoreFailure { ContainerChecks::pack, 0, "an index entry does not repeat its body's envelope"_s });
+    return ReadBody { bytes, *layout };
 }
 
-std::optional<BodyKey> bodyKeyFromFileName(std::span<const char> name)
+static std::span<const uint8_t> sectionIn(std::span<const uint8_t> body, const BodyLayout& layout, SectionKind kind)
+{
+    auto& extent = layout.sections[static_cast<size_t>(kind)];
+    if (!extent)
+        return { };
+    return body.subspan(static_cast<size_t>(extent->offset), static_cast<size_t>(extent->size));
+}
+
+} // namespace ArtifactStoreInternal
+
+// Names.
+
+std::array<char, bodyKeyHexLength> bodyKeyHexDigits(const BodyKey& key)
+{
+    std::array<char, bodyKeyHexLength> digits { };
+    ArtifactStoreInternal::writeLowercaseHex(std::span { digits }, key.bytes());
+    return digits;
+}
+
+std::optional<BodyKey> bodyKeyFromHex(std::span<const char> digits)
 {
     using namespace ArtifactStoreInternal;
-    if (name.size() != bodyFileNameLength || !equalSpans(name.last(bodyNameSuffix.size()), std::span { bodyNameSuffix }))
+    if (digits.size() != bodyKeyHexLength)
         return std::nullopt;
     std::array<uint8_t, BodyKey::byteSize> bytes { };
-    if (!readLowercaseHex(name.first(2 * BodyKey::byteSize), bytes))
-        return std::nullopt;
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        auto high = lowercaseHexDigitValue(digits[2 * index]);
+        auto low = lowercaseHexDigitValue(digits[2 * index + 1]);
+        if (!high || !low)
+            return std::nullopt;
+        bytes[index] = static_cast<uint8_t>(*high << 4 | *low);
+    }
     return BodyKey::fromBytes(bytes);
 }
 
@@ -501,8 +313,7 @@ TemporaryFileName temporaryFileName(TemporaryKind kind)
     using namespace ArtifactStoreInternal;
     std::array<uint8_t, temporaryRandomBytes> random { };
     cryptographicallyRandomValues(random);
-    std::span<const char> prefix = kind == TemporaryKind::Header ? std::span<const char> { headerTemporaryPrefix } : std::span<const char> { bodyTemporaryPrefix };
-
+    std::span<const char> prefix = kind == TemporaryKind::Header ? std::span<const char> { headerTemporaryPrefix } : std::span<const char> { packTemporaryPrefix };
     TemporaryFileName name;
     auto characters = std::span { name.characters };
     memcpySpan(characters.first(prefix.size()), prefix);
@@ -523,8 +334,8 @@ std::optional<TemporaryKind> temporaryKindOfFileName(std::span<const char> name)
     };
     if (matches(headerTemporaryPrefix))
         return TemporaryKind::Header;
-    if (matches(bodyTemporaryPrefix))
-        return TemporaryKind::Body;
+    if (matches(packTemporaryPrefix))
+        return TemporaryKind::Pack;
     return std::nullopt;
 }
 
@@ -577,43 +388,30 @@ int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved)
     if (replacedFd < 0)
         return errno == ENOENT ? 0 : errno;
 
-    auto removeFile = [&](int directoryFd, const char* name) -> int {
+    auto removeFile = [&](const char* name) -> int {
         struct stat status;
-        bool sized = !::fstatat(directoryFd, name, &status, AT_SYMLINK_NOFOLLOW);
-        if (::unlinkat(directoryFd, name, 0))
+        bool sized = !::fstatat(replacedFd, name, &status, AT_SYMLINK_NOFOLLOW);
+        if (::unlinkat(replacedFd, name, 0))
             return errno == ENOENT ? 0 : errno;
         if (sized)
             bytesRemoved += static_cast<uint64_t>(status.st_size);
         return 0;
     };
-    // Names are collected first and removed after the listing, so no entry goes while its directory is read.
-    auto removeListed = [&](int directoryFd, bool (*removes)(std::span<const char>)) -> int {
-        Vector<CString> names;
-        int error = listDirectory(directoryFd, [&](std::span<const char> name, uint64_t) {
-            if (removes(name))
-                names.append(CString { name });
-        });
-        for (auto& name : names) {
-            if (error)
-                break;
-            error = removeFile(directoryFd, name.data());
-        }
-        return error;
-    };
-
-    int error = removeListed(replacedFd, [](std::span<const char> name) { return !!temporaryKindOfFileName(name); });
-    if (!error) {
-        int bodiesFd = openAt(replacedFd, ArtifactNames::bodiesDirectory.characters(), directoryFlags);
-        if (bodiesFd >= 0) {
-            error = removeListed(bodiesFd, [](std::span<const char> name) { return !!bodyKeyFromFileName(name); });
-            ::close(bodiesFd);
-        } else if (errno != ENOENT)
-            error = errno;
+    // Names are collected first and removed after the listing, so no entry goes while the directory is read.
+    Vector<CString> temporaries;
+    int error = listDirectory(replacedFd, [&](std::span<const char> name, uint64_t) {
+        if (temporaryKindOfFileName(name))
+            temporaries.append(CString { name });
+    });
+    for (auto& name : temporaries) {
+        if (error)
+            break;
+        error = removeFile(name.data());
     }
     if (!error)
-        error = removeFile(replacedFd, ArtifactNames::header.characters());
-    if (!error && ::unlinkat(replacedFd, ArtifactNames::bodiesDirectory.characters(), AT_REMOVEDIR) && errno != ENOENT)
-        error = errno;
+        error = removeFile(ArtifactNames::pack.characters());
+    if (!error)
+        error = removeFile(ArtifactNames::header.characters());
     ::close(replacedFd);
     if (!error && ::unlinkat(parentFd, ArtifactNames::replacedCacheDirectory.characters(), AT_REMOVEDIR))
         error = errno;
@@ -621,11 +419,71 @@ int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved)
 #endif
 }
 
-// The producer lock (container sub-SPEC section 2).
+int createEmptyPack(int cacheFd, std::span<const uint8_t, 16> headerDigest)
+{
+#if !OS(LINUX)
+    UNUSED_PARAM(cacheFd);
+    UNUSED_PARAM(headerDigest);
+    return ENOSYS;
+#else
+    using namespace ArtifactStoreInternal;
+    PackPrefix prefix;
+    memcpySpan(std::span { prefix.headerDigest }, headerDigest);
+    prefix.identifier = freshPackIdentifier();
+    std::array<uint8_t, packPrefixBytes + packIndexBlockHeaderBytes> bytes { };
+    auto span = std::span { bytes };
+    auto prefixBytes = encodePackPrefix(prefix);
+    memcpySpan(span.first(packPrefixBytes), std::span<const uint8_t> { prefixBytes });
+    auto indexBytes = encodePackIndexBlockHeader({ PackIndexKind::Full, 0, 0 }, { });
+    memcpySpan(span.subspan(packPrefixBytes), std::span<const uint8_t> { indexBytes });
+    PackRoot root { 1, bytes.size(), packPrefixBytes };
+    auto rootBytes = encodePackRoot(root);
+    memcpySpan(span.subspan(packRootSlotOffset(root.generation), packRootSlotBytes), std::span<const uint8_t> { rootBytes });
 
-ProducerLock::ProducerLock(int fd, uint64_t* epoch)
+    TemporaryFileName temporary = temporaryFileName(TemporaryKind::Pack);
+    int fd = openAt(cacheFd, temporary.data(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return errno;
+    int error = writeExactly(fd, bytes, 0);
+    if (::close(fd) && !error && errno != EINTR)
+        error = errno;
+    if (!error && ::renameat(cacheFd, temporary.data(), cacheFd, ArtifactNames::pack.characters()))
+        error = errno;
+    if (error)
+        ::unlinkat(cacheFd, temporary.data(), 0);
+    return error;
+#endif
+}
+
+bool packHoldsBodies(int cacheFd)
+{
+#if !OS(LINUX)
+    UNUSED_PARAM(cacheFd);
+    return true;
+#else
+    using namespace ArtifactStoreInternal;
+    int fd = openAt(cacheFd, ArtifactNames::pack.characters(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return errno != ENOENT;
+    std::array<uint8_t, packPrefixBytes> prefix { };
+    int error = readExactly(fd, prefix, 0);
+    ::close(fd);
+    if (error)
+        return true;
+    std::optional<PackRoot> best;
+    for (uint64_t slot = 0; slot < 2; ++slot) {
+        auto root = decodePackRoot(std::span { prefix }.subspan(packRootSlotOffset(slot)).first<packRootSlotBytes>());
+        if (root && (!best || root->generation > best->generation))
+            best = root;
+    }
+    return !best || best->indexOffset != packPrefixBytes || best->validEnd != packPrefixBytes + packIndexBlockHeaderBytes;
+#endif
+}
+
+// The producer lock.
+
+ProducerLock::ProducerLock(int fd)
     : m_fd(fd)
-    , m_epoch(epoch)
 {
 }
 
@@ -647,45 +505,27 @@ std::expected<std::unique_ptr<ProducerLock>, ProducerLock::Failure> ProducerLock
     if (result) {
         int error = errno;
         ::close(fd);
-        if (error == EWOULDBLOCK)
-            return std::unexpected(Failure { true, error });
-        return std::unexpected(Failure { false, error });
+        return std::unexpected(Failure { error == EWOULDBLOCK, error });
     }
-
     // Closing the descriptor releases the lock, so every failure from here on leaves the lock free.
     if (int error = setUpLockFile(fd)) {
         ::close(fd);
         return std::unexpected(Failure { false, error });
     }
-    void* page = mmap(nullptr, lockFileBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (page == MAP_FAILED) {
-        int error = errno;
-        ::close(fd);
-        return std::unexpected(Failure { false, error });
-    }
-    auto* epoch = reinterpret_cast<uint64_t*>(static_cast<uint8_t*>(page) + lockFileEpochOffset);
-    return std::unique_ptr<ProducerLock>(new ProducerLock(fd, epoch));
+    return std::unique_ptr<ProducerLock>(new ProducerLock(fd));
 #endif
-}
-
-uint64_t ProducerLock::bumpEpoch()
-{
-    // Release order: whoever loads the new value with acquire order also sees the rename or the removals before it.
-    return __atomic_fetch_add(m_epoch, 1, __ATOMIC_RELEASE);
 }
 
 ProducerLock::~ProducerLock()
 {
 #if OS(LINUX)
-    using namespace ArtifactStoreInternal;
-    munmap(reinterpret_cast<uint8_t*>(m_epoch) - lockFileEpochOffset, lockFileBytes);
     ::close(m_fd);
 #else
     UNUSED_VARIABLE(m_fd);
 #endif
 }
 
-// The index's hash and traits (container sub-SPEC section 6.1).
+// The index's hash and traits.
 
 unsigned BodyKeyHash::hash(const BodyKey& key)
 {
@@ -718,11 +558,211 @@ bool BodyKeyHashTraits::isDeletedValue(const BodyKey& key)
     });
 }
 
-// Saved summaries (container sub-SPEC section 7.3).
+// Reading a pack's index.
 
-SavedSummaries::SavedSummaries(std::span<const uint8_t> mapping, uint64_t version, uint8_t highestTier, std::span<const uint8_t> ucbFeedback,
-    std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics)
+static uint64_t recordExtentOf(const PackIndexEntry& entry)
+{
+    // Every applied entry's extent was bounded by a valid end, so it cannot overflow.
+    return *packRecordExtent(entry.size);
+}
+
+uint64_t packLiveBytes(const PackIndex& index)
+{
+    uint64_t bytes = packPrefixBytes;
+    for (auto& entry : index.values())
+        bytes += recordExtentOf(entry);
+    return bytes;
+}
+
+std::expected<PackIndexRead, PackRejection> readPackIndex(const PackRoot& root, std::optional<uint64_t> stopAt, PackIndex& index,
+    uint64_t& liveBytes, const ScopedLambda<std::span<const uint8_t>(uint64_t offset, uint64_t size)>& readAt)
+{
+    // Back from the latest block to the full index, or to the block the caller applied last. Offsets strictly decrease
+    // along the chain, which bounds the walk.
+    Vector<std::pair<uint64_t, PackIndexBlock>, 16> chain;
+    uint64_t at = root.indexOffset;
+    bool reachedFull = false;
+    while (!(stopAt && at == *stopAt)) {
+        if (at < packPrefixBytes || at % packAlignment || at > root.validEnd || root.validEnd - at < packIndexBlockHeaderBytes)
+            return std::unexpected("an index block lies outside the valid bytes"_s);
+        auto block = decodePackIndexBlockHeader(readAt(at, packIndexBlockHeaderBytes).first<packIndexBlockHeaderBytes>());
+        if (!block)
+            return std::unexpected(block.error());
+        if (static_cast<uint64_t>(block->count) * packIndexEntryBytes > root.validEnd - at - packIndexBlockHeaderBytes)
+            return std::unexpected("an index block's entries pass the valid end"_s);
+        chain.append({ at, *block });
+        if (block->kind == PackIndexKind::Full) {
+            reachedFull = true;
+            break;
+        }
+        if (block->previous >= at)
+            return std::unexpected("an index block's previous block does not precede it"_s);
+        at = block->previous;
+    }
+
+    PackIndexRead result;
+    if (reachedFull) {
+        index.clear();
+        liveBytes = packPrefixBytes;
+    }
+    for (size_t position = chain.size(); position--;) {
+        auto [offset, block] = chain[position];
+        auto header = readAt(offset, packIndexBlockHeaderBytes).first<packIndexBlockHeaderBytes>();
+        auto entries = readAt(offset + packIndexBlockHeaderBytes, static_cast<uint64_t>(block.count) * packIndexEntryBytes);
+        if (auto rejection = checkPackIndexBlockCRC(header, entries))
+            return std::unexpected(*rejection);
+        std::optional<BodyKey> previousKey;
+        for (size_t ordinal = 0; ordinal < block.count; ++ordinal) {
+            auto entry = decodePackIndexEntry(entries.subspan(ordinal * packIndexEntryBytes, packIndexEntryBytes));
+            if (!entry)
+                return std::unexpected(entry.error());
+            if (block.kind == PackIndexKind::Full) {
+                if (entry->isTombstone())
+                    return std::unexpected("a full index lists a tombstone"_s);
+                if (previousKey && !std::ranges::lexicographical_compare(previousKey->bytes(), entry->key.bytes()))
+                    return std::unexpected("a full index's keys do not strictly increase"_s);
+                previousKey = entry->key;
+            }
+            auto replaced = index.find(entry->key);
+            if (replaced != index.end()) {
+                liveBytes -= recordExtentOf(replaced->value);
+                index.remove(replaced);
+            }
+            if (entry->isTombstone())
+                continue;
+            auto extent = packRecordExtent(entry->size);
+            if (!extent || entry->offset >= offset || *extent > offset - entry->offset)
+                return std::unexpected("an index entry's record does not precede its block"_s);
+            index.add(entry->key, *entry);
+            liveBytes += *extent;
+        }
+        ++result.blocks;
+        if (block.kind == PackIndexKind::Delta)
+            ++result.deltasSinceFull;
+    }
+    result.reachedFull = reachedFull;
+    return result;
+}
+
+// The pack's mapping.
+
+MappedPack::MappedPack(std::span<const uint8_t> mapping, uint64_t inode, uint64_t identifier)
     : m_mapping(mapping)
+    , m_inode(inode)
+    , m_identifier(identifier)
+{
+}
+
+std::expected<Ref<MappedPack>, ArtifactReadFailure> MappedPack::map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity)
+{
+#if !OS(LINUX)
+    UNUSED_PARAM(cacheFd);
+    UNUSED_PARAM(headerDigest);
+    UNUSED_PARAM(minimumCapacity);
+    return std::unexpected(ArtifactReadFailure { ENOSYS, { } });
+#else
+    using namespace ArtifactStoreInternal;
+    if (int error = injectedError(StoreCall::PackMap))
+        return std::unexpected(ArtifactReadFailure { error, { } });
+    int fd = openAt(cacheFd, ArtifactNames::pack.characters(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return std::unexpected(ArtifactReadFailure { errno, { } });
+    struct stat status;
+    if (fstat(fd, &status)) {
+        closeKeepingErrno(fd);
+        return std::unexpected(ArtifactReadFailure { errno, { } });
+    }
+    uint64_t fileSize = static_cast<uint64_t>(status.st_size);
+    if (fileSize < packPrefixBytes) {
+        ::close(fd);
+        return std::unexpected(ArtifactReadFailure { 0, "the file is shorter than the pack's prefix"_s });
+    }
+    std::array<uint8_t, packRetiredOffset> prefixBytes { };
+    if (int error = readExactly(fd, prefixBytes, 0)) {
+        ::close(fd);
+        return std::unexpected(ArtifactReadFailure { error, { } });
+    }
+    auto prefix = decodePackPrefix(prefixBytes, headerDigest);
+    if (!prefix) {
+        ::close(fd);
+        return std::unexpected(ArtifactReadFailure { 0, prefix.error() });
+    }
+    // Room for the file and for growth past it; the file grows into the mapping, and the pages past its end are never read.
+    uint64_t wanted = std::max(fileSize, minimumCapacity);
+    if (wanted > std::numeric_limits<uint64_t>::max() / 4) {
+        ::close(fd);
+        return std::unexpected(ArtifactReadFailure { EFBIG, { } });
+    }
+    uint64_t capacity = pageRounded(wanted + std::max(wanted, packMappingSlackBytes));
+    if (capacity > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        ::close(fd);
+        return std::unexpected(ArtifactReadFailure { EFBIG, { } });
+    }
+    void* address = mmap(nullptr, static_cast<size_t>(capacity), PROT_READ, MAP_SHARED, fd, 0);
+    int mapError = address == MAP_FAILED ? errno : 0;
+    ::close(fd);
+    if (mapError)
+        return std::unexpected(ArtifactReadFailure { mapError, { } });
+    auto mapping = unsafeMakeSpan(static_cast<const uint8_t*>(address), static_cast<size_t>(capacity));
+    return adoptRef(*new MappedPack(mapping, static_cast<uint64_t>(status.st_ino), prefix->identifier));
+#endif
+}
+
+MappedPack::~MappedPack()
+{
+#if OS(LINUX)
+    munmap(const_cast<uint8_t*>(m_mapping.data()), m_mapping.size());
+#endif
+}
+
+std::span<const uint8_t> MappedPack::bytes(uint64_t offset, uint64_t size) const
+{
+    RELEASE_ASSERT(offset <= m_mapping.size() && size <= m_mapping.size() - offset);
+    return m_mapping.subspan(static_cast<size_t>(offset), static_cast<size_t>(size));
+}
+
+uint64_t MappedPack::loadWord(size_t offset) const
+{
+    // A producer in another process may be writing these words: each is loaded whole, and the slot's CRC tells a torn
+    // root.
+    return __atomic_load_n(reinterpret_cast<const uint64_t*>(m_mapping.subspan(offset, sizeof(uint64_t)).data()), __ATOMIC_RELAXED);
+}
+
+uint64_t MappedPack::highestSlotGeneration() const
+{
+    return std::max(loadWord(packRootSlotOffset(0)), loadWord(packRootSlotOffset(1)));
+}
+
+bool MappedPack::isRetired() const
+{
+    bool retired = !!loadWord(packRetiredOffset);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return retired;
+}
+
+std::optional<PackRoot> MappedPack::currentRoot() const
+{
+    std::optional<PackRoot> best;
+    for (uint64_t slot = 0; slot < 2; ++slot) {
+        std::array<uint8_t, packRootSlotBytes> bytes { };
+        for (size_t index = 0; index < packRootSlotBytes / sizeof(uint64_t); ++index) {
+            uint64_t word = loadWord(packRootSlotOffset(slot) + index * sizeof(uint64_t));
+            memcpySpan(std::span { bytes }.subspan(index * sizeof(uint64_t), sizeof(uint64_t)), asByteSpan(word));
+        }
+        auto root = decodePackRoot(std::span<const uint8_t, packRootSlotBytes> { bytes });
+        if (root && root->generation % 2 == slot && (!best || root->generation > best->generation))
+            best = root;
+    }
+    // The producer writes a root after the bytes it names, with a fence between: a reader that saw the root sees them.
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return best;
+}
+
+// Saved summaries.
+
+SavedSummaries::SavedSummaries(Ref<MappedPack>&& pack, uint64_t version, uint8_t highestTier, std::span<const uint8_t> ucbFeedback,
+    std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics)
+    : m_pack(WTF::move(pack))
     , m_version(version)
     , m_highestTier(highestTier)
     , m_ucbFeedback(ucbFeedback)
@@ -731,95 +771,50 @@ SavedSummaries::SavedSummaries(std::span<const uint8_t> mapping, uint64_t versio
 {
 }
 
-SavedSummaries::~SavedSummaries()
-{
-#if OS(LINUX)
-    ArtifactStoreInternal::unmap(m_mapping);
-#else
-    UNUSED_VARIABLE(m_mapping);
-#endif
-}
+SavedSummaries::~SavedSummaries() = default;
 
-uint64_t SavedSummaries::version() const
-{
-    return m_version;
-}
+// The opened artifact.
 
-uint8_t SavedSummaries::highestTier() const
-{
-    return m_highestTier;
-}
-
-std::span<const uint8_t> SavedSummaries::ucbFeedback() const
-{
-    return m_ucbFeedback;
-}
-
-std::span<const uint8_t> SavedSummaries::cbSummary() const
-{
-    return m_cbSummary;
-}
-
-std::span<const uint8_t> SavedSummaries::ics() const
-{
-    return m_ics;
-}
-
-// An opened artifact (container sub-SPEC section 5.2).
-
-OpenedArtifact::OpenedArtifact(int parentFd, int cacheFd, int bodiesFd, const std::array<uint8_t, 16>& headerDigest, const uint64_t* epoch, int inotifyFd)
+OpenedArtifact::OpenedArtifact(int parentFd, int cacheFd, const std::array<uint8_t, 16>& headerDigest)
     : m_parentFd(parentFd)
     , m_cacheFd(cacheFd)
-    , m_bodiesFd(bodiesFd)
     , m_headerDigest(headerDigest)
-    , m_epoch(epoch)
-    , m_inotifyFd(inotifyFd)
 {
 }
 
-std::expected<Ref<OpenedArtifact>, int> OpenedArtifact::create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes)
+std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> OpenedArtifact::create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes)
 {
 #if !OS(LINUX)
     UNUSED_PARAM(parentFd);
     UNUSED_PARAM(cacheFd);
     UNUSED_PARAM(headerBytes);
-    return std::unexpected(ENOSYS);
+    return std::unexpected(ArtifactReadFailure { ENOSYS, { } });
 #else
     using namespace ArtifactStoreInternal;
-    // The object pins descriptors of its own, so it outlives the descriptors of the VM that built it, and every later
-    // lookup, open and write goes through the directories whose header that VM checked.
+    // The object pins descriptors of its own, so it outlives the descriptors of the VM that built it.
     int pinnedParentFd = openAt(parentFd, ".", pinnedParentFlags);
     if (pinnedParentFd < 0)
-        return std::unexpected(errno);
+        return std::unexpected(ArtifactReadFailure { errno, { } });
     int pinnedCacheFd = openAt(cacheFd, ".", directoryFlags);
     if (pinnedCacheFd < 0) {
         closeKeepingErrno(pinnedParentFd);
-        return std::unexpected(errno);
+        return std::unexpected(ArtifactReadFailure { errno, { } });
     }
-    int pinnedBodiesFd = openAt(cacheFd, ArtifactNames::bodiesDirectory.characters(), directoryFlags);
-    if (pinnedBodiesFd < 0) {
-        closeKeepingErrno(pinnedCacheFd);
-        closeKeepingErrno(pinnedParentFd);
-        return std::unexpected(errno);
-    }
+    Ref<OpenedArtifact> artifact = adoptRef(*new OpenedArtifact(pinnedParentFd, pinnedCacheFd, artifactHeaderDigest(headerBytes)));
 
-    // A missing epoch or inotify only changes how the index refreshes.
-    const uint64_t* epoch = mapEpochForReading(pinnedParentFd);
-    int inotifyFd = watchBodies(pinnedBodiesFd);
-    Ref<OpenedArtifact> artifact = adoptRef(*new OpenedArtifact(pinnedParentFd, pinnedCacheFd, pinnedBodiesFd, artifactHeaderDigest(headerBytes), epoch, inotifyFd));
-
-    // The index is listed here, at the demand a role creates when it starts, so no directory scan lands inside a request
-    // point. The watch exists before the listing, so a change made during it is queued for the next refresh. A failure
-    // destroys the object unregistered, and start reports the errno at start.io.
-    int error;
+    // The pack is mapped and its index read here, at the demand a role creates when it starts, so no mapping and no full
+    // index read land inside a request point.
+    std::optional<ArtifactReadFailure> failure;
     {
         OpenedArtifact& object = artifact.get();
         Locker locker { object.m_indexLock };
-        error = object.list();
-        object.m_statistics.buildNanoseconds = object.m_statistics.listingNanoseconds;
+        MonotonicTime start = MonotonicTime::now();
+        failure = object.reopen(0);
+        object.m_statistics.buildNanoseconds = (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
+        object.m_statistics.reopens = 0;
     }
-    if (error)
-        return std::unexpected(error);
+    if (failure)
+        return std::unexpected(*failure);
     return artifact;
 #endif
 }
@@ -827,12 +822,6 @@ std::expected<Ref<OpenedArtifact>, int> OpenedArtifact::create(int parentFd, int
 OpenedArtifact::~OpenedArtifact()
 {
 #if OS(LINUX)
-    // The last reference is gone, so no other thread reads the guarded fields.
-    if (m_epoch)
-        ArtifactStoreInternal::unmapEpoch(m_epoch);
-    if (m_inotifyFd >= 0)
-        ::close(m_inotifyFd);
-    ::close(m_bodiesFd);
     ::close(m_cacheFd);
     ::close(m_parentFd);
 #else
@@ -840,131 +829,171 @@ OpenedArtifact::~OpenedArtifact()
 #endif
 }
 
+std::optional<ArtifactReadFailure> OpenedArtifact::reopen(uint64_t minimumCapacity)
+{
+    auto mapped = MappedPack::map(m_cacheFd, headerDigest(), minimumCapacity);
+    if (!mapped)
+        return mapped.error();
+    auto root = (*mapped)->currentRoot();
+    if (!root)
+        return ArtifactReadFailure { 0, "neither root slot holds a valid root"_s };
+    if (root->validEnd > (*mapped)->capacity()) {
+        mapped = MappedPack::map(m_cacheFd, headerDigest(), root->validEnd);
+        if (!mapped)
+            return mapped.error();
+        root = (*mapped)->currentRoot();
+        if (!root || root->validEnd > (*mapped)->capacity())
+            return ArtifactReadFailure { 0, "the root's valid end passes the file"_s };
+    }
+    Ref<MappedPack> pack = WTF::move(*mapped);
+    PackIndex index;
+    uint64_t liveBytes = packPrefixBytes;
+    auto read = readPackIndex(*root, std::nullopt, index, liveBytes, [&](uint64_t offset, uint64_t size) {
+        return pack->bytes(offset, size);
+    });
+    if (!read)
+        return ArtifactReadFailure { 0, read.error() };
+
+    m_pack = WTF::move(pack);
+    m_root = *root;
+    m_index = WTF::move(index);
+    m_liveBytes = liveBytes;
+    m_deltasSinceFull = read->deltasSinceFull;
+    m_damage = std::nullopt;
+    m_gone = false;
+    m_retiredSince = MonotonicTime { };
+    m_nextRetiredReopen = MonotonicTime { };
+    ++m_statistics.reopens;
+    m_statistics.appliedBlocks += read->blocks;
+    return std::nullopt;
+}
+
+std::optional<StoreFailure> OpenedArtifact::applyRoot(const PackRoot& root)
+{
+    if (root.validEnd > m_pack->capacity()) {
+        // The pack outgrew the mapping: a new, larger one; bodies borrowed from the old one keep it.
+        if (auto failure = reopen(root.validEnd)) {
+            if (failure->error) {
+                ++m_statistics.failedReopens;
+                return std::nullopt;
+            }
+            m_damage = StoreFailure { ContainerChecks::pack, 0, failure->packRejection };
+            return m_damage;
+        }
+        return std::nullopt;
+    }
+    RefPtr<MappedPack> pack = m_pack;
+    // Blocks are applied in place: a failure marks the object damaged for good, so the index is never read again.
+    auto read = readPackIndex(root, m_root.indexOffset, m_index, m_liveBytes, [&](uint64_t offset, uint64_t size) {
+        return pack->bytes(offset, size);
+    });
+    if (!read) {
+        m_damage = StoreFailure { ContainerChecks::pack, 0, read.error() };
+        return m_damage;
+    }
+    m_deltasSinceFull = read->reachedFull ? read->deltasSinceFull : m_deltasSinceFull + read->deltasSinceFull;
+    m_root = root;
+    m_statistics.appliedBlocks += read->blocks;
+    return std::nullopt;
+}
+
+std::optional<StoreFailure> OpenedArtifact::follow()
+{
+#if !OS(LINUX)
+    return std::nullopt;
+#else
+    using namespace ArtifactStoreInternal;
+    if (m_damage)
+        return m_damage;
+    if (m_gone || !m_pack)
+        return std::nullopt;
+
+    if (m_pack->isRetired()) {
+        // A compaction or a whole deletion replaced the file: the path names its successor, or nothing.
+        MonotonicTime now = MonotonicTime::now();
+        if (now < m_nextRetiredReopen)
+            return std::nullopt;
+        MonotonicTime start = now;
+        struct stat status;
+        if (fstatat(m_cacheFd, ArtifactNames::pack.characters(), &status, 0)) {
+            if (errno == ENOENT) {
+                m_gone = true;
+                m_index.clear();
+                m_liveBytes = packPrefixBytes;
+                return std::nullopt;
+            }
+        } else if (static_cast<uint64_t>(status.st_ino) != m_pack->inode()) {
+            auto failure = reopen(0);
+            ++m_statistics.refreshes;
+            m_statistics.refreshNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
+            if (!failure)
+                return std::nullopt;
+            if (!failure->error) {
+                m_damage = StoreFailure { ContainerChecks::pack, 0, failure->packRejection };
+                return m_damage;
+            }
+        }
+        // The rename has not happened yet, or a compaction died between its mark and its rename, which the next producer
+        // or clean repairs: the mapped pack stays current until then. A rename follows its mark within microseconds, so
+        // every read looks again during the first second, and a mark older than that is looked at once per interval.
+        ++m_statistics.failedReopens;
+        if (!m_retiredSince)
+            m_retiredSince = now;
+        else if (now - m_retiredSince > 1_s)
+            m_nextRetiredReopen = now + Seconds::fromMilliseconds(static_cast<double>(retiredPackReopenIntervalMilliseconds));
+    } else
+        m_retiredSince = MonotonicTime { };
+
+    if (m_pack->highestSlotGeneration() == m_root.generation)
+        return std::nullopt;
+    auto root = m_pack->currentRoot();
+    // A root being written fails its CRC and the other slot holds the one before it; the next read sees the new one.
+    if (!root || root->generation <= m_root.generation)
+        return std::nullopt;
+    MonotonicTime start = MonotonicTime::now();
+    auto failure = applyRoot(*root);
+    ++m_statistics.refreshes;
+    m_statistics.refreshNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
+    return failure;
+#endif
+}
+
 uint64_t OpenedArtifact::token(const BodyKey& key)
 {
     Locker locker { m_indexLock };
-    bool deferred = refreshIfStale();
-    uint64_t keyToken = currentToken(key);
-    // A miss while the interval defers a listing may be a body that listing would have found; the next listing counts
-    // the keys it finds (section 6.3; SPEC-integrator.md IB2).
-    if (deferred && !keyToken)
-        m_missedWhileDeferred.add(key);
-    return keyToken;
-}
-
-BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
-{
-#if !OS(LINUX)
-    UNUSED_PARAM(key);
-    UNUSED_PARAM(mode);
-    return { StoreOutcome::Invalid, nullptr, { "container.io"_s, ENOSYS } };
-#else
-    using namespace ArtifactStoreInternal;
-    uint64_t tokenBeforeOpen;
-    {
-        Locker locker { m_indexLock };
-        refreshIfStale();
-        tokenBeforeOpen = currentToken(key);
-    }
-    // A key the index lacks costs no system call (SPEC-ucb.md R-INT-3).
-    if (!tokenBeforeOpen)
-        return { StoreOutcome::Absent, nullptr, { } };
-
-    // The file work runs outside m_indexLock (section 6.4).
-    auto read = readBodyFile(StoreCall::Open, m_bodiesFd, key);
-    if (!read) {
-        if (!read.error().error)
-            return { StoreOutcome::Invalid, nullptr, { read.error().check, 0 } };
-        int error = read.error().error;
-        if (error == ENOENT)
-            eraseIfTokenIs(key, tokenBeforeOpen);
-        return { outcomeOfError(error), nullptr, failureOfError(error) };
-    }
-
-    MallocSpan<uint8_t> bytes = WTF::move(*read);
-    std::span<const uint8_t> file = bytes.span();
-    size_t fileSize = file.size();
-    auto layout = validateBody(file, key, headerDigest(), mode);
-    if (!layout)
-        return { StoreOutcome::Invalid, nullptr, { layout.error(), 0 }, fileSize };
-
-    ValidatedBody::SectionSpans sections { };
-    for (size_t index = 0; index < numberOfSectionKinds; ++index)
-        sections[index] = sectionIn(file, *layout, static_cast<SectionKind>(index));
-    // The body owns the buffer from here; moving it keeps its address, so the spans stay valid.
-    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, layout->version, layout->highestTier, layout->llintThreshold,
-        layout->counterProgress, WTF::move(bytes), sections));
-    return { StoreOutcome::Found, WTF::move(body), { }, fileSize };
-#endif
-}
-
-SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, ValidationMode mode)
-{
-#if !OS(LINUX)
-    UNUSED_PARAM(key);
-    UNUSED_PARAM(mode);
-    return { StoreOutcome::Invalid, nullptr, { "container.io"_s, ENOSYS } };
-#else
-    using namespace ArtifactStoreInternal;
-    // The read opens the body by its name whatever the index holds, so a body the index lacks, such as one whose producer
-    // died between its rename and its epoch bump, is found; ENOENT alone answers that no body exists. The token read
-    // here only decides whether an ENOENT may erase the key.
-    uint64_t tokenBeforeOpen;
-    {
-        Locker locker { m_indexLock };
-        tokenBeforeOpen = currentToken(key);
-    }
-
-    // Unpopulated: the read faults in only the envelope, the directory and the three summary sections.
-    auto mapped = mapBodyFile(StoreCall::ReadSavedSummaries, m_bodiesFd, key);
-    if (!mapped) {
-        if (!mapped.error().error)
-            return { StoreOutcome::Invalid, nullptr, { mapped.error().check, 0 } };
-        int error = mapped.error().error;
-        if (error == ENOENT)
-            eraseIfTokenIs(key, tokenBeforeOpen);
-        return { outcomeOfError(error), nullptr, failureOfError(error) };
-    }
-
-    std::span<const uint8_t> file = *mapped;
-    auto layout = validateBodyFraming(file, key, headerDigest(), mode, summarySectionKinds);
-    if (!layout) {
-        unmap(file);
-        return { StoreOutcome::Invalid, nullptr, { layout.error(), 0 } };
-    }
-    std::unique_ptr<SavedSummaries> summaries(new SavedSummaries(file, layout->version, layout->highestTier,
-        sectionIn(file, *layout, SectionKind::UCBFeedback), sectionIn(file, *layout, SectionKind::CBSummaryBaseline),
-        sectionIn(file, *layout, SectionKind::ICsBaseline)));
-    return { StoreOutcome::Found, WTF::move(summaries), { } };
-#endif
+    follow();
+    if (m_gone)
+        return 0;
+    auto iterator = m_index.find(key);
+    return iterator == m_index.end() ? 0 : iterator->value.version;
 }
 
 bool OpenedArtifact::containsKey(const BodyKey& key)
 {
-    Locker locker { m_indexLock };
-    refreshIfStale();
-    return m_index.contains(key);
+    return !!token(key);
 }
 
 uint64_t OpenedArtifact::indexedBodies()
 {
     Locker locker { m_indexLock };
-    return m_index.size();
+    return m_gone ? 0 : m_index.size();
 }
 
 IndexStatistics OpenedArtifact::statistics()
 {
     Locker locker { m_indexLock };
     IndexStatistics statistics = m_statistics;
-    statistics.hasInotify = m_inotifyFd >= 0;
-    statistics.bodies = m_index.size();
-    statistics.tableBytes = static_cast<uint64_t>(m_index.capacity()) * sizeof(decltype(m_index)::KeyValuePairType);
+    statistics.bodies = m_gone ? 0 : m_index.size();
+    statistics.generation = m_root.generation;
+    statistics.packBytes = m_root.validEnd;
+    statistics.liveBytes = m_liveBytes;
+    statistics.tableBytes = static_cast<uint64_t>(m_index.capacity()) * sizeof(PackIndex::KeyValuePairType);
     return statistics;
 }
 
 std::span<const uint8_t, 16> OpenedArtifact::headerDigest() const
 {
-    return std::span { m_headerDigest };
+    return std::span<const uint8_t, 16> { m_headerDigest };
 }
 
 int OpenedArtifact::cacheFd() const
@@ -972,199 +1001,74 @@ int OpenedArtifact::cacheFd() const
     return m_cacheFd;
 }
 
-int OpenedArtifact::bodiesFd() const
-{
-    return m_bodiesFd;
-}
-
-bool OpenedArtifact::refreshIfStale()
+BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
 {
     using namespace ArtifactStoreInternal;
-    if (!m_epoch || m_gone)
-        return false;
-    // While nothing changes, this load from a shared page is the whole cost of a lookup.
-    uint64_t epoch = loadEpoch(m_epoch);
-    if (epoch == m_lastEpochSeen)
-        return false;
+    if (int error = injectedError(StoreCall::Open))
+        return { outcomeOfError(error), nullptr, outcomeOfError(error) == StoreOutcome::Invalid ? failureOfError(error) : StoreFailure { }, 0 };
 
-    MonotonicTime start = MonotonicTime::now();
-    if (m_inotifyFd >= 0 && !m_listingPending) {
-        // The kernel queues a rename's events during the rename, before the writer bumps the epoch, so the queue holds
-        // every change the new epoch covers.
-        m_lastEpochSeen = epoch;
-        drainEvents(true);
-    } else if (start - m_lastListingStart < fallbackListingInterval()) {
-        // Without inotify, or with a listing pending, at most one listing starts per interval. Inside it the epoch is not
-        // recorded: the index answers as it stands, and the first lookup after the interval lists.
-        ++m_statistics.deferredRefreshes;
-        return true;
-    } else {
-        list();
+    RefPtr<MappedPack> pack;
+    PackIndexEntry entry;
+    {
+        Locker locker { m_indexLock };
+        if (auto damage = follow())
+            return { StoreOutcome::Invalid, nullptr, *damage, 0 };
+        auto iterator = m_index.find(key);
+        if (m_gone || iterator == m_index.end())
+            return { StoreOutcome::Absent, nullptr, { }, 0 };
+        entry = iterator->value;
+        pack = m_pack;
+        ++m_statistics.opens;
     }
 
-    ++m_statistics.refreshes;
-    m_statistics.refreshNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
-    return false;
+    auto read = readBody(*pack, entry, headerDigest(), mode, std::nullopt);
+    if (!read)
+        return { StoreOutcome::Invalid, nullptr, read.error(), entry.size };
+    ValidatedBody::SectionSpans spans;
+    for (size_t index = 0; index < numberOfSectionKinds; ++index)
+        spans[index] = sectionIn(read->bytes, read->layout, static_cast<SectionKind>(index));
+    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, read->layout.version, read->layout.highestTier, read->layout.llintThreshold,
+        read->layout.counterProgress, pack.releaseNonNull(), read->bytes, spans));
+    return { StoreOutcome::Found, WTF::move(body), { }, entry.size };
 }
 
-int OpenedArtifact::list()
+SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, ValidationMode mode)
 {
-    using namespace ArtifactStoreInternal;
-    // One order for every listing: drain the queue, read the epoch, list, and swap the new map in only on success. The map
-    // is built under the lock, so nothing the writer's commit or a drained event records meanwhile is dropped.
-    discardEvents(m_inotifyFd);
-    std::optional<uint64_t> epoch;
-    if (m_epoch)
-        epoch = loadEpoch(m_epoch);
-    m_lastListingStart = MonotonicTime::now();
-
-    HashMap<BodyKey, IndexEntry, BodyKeyHash, BodyKeyHashTraits> index;
-    // A key whose entry in the old index holds the same nonzero inode keeps its token; every other key takes a fresh one.
-    // A body replaced by renameat carries its temporary's inode, so it gets a fresh token. Every name that is not a body's
-    // is ignored: temporaries, and stray files, which clean reports.
-    const auto& previousIndex = m_index;
-    uint64_t& nextToken = m_nextToken;
-    int error = injectedOpenError(StoreCall::Listing);
-    if (!error) {
-        error = listDirectory(m_bodiesFd, [&](std::span<const char> name, uint64_t inode) {
-            auto key = bodyKeyFromFileName(name);
-            if (!key)
-                return;
-            auto previous = previousIndex.find(*key);
-            bool keepsToken = previous != previousIndex.end() && previous->value.inode && previous->value.inode == inode;
-            index.set(*key, IndexEntry { keepsToken ? previous->value.token : nextToken++, inode });
-        });
-    }
-    ++m_statistics.listings;
-    m_statistics.listingNanoseconds += (MonotonicTime::now() - m_lastListingStart).nanosecondsAs<uint64_t>();
-
-    if (error) {
-        // The index stays as it was. The events drained above are gone, so the next epoch change lists again; until
-        // then, the bodies the index lacks are misses. The listing found none of the deferral's misses.
-        ++m_statistics.failedListings;
-        if (epoch)
-            m_lastEpochSeen = *epoch;
-        m_listingPending = true;
-        m_missedWhileDeferred.clear();
-        return error;
-    }
-    m_index = WTF::move(index);
-    if (epoch)
-        m_lastEpochSeen = *epoch;
-    m_listingPending = false;
-    // The bodies a deferral left as misses are the keys missed meanwhile that this listing finds (section 6.3).
-    for (auto& key : m_missedWhileDeferred) {
-        if (m_index.contains(key))
-            ++m_statistics.deferredMisses;
-    }
-    m_missedWhileDeferred.clear();
-    return 0;
-}
-
-void OpenedArtifact::drainEvents(bool listOnOverflow)
-{
-#if OS(LINUX)
-    using namespace ArtifactStoreInternal;
-    if (m_inotifyFd < 0)
-        return;
-    bool mustList = false;
-    std::array<uint8_t, inotifyBufferBytes> buffer;
-    while (true) {
-        ssize_t count = ::read(m_inotifyFd, buffer.data(), buffer.size());
-        if (count < 0) {
-            if (errno == EINTR)
-                continue;
-            // A read that fails other than with EAGAIN may have lost events, which only a listing recovers.
-            if (errno != EAGAIN && errno != EWOULDBLOCK)
-                mustList = true;
-            break;
-        }
-        if (!count)
-            break;
-
-        auto events = std::span { buffer }.first(static_cast<size_t>(count));
-        while (events.size() >= sizeof(struct inotify_event)) {
-            // The fixed fields of struct inotify_event, read without forming an object of a type that ends in a
-            // flexible array.
-            uint32_t mask = 0;
-            uint32_t length = 0;
-            memcpySpan(asMutableByteSpan(mask), events.subspan(offsetof(struct inotify_event, mask), sizeof(mask)));
-            memcpySpan(asMutableByteSpan(length), events.subspan(offsetof(struct inotify_event, len), sizeof(length)));
-            size_t eventBytes = sizeof(struct inotify_event) + length;
-            if (eventBytes > events.size())
-                break; // the kernel returns whole events; a torn one would be a kernel defect
-            auto nameBytes = events.subspan(sizeof(struct inotify_event), length);
-            events = events.subspan(eventBytes);
-
-            if (mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) {
-                // The pinned directory is gone: every later lookup misses without refreshing. A recreated artifact is
-                // another directory, whose header this object never checked.
-                m_index.clear();
-                ::close(m_inotifyFd);
-                m_inotifyFd = -1;
-                m_gone = true;
-                return;
-            }
-            if (mask & IN_Q_OVERFLOW) {
-                mustList = true;
-                continue;
-            }
-            // The kernel pads the name with NUL bytes.
-            auto nameEnd = std::ranges::find(nameBytes, static_cast<uint8_t>(0));
-            auto name = spanReinterpretCast<const char>(nameBytes.first(static_cast<size_t>(nameEnd - nameBytes.begin())));
-            auto key = bodyKeyFromFileName(name);
-            if (!key)
-                continue;
-            if (mask & IN_MOVED_TO)
-                learn(*key, 0); // present, inode unknown
-            else if (mask & (IN_MOVED_FROM | IN_DELETE))
-                erase(*key);
-        }
-    }
-
-    if (!mustList)
-        return;
-    // The descriptor stays. A listing that fails records the epoch it read and marks a listing pending; the writer's
-    // index update only marks one, so no listing runs inside a capture pause.
-    ++m_statistics.queueOverflows;
-    if (listOnOverflow)
-        list();
-    else
-        m_listingPending = true;
+#if !OS(LINUX)
+    UNUSED_PARAM(key);
+    UNUSED_PARAM(mode);
+    return { StoreOutcome::Invalid, nullptr, ArtifactStoreInternal::failureOfError(ENOSYS) };
 #else
-    UNUSED_PARAM(listOnOverflow);
+    using namespace ArtifactStoreInternal;
+    if (int error = injectedError(StoreCall::ReadSavedSummaries))
+        return { outcomeOfError(error), nullptr, outcomeOfError(error) == StoreOutcome::Invalid ? failureOfError(error) : StoreFailure { } };
+
+    RefPtr<MappedPack> pack;
+    PackIndexEntry entry;
+    {
+        Locker locker { m_indexLock };
+        if (auto damage = follow())
+            return { StoreOutcome::Invalid, nullptr, *damage };
+        auto iterator = m_index.find(key);
+        if (m_gone || iterator == m_index.end())
+            return { StoreOutcome::Absent, nullptr, { } };
+        entry = iterator->value;
+        pack = m_pack;
+        ++m_statistics.opens;
+    }
+
+    auto read = readBody(*pack, entry, headerDigest(), mode, std::span<const SectionKind> { summarySectionKinds });
+    if (!read)
+        return { StoreOutcome::Invalid, nullptr, read.error() };
+    auto& layout = read->layout;
+    auto summaries = std::unique_ptr<SavedSummaries>(new SavedSummaries(pack.releaseNonNull(), layout.version, layout.highestTier,
+        sectionIn(read->bytes, layout, SectionKind::UCBFeedback), sectionIn(read->bytes, layout, SectionKind::CBSummaryBaseline),
+        sectionIn(read->bytes, layout, SectionKind::ICsBaseline)));
+    return { StoreOutcome::Found, WTF::move(summaries), { } };
 #endif
 }
 
-void OpenedArtifact::learn(const BodyKey& key, uint64_t inode)
-{
-    m_index.set(key, IndexEntry { m_nextToken++, inode });
-}
-
-void OpenedArtifact::erase(const BodyKey& key)
-{
-    m_index.remove(key);
-}
-
-uint64_t OpenedArtifact::currentToken(const BodyKey& key)
-{
-    auto iterator = m_index.find(key);
-    return iterator == m_index.end() ? 0 : iterator->value.token;
-}
-
-void OpenedArtifact::eraseIfTokenIs(const BodyKey& key, uint64_t token)
-{
-    // A key absent before the openat has nothing to erase, and a token learned since, from the writer's own commit or an
-    // event, names a body that arrived after that openat: erasing it would hide that body from bodyVersion (II8).
-    if (!token)
-        return;
-    Locker locker { m_indexLock };
-    auto iterator = m_index.find(key);
-    if (iterator != m_index.end() && iterator->value.token == token)
-        m_index.remove(iterator);
-}
-
-// The registry (container sub-SPEC section 5.1).
+// The registry.
 
 ArtifactRegistry& ArtifactRegistry::singleton()
 {
@@ -1176,19 +1080,17 @@ ArtifactRegistry& ArtifactRegistry::singleton()
     return registry.get();
 }
 
-std::expected<Ref<OpenedArtifact>, int> ArtifactRegistry::take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes)
+std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> ArtifactRegistry::take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes)
 {
 #if !OS(LINUX)
     UNUSED_PARAM(parentFd);
     UNUSED_PARAM(cacheFd);
     UNUSED_PARAM(headerBytes);
-    return std::unexpected(ENOSYS);
+    return std::unexpected(ArtifactReadFailure { ENOSYS, { } });
 #else
-    // The key is the directory start opened and read the header through, so an object found under it pinned the very
-    // directory whose header the VM checked.
     struct stat status;
     if (fstat(cacheFd, &status))
-        return std::unexpected(errno);
+        return std::unexpected(ArtifactReadFailure { errno, { } });
     DirectoryIdentity identity { static_cast<uint64_t>(status.st_dev), static_cast<uint64_t>(status.st_ino) };
     ArtifactRegistry& registry = singleton();
     bool shares = ArtifactStoreInternal::registryShares();
@@ -1203,7 +1105,6 @@ std::expected<Ref<OpenedArtifact>, int> ArtifactRegistry::take(int parentFd, int
         }
         if (existing) {
 #if ASSERT_ENABLED
-            // Every input of the header is process-wide, so the bytes the object was built from equal this VM's.
             HeaderDigest digest = artifactHeaderDigest(headerBytes);
             ASSERT(equalSpans(existing->headerDigest(), std::span { digest }));
 #endif
@@ -1211,7 +1112,6 @@ std::expected<Ref<OpenedArtifact>, int> ArtifactRegistry::take(int parentFd, int
         }
     }
 
-    // Built outside the lock, which stays a leaf.
     auto created = OpenedArtifact::create(parentFd, cacheFd, headerBytes);
     if (!created || !shares)
         return created;
@@ -1222,13 +1122,10 @@ std::expected<Ref<OpenedArtifact>, int> ArtifactRegistry::take(int parentFd, int
         auto& entry = registry.m_artifacts.add(identity, nullptr).iterator->value;
         registered = entry.get();
         if (!registered) {
-            // No live object for the directory, a dead entry included: this one is registered.
             entry = created->get();
             registered = created->ptr();
         }
     }
-    // When another VM registered its object first, that object wins, and this one is destroyed with created, outside
-    // the lock.
     return registered.releaseNonNull();
 #endif
 }
@@ -1253,16 +1150,6 @@ void setFault(std::optional<Fault> fault)
 void setRegistrySharing(bool sharing)
 {
     ArtifactStoreInternal::storeRegistrySharing.store(sharing);
-}
-
-void setInotify(bool enabled)
-{
-    ArtifactStoreInternal::storeInotifyEnabled.store(enabled);
-}
-
-void setFallbackListingInterval(std::optional<Seconds> interval)
-{
-    ArtifactStoreInternal::storeListingIntervalSeconds.store(interval ? interval->seconds() : std::numeric_limits<double>::quiet_NaN());
 }
 
 } // namespace StoreTesting

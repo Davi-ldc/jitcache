@@ -4,7 +4,7 @@
 // error as toJSON lines (SPEC-integrator.md sections 3.1 and 11.1); a Maintenance run writes its summary line to standard
 // output (maintenance sub-SPEC section 5). Each sequence's directory holds artifact/ beside scratch/ (harness sub-SPEC
 // section 7.3).
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const [stdoutPath, stderrPath, scratchPath] = process.argv.slice(2);
@@ -50,19 +50,22 @@ export function checkFinalStatus(expected: Record<string, unknown>) {
   }
 }
 
-// A clean that removed the given number of temporaries, after which cache/ holds none: the .<32 hex>.tmp names of
-// container sub-SPEC section 1.1.
-export function checkCleanRemoved(temporaries: number) {
+// A clean that removed no temporary, since commits create none, and reclaimed bytes exactly when the kill left bytes past
+// the pack's valid end, after which cache/pack ends at its valid end.
+export function checkCleanTruncated(bytesPastValidEnd: boolean) {
   const lines = readFileSync(stdoutPath, "utf8")
     .split("\n")
     .filter(line => line.startsWith("clean: "));
   if (lines.length !== 1) failCheck(`the clean wrote ${lines.length} summary lines, expected one`);
-  const summary = /^clean: done, (\d+) temporaries removed, \d+ bytes reclaimed$/.exec(lines[0]);
+  const summary = /^clean: done, (\d+) temporaries removed, (\d+) bytes reclaimed$/.exec(lines[0]);
   if (!summary) failCheck(`the clean's summary is ${JSON.stringify(lines[0])}`);
-  if (Number(summary[1]) !== temporaries) {
-    failCheck(`the clean removed ${summary[1]} temporaries, expected ${temporaries}`);
-  }
-  const cache = join(dirname(scratchPath), "artifact", "cache");
-  const left = readdirSync(cache).filter(name => /^\.[0-9a-f]{32}\.tmp$/.test(name));
-  if (left.length) failCheck(`${cache} still holds ${left.join(", ")} after the clean`);
+  if (Number(summary[1])) failCheck(`the clean removed ${summary[1]} temporaries, expected none`);
+  if ((Number(summary[2]) > 0) !== bytesPastValidEnd)
+    failCheck(`the clean reclaimed ${summary[2]} bytes, expected ${bytesPastValidEnd ? "some" : "none"}`);
+  const pack = readFileSync(join(dirname(scratchPath), "artifact", "cache", "pack"));
+  const view = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
+  const generations = [view.getBigUint64(64, true), view.getBigUint64(128, true)];
+  const slot = generations[0] > generations[1] ? 64 : 128;
+  const validEnd = Number(view.getBigUint64(slot + 8, true));
+  if (pack.byteLength !== validEnd) failCheck(`cache/pack holds ${pack.byteLength} bytes past a valid end of ${validEnd}`);
 }

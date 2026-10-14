@@ -104,7 +104,7 @@ BodyLookup VMState::openBody(const BodyKey& key)
     uint64_t startNanoseconds = report ? benchThreadCPUNanoseconds() : 0;
     // Full validation exactly when strict is on; both modes run the integrity checks (section 4.3).
     BodyOpen opened = artifact->open(key, strict() ? ValidationMode::Full : ValidationMode::Integrity);
-    if (opened.mappedBytes)
+    if (opened.bodyBytes)
         ++m_progress.bodyOpens;
 
     BenchReport::Lookup tally = BenchReport::Lookup::OpenBodyMissing;
@@ -134,8 +134,8 @@ BodyLookup VMState::openBody(const BodyKey& key)
         uint64_t nanoseconds = benchThreadCPUNanoseconds() - startNanoseconds;
         report->countLookup(tally, nanoseconds);
         // Harness sub-SPEC section 9.2: each openBody that maps a file.
-        if (opened.mappedBytes)
-            report->record("open"_s, { { "key"_s, bodyKeyHex(key) }, { "bytes"_s, opened.mappedBytes }, { "nanoseconds"_s, nanoseconds } });
+        if (opened.bodyBytes)
+            report->record("open"_s, { { "key"_s, bodyKeyHex(key) }, { "bytes"_s, opened.bodyBytes }, { "nanoseconds"_s, nanoseconds } });
     }
     return lookup;
 }

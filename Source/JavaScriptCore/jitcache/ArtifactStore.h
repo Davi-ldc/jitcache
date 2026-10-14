@@ -6,6 +6,7 @@
 #include <array>
 #include <bit>
 #include <expected>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -13,7 +14,6 @@
 #include <type_traits>
 #include <utility>
 #include <wtf/HashMap.h>
-#include <wtf/HashSet.h>
 #include <wtf/HashTraits.h>
 #include <wtf/Lock.h>
 #include <wtf/MonotonicTime.h>
@@ -22,48 +22,41 @@
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
 #include <wtf/ScopedLambda.h>
-#include <wtf/Seconds.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/ThreadSafeWeakPtr.h>
 #include <wtf/text/ASCIILiteral.h>
+#include <wtf/text/WTFString.h>
 
 namespace JSC::JITCache {
 
-// The artifact in a process (container sub-SPEC sections 1.1, 2 and 5 to 7): the artifact's names, the producer lock,
-// the registry of opened artifacts, an opened artifact with its index, and the store's reads.
+// The artifact in a process: its names, the producer lock, the registry of opened artifacts, the pack's mapping, and an
+// opened artifact that follows the pack's root and serves its bodies.
 
-// The names of container sub-SPEC section 1.1, relative to <parent> (Config::artifactPath):
+// The artifact's names, relative to <parent> (Config::artifactPath):
 //   <parent>/.cache.producer.lock
 //   <parent>/cache/header
+//   <parent>/cache/pack                    every body, in one log-structured file (JITCacheContainer.h)
 //   <parent>/cache/.header.<32 hex>.tmp    a header being written
-//   <parent>/cache/.<32 hex>.tmp           a body being written
-//   <parent>/cache/bodies/<80 hex>.bin     a body
+//   <parent>/cache/.pack.<32 hex>.tmp      a pack being written: a new artifact's, or a compaction's
+//   <parent>/.cache.replaced               an incompatible cache/ a ConsumerProducer moved aside
 namespace ArtifactNames {
 inline constexpr ASCIILiteral lockFile = ".cache.producer.lock"_s;
 inline constexpr ASCIILiteral cacheDirectory = "cache"_s;
 inline constexpr ASCIILiteral header = "header"_s;
-inline constexpr ASCIILiteral bodiesDirectory = "bodies"_s;
-// <parent>/.cache.replaced: an incompatible cache/ a ConsumerProducer moved aside (container sub-SPEC section 1.4).
+inline constexpr ASCIILiteral pack = "pack"_s;
 inline constexpr ASCIILiteral replacedCacheDirectory = ".cache.replaced"_s;
 } // namespace ArtifactNames
 
-// A body's name: the lowercase hex of its 40 canonical key bytes, which is THREAD Storage's body-key hash, then ".bin".
-// A lookup computes no hash for it.
-constexpr size_t bodyFileNameLength = 2 * BodyKey::byteSize + 4;
-struct BodyFileName {
-    std::array<char, bodyFileNameLength + 1> characters { }; // NUL-terminated, for the *at calls
-    const char* data() const LIFETIME_BOUND { return characters.data(); }
-    std::span<const char> span() const LIFETIME_BOUND { return std::span { characters }.first(bodyFileNameLength); }
-};
-BodyFileName bodyFileName(const BodyKey&);
-// The key a name encodes, or nothing: a name is a body name exactly when it has 80 lowercase hex digits before ".bin"
-// and BodyKey::fromBytes accepts the decoded bytes. name holds the characters without a terminator.
-std::optional<BodyKey> bodyKeyFromFileName(std::span<const char> name);
+// A body key as reports and the shell spell it: the lowercase hex of its 40 canonical bytes.
+constexpr size_t bodyKeyHexLength = 2 * BodyKey::byteSize;
+std::array<char, bodyKeyHexLength> bodyKeyHexDigits(const BodyKey&);
+// The key 80 lowercase hex digits spell, or nothing when they are not that or BodyKey::fromBytes rejects the bytes.
+std::optional<BodyKey> bodyKeyFromHex(std::span<const char>);
 
-// A temporary's name: a dot, 32 lowercase hex digits of a fresh 128-bit value from cryptographicallyRandomValues and
-// ".tmp", or ".header.", 32 hex digits and ".tmp" for a header temporary. Both are created with O_CREAT | O_EXCL in
-// cache/, so a body enters bodies/ only through the writer's rename.
-enum class TemporaryKind : uint8_t { Body, Header };
+// A temporary's name: ".header." or ".pack.", 32 lowercase hex digits of a fresh 128-bit value from
+// cryptographicallyRandomValues, and ".tmp". Both are created with O_CREAT | O_EXCL in cache/, so a header or a pack
+// takes its name only through a rename.
+enum class TemporaryKind : uint8_t { Header, Pack };
 constexpr size_t maximumTemporaryFileNameLength = 8 + 32 + 4; // ".header.", the hex digits, ".tmp"
 struct TemporaryFileName {
     std::array<char, maximumTemporaryFileNameLength + 1> characters { }; // NUL-terminated
@@ -72,26 +65,71 @@ struct TemporaryFileName {
 TemporaryFileName temporaryFileName(TemporaryKind);
 std::optional<TemporaryKind> temporaryKindOfFileName(std::span<const char> name);
 
-// Reads the directory directoryFd names the way every listing of the artifact does (container sub-SPEC section 6.2): it
-// opens "." relative to directoryFd, so it reads an open file description of its own from offset zero and never one it
-// shares with directoryFd, reads it with readdir on fdopendir of that descriptor, which closedir closes, and calls visit
-// with each entry's name, "." and ".." aside, and its inode. Returns 0, or the errno of the call that failed, after
-// which visit may have seen part of the directory. Any thread; it takes no lock, so a caller may hold one.
+// Reads the directory directoryFd names: it opens "." relative to directoryFd, so it reads an open file description of its
+// own from offset zero, reads it with readdir on fdopendir of that descriptor, and calls visit with each entry's name, "."
+// and ".." aside, and its inode. Returns 0, or the errno of the call that failed, after which visit may have seen part of
+// the directory. Any thread; it takes no lock.
 int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char> name, uint64_t inode)>& visit);
 
-// Removes <parent>/.cache.replaced, under the producer lock (container sub-SPEC section 1.4), the way a whole-artifact
-// deletion removes cache/ (maintenance sub-SPEC section 4.5): its temporaries, its bodies and its header, then bodies/ and
-// the directory. A name that is none of these stays, and with it the directories. Adds each removed file's size, taken
-// with fstatat before its unlinkat, to bytesRemoved. Returns 0, also when there is no such directory, or the errno of
-// the first call that failed.
+// Removes <parent>/.cache.replaced under the producer lock: its temporaries, its pack and its header, then the directory.
+// A name that is none of these stays, and with it the directory. Adds each removed file's size, taken with fstatat before
+// its unlinkat, to bytesRemoved. Returns 0, also when there is no such directory, or the errno of the first call that
+// failed.
 int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved);
 
-// The producer lock (container sub-SPEC section 2): a non-blocking flock on <parent>/.cache.producer.lock, a 64-byte file
+// Writes a new artifact's empty pack, under the producer lock: a pack temporary holding the prefix, an empty full index
+// and the root of generation 1, renamed to cache/pack. Returns 0 or the errno of the call that failed, after which no
+// temporary is left.
+int createEmptyPack(int cacheFd, std::span<const uint8_t, 16> headerDigest);
+
+// Whether a header-less cache/'s pack may hold a committed body: false only for a pack whose current root is the one a new
+// artifact's pack starts with, an empty full index right after the prefix. A pack that cannot be read counts as holding
+// bodies.
+bool packHoldsBodies(int cacheFd);
+
+// Why the artifact could not be read: the errno of the call that failed, or, with error 0, the reason its pack fails
+// container.pack.
+struct ArtifactReadFailure {
+    int error { 0 };
+    PackRejection packRejection;
+};
+
+// One shared, read-only mapping of a pack file whose prefix passed its checks. It maps more than the file holds, so the
+// pack grows into it without a new mapping; nothing reads past a valid end a root of this file named, which the file
+// always holds. The opened artifact that mapped it and every body or saved summary that borrows from it hold references,
+// and the last one unmaps it. A pack replaced or deleted meanwhile stays readable through it.
+class MappedPack final : public ThreadSafeRefCounted<MappedPack> {
+    WTF_MAKE_NONCOPYABLE(MappedPack);
+    WTF_MAKE_TZONE_ALLOCATED(MappedPack);
+public:
+    // cacheFd's pack, mapped with room for at least minimumCapacity bytes. ENOENT when cacheFd holds no pack.
+    static std::expected<Ref<MappedPack>, ArtifactReadFailure> map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity);
+    ~MappedPack();
+
+    uint64_t inode() const { return m_inode; }
+    uint64_t identifier() const { return m_identifier; }
+    uint64_t capacity() const { return m_mapping.size(); }
+    // The bytes [offset, offset + size), which the caller has bounded by a valid end this file's root named.
+    std::span<const uint8_t> bytes(uint64_t offset, uint64_t size) const LIFETIME_BOUND;
+    // The valid root with the highest generation, read with acquire order, so the bytes below its valid end are visible.
+    std::optional<PackRoot> currentRoot() const;
+    // The generations both slots hold now, read without checks: the cheap test of whether the root moved.
+    uint64_t highestSlotGeneration() const;
+    bool isRetired() const;
+
+private:
+    MappedPack(std::span<const uint8_t> mapping, uint64_t inode, uint64_t identifier);
+    uint64_t loadWord(size_t offset) const;
+
+    const std::span<const uint8_t> m_mapping; // MAP_SHARED, PROT_READ, larger than the file
+    const uint64_t m_inode;
+    const uint64_t m_identifier;
+};
+
+// The producer lock: a non-blocking flock on <parent>/.cache.producer.lock, a 64-byte file
 //   0   8  the bytes JITCLOCK
 //   8   4  layout version, 1
-//   12  4  0
-//   16  8  commit epoch
-//   24  40 0
+//   12  52 0
 // which a producing VM, clean and compact hold through one type. The lock lives on the open file description, so
 // destroying the object, or the process exiting, releases it; two descriptors of one process conflict, so a second
 // producing VM in a process is busy too. The file is never deleted or replaced.
@@ -104,20 +142,18 @@ public:
         int error; // otherwise the errno of the call that failed
     };
     static std::expected<std::unique_ptr<ProducerLock>, Failure> tryAcquire(int parentFd);
-    uint64_t bumpEpoch(); // returns the value the bump replaced
-    ~ProducerLock(); // unmaps and closes, which releases the lock
+    ~ProducerLock(); // closes, which releases the lock
 
 private:
-    ProducerLock(int fd, uint64_t* epoch);
+    explicit ProducerLock(int fd);
 
     const int m_fd; // the lock file, O_RDWR | O_CLOEXEC, holding LOCK_EX
-    uint64_t* const m_epoch; // the commit epoch, mapped PROT_READ | PROT_WRITE and MAP_SHARED; bumped with release order
 };
 
-// The index's hash and traits (container sub-SPEC section 6.1), which every integrator map keyed by a body key uses: the
-// index, the kept summaries and delta's candidate table. The hash reads the first four bytes of the key's identity
-// digest, which SHA-256 makes uniform, mixed with its kind, specialization and mode bytes. An all-zero key, which
-// BodyKey::fromBytes never accepts, is the empty value, and an all-0xFF key the deleted value.
+// The hash and traits of every integrator map keyed by a body key: the index, the kept summaries and delta's candidate
+// table. The hash reads the first four bytes of the key's identity digest, which SHA-256 makes uniform, mixed with its
+// kind, specialization and mode bytes. An all-zero key, which BodyKey::fromBytes never accepts, is the empty value, and an
+// all-0xFF key the deleted value.
 struct BodyKeyHash {
     static unsigned hash(const BodyKey&);
     static bool equal(const BodyKey& a, const BodyKey& b) { return a == b; }
@@ -125,87 +161,93 @@ struct BodyKeyHash {
 };
 struct BodyKeyHashTraits : WTF::GenericHashTraits<BodyKey> {
     static constexpr bool emptyValueIsZero = true;
-    static BodyKey emptyValue(); // std::bit_cast of BodyKey::byteSize zero bytes
-    static void constructDeletedValue(BodyKey&); // std::bit_cast of BodyKey::byteSize 0xFF bytes
+    static BodyKey emptyValue();
+    static void constructDeletedValue(BodyKey&);
     static bool isDeletedValue(const BodyKey&);
 };
-// Both values are byte fills, which needs a BodyKey that is trivially copyable and exactly its canonical bytes.
 static_assert(std::is_trivially_copyable_v<BodyKey>);
 static_assert(sizeof(BodyKey) == BodyKey::byteSize);
 
-struct IndexEntry {
-    uint64_t token; // nonzero; a fresh one whenever the index learns of another body at the key
-    uint64_t inode; // the body file's inode as a listing or the writer saw it; 0 when an event made the entry
-};
+// A pack's live entries by key, as its full index and deltas leave them.
+using PackIndex = HashMap<BodyKey, PackIndexEntry, BodyKeyHash, BodyKeyHashTraits>;
 
-// The outcomes of the store's two reads that open a body by its name (container sub-SPEC section 7):
-//   Absent       open: a key the index lacks, without a system call, or ENOENT, which erases the entry unless its
-//                token changed meanwhile; readSavedSummaries: ENOENT, which erases an entry for the key the same way
-//   Unavailable  EMFILE, ENFILE or ENOMEM from openat, fstat or mmap; the entry stays
-//   Invalid      any other error (container.io), or the first failed check of section 4.5 that the read's mode runs
-//   Found        the read succeeded; the index is left as it is
+// Reads the index the root names from a pack's bytes: walks the blocks back from the root's latest one to the full index,
+// or to stopAt when it meets it, and applies them in order to index. Every block and every entry must lie below the root's
+// valid end, and every body entry's record extent too, and a record header must repeat its entry's key, size and commit
+// identifier. Returns the number of blocks applied, or why the pack fails container.pack, after which index is
+// unspecified. readAt returns the bytes [offset, offset + size) of the pack, which the walk bounds first.
+// liveBytes, packLiveBytes of index, follows the blocks applied.
+struct PackIndexRead {
+    uint64_t blocks { 0 };
+    uint64_t deltasSinceFull { 0 }; // the delta blocks applied; with reachedFull, all of those since the full index
+    bool reachedFull { false }; // the walk reached a full index, so index holds only what the applied blocks list
+};
+std::expected<PackIndexRead, PackRejection> readPackIndex(const PackRoot&, std::optional<uint64_t> stopAt, PackIndex&, uint64_t& liveBytes,
+    const ScopedLambda<std::span<const uint8_t>(uint64_t offset, uint64_t size)>& readAt);
+
+// The bytes a pack's live bodies take: its prefix and the extents of the records its index lists. The rest of its valid
+// bytes, superseded records, tombstoned ones and index blocks, are dead.
+uint64_t packLiveBytes(const PackIndex&);
+
+// The outcomes of the store's two reads of a body:
+//   Absent       the index lists no body for the key
+//   Unavailable  the fault hook of test builds failed the read with EMFILE, ENFILE or ENOMEM
+//   Invalid      the pack failed its own checks (container.pack), or the body failed the first check of B1 to B8 that the
+//                read's mode runs, or, in Full mode, its index entry does not repeat its envelope (container.pack)
+//   Found        the read succeeded
 enum class StoreOutcome : uint8_t { Absent, Unavailable, Invalid, Found };
-struct StoreFailure { // Invalid: container.io with its errno, or a check of section 4.5
+struct StoreFailure { // Invalid: container.io with its errno, a check of B1 to B8, or container.pack
     ASCIILiteral check;
     int error { 0 };
+    PackRejection packRejection { };
 };
 
 struct BodyOpen {
     StoreOutcome outcome;
     RefPtr<ValidatedBody> body; // Found only
     StoreFailure failure;
-    // The size of the file the read mapped: set for Found and for an Invalid at a check of section 4.5, 0 when no file
-    // was mapped. The open bench event and Progress::bodyOpens count the opens that mapped a file (harness sub-SPEC
-    // section 9.2).
-    uint64_t mappedBytes { 0 };
+    // The size of the body the read reached: set for Found and for an Invalid at a body check, 0 otherwise. The open
+    // bench event and Progress::bodyOpens count the opens that reached one.
+    uint64_t bodyBytes { 0 };
 };
 
-// What one opened artifact's index has cost so far, which every flush of a bench report writes as an index line
-// (SPEC-integrator.md IB2). The VMs of a process that open one artifact share its index (II21), so these are the
-// process's totals for it, whichever VM did the work. Times are wall time from MonotonicTime, which the vDSO serves: the
-// index's work runs under m_indexLock, at request points and in the writer's step 8, inside spans that the lookups and
-// the commit measure with the thread CPU clock, so it adds no system call to them.
+// What one opened artifact's index has cost so far, which every flush of a bench report writes as an index line. The VMs
+// of a process that open one artifact share its index, so these are the process's totals for it. Times are wall time
+// from MonotonicTime, which the vDSO serves.
 struct IndexStatistics {
-    bool hasInotify { false }; // whether the index refreshes from inotify events now
     uint64_t bodies { 0 }; // the keys the index lists now
+    uint64_t generation { 0 }; // the root the index follows now
+    uint64_t packBytes { 0 }; // its valid end
+    uint64_t liveBytes { 0 }; // packLiveBytes of the index now
     uint64_t tableBytes { 0 }; // the index table's storage now: its buckets times their size
-    uint64_t buildNanoseconds { 0 }; // the listing that built the index
-    uint64_t listings { 0 }; // every listing, the build's and the failed ones included
-    uint64_t listingNanoseconds { 0 };
-    uint64_t failedListings { 0 };
-    // Inotify queue overflows and failed reads of the queue, each of which forces a listing: at once in a refresh, or at
-    // the first refresh the interval allows after the writer's step 8 marked one pending.
-    uint64_t queueOverflows { 0 };
-    uint64_t refreshes { 0 }; // lookups that found the epoch moved and applied the queued events or listed
-    uint64_t refreshNanoseconds { 0 }; // their time, the listings they ran included
-    uint64_t deferredRefreshes { 0 }; // lookups that found the epoch moved and left the listing to the interval
-    // Keys a deferred listing left as misses: keys a token read found no body for while the interval deferred a listing,
-    // which the next listing then found (section 6.3).
-    uint64_t deferredMisses { 0 };
-    uint64_t writerUpdates { 0 }; // the writer's index updates (container sub-SPEC section 8.2, step 8)
-    uint64_t timedWriterUpdates { 0 }; // those of commits given a CommitTiming, which alone read a clock
-    uint64_t writerUpdateNanoseconds { 0 }; // the timed updates' time under m_indexLock
+    uint64_t buildNanoseconds { 0 }; // the first reading of the pack: its mapping and its whole index
+    uint64_t refreshes { 0 }; // reads that found the root moved and applied it, reopens included
+    uint64_t refreshNanoseconds { 0 };
+    uint64_t appliedBlocks { 0 }; // index blocks those refreshes and the build applied
+    uint64_t reopens { 0 }; // new mappings: of a retired pack's successor, or of a pack that outgrew its mapping
+    uint64_t failedReopens { 0 }; // attempts that kept the mapping they had
+    uint64_t opens { 0 }; // reads that reached a body, the scoring reads included
 };
 
 class OpenedArtifact;
 
-class SavedSummaries { // one body's mapping, with its three summary sections checked; unmaps when destroyed
+class SavedSummaries { // one body's bytes, with its three summary sections checked; holds the pack's mapping
     WTF_MAKE_NONCOPYABLE(SavedSummaries);
     WTF_MAKE_TZONE_ALLOCATED(SavedSummaries);
 public:
-    uint64_t version() const; // the envelope's commit identifier
-    uint8_t highestTier() const;
-    std::span<const uint8_t> ucbFeedback() const;
-    std::span<const uint8_t> cbSummary() const;
-    std::span<const uint8_t> ics() const; // the whole ICsBaseline section
-    ~SavedSummaries(); // unmaps the body
+    uint64_t version() const { return m_version; } // the envelope's commit identifier
+    uint8_t highestTier() const { return m_highestTier; }
+    std::span<const uint8_t> ucbFeedback() const { return m_ucbFeedback; }
+    std::span<const uint8_t> cbSummary() const { return m_cbSummary; }
+    std::span<const uint8_t> ics() const { return m_ics; } // the whole ICsBaseline section
+    ~SavedSummaries();
 
 private:
-    friend class OpenedArtifact; // readSavedSummaries builds it from a mapping whose envelope, directory and summaries passed
-    SavedSummaries(std::span<const uint8_t> mapping, uint64_t version, uint8_t highestTier, std::span<const uint8_t> ucbFeedback,
+    friend class OpenedArtifact; // readSavedSummaries builds it from bytes whose envelope, directory and summaries passed
+    SavedSummaries(Ref<MappedPack>&&, uint64_t version, uint8_t highestTier, std::span<const uint8_t> ucbFeedback,
         std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics);
 
-    const std::span<const uint8_t> m_mapping; // the private mapping the destructor unmaps
+    const Ref<MappedPack> m_pack;
     const uint64_t m_version;
     const uint8_t m_highestTier;
     const std::span<const uint8_t> m_ucbFeedback;
@@ -218,114 +260,89 @@ struct SavedSummaryRead {
     StoreFailure failure;
 };
 
-// An opened artifact (container sub-SPEC section 5.2), which the VMs of a process that open one artifact share (II21).
-// Everything outside m_indexLock is immutable once the object is built. m_indexLock is a leaf: nothing under it takes
-// another lock, the only system calls made under it are the reads of the inotify descriptor and the listings' calls,
-// and it is never held while a body is mapped or validated, while an envelope is read, or while any lane, JSC or the
-// collector is called. The object's reads return results, raise nothing and know no VM.
+// An opened artifact, which the VMs of a process that open one artifact share. It maps the pack once and follows its root:
+// every read first loads the two slots' generations from the mapping, and only when they moved does it read the new root
+// and apply the index blocks appended since, or, when the mapped pack was retired or outgrew its mapping, map the path
+// again and read the whole index. Everything outside m_indexLock is immutable once the object is built. m_indexLock is a
+// leaf: nothing under it takes another lock, the only system calls made under it are a new mapping's, and it is never held
+// while a body is validated or while any lane, JSC or the collector is called.
 class OpenedArtifact final : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<OpenedArtifact> {
     WTF_MAKE_NONCOPYABLE(OpenedArtifact);
     WTF_MAKE_TZONE_ALLOCATED(OpenedArtifact);
 public:
-    ~OpenedArtifact(); // unmaps the epoch page and closes every descriptor
+    ~OpenedArtifact(); // drops the pack's mapping and closes the descriptors
 
-    // Section 7; any thread that holds no JITCache lock.
-    uint64_t token(const BodyKey&); // refreshes the index and returns the key's token, 0 when it lists no body; opens no file
-    BodyOpen open(const BodyKey&, ValidationMode); // maps the body name with MAP_POPULATE and validates it (section 7.2)
-    SavedSummaryRead readSavedSummaries(const BodyKey&, ValidationMode); // opens the body name whatever the index holds (section 7.3)
-    // Section 6.4: whether the index lists the key, after the refresh token makes, so the capture glue charges an index
-    // entry exactly when the writer's index update will add one (SPEC-integrator.md section 8.4, step 8).
+    // Any thread that holds no JITCache lock.
+    uint64_t token(const BodyKey&); // the commit identifier of the key's newest body, 0 when it has none; no system call
+    BodyOpen open(const BodyKey&, ValidationMode); // borrows the body from the mapping and validates it
+    SavedSummaryRead readSavedSummaries(const BodyKey&, ValidationMode); // the key's body through the current root
     bool containsKey(const BodyKey&);
-    // The number of keys the index lists, read under m_indexLock without a refresh: Progress::indexedBodies in status,
-    // which opens no file and changes no state, and the start bench event (SPEC-integrator.md section 3.3; harness
-    // sub-SPEC section 9.2).
-    uint64_t indexedBodies();
-    // The index's statistics, read under m_indexLock without a refresh: the index line each flush of a bench report
-    // writes for the artifact start handed it (harness sub-SPEC section 9.2).
-    IndexStatistics statistics();
+    uint64_t indexedBodies(); // without following the root: status and the start bench event
+    IndexStatistics statistics(); // without following the root
 
     std::span<const uint8_t, 16> headerDigest() const LIFETIME_BOUND;
-    int cacheFd() const; // the writer's temporaries (section 8.2)
-    int bodiesFd() const; // the writer's renames (section 8.2)
+    int cacheFd() const;
 
 private:
-    friend class ArtifactRegistry; // builds and registers objects (section 5.1)
-    friend class ArtifactWriter; // runs step 8 of section 8.2 under m_indexLock
-    // Opens the descriptors, the epoch mapping and the inotify watch, then lists; an error is the failing call's errno.
-    static std::expected<Ref<OpenedArtifact>, int> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
-    OpenedArtifact(int parentFd, int cacheFd, int bodiesFd, const std::array<uint8_t, 16>& headerDigest, const uint64_t* epoch, int inotifyFd);
+    friend class ArtifactRegistry; // builds and registers objects
+    friend class ArtifactWriter; // reads the current root and pack under m_indexLock and follows its own commits
+    static std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
+    OpenedArtifact(int parentFd, int cacheFd, const std::array<uint8_t, 16>& headerDigest);
 
-    // Section 6.3. Returns whether the index may lag the epoch because the listing interval deferred its listing.
-    bool refreshIfStale() WTF_REQUIRES_LOCK(m_indexLock);
-    // Section 6.2: drains the inotify queue, reads the epoch and lists. Success swaps the new map in, records that epoch as
-    // the last seen, clears a pending listing and counts in deferredMisses each key of m_missedWhileDeferred it found; a
-    // failure leaves the index as it was, records the epoch it read and marks a listing pending. Either empties
-    // m_missedWhileDeferred. Returns 0, or the errno of the call that failed.
-    int list() WTF_REQUIRES_LOCK(m_indexLock);
-    void drainEvents(bool listOnOverflow) WTF_REQUIRES_LOCK(m_indexLock); // section 6.3; the writer's step 8 passes false
-    void learn(const BodyKey&, uint64_t inode) WTF_REQUIRES_LOCK(m_indexLock); // section 6.4
-    void erase(const BodyKey&) WTF_REQUIRES_LOCK(m_indexLock);
-    // The current token of the key, 0 when the index lacks it, without a refresh: what open and readSavedSummaries read
-    // before their openat, and what an ENOENT compares with before it erases the key (section 6.4).
-    uint64_t currentToken(const BodyKey&) WTF_REQUIRES_LOCK(m_indexLock);
-    void eraseIfTokenIs(const BodyKey&, uint64_t token);
+    // Follows the root: returns the failure that makes every read Invalid, which stays once set.
+    std::optional<StoreFailure> follow() WTF_REQUIRES_LOCK(m_indexLock);
+    // Maps cache/pack afresh and reads its whole index; on failure keeps what the object had.
+    std::optional<ArtifactReadFailure> reopen(uint64_t minimumCapacity) WTF_REQUIRES_LOCK(m_indexLock);
+    std::optional<StoreFailure> applyRoot(const PackRoot&) WTF_REQUIRES_LOCK(m_indexLock);
 
     const int m_parentFd; // O_PATH | O_DIRECTORY
     const int m_cacheFd;
-    const int m_bodiesFd;
     const std::array<uint8_t, 16> m_headerDigest;
-    const uint64_t* const m_epoch; // the lock file's epoch, mapped PROT_READ; null when the object has none (section 2)
     Lock m_indexLock;
-    int m_inotifyFd WTF_GUARDED_BY_LOCK(m_indexLock) { -1 }; // -1 without inotify, and once the directory is gone
-    HashMap<BodyKey, IndexEntry, BodyKeyHash, BodyKeyHashTraits> m_index WTF_GUARDED_BY_LOCK(m_indexLock);
-    uint64_t m_nextToken WTF_GUARDED_BY_LOCK(m_indexLock) { 1 };
-    uint64_t m_lastEpochSeen WTF_GUARDED_BY_LOCK(m_indexLock) { 0 };
-    // When the last listing started, so an object that refreshes by listing lists at most once per
-    // fallbackListingIntervalMilliseconds (section 6.3).
-    MonotonicTime m_lastListingStart WTF_GUARDED_BY_LOCK(m_indexLock);
-    bool m_listingPending WTF_GUARDED_BY_LOCK(m_indexLock) { false };
-    bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false };
-    // The totals of IndexStatistics; statistics() fills the fields that describe the index now.
+    PackIndex m_index WTF_GUARDED_BY_LOCK(m_indexLock);
+    RefPtr<MappedPack> m_pack WTF_GUARDED_BY_LOCK(m_indexLock);
+    PackRoot m_root WTF_GUARDED_BY_LOCK(m_indexLock);
+    uint64_t m_liveBytes WTF_GUARDED_BY_LOCK(m_indexLock) { packPrefixBytes };
+    uint64_t m_deltasSinceFull WTF_GUARDED_BY_LOCK(m_indexLock) { 0 };
+    std::optional<StoreFailure> m_damage WTF_GUARDED_BY_LOCK(m_indexLock);
+    bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false }; // the retired pack's path holds no pack: every key misses
+    MonotonicTime m_nextRetiredReopen WTF_GUARDED_BY_LOCK(m_indexLock);
+    MonotonicTime m_retiredSince WTF_GUARDED_BY_LOCK(m_indexLock); // when a read first met the mapped pack's retired mark with the path unchanged
+
     IndexStatistics m_statistics WTF_GUARDED_BY_LOCK(m_indexLock);
-    // The keys token found no body for while the interval deferred a listing, until the next listing (section 6.3).
-    HashSet<BodyKey, BodyKeyHash, BodyKeyHashTraits> m_missedWhileDeferred WTF_GUARDED_BY_LOCK(m_indexLock);
 };
 
-// The process-wide registry of opened artifacts (container sub-SPEC section 5.1), keyed by the cache/ directory's
-// (st_dev, st_ino). take holds m_lock only to look the key up and to register a new object, and builds an object outside
-// it, so the lock is a leaf; when two VMs build an object for one directory at once, the second to register takes the
-// first's and destroys its own. A dead weak entry is replaced the same way.
+// The process-wide registry of opened artifacts, keyed by the cache/ directory's (st_dev, st_ino). take holds m_lock only
+// to look the key up and to register a new object, and builds an object outside it, so the lock is a leaf; when two VMs
+// build an object for one directory at once, the second to register takes the first's and destroys its own.
 class ArtifactRegistry {
     WTF_MAKE_NONCOPYABLE(ArtifactRegistry);
 public:
-    // The object for the directory cacheFd names; builds and registers one when no VM of the process holds it.
-    // An error is the errno of the failing call, which start reports at start.io.
-    static std::expected<Ref<OpenedArtifact>, int> take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
+    static std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> take(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
 
 private:
     friend class LazyNeverDestroyed<ArtifactRegistry>;
     ArtifactRegistry() = default;
     static ArtifactRegistry& singleton();
 
-    using DirectoryIdentity = std::pair<uint64_t, uint64_t>; // the cache/ directory's (st_dev, st_ino)
+    using DirectoryIdentity = std::pair<uint64_t, uint64_t>;
     Lock m_lock;
     HashMap<DirectoryIdentity, ThreadSafeWeakPtr<OpenedArtifact>> m_artifacts WTF_GUARDED_BY_LOCK(m_lock);
 };
 
 #if ENABLE(JITCACHE_TWINS)
-// The store's test interface (container sub-SPEC section 7.5). Every hook is process-wide and made of atomics, so it is
-// read without a lock, under m_indexLock included.
+// The store's test interface. Every hook is process-wide and made of atomics, so it is read without a lock.
 namespace StoreTesting {
-enum class Call : uint8_t { Open, ReadSavedSummaries, Listing };
+// Open is open's read of a body, ReadSavedSummaries the scoring read's, PackMap the openat of cache/pack that maps a pack.
+// A failed read answers as a failed system call would have: EMFILE, ENFILE and ENOMEM Unavailable, any other errno Invalid.
+enum class Call : uint8_t { Open, ReadSavedSummaries, PackMap };
 struct Fault {
     Call call;
     int error;
     std::optional<uint64_t> n; // counts calls of that kind from 1, from the setFault call; absent: every call
 };
-void setFault(std::optional<Fault>); // process-wide, any thread
-void setRegistrySharing(bool); // false: ArtifactRegistry::take builds a new OpenedArtifact at every call (test C4)
-void setInotify(bool); // false: an object built afterward creates no inotify descriptor and lists instead (test C4)
-void setFallbackListingInterval(std::optional<Seconds>); // replaces fallbackListingIntervalMilliseconds for every object; absent: the parameter (test C4)
+void setFault(std::optional<Fault>);
+void setRegistrySharing(bool); // false: ArtifactRegistry::take builds a new OpenedArtifact at every call
 } // namespace StoreTesting
 #endif
 

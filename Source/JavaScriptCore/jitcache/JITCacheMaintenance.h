@@ -40,6 +40,9 @@ struct Plan {
     uint64_t postCleanBytes { 0 };
     uint64_t targetBytes { 0 };
     uint64_t evictedBytes { 0 };
+    // The size of a pack that fails its own checks, whose bodies no reader can trust: evicted whole, before any body,
+    // whenever the target is above zero; 0 for a sound pack or none.
+    uint64_t damagedPackBytes { 0 };
     Vector<Eviction> evictions; // in eviction order
     bool deletesArtifact { false };
     friend bool operator==(const Plan&, const Plan&) = default;

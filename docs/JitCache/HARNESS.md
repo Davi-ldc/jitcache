@@ -99,7 +99,9 @@ The bench also proposes the numbers THREAD leaves to it, which the SPECs name as
 | `installationBoundSmallestBody` | the smallest body that bound covers (THREAD's opening) | unset |
 | `defaultProducerLimitBytes` | the producer limit when the host passes none, sized so it stays out of normal runs (THREAD Execution) | unset |
 | `writerStagingBytes` | the writer's staging buffer (SPEC-integrator.md IB5) | 64 KiB until tuned |
-| `fallbackListingIntervalMilliseconds` | the least time between two listings of an index that cannot read inotify events (SPEC-integrator.md IB2) | 1000 until tuned |
+| `packDeltaChainBound` | the index deltas a pack's chain holds before a commit writes a full index, which bounds a reader's walk at start (SPEC-integrator.md IB2) | 32 until tuned |
+| `retiredPackReopenIntervalMilliseconds` | the least time between a reader's looks at `cache/pack` once a retired mark has outlived its rename by a second | 100 until tuned |
+| `packMappingSlackBytes` | the address space a reader maps past the pack's valid end, so the pack grows without a new mapping | 256 MiB until tuned |
 | `benchConsumerProducerGenerations` | the ConsumerProducer runs IB10 chains (SPEC-integrator.md section 16) | unset |
 | `kRecordChargeStep` | recording's charge step (SPEC-image.md B2) | 4 KiB until tuned |
 | `catchUpMargin` | the ratio Ck/W within which a consumer's call counts as caught up | unset |

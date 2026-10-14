@@ -111,7 +111,7 @@ WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(KeptSummaries);
 namespace JITCacheCaptureInternal {
 
 // An index entry the writer adds for a key the index lacks is charged six of the index's bucket sizes (section 4.4).
-constexpr size_t indexBucketBytes = sizeof(HashMap<BodyKey, IndexEntry, BodyKeyHash, BodyKeyHashTraits>::KeyValuePairType);
+constexpr size_t indexBucketBytes = sizeof(PackIndex::KeyValuePairType);
 
 static size_t newEntryCharge(size_t bucketBytes, bool tableCharged)
 {
@@ -1290,11 +1290,32 @@ DeltaResult delta(VM& vm)
 
     // Steps 3 and 4, the three phases, free their candidate tables and release the charges before they return.
     DeltaCounts counts = runDeltaPhases(vm, *state, budget, CaptureClock(report));
+
+    // Step 5: after its commits, the delta compacts the pack once its dead bytes pass half of it. A body that fails its
+    // checks on the way is invalid material and any other failure a recording fault; the bodies committed above stay
+    // valid either way.
+    if (!counts.faulted && state->productionActive()) {
+        // The pack as the delta's commits left it, and what the compaction made of it, for the bench's pack event.
+        IndexStatistics before = report && state->artifact() ? state->artifact()->statistics() : IndexStatistics { };
+        auto compacted = state->writer()->compactIfNeeded(!!report);
+        if (!compacted) {
+            counts.faulted = true;
+            if (compacted.error().kind == CompactionFailure::Kind::Damaged)
+                state->raiseInvalidMaterial(compacted.error().check, WTF::move(compacted.error().detail));
+            else
+                state->raiseRecordingFault({ }, compacted.error().check, WTF::move(compacted.error().detail));
+        } else if (report) {
+            const CompactionResult* result = *compacted ? &**compacted : nullptr;
+            report->record("pack"_s, { { "bodies"_s, before.bodies }, { "bytes"_s, before.packBytes }, { "liveBytes"_s, before.liveBytes },
+                { "deadBytes"_s, before.packBytes - std::min(before.packBytes, before.liveBytes) }, { "compacted"_s, static_cast<uint64_t>(!!result) },
+                { "compactedBytes"_s, result ? result->packBytes : 0 }, { "compactionNanoseconds"_s, result ? result->nanoseconds : 0 } });
+        }
+    }
     finish(counts);
     if (counts.faulted)
         return faulted(counts);
 
-    // Step 5.
+    // Step 6.
     ++state->progress().deltaRuns;
     return { DeltaOutcome::Completed, { }, std::nullopt, counts.eligibleKeys, counts.committedBodies, counts.committedBytes, counts.deferredKeys };
 }

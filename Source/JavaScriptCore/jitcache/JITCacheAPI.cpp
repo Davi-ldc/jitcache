@@ -248,23 +248,12 @@ static StartResult ioFault(const String& path, ASCIILiteral what, int error)
     return { StartOutcome::Fault, "start.io"_s, makeString(what, " in "_s, path, ": "_s, errorText(error)) };
 }
 
-// A header-less cache/ is reused only when bodies/ holds no body name: its temporaries are removed, and the caller
-// creates bodies/ when it is missing (container sub-SPEC section 1.3). Returns the result that stops start, or nothing.
+// A header-less cache/ is reused only when its pack, if any, holds no body: its temporaries are removed, and the caller
+// writes a new pack and the header. Returns the result that stops start, or nothing.
 static std::optional<StartResult> resetRemnant(int cacheFd, const String& path)
 {
-    ScopedDescriptor bodies { openDirectoryAt(cacheFd, ArtifactNames::bodiesDirectory.characters()) };
-    if (bodies) {
-        bool holdsBody = false;
-        int error = listDirectory(bodies.get(), [&](std::span<const char> name, uint64_t) {
-            if (bodyKeyFromFileName(name))
-                holdsBody = true;
-        });
-        if (error)
-            return ioFault(path, "cannot list cache/bodies/"_s, error);
-        if (holdsBody)
-            return rejection("start.not-an-artifact"_s, makeString(path, "/cache holds committed bodies but no header"_s));
-    } else if (int error = errno; error != ENOENT)
-        return ioFault(path, "cannot open cache/bodies/"_s, error);
+    if (packHoldsBodies(cacheFd))
+        return rejection("start.not-an-artifact"_s, makeString(path, "/cache holds a pack with bodies but no header"_s));
 
     // Collected first and removed after the listing, so no entry goes while the directory is being read.
     Vector<TemporaryFileName> temporaries;
@@ -309,9 +298,9 @@ static std::optional<StartResult> writeHeader(int cacheFd, const String& path)
     return std::nullopt;
 }
 
-// A Producer's creation (container sub-SPEC section 1.3), under the producer lock: cache/ with bodies/, or a remnant
-// reset, then the header. A failure leaves whatever the step created, which the next Producer or clean finishes or
-// removes. Returns cache/'s descriptor.
+// A Producer's creation, under the producer lock: cache/, or a remnant reset, then an empty pack, then the header, so a
+// Consumer that finds the header finds the pack. A failure leaves whatever the step created, which the next Producer or
+// clean finishes or removes. Returns cache/'s descriptor.
 static std::expected<ScopedDescriptor, StartResult> createArtifact(int parentFd, const String& path)
 {
     ScopedDescriptor cache { openDirectoryAt(parentFd, ArtifactNames::cacheDirectory.characters()) };
@@ -334,8 +323,9 @@ static std::expected<ScopedDescriptor, StartResult> createArtifact(int parentFd,
         if (auto stopped = resetRemnant(cache.get(), path))
             return std::unexpected(WTF::move(*stopped));
     }
-    if (::mkdirat(cache.get(), ArtifactNames::bodiesDirectory.characters(), 0755) && errno != EEXIST)
-        return std::unexpected(ioFault(path, "cannot create cache/bodies/"_s, errno));
+    HeaderDigest digest = artifactHeaderDigest(expectedHeader().span());
+    if (int error = createEmptyPack(cache.get(), std::span<const uint8_t, 16> { digest }))
+        return std::unexpected(ioFault(path, "cannot create cache/pack"_s, error));
     if (auto stopped = writeHeader(cache.get(), path))
         return std::unexpected(WTF::move(*stopped));
     return cache;
@@ -452,9 +442,6 @@ static std::expected<ArtifactAccess, StartResult> openArtifact(const Config& con
     if (!cache && config.role == Role::ConsumerProducer && cache.error().step == "start.incompatible"_s) {
         replaced = WTF::move(cache.error().detail);
         cache = replaceArtifact(parent.get(), path);
-        // Other processes' objects then refresh and erase the old bodies, as after a whole-artifact deletion.
-        if (cache)
-            producerLock->bumpEpoch();
     }
     if (!cache)
         return std::unexpected(WTF::move(cache.error()));
@@ -462,8 +449,12 @@ static std::expected<ArtifactAccess, StartResult> openArtifact(const Config& con
     // The VMs of the process that open this directory share one object and its index (II21). Every input of the header
     // is process-wide, so a compatible header's bytes are the process's own.
     auto taken = ArtifactRegistry::take(parent.get(), cache->get(), expectedHeader().span());
-    if (!taken)
-        return std::unexpected(ioFault(path, "cannot open and list cache/bodies/"_s, taken.error()));
+    if (!taken) {
+        // A pack that fails its checks is the artifact's own damage, which start reports as it reports a corrupt header.
+        if (!taken.error().error)
+            return std::unexpected(StartResult { StartOutcome::Fault, "start.pack"_s, makeString("cache/pack fails container.pack: "_s, taken.error().packRejection) });
+        return std::unexpected(ioFault(path, "cannot map cache/pack"_s, taken.error().error));
+    }
     return ArtifactAccess { WTF::move(producerLock), WTF::move(*taken), WTF::move(replaced) };
 }
 

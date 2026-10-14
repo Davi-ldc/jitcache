@@ -82,11 +82,6 @@ static BodyKey maintenanceKey(uint8_t seed)
     return *key;
 }
 
-static String bodyName(const BodyKey& key)
-{
-    return String { bodyFileName(key).span() };
-}
-
 // A header that passes its own checks (container sub-SPEC section 3.2). Maintenance never compares it with the running
 // process, so crafted facts serve; another CPU feature vector gives another header and digest.
 static ArtifactHeaderBytes maintenanceHeader(uint64_t cpuFeatures = 0x15)
@@ -112,28 +107,6 @@ static Vector<uint8_t> filler(size_t size, uint8_t seed)
     return bytes;
 }
 
-// A body file laid out as the writer lays it out, every section of a tier-1 body in this build filled with sectionBytes
-// bytes, under any key, commit identifier and header digest; a test damages or misplaces it to reach a check.
-static Vector<uint8_t> syntheticBody(const BodyKey& key, const HeaderDigest& headerDigest, uint64_t version, size_t sectionBytes)
-{
-    std::array<Vector<uint8_t>, numberOfSectionKinds> sections;
-    Vector<ContainerTesting::Section> list;
-    for (size_t index = 0; index < numberOfSectionKinds; ++index) {
-        auto kind = static_cast<SectionKind>(index);
-        if (!isSectionRequired(kind, 1))
-            continue;
-        sections[index] = filler(sectionBytes, static_cast<uint8_t>(key.bytes()[8] + index));
-        list.append({ kind, sections[index].span() });
-    }
-    BodyEnvelope stamp;
-    stamp.highestTier = 1;
-    stamp.key = key;
-    stamp.version = version;
-    stamp.headerDigest = headerDigest;
-    stamp.llintThreshold = 300;
-    return ContainerTesting::buildBody(stamp, list.span());
-}
-
 static bool writeFileAt(TestContext& context, int directoryFd, const char* name, std::span<const uint8_t> bytes)
 {
     int fd = openat(directoryFd, name, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -154,6 +127,25 @@ static bool writeFileAt(TestContext& context, int directoryFd, const char* name,
     }
     ::close(fd);
     return true;
+}
+
+static std::optional<Vector<uint8_t>> readFileAt(int directoryFd, const char* name)
+{
+    int fd = openat(directoryFd, name, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return std::nullopt;
+    Vector<uint8_t> bytes;
+    std::array<uint8_t, 4096> buffer;
+    while (true) {
+        ssize_t count = ::read(fd, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0)
+            break;
+        bytes.append(std::span { buffer }.first(static_cast<size_t>(count)));
+    }
+    ::close(fd);
+    return bytes;
 }
 
 // A body the writer committed, with the terms compact orders it by.
@@ -185,8 +177,8 @@ static uint64_t totalBytes(std::span<const CommittedBody> bodies)
 
 enum class Layout : uint8_t {
     Parent, // <parent> alone
-    Remnant, // cache/ and cache/bodies/ without a header
-    Artifact, // cache/, cache/bodies/ and a header
+    Remnant, // cache/ without a header or a pack
+    Artifact, // cache/, an empty pack and a header
 };
 
 // A temporary <parent>, removed with everything in it when the object goes. Bodies are committed through the writer,
@@ -213,20 +205,25 @@ public:
         if (layout == Layout::Parent)
             return artifact;
         if (mkdirat(artifact->m_parentFd, ArtifactNames::cacheDirectory.characters(), 0755)
-            || (artifact->m_cacheFd = openat(artifact->m_parentFd, ArtifactNames::cacheDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0
-            || mkdirat(artifact->m_cacheFd, ArtifactNames::bodiesDirectory.characters(), 0755)
-            || (artifact->m_bodiesFd = openat(artifact->m_cacheFd, ArtifactNames::bodiesDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) {
+            || (artifact->m_cacheFd = openat(artifact->m_parentFd, ArtifactNames::cacheDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) {
             JITCACHE_FAIL(makeString("cannot lay out a test artifact: "_s, errnoText(errno)));
             return nullptr;
         }
-        if (layout == Layout::Artifact && !artifact->writeHeader(context, artifact->headerBytes()))
-            return nullptr;
+        if (layout == Layout::Artifact) {
+            auto digest = artifact->headerDigest();
+            if (int error = createEmptyPack(artifact->m_cacheFd, std::span<const uint8_t, 16> { digest })) {
+                JITCACHE_FAIL(makeString("createEmptyPack failed: "_s, errnoText(error)));
+                return nullptr;
+            }
+            if (!artifact->writeHeader(context, artifact->headerBytes()))
+                return nullptr;
+        }
         return artifact;
     }
 
     ~MaintenanceArtifact()
     {
-        for (int fd : { m_bodiesFd, m_cacheFd, m_parentFd }) {
+        for (int fd : { m_cacheFd, m_parentFd }) {
             if (fd >= 0)
                 ::close(fd);
         }
@@ -237,7 +234,6 @@ public:
     CString pathArgument() const { return m_path.utf8(); }
     int parentFd() const { return m_parentFd; }
     int cacheFd() const { return m_cacheFd; }
-    int bodiesFd() const { return m_bodiesFd; }
     std::span<const uint8_t> headerBytes() const LIFETIME_BOUND { return m_header.span(); }
     HeaderDigest headerDigest() const { return artifactHeaderDigest(headerBytes()); }
 
@@ -264,7 +260,7 @@ public:
         }
         auto taken = ArtifactRegistry::take(m_parentFd, m_cacheFd, headerBytes());
         if (!taken) {
-            JITCACHE_FAIL(makeString("ArtifactRegistry::take failed: "_s, errnoText(taken.error())));
+            JITCACHE_FAIL(makeString("ArtifactRegistry::take failed: "_s, taken.error().error ? errnoText(taken.error().error) : String { taken.error().packRejection }));
             return std::nullopt;
         }
         Ref<OpenedArtifact> object = WTF::move(*taken);
@@ -291,10 +287,34 @@ public:
         return CommittedBody { key, committed->fileSize, committed->version, score };
     }
 
-    // A body file placed under key's name by hand, as no writer would.
-    bool placeBody(TestContext& context, const BodyKey& key, std::span<const uint8_t> file)
+    // Flips a byte of the pack's last index block, which its CRC then rejects.
+    bool damagePack(TestContext& context)
     {
-        return writeFileAt(context, m_bodiesFd, bodyFileName(key).data(), file);
+        auto bytes = readFileAt(m_cacheFd, ArtifactNames::pack.characters());
+        if (!bytes || bytes->size() < 100) {
+            JITCACHE_FAIL("the artifact holds no pack to damage"_s);
+            return false;
+        }
+        (*bytes)[bytes->size() - 30] ^= 0x01;
+        return writeFileAt(context, m_cacheFd, ArtifactNames::pack.characters(), bytes->span());
+    }
+
+    // The bytes of every file in cache/: the artifact's size on disk.
+    uint64_t artifactBytes() const
+    {
+        uint64_t total = 0;
+        for (const char* directory : { "cache" }) {
+            auto listed = names(directory);
+            if (!listed)
+                continue;
+            for (auto& name : *listed) {
+                struct stat status;
+                CString path = makeString(String::fromUTF8(directory), '/', name).utf8();
+                if (!fstatat(m_parentFd, path.data(), &status, AT_SYMLINK_NOFOLLOW) && S_ISREG(status.st_mode))
+                    total += static_cast<uint64_t>(status.st_size);
+            }
+        }
+        return total;
     }
 
     // A temporary of that kind in cache/, as a producer killed mid-commit leaves one.
@@ -317,9 +337,62 @@ public:
 
     bool exists(const String& path) const { return exists(path.utf8().data()); }
 
+    // A fresh reader's view of the pack, which the registry does not share, or null without a pack that passes its checks.
+    RefPtr<OpenedArtifact> freshView() const
+    {
+        if (m_cacheFd < 0)
+            return nullptr;
+        StoreTesting::setRegistrySharing(false);
+        auto taken = ArtifactRegistry::take(m_parentFd, m_cacheFd, headerBytes());
+        StoreTesting::setRegistrySharing(true);
+        if (!taken)
+            return nullptr;
+        return WTF::move(*taken);
+    }
+
+    // Whether the pack's index lists a body for the key.
     bool holdsBody(const BodyKey& key) const
     {
-        return exists(makeString("cache/bodies/"_s, bodyName(key)));
+        RefPtr view = freshView();
+        return view && view->token(key);
+    }
+
+    // The bodies the pack's index lists, 0 without a pack or for one that fails its checks.
+    uint64_t bodiesInPack() const
+    {
+        RefPtr view = freshView();
+        return view ? view->indexedBodies() : 0;
+    }
+
+    size_t currentBodies() const { return bodiesInPack(); }
+
+    // The pack's valid end and file size.
+    uint64_t packValidEnd() const
+    {
+        RefPtr view = freshView();
+        return view ? view->statistics().packBytes : 0;
+    }
+
+    uint64_t packFileSize() const
+    {
+        struct stat status;
+        if (fstatat(m_cacheFd, ArtifactNames::pack.characters(), &status, AT_SYMLINK_NOFOLLOW))
+            return 0;
+        return static_cast<uint64_t>(status.st_size);
+    }
+
+    // Bytes a commit wrote past the valid end before it stopped.
+    bool appendGarbage(TestContext& context, size_t bytes)
+    {
+        int fd = openat(m_cacheFd, ArtifactNames::pack.characters(), O_WRONLY | O_APPEND | O_CLOEXEC);
+        if (fd < 0) {
+            JITCACHE_FAIL(makeString("cannot open the pack: "_s, errnoText(errno)));
+            return false;
+        }
+        auto garbage = filler(bytes, 0x5C);
+        bool written = ::write(fd, garbage.span().data(), garbage.size()) == static_cast<ssize_t>(garbage.size());
+        ::close(fd);
+        return written;
     }
 
     // The names a fresh listing of a directory under <parent> finds, or nothing when it cannot be listed.
@@ -352,42 +425,12 @@ public:
         return count;
     }
 
-    size_t bodiesInBodies() const
-    {
-        auto listed = names("cache/bodies");
-        if (!listed)
-            return 0;
-        size_t count = 0;
-        for (auto& name : *listed) {
-            CString characters = name.utf8();
-            if (bodyKeyFromFileName(characters.span()))
-                ++count;
-        }
-        return count;
-    }
-
-    // The commit epoch, read through the lock file (container sub-SPEC section 2).
-    std::optional<uint64_t> epoch() const
-    {
-        int fd = openat(m_parentFd, ArtifactNames::lockFile.characters(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0)
-            return std::nullopt;
-        std::array<uint8_t, sizeof(uint64_t)> bytes { };
-        ssize_t count = ::pread(fd, bytes.data(), bytes.size(), 16);
-        ::close(fd);
-        if (count != static_cast<ssize_t>(bytes.size()))
-            return std::nullopt;
-        uint64_t epoch = 0;
-        memcpySpan(asMutableByteSpan(epoch), std::span { bytes });
-        return epoch;
-    }
-
     // The store's view of what remains, as a VM that opens the artifact afterwards builds it.
     RefPtr<OpenedArtifact> take(TestContext& context)
     {
         auto taken = ArtifactRegistry::take(m_parentFd, m_cacheFd, headerBytes());
         if (!taken) {
-            JITCACHE_FAIL(makeString("ArtifactRegistry::take failed: "_s, errnoText(taken.error())));
+            JITCACHE_FAIL(makeString("ArtifactRegistry::take failed: "_s, taken.error().error ? errnoText(taken.error().error) : String { taken.error().packRejection }));
             return nullptr;
         }
         return WTF::move(*taken);
@@ -404,7 +447,6 @@ private:
     ArtifactHeaderBytes m_header;
     int m_parentFd { -1 };
     int m_cacheFd { -1 };
-    int m_bodiesFd { -1 };
 };
 
 // Commits count bodies with distinct scores and returns them in eviction order.
@@ -630,38 +672,66 @@ JITCACHE_TEST(maintenanceCleanRemovesOnlyTemporaries, No)
     auto bodies = commitBodies(context, *artifact, 2);
     if (!bodies)
         return;
-    if (!artifact->placeTemporary(context, TemporaryKind::Body, 100) || !artifact->placeTemporary(context, TemporaryKind::Body, 200)
+    if (!artifact->placeTemporary(context, TemporaryKind::Pack, 100) || !artifact->placeTemporary(context, TemporaryKind::Pack, 200)
         || !artifact->placeTemporary(context, TemporaryKind::Header, 50)
-        || !artifact->placeFile(context, artifact->cacheFd(), "notes.txt", 7) || !artifact->placeFile(context, artifact->bodiesFd(), "stray", 9))
+        || !artifact->placeFile(context, artifact->cacheFd(), "notes.txt", 7) || !artifact->placeFile(context, artifact->cacheFd(), "stray", 9))
         return;
-    auto epochBefore = artifact->epoch();
+    // A commit that stopped before its root left bytes past the valid end.
+    uint64_t validEnd = artifact->packValidEnd();
+    if (!artifact->appendGarbage(context, 77))
+        return;
 
     Maintenance::Report report = Maintenance::clean(artifact->path());
     if (!checkOutcome(context, "clean"_s, report, Maintenance::Outcome::Done))
         return;
     JITCACHE_CHECK(report.temporariesRemoved == 3);
-    JITCACHE_CHECK(report.bytesReclaimed == 350);
+    JITCACHE_CHECK(report.bytesReclaimed == 350 + 77);
     JITCACHE_CHECK(!report.bodiesEvicted);
     JITCACHE_CHECK(!report.plan);
     JITCACHE_CHECK(!artifact->temporariesInCache());
+    JITCACHE_CHECK(artifact->packFileSize() == validEnd && artifact->packValidEnd() == validEnd);
     JITCACHE_CHECK(artifact->holdsBody((*bodies)[0].key) && artifact->holdsBody((*bodies)[1].key));
     JITCACHE_CHECK(artifact->exists("cache/header"));
-    JITCACHE_CHECK(artifact->exists("cache/notes.txt") && artifact->exists("cache/bodies/stray"));
+    JITCACHE_CHECK(artifact->exists("cache/notes.txt") && artifact->exists("cache/stray"));
     JITCACHE_CHECK(report.diagnostics.size() == 2);
     JITCACHE_CHECK(hasDiagnostic(report, "unknown-file"_s, "cache/notes.txt"_s));
-    JITCACHE_CHECK(hasDiagnostic(report, "unknown-file"_s, "cache/bodies/stray"_s));
-    auto epochAfter = artifact->epoch();
-    JITCACHE_CHECK(epochBefore && epochAfter && *epochAfter == *epochBefore + 1);
+    JITCACHE_CHECK(hasDiagnostic(report, "unknown-file"_s, "cache/stray"_s));
 
-    // A clean with nothing to remove leaves the epoch alone.
+    // A clean with nothing to remove reclaims nothing.
     report = Maintenance::clean(artifact->path());
     JITCACHE_CHECK(report.outcome == Maintenance::Outcome::Done && !report.temporariesRemoved && !report.bytesReclaimed);
-    JITCACHE_CHECK(artifact->epoch() == epochAfter);
 }
 
-// M1. clean removes the .cache.replaced a ConsumerProducer's replacement left when it stopped midway (container sub-SPEC
-// section 1.4), with its header, bodies and temporaries, counts their bytes and bumps the epoch; a name in it that is no
-// artifact file stays, with the directories that hold it, and is reported.
+// M1. A compaction that died between its retired mark and its rename leaves the mark on the current pack: clean clears
+// it, and every body stays.
+JITCACHE_TEST(maintenanceCleanClearsAnAbandonedRetiredMark, No)
+{
+    HookScope hooks;
+    auto artifact = MaintenanceArtifact::create(context);
+    if (!artifact)
+        return;
+    auto bodies = commitBodies(context, *artifact, 2);
+    if (!bodies)
+        return;
+    int fd = openat(artifact->cacheFd(), ArtifactNames::pack.characters(), O_WRONLY | O_CLOEXEC);
+    uint64_t retired = 1;
+    bool marked = fd >= 0 && pwrite(fd, &retired, sizeof(retired), static_cast<off_t>(packRetiredOffset)) == static_cast<ssize_t>(sizeof(retired));
+    if (fd >= 0)
+        ::close(fd);
+    JITCACHE_CHECK(marked);
+    Maintenance::Report report = Maintenance::clean(artifact->path());
+    JITCACHE_CHECK(checkOutcome(context, "clean"_s, report, Maintenance::Outcome::Done));
+    auto pack = readFileAt(artifact->cacheFd(), ArtifactNames::pack.characters());
+    uint64_t mark = 1;
+    if (pack && pack->size() >= packPrefixBytes)
+        memcpySpan(asMutableByteSpan(mark), pack->span().subspan(packRetiredOffset, sizeof(mark)));
+    JITCACHE_CHECK(!mark);
+    JITCACHE_CHECK(artifact->bodiesInPack() == 2);
+}
+
+// M1. clean removes the .cache.replaced a ConsumerProducer's replacement left when it stopped midway, with its header,
+// pack and temporaries, and counts their bytes; a name in it that is no artifact file stays, with the directory, and is
+// reported.
 JITCACHE_TEST(maintenanceCleanRemovesAReplacedArtifact, No)
 {
     HookScope hooks;
@@ -671,44 +741,32 @@ JITCACHE_TEST(maintenanceCleanRemovesAReplacedArtifact, No)
         if (!artifact)
             return;
         int replacedFd = -1;
-        int replacedBodiesFd = -1;
         if (mkdirat(artifact->parentFd(), ArtifactNames::replacedCacheDirectory.characters(), 0755)
-            || (replacedFd = openat(artifact->parentFd(), ArtifactNames::replacedCacheDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0
-            || mkdirat(replacedFd, ArtifactNames::bodiesDirectory.characters(), 0755)
-            || (replacedBodiesFd = openat(replacedFd, ArtifactNames::bodiesDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) {
+            || (replacedFd = openat(artifact->parentFd(), ArtifactNames::replacedCacheDirectory.characters(), O_RDONLY | O_DIRECTORY | O_CLOEXEC)) < 0) {
             JITCACHE_FAIL(makeString(label, ": cannot make .cache.replaced: "_s, errnoText(errno)));
             return;
         }
         bool placed = artifact->placeFile(context, replacedFd, ArtifactNames::header.characters(), 64)
-            && artifact->placeFile(context, replacedBodiesFd, bodyFileName(maintenanceKey(7)).data(), 300)
-            && (!withUnknownFile || artifact->placeFile(context, replacedBodiesFd, "stray", 5));
-        ::close(replacedBodiesFd);
+            && artifact->placeFile(context, replacedFd, ArtifactNames::pack.characters(), 300)
+            && (!withUnknownFile || artifact->placeFile(context, replacedFd, "stray", 5));
         ::close(replacedFd);
         if (!placed)
             return;
-        // The lock file a replacing ConsumerProducer leaves, whose epoch clean bumps.
-        if (!ProducerLock::tryAcquire(artifact->parentFd())) {
-            JITCACHE_FAIL(makeString(label, ": cannot create the lock file"_s));
-            return;
-        }
-        auto epochBefore = artifact->epoch();
 
         Maintenance::Report report = Maintenance::clean(artifact->path());
         if (!checkOutcome(context, label, report, Maintenance::Outcome::Done))
             continue;
         if (report.bytesReclaimed != 364)
             JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
-        if (artifact->exists(".cache.replaced") != withUnknownFile || artifact->exists(".cache.replaced/bodies/stray") != withUnknownFile)
+        if (artifact->exists(".cache.replaced") != withUnknownFile || artifact->exists(".cache.replaced/stray") != withUnknownFile)
             JITCACHE_FAIL(makeString(label, ": .cache.replaced is "_s, artifact->exists(".cache.replaced") ? "still there"_s : "gone"_s));
         if (withUnknownFile != hasDiagnosticStartingWith(report, "unlink-failed"_s, ".cache.replaced/"_s))
             JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
-        auto epochAfter = artifact->epoch();
-        JITCACHE_CHECK(epochBefore && epochAfter && *epochAfter == *epochBefore + 1);
         JITCACHE_CHECK(artifact->exists("cache/header"));
     }
 }
 
-// M1. A header-less cache/ that holds a body is a remnant clean never finishes: it removes the temporaries only.
+// M1. A header-less cache/ whose pack holds a body is a remnant clean never finishes: it removes the temporaries only.
 JITCACHE_TEST(maintenanceCleanKeepsTheBodiesOfARemnant, No)
 {
     HookScope hooks;
@@ -716,7 +774,7 @@ JITCACHE_TEST(maintenanceCleanKeepsTheBodiesOfARemnant, No)
     if (!artifact)
         return;
     auto body = artifact->commit(context, maintenanceKey(1), 500, 0, 64);
-    if (!body || !artifact->placeTemporary(context, TemporaryKind::Body, 40))
+    if (!body || !artifact->placeTemporary(context, TemporaryKind::Pack, 40))
         return;
     if (unlinkat(artifact->cacheFd(), ArtifactNames::header.characters(), 0)) {
         JITCACHE_FAIL(makeString("cannot remove the header: "_s, errnoText(errno)));
@@ -727,31 +785,35 @@ JITCACHE_TEST(maintenanceCleanKeepsTheBodiesOfARemnant, No)
     if (!checkOutcome(context, "clean"_s, report, Maintenance::Outcome::Done))
         return;
     JITCACHE_CHECK(report.temporariesRemoved == 1 && report.bytesReclaimed == 40);
-    JITCACHE_CHECK(artifact->holdsBody(body->key));
-    JITCACHE_CHECK(artifact->exists("cache/bodies"));
+    JITCACHE_CHECK(artifact->exists("cache/pack"));
     JITCACHE_CHECK(report.diagnostics.size() == 1 && countDiagnostics(report, "remnant-with-bodies"_s) == 1);
 }
 
-// M1. clean finishes a header-less remnant with no body, with or without bodies/, and keeps the lock file.
+// M1. clean finishes a header-less remnant whose pack, if any, holds no body, and keeps the lock file.
 JITCACHE_TEST(maintenanceCleanFinishesARemnantWithoutBodies, No)
 {
     HookScope hooks;
-    for (bool withBodiesDirectory : { true, false }) {
-        String label = withBodiesDirectory ? "with bodies/"_s : "without bodies/"_s;
+    for (bool withEmptyPack : { true, false }) {
+        String label = withEmptyPack ? "with an empty pack"_s : "without a pack"_s;
         auto artifact = MaintenanceArtifact::create(context, Layout::Remnant);
         if (!artifact)
             return;
-        if (!artifact->placeTemporary(context, TemporaryKind::Body, 30) || !artifact->placeTemporary(context, TemporaryKind::Header, 20))
+        if (!artifact->placeTemporary(context, TemporaryKind::Pack, 30) || !artifact->placeTemporary(context, TemporaryKind::Header, 20))
             return;
-        if (!withBodiesDirectory && unlinkat(artifact->cacheFd(), ArtifactNames::bodiesDirectory.characters(), AT_REMOVEDIR)) {
-            JITCACHE_FAIL(makeString("cannot remove bodies/: "_s, errnoText(errno)));
-            return;
+        uint64_t packBytes = 0;
+        if (withEmptyPack) {
+            auto digest = artifact->headerDigest();
+            if (int error = createEmptyPack(artifact->cacheFd(), std::span<const uint8_t, 16> { digest })) {
+                JITCACHE_FAIL(makeString("createEmptyPack failed: "_s, errnoText(error)));
+                return;
+            }
+            packBytes = artifact->packFileSize();
         }
 
         Maintenance::Report report = Maintenance::clean(artifact->path());
         if (!checkOutcome(context, label, report, Maintenance::Outcome::Done))
             continue;
-        if (report.temporariesRemoved != 2 || report.bytesReclaimed != 50 || !report.diagnostics.isEmpty())
+        if (report.temporariesRemoved != 2 || report.bytesReclaimed != 50 + packBytes || !report.diagnostics.isEmpty())
             JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
         if (artifact->exists("cache"))
             JITCACHE_FAIL(makeString(label, ": cache/ is still there"_s));
@@ -764,22 +826,21 @@ JITCACHE_TEST(maintenanceCleanFinishesARemnantWithoutBodies, No)
 JITCACHE_TEST(maintenanceCleanLeavesARemnantHoldingAnUnknownFile, No)
 {
     HookScope hooks;
-    for (bool inBodies : { false, true }) {
-        String label = inBodies ? "an unknown file in bodies/"_s : "an unknown file in cache/"_s;
+    {
+        String label = "an unknown file in cache/"_s;
         auto artifact = MaintenanceArtifact::create(context, Layout::Remnant);
         if (!artifact)
             return;
-        if (!artifact->placeTemporary(context, TemporaryKind::Body, 30)
-            || !artifact->placeFile(context, inBodies ? artifact->bodiesFd() : artifact->cacheFd(), "keep-me", 5))
+        if (!artifact->placeTemporary(context, TemporaryKind::Pack, 30) || !artifact->placeFile(context, artifact->cacheFd(), "keep-me", 5))
             return;
 
         Maintenance::Report report = Maintenance::clean(artifact->path());
         if (!checkOutcome(context, label, report, Maintenance::Outcome::Done))
-            continue;
-        String unknown = inBodies ? "cache/bodies/keep-me"_s : "cache/keep-me"_s;
+            return;
+        String unknown = "cache/keep-me"_s;
         if (report.temporariesRemoved != 1 || report.diagnostics.size() != 1 || !hasDiagnostic(report, "unknown-file"_s, unknown))
             JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
-        if (!artifact->exists("cache/bodies") || !artifact->exists(unknown) || artifact->temporariesInCache())
+        if (!artifact->exists("cache") || !artifact->exists(unknown) || artifact->temporariesInCache())
             JITCACHE_FAIL(makeString(label, ": the remnant did not stay as it should"_s));
     }
 }
@@ -817,7 +878,7 @@ JITCACHE_TEST(maintenanceIsBusyWhileAProducerLockIsHeld, No)
     if (!artifact)
         return;
     auto body = artifact->commit(context, maintenanceKey(1), 500, 0, 64);
-    if (!body || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+    if (!body || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
         return;
 
     {
@@ -852,7 +913,7 @@ JITCACHE_TEST(maintenanceBadHeaderStopsCompactButNotClean, No)
         if (!artifact)
             return;
         auto body = artifact->commit(context, maintenanceKey(1), 500, 0, 64);
-        if (!body || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+        if (!body || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
             return;
         if (!artifact->writeHeader(context, corrupt ? garbage.span() : laterLayout.span()))
             return;
@@ -906,7 +967,7 @@ JITCACHE_TEST(maintenanceCompactOrdersByScoreThenKey, No)
     JITCACHE_CHECK(plan.deletesArtifact);
     JITCACHE_CHECK(plan.headerDigest == artifact->headerDigest());
     JITCACHE_CHECK(report.diagnostics.isEmpty());
-    JITCACHE_CHECK(artifact->bodiesInBodies() == 5 && artifact->exists("cache/header"));
+    JITCACHE_CHECK(artifact->bodiesInPack() == 5 && artifact->exists("cache/header"));
 }
 
 // M2. Ratio 0 evicts nothing and only cleans, on an artifact with bodies and on one with none, whose header stays.
@@ -919,8 +980,10 @@ JITCACHE_TEST(maintenanceCompactAtRatioZeroOnlyCleans, No)
         if (!artifact)
             return;
         auto bodies = commitBodies(context, *artifact, bodyCount);
-        if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 40))
+        if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Pack, 40))
             return;
+        // Besides the temporary, compact drops the pack's dead bytes: the index deltas the commits appended.
+        uint64_t sizeBefore = artifact->artifactBytes();
 
         Maintenance::Report report = Maintenance::compact(artifact->path(), 0, { });
         if (!checkOutcome(context, label, report, Maintenance::Outcome::Done) || !report.plan)
@@ -930,9 +993,9 @@ JITCACHE_TEST(maintenanceCompactAtRatioZeroOnlyCleans, No)
             JITCACHE_FAIL(makeString(label, ": the plan evicts something"_s));
         if (plan.postCleanBytes != totalBytes(bodies->span()) + artifact->headerBytes().size())
             JITCACHE_FAIL(makeString(label, ": postCleanBytes is "_s, plan.postCleanBytes));
-        if (report.temporariesRemoved != 1 || report.bytesReclaimed != 40 || report.bodiesEvicted || !report.diagnostics.isEmpty())
+        if (report.temporariesRemoved != 1 || report.bytesReclaimed != sizeBefore - artifact->artifactBytes() || report.bodiesEvicted || !report.diagnostics.isEmpty())
             JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
-        if (!artifact->exists("cache/header") || artifact->bodiesInBodies() != bodyCount || artifact->temporariesInCache())
+        if (!artifact->exists("cache/header") || artifact->bodiesInPack() != bodyCount || artifact->temporariesInCache())
             JITCACHE_FAIL(makeString(label, ": the artifact is not what a clean leaves"_s));
     }
 }
@@ -950,7 +1013,7 @@ JITCACHE_TEST(maintenanceCompactEvictsTheBodyItsTargetFallsIn, No)
     auto& order = *bodies;
     uint64_t postCleanBytes = totalBytes(order.span()) + artifact->headerBytes().size();
     double ratio = (static_cast<double>(order[0].bytes) + static_cast<double>(order[1].bytes) / 2) / static_cast<double>(postCleanBytes);
-    auto epochBefore = artifact->epoch();
+    uint64_t sizeBefore = artifact->artifactBytes();
 
     Maintenance::Report report = Maintenance::compact(artifact->path(), ratio, { });
     if (!checkOutcome(context, "compact"_s, report, Maintenance::Outcome::Done) || !report.plan)
@@ -962,108 +1025,127 @@ JITCACHE_TEST(maintenanceCompactEvictsTheBodyItsTargetFallsIn, No)
     checkEvictions(context, "the plan"_s, plan, order.span().first(2));
     JITCACHE_CHECK(plan.evictedBytes == order[0].bytes + order[1].bytes);
     JITCACHE_CHECK(!plan.deletesArtifact);
-    JITCACHE_CHECK(report.bodiesEvicted == 2 && report.bytesReclaimed == order[0].bytes + order[1].bytes);
+    // The compaction reclaims what the old pack held beyond the new one: the evicted records and the index deltas.
+    JITCACHE_CHECK(report.bodiesEvicted == 2 && report.bytesReclaimed == sizeBefore - artifact->artifactBytes());
+    JITCACHE_CHECK(report.bytesReclaimed > order[0].bytes + order[1].bytes);
     JITCACHE_CHECK(!artifact->holdsBody(order[0].key) && !artifact->holdsBody(order[1].key) && artifact->holdsBody(order[2].key));
+    JITCACHE_CHECK(artifact->bodiesInPack() == 1);
     JITCACHE_CHECK(artifact->exists("cache/header"));
-    auto epochAfter = artifact->epoch();
-    JITCACHE_CHECK(epochBefore && epochAfter && *epochAfter == *epochBefore + 1);
 }
 
-// M2. Bodies whose envelopes fail B1 to B5 are evicted first, with score -infinity, version 0 and a diagnostic each:
-// damaged-body for B1, B2 and B5, foreign-body for B4, misnamed-body for B3. A body name that is not a regular file fails
-// B1 with 0 bytes (section 6): a FIFO, which an open that could block would wait on for good, and a symbolic link to a
-// sound body, whose target's envelope would otherwise be judged under the link's name.
-JITCACHE_TEST(maintenanceCompactEvictsDamagedForeignAndMisnamedBodiesFirst, No)
+// M7. Compact plans the bodies the pack's index lists, the newest version of each key only, and applies a plan that keeps
+// bodies as a compaction: the evicted bodies and the superseded versions leave with the old pack, and the reclaimed bytes
+// are the artifact's own decrease. A ratio of 1 deletes the pack with the rest.
+JITCACHE_TEST(maintenanceCompactRewritesThePack, No)
 {
     HookScope hooks;
     auto artifact = MaintenanceArtifact::create(context);
     if (!artifact)
         return;
-    auto good = commitBodies(context, *artifact, 2);
-    if (!good)
+    auto bodies = commitBodies(context, *artifact, 4);
+    if (!bodies)
+        return;
+    auto& order = *bodies;
+    // A later version of the highest-scored body supersedes its first.
+    auto newer = artifact->commit(context, order[3].key, 500, 120, 64);
+    if (!newer)
         return;
 
-    HeaderDigest digest = artifact->headerDigest();
-    HeaderDigest otherDigest = artifactHeaderDigest(maintenanceHeader(0x2A).span());
-    enum class Placement : uint8_t { File, FIFO, Link };
-    struct Damage {
-        BodyKey name;
-        Vector<uint8_t> file; // Placement::File only
-        ASCIILiteral code;
-        ContainerCheck check;
-        Placement placement { Placement::File };
-    };
-    Vector<Damage> damages;
-    {
-        Vector<uint8_t> truncated = syntheticBody(maintenanceKey(20), digest, 7, 16);
-        truncated.shrink(100);
-        damages.append({ maintenanceKey(20), WTF::move(truncated), "damaged-body"_s, ContainerChecks::size });
-        Vector<uint8_t> badEnvelope = syntheticBody(maintenanceKey(21), digest, 8, 16);
-        badEnvelope[92] ^= 0x01; // P changes under the envelope's CRC
-        damages.append({ maintenanceKey(21), WTF::move(badEnvelope), "damaged-body"_s, ContainerChecks::envelope });
-        damages.append({ maintenanceKey(22), syntheticBody(maintenanceKey(22), digest, 0, 16), "damaged-body"_s, ContainerChecks::version });
-        damages.append({ maintenanceKey(23), syntheticBody(maintenanceKey(23), otherDigest, 9, 16), "foreign-body"_s, ContainerChecks::headerDigest });
-        damages.append({ maintenanceKey(24), syntheticBody(maintenanceKey(25), digest, 10, 16), "misnamed-body"_s, ContainerChecks::key });
-        damages.append({ maintenanceKey(26), { }, "damaged-body"_s, ContainerChecks::size, Placement::FIFO });
-        damages.append({ maintenanceKey(27), { }, "damaged-body"_s, ContainerChecks::size, Placement::Link });
-    }
-    Vector<CommittedBody> bad;
-    for (auto& damage : damages) {
-        switch (damage.placement) {
-        case Placement::File:
-            if (!artifact->placeBody(context, damage.name, damage.file.span()))
-                return;
-            break;
-        case Placement::FIFO:
-            if (mkfifoat(artifact->bodiesFd(), bodyFileName(damage.name).data(), 0644)) {
-                JITCACHE_FAIL(makeString("cannot make a FIFO under a body name: "_s, errnoText(errno)));
-                return;
-            }
-            break;
-        case Placement::Link:
-            // A relative target resolves in bodies/, the link's own directory.
-            if (symlinkat(bodyFileName((*good)[0].key).data(), artifact->bodiesFd(), bodyFileName(damage.name).data())) {
-                JITCACHE_FAIL(makeString("cannot make a symbolic link under a body name: "_s, errnoText(errno)));
-                return;
-            }
-            break;
-        }
-        bad.append({ damage.name, damage.file.size(), 0, -std::numeric_limits<double>::infinity() });
-    }
-    Vector<CommittedBody> all = bad;
-    all.appendVector(*good);
-    Vector<CommittedBody> expected = inEvictionOrder(WTF::move(all));
-    // The applied plan below aims at exactly the bad bodies' bytes, so it takes all of them only when the last of them in
-    // eviction order, by key bytes, has bytes of its own: a body of 0 bytes after it would be left out.
-    JITCACHE_CHECK(expected[damages.size() - 1].bytes);
-
-    auto checkDiagnostics = [&](const String& label, const Maintenance::Report& report) {
-        for (auto& damage : damages) {
-            String detail = makeString("cache/bodies/"_s, bodyName(damage.name), ": "_s, damage.check);
-            if (!hasDiagnostic(report, damage.code, detail))
-                JITCACHE_FAIL(makeString(label, ": no "_s, damage.code, " diagnostic "_s, detail, " in "_s, describe(report)));
-        }
-    };
-
-    Maintenance::Report report = compactAnswering(*artifact, 1, Maintenance::Answer::No);
-    if (!checkOutcome(context, "compact 1 --no"_s, report, Maintenance::Outcome::Declined) || !report.plan)
+    Maintenance::Report declined = compactAnswering(*artifact, 1, Maintenance::Answer::No);
+    if (!checkOutcome(context, "compact 1 --no"_s, declined, Maintenance::Outcome::Declined) || !declined.plan)
         return;
-    checkEvictions(context, "the whole plan"_s, *report.plan, expected.span());
-    checkDiagnostics("the whole plan"_s, report);
-    JITCACHE_CHECK(report.diagnostics.size() == damages.size());
+    JITCACHE_CHECK(declined.plan->evictions.size() == 4);
+    uint64_t planned = order[0].bytes + order[1].bytes + order[2].bytes + newer->bytes;
+    JITCACHE_CHECK(declined.plan->postCleanBytes == planned + artifact->headerBytes().size());
 
-    // A target of exactly the bad bodies' bytes takes them and stops.
-    uint64_t badBytes = totalBytes(bad.span());
-    double ratio = (static_cast<double>(badBytes) - 0.5) / static_cast<double>(report.plan->postCleanBytes);
-    report = Maintenance::compact(artifact->path(), ratio, { });
+    uint64_t sizeBefore = artifact->artifactBytes();
+    double ratio = static_cast<double>(order[0].bytes) / static_cast<double>(declined.plan->postCleanBytes);
+    Maintenance::Report report = Maintenance::compact(artifact->path(), ratio, { });
     if (!checkOutcome(context, "compact"_s, report, Maintenance::Outcome::Done) || !report.plan)
         return;
-    checkEvictions(context, "the plan"_s, *report.plan, expected.span().first(damages.size()));
-    checkDiagnostics("the applied plan"_s, report);
-    JITCACHE_CHECK(report.bodiesEvicted == damages.size() && report.bytesReclaimed == badBytes);
-    for (auto& damage : damages)
-        JITCACHE_CHECK(!artifact->holdsBody(damage.name));
-    JITCACHE_CHECK(artifact->holdsBody((*good)[0].key) && artifact->holdsBody((*good)[1].key) && artifact->exists("cache/header"));
+    JITCACHE_CHECK(report.plan->evictions.size() == 1 && report.bodiesEvicted == 1);
+    JITCACHE_CHECK(!artifact->holdsBody(order[0].key) && artifact->holdsBody(order[1].key) && artifact->holdsBody(order[2].key));
+    JITCACHE_CHECK(artifact->bodiesInPack() == 3);
+    JITCACHE_CHECK(report.bytesReclaimed == sizeBefore - artifact->artifactBytes());
+    RefPtr view = artifact->freshView();
+    JITCACHE_CHECK(view && view->token(order[3].key) == newer->version);
+
+    Maintenance::Report deletion = compactAnswering(*artifact, 1, Maintenance::Answer::Yes);
+    if (!checkOutcome(context, "compact 1 --yes"_s, deletion, Maintenance::Outcome::Done))
+        return;
+    JITCACHE_CHECK(deletion.bodiesEvicted == 3 && !artifact->exists("cache"));
+}
+
+// M7. A pack that fails its own checks is evicted whole, before any body, by any ratio above 0, with damaged-pack; since
+// no body is left to keep, the plan deletes the artifact. Ratio 0 leaves it.
+JITCACHE_TEST(maintenanceCompactEvictsADamagedPack, No)
+{
+    HookScope hooks;
+    auto artifact = MaintenanceArtifact::create(context);
+    if (!artifact)
+        return;
+    auto packed = commitBodies(context, *artifact, 2);
+    if (!packed || !artifact->damagePack(context))
+        return;
+
+    Maintenance::Report kept = Maintenance::compact(artifact->path(), 0, { });
+    if (!checkOutcome(context, "compact 0"_s, kept, Maintenance::Outcome::Done) || !kept.plan)
+        return;
+    JITCACHE_CHECK(!kept.plan->damagedPackBytes && artifact->exists("cache/pack"));
+    bool reported = std::ranges::any_of(kept.diagnostics, [](auto& diagnostic) { return diagnostic.code == "damaged-pack"_s; });
+    JITCACHE_CHECK(reported);
+
+    Maintenance::Report report = compactAnswering(*artifact, 0.01, Maintenance::Answer::Yes);
+    if (!checkOutcome(context, "compact 0.01 --yes"_s, report, Maintenance::Outcome::Done) || !report.plan)
+        return;
+    JITCACHE_CHECK(report.plan->damagedPackBytes && report.plan->evictions.isEmpty() && report.plan->deletesArtifact);
+    JITCACHE_CHECK(!artifact->exists("cache"));
+}
+
+// M2. A body that fails its checks while compact moves it is left out with a damaged-body diagnostic, and the bodies
+// around it move whole.
+JITCACHE_TEST(maintenanceCompactDropsADamagedBody, No)
+{
+    HookScope hooks;
+    auto artifact = MaintenanceArtifact::create(context);
+    if (!artifact)
+        return;
+    auto bodies = commitBodies(context, *artifact, 3);
+    if (!bodies)
+        return;
+    // The middle record's last byte belongs to its last section, which every check of the body covers.
+    RefPtr view = artifact->freshView();
+    auto pack = readFileAt(artifact->cacheFd(), ArtifactNames::pack.characters());
+    if (!view || !pack) {
+        JITCACHE_FAIL("the pack cannot be read"_s);
+        return;
+    }
+    const CommittedBody& damaged = (*bodies)[1];
+    uint64_t recordOffset = packPrefixBytes + packIndexBlockHeaderBytes;
+    // Each commit appended its record and a delta of one entry; the record whose header names the damaged key is hit.
+    while (recordOffset + packRecordHeaderBytes <= pack->size()) {
+        auto header = decodePackRecordHeader(pack->span().subspan(recordOffset).first<packRecordHeaderBytes>());
+        if (!header)
+            break;
+        if (header->key == damaged.key) {
+            (*pack)[recordOffset + packRecordHeaderBytes + header->size - 1] ^= 0x20;
+            break;
+        }
+        recordOffset += *packRecordExtent(header->size) + packIndexBlockHeaderBytes + packIndexEntryBytes;
+    }
+    if (!writeFileAt(context, artifact->cacheFd(), ArtifactNames::pack.characters(), pack->span()))
+        return;
+
+    // A recapture leaves dead bytes, so even ratio 0 rewrites the pack.
+    auto newer = artifact->commit(context, (*bodies)[0].key, 500, 7, 64);
+    if (!newer)
+        return;
+    Maintenance::Report report = Maintenance::compact(artifact->path(), 0, { });
+    if (!checkOutcome(context, "compact 0"_s, report, Maintenance::Outcome::Done))
+        return;
+    JITCACHE_CHECK(report.bodiesEvicted == 1);
+    JITCACHE_CHECK(countDiagnostics(report, "damaged-body"_s) == 1);
+    JITCACHE_CHECK(!artifact->holdsBody(damaged.key) && artifact->holdsBody((*bodies)[0].key) && artifact->holdsBody((*bodies)[2].key));
 }
 
 // Section 4.2, step 3: a ratio that is NaN or outside [0, 1] fails at bad-ratio and changes nothing.
@@ -1074,7 +1156,7 @@ JITCACHE_TEST(maintenanceCompactRejectsABadRatio, No)
     if (!artifact)
         return;
     auto body = artifact->commit(context, maintenanceKey(1), 500, 0, 64);
-    if (!body || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+    if (!body || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
         return;
     for (double ratio : { std::numeric_limits<double>::quiet_NaN(), -0.25, 1.5, std::numeric_limits<double>::infinity() }) {
         Maintenance::Report report = compactAnswering(*artifact, ratio, Maintenance::Answer::Yes);
@@ -1096,7 +1178,7 @@ JITCACHE_TEST(maintenanceWholeDeletionWaitsForConfirmation, No)
     if (!artifact)
         return;
     auto bodies = commitBodies(context, *artifact, 3);
-    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
         return;
     auto& order = *bodies;
     uint64_t bodiesBytes = totalBytes(order.span());
@@ -1127,7 +1209,7 @@ JITCACHE_TEST(maintenanceWholeDeletionWaitsForConfirmation, No)
     }
 
     auto empty = MaintenanceArtifact::create(context);
-    if (!empty || !empty->placeTemporary(context, TemporaryKind::Body, 10))
+    if (!empty || !empty->placeTemporary(context, TemporaryKind::Pack, 10))
         return;
     for (auto answer : { Maintenance::Answer::Ask, Maintenance::Answer::No }) {
         String label = answer == Maintenance::Answer::Ask ? "no body with Ask"_s : "no body with No"_s;
@@ -1142,7 +1224,7 @@ JITCACHE_TEST(maintenanceWholeDeletionWaitsForConfirmation, No)
     }
 }
 
-// M3. Yes deletes the temporaries, the bodies, the header and both directories, keeps the lock file, and bumps the epoch.
+// M3. Yes deletes the temporaries, the pack, the header and cache/, and keeps the lock file.
 JITCACHE_TEST(maintenanceWholeDeletionRemovesEverythingButTheLockFile, No)
 {
     HookScope hooks;
@@ -1152,10 +1234,9 @@ JITCACHE_TEST(maintenanceWholeDeletionRemovesEverythingButTheLockFile, No)
         if (!artifact)
             return;
         auto bodies = commitBodies(context, *artifact, bodyCount);
-        if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 100) || !artifact->placeTemporary(context, TemporaryKind::Header, 30))
+        if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Pack, 100) || !artifact->placeTemporary(context, TemporaryKind::Header, 30))
             return;
-        // A path without commits has no lock file yet; the first maintenance call creates it with a zero epoch.
-        uint64_t epochBefore = artifact->epoch().value_or(0);
+        uint64_t packBytes = artifact->packFileSize();
 
         Maintenance::Report report = compactAnswering(*artifact, bodyCount ? 1 : 0.5, Maintenance::Answer::Yes);
         if (!checkOutcome(context, label, report, Maintenance::Outcome::Done) || !report.plan)
@@ -1163,18 +1244,17 @@ JITCACHE_TEST(maintenanceWholeDeletionRemovesEverythingButTheLockFile, No)
         JITCACHE_CHECK(report.plan->deletesArtifact);
         JITCACHE_CHECK(report.diagnostics.isEmpty());
         JITCACHE_CHECK(report.temporariesRemoved == 2 && report.bodiesEvicted == bodyCount);
-        uint64_t everything = 130 + totalBytes(bodies->span()) + artifact->headerBytes().size();
+        uint64_t everything = 130 + packBytes + artifact->headerBytes().size();
         if (report.bytesReclaimed != everything)
             JITCACHE_FAIL(makeString(label, ": "_s, report.bytesReclaimed, " bytes reclaimed where "_s, everything, " were expected"_s));
         JITCACHE_CHECK(!artifact->exists("cache"));
         JITCACHE_CHECK(artifact->exists(ArtifactNames::lockFile.characters()));
-        JITCACHE_CHECK(artifact->epoch() == epochBefore + 1);
     }
 }
 
-// M3. With one body's unlink made to fail, Yes evicts the others, keeps that body and the header, returns Failed with
-// unlink-failed, and the store's open accepts what remains.
-JITCACHE_TEST(maintenanceWholeDeletionKeepsTheHeaderWhenABodyUnlinkFails, No)
+// M3. With the pack's replacement made to fail, Yes keeps every body and the header, returns Failed with unlink-failed,
+// and the store's open accepts what remains.
+JITCACHE_TEST(maintenanceWholeDeletionKeepsTheHeaderWhenThePackStays, No)
 {
     HookScope hooks;
     auto artifact = MaintenanceArtifact::create(context);
@@ -1184,7 +1264,7 @@ JITCACHE_TEST(maintenanceWholeDeletionKeepsTheHeaderWhenABodyUnlinkFails, No)
     if (!bodies)
         return;
     auto& order = *bodies;
-    Maintenance::Testing::setFailingBodyUnlink(2);
+    Maintenance::Testing::setFailingBodyUnlink(1);
 
     Maintenance::Report report = compactAnswering(*artifact, 1, Maintenance::Answer::Yes);
     Maintenance::Testing::setFailingBodyUnlink(std::nullopt);
@@ -1192,22 +1272,19 @@ JITCACHE_TEST(maintenanceWholeDeletionKeepsTheHeaderWhenABodyUnlinkFails, No)
         return;
     checkEvictions(context, "the plan"_s, *report.plan, order.span());
     JITCACHE_CHECK(report.diagnostics.size() == 1);
-    JITCACHE_CHECK(hasDiagnosticStartingWith(report, "unlink-failed"_s, makeString("cache/bodies/"_s, bodyName(order[1].key), ": "_s)));
-    JITCACHE_CHECK(report.bodiesEvicted == 2 && report.bytesReclaimed == order[0].bytes + order[2].bytes);
-    JITCACHE_CHECK(!artifact->holdsBody(order[0].key) && artifact->holdsBody(order[1].key) && !artifact->holdsBody(order[2].key));
-    JITCACHE_CHECK(artifact->exists("cache/header") && artifact->exists("cache/bodies"));
+    JITCACHE_CHECK(hasDiagnosticStartingWith(report, "unlink-failed"_s, "cache/pack: "_s));
+    JITCACHE_CHECK(!report.bodiesEvicted && !report.bytesReclaimed);
+    JITCACHE_CHECK(artifact->exists("cache/header"));
 
     RefPtr<OpenedArtifact> object = artifact->take(context);
     if (!object)
         return;
-    JITCACHE_CHECK(object->indexedBodies() == 1);
-    JITCACHE_CHECK(object->token(order[1].key) && !object->token(order[0].key) && !object->token(order[2].key));
+    JITCACHE_CHECK(object->indexedBodies() == 3);
     BodyOpen opened = object->open(order[1].key, ValidationMode::Full);
     JITCACHE_CHECK(opened.outcome == StoreOutcome::Found && opened.body && opened.body->version() == order[1].version);
 }
 
-// M3. With an unknown file in bodies/, Yes returns Done with rmdir-failed, and the next Producer reuses the remnant
-// (container sub-SPEC section 1.3).
+// M3. With an unknown file in cache/, Yes returns Done with rmdir-failed, and the next Producer reuses the remnant.
 JITCACHE_TEST(maintenanceWholeDeletionLeavesARemnantTheNextProducerReuses, Yes)
 {
     HookScope hooks;
@@ -1215,16 +1292,16 @@ JITCACHE_TEST(maintenanceWholeDeletionLeavesARemnantTheNextProducerReuses, Yes)
     if (!artifact)
         return;
     auto bodies = commitBodies(context, *artifact, 2);
-    if (!bodies || !artifact->placeFile(context, artifact->bodiesFd(), "stray", 4))
+    if (!bodies || !artifact->placeFile(context, artifact->cacheFd(), "stray", 4))
         return;
 
     Maintenance::Report report = compactAnswering(*artifact, 1, Maintenance::Answer::Yes);
     if (!checkOutcome(context, "compact 1 --yes"_s, report, Maintenance::Outcome::Done))
         return;
     JITCACHE_CHECK(report.bodiesEvicted == 2);
-    JITCACHE_CHECK(hasDiagnostic(report, "unknown-file"_s, "cache/bodies/stray"_s));
+    JITCACHE_CHECK(hasDiagnostic(report, "unknown-file"_s, "cache/stray"_s));
     JITCACHE_CHECK(countDiagnostics(report, "rmdir-failed"_s) == 1 && report.diagnostics.size() == 2);
-    JITCACHE_CHECK(!artifact->exists("cache/header") && artifact->exists("cache/bodies/stray") && !artifact->bodiesInBodies());
+    JITCACHE_CHECK(!artifact->exists("cache/header") && artifact->exists("cache/stray") && !artifact->exists("cache/pack"));
 
     JITCache::Config config;
     config.artifactPath = artifact->path();
@@ -1234,7 +1311,7 @@ JITCACHE_TEST(maintenanceWholeDeletionLeavesARemnantTheNextProducerReuses, Yes)
     StartResult started = JITCache::start(*context.vm(), config);
     if (started.outcome != StartOutcome::Started)
         JITCACHE_FAIL(makeString("the Producer's start is "_s, JITCache::name(started.outcome), " at "_s, started.step, ": "_s, started.detail));
-    JITCACHE_CHECK(artifact->exists("cache/header") && artifact->exists("cache/bodies/stray"));
+    JITCACHE_CHECK(artifact->exists("cache/header") && artifact->exists("cache/stray"));
 }
 
 // M4. A plan confirmed after a commit, a recapture of a key, an eviction or a header change in between gives PlanChanged
@@ -1277,6 +1354,8 @@ JITCACHE_TEST(maintenanceConfirmationRequiresAnUnchangedPlan, No)
         case Change::Header:
             if (!artifact->replaceHeader(context, maintenanceHeader(0x2A)))
                 return;
+            // The pack belongs to the old header, which a reader under the new one rejects.
+            bodiesAfterChange = 0;
             break;
         case Change::None:
             break;
@@ -1297,19 +1376,19 @@ JITCACHE_TEST(maintenanceConfirmationRequiresAnUnchangedPlan, No)
             JITCACHE_FAIL(makeString(label, ": the new plan has the old header digest"_s));
         if (report.bodiesEvicted || report.temporariesRemoved || report.bytesReclaimed)
             JITCACHE_FAIL(makeString(label, ": PlanChanged removed something: "_s, describe(report)));
-        if (artifact->bodiesInBodies() != bodiesAfterChange || !artifact->exists("cache/header"))
+        if (artifact->currentBodies() != bodiesAfterChange || !artifact->exists("cache/header"))
             JITCACHE_FAIL(makeString(label, ": the artifact changed after PlanChanged"_s));
     }
 }
 
-// M5. An apply stopped after each unlink of a body leaves an artifact that the store's open and its index accept, with only
-// whole bodies and no epoch bump; one stopped after the header's unlink leaves a remnant that clean finishes.
+// M5. An apply stopped after the pack's emptying leaves a valid artifact without bodies, and one stopped after the
+// header's unlink a remnant whose pack holds no body, which clean finishes.
 JITCACHE_TEST(maintenanceInterruptedDeletionLeavesWholeBodies, No)
 {
     HookScope hooks;
     constexpr unsigned bodyCount = 3;
-    for (unsigned n = 1; n <= bodyCount + 1; ++n) {
-        String label = makeString("stopped after unlink "_s, n);
+    for (unsigned n = 1; n <= 2; ++n) {
+        String label = makeString("stopped after step "_s, n);
         auto artifact = MaintenanceArtifact::create(context);
         if (!artifact)
             return;
@@ -1317,7 +1396,6 @@ JITCACHE_TEST(maintenanceInterruptedDeletionLeavesWholeBodies, No)
         if (!bodies)
             return;
         auto& order = *bodies;
-        auto epochBefore = artifact->epoch();
 
         Maintenance::Testing::setStopAfterUnlink(n);
         Maintenance::Report report = compactAnswering(*artifact, 1, Maintenance::Answer::Yes);
@@ -1325,11 +1403,9 @@ JITCACHE_TEST(maintenanceInterruptedDeletionLeavesWholeBodies, No)
         if (!checkOutcome(context, label, report, Maintenance::Outcome::Failed) || !report.plan)
             continue;
         checkEvictions(context, label, *report.plan, order.span());
-        if (artifact->epoch() != epochBefore)
-            JITCACHE_FAIL(makeString(label, ": the stopped apply bumped the epoch"_s));
 
-        if (n > bodyCount) {
-            if (artifact->exists("cache/header") || artifact->bodiesInBodies() || !artifact->exists("cache"))
+        if (n == 2) {
+            if (artifact->exists("cache/header") || !artifact->exists("cache/pack"))
                 JITCACHE_FAIL(makeString(label, ": the artifact is not a bodiless remnant"_s));
             Maintenance::Report cleaned = Maintenance::clean(artifact->path());
             if (checkOutcome(context, makeString(label, ", clean"_s), cleaned, Maintenance::Outcome::Done) && artifact->exists("cache"))
@@ -1337,24 +1413,11 @@ JITCACHE_TEST(maintenanceInterruptedDeletionLeavesWholeBodies, No)
             continue;
         }
 
-        if (report.bodiesEvicted != n || !artifact->exists("cache/header") || artifact->bodiesInBodies() != bodyCount - n)
+        if (report.bodiesEvicted != bodyCount || !artifact->exists("cache/header") || artifact->bodiesInPack())
             JITCACHE_FAIL(makeString(label, ": "_s, describe(report)));
         RefPtr<OpenedArtifact> object = artifact->take(context);
-        if (!object)
-            continue;
-        if (object->indexedBodies() != bodyCount - n)
+        if (object && object->indexedBodies())
             JITCACHE_FAIL(makeString(label, ": the index lists "_s, object->indexedBodies(), " bodies"_s));
-        for (unsigned index = 0; index < bodyCount; ++index) {
-            const BodyKey& key = order[index].key;
-            if (index < n) {
-                if (object->token(key) || artifact->holdsBody(key))
-                    JITCACHE_FAIL(makeString(label, ": evicted body "_s, index, " is still there"_s));
-                continue;
-            }
-            BodyOpen opened = object->open(key, ValidationMode::Full);
-            if (!object->token(key) || opened.outcome != StoreOutcome::Found || !opened.body || opened.body->version() != order[index].version)
-                JITCACHE_FAIL(makeString(label, ": surviving body "_s, index, " does not open whole"_s));
-        }
     }
 }
 
@@ -1368,7 +1431,7 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
     if (!artifact)
         return;
     auto bodies = commitBodies(context, *artifact, 2);
-    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
         return;
     CString path = artifact->pathArgument();
 
@@ -1406,11 +1469,11 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
     JITCACHE_CHECK(run.exitCode == 4);
     JITCACHE_CHECK(run.out.contains("compact: needs-confirmation"_s) && run.out.contains("deletes the whole artifact"_s));
     JITCACHE_CHECK(!run.out.contains(confirmationPrompt));
-    JITCACHE_CHECK(artifact->temporariesInCache() == 1 && artifact->bodiesInBodies() == 2 && artifact->exists("cache/header"));
+    JITCACHE_CHECK(artifact->temporariesInCache() == 1 && artifact->bodiesInPack() == 2 && artifact->exists("cache/header"));
 
     run = runMaintenanceCommand({ "compact"_s, "1"_s, path, "--no"_s });
     JITCACHE_CHECK(run.exitCode == 4 && run.out.contains("compact: declined"_s) && !run.out.contains(confirmationPrompt));
-    JITCACHE_CHECK(artifact->temporariesInCache() == 1 && artifact->bodiesInBodies() == 2);
+    JITCACHE_CHECK(artifact->temporariesInCache() == 1 && artifact->bodiesInPack() == 2);
 
     run = runMaintenanceCommand({ "compact"_s, "2"_s, path });
     JITCACHE_CHECK(run.exitCode == 1 && run.out.contains("compact: failed"_s) && run.err.contains("bad-ratio"_s));
@@ -1435,11 +1498,11 @@ JITCACHE_TEST(maintenanceCommandLineExitCodes, No)
 
     run = runMaintenanceCommand({ "compact"_s, "0"_s, path });
     JITCACHE_CHECK(!run.exitCode && run.out.contains("compact: done, 0 temporaries removed, 0 bodies evicted"_s));
-    JITCACHE_CHECK(artifact->bodiesInBodies() == 2);
+    JITCACHE_CHECK(artifact->bodiesInPack() == 2);
 
     run = runMaintenanceCommand({ "compact"_s, "1"_s, "--yes"_s, path });
     JITCACHE_CHECK(!run.exitCode && run.out.contains("compact: done"_s) && !run.out.contains(confirmationPrompt));
-    JITCACHE_CHECK(!artifact->exists("cache/header") && !artifact->bodiesInBodies());
+    JITCACHE_CHECK(!artifact->exists("cache/header") && !artifact->bodiesInPack());
 }
 
 // M6. Without a path, both commands work on ./.jitcache in the working directory, here a symbolic link to the artifact.
@@ -1451,7 +1514,7 @@ JITCACHE_TEST(maintenanceCommandLineDefaultsToTheJITCacheDirectory, No)
     if (!artifact || !workingDirectory)
         return;
     auto bodies = commitBodies(context, *artifact, 2);
-    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+    if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
         return;
     if (symlinkat(artifact->pathArgument().data(), workingDirectory->parentFd(), ".jitcache")) {
         JITCACHE_FAIL(makeString("symlinkat failed: "_s, errnoText(errno)));
@@ -1474,7 +1537,7 @@ JITCACHE_TEST(maintenanceCommandLineDefaultsToTheJITCacheDirectory, No)
     JITCACHE_CHECK(restored);
     JITCACHE_CHECK(!clean.exitCode && clean.out.contains("clean: done, 1 temporaries removed, 10 bytes reclaimed"_s));
     JITCACHE_CHECK(!compact.exitCode && compact.out.contains("compact: done"_s));
-    JITCACHE_CHECK(!artifact->exists("cache/header") && !artifact->bodiesInBodies());
+    JITCACHE_CHECK(!artifact->exists("cache/header") && !artifact->bodiesInPack());
 }
 
 // M6. With a terminal on in (a pseudo-terminal here), compact prints the plan and the prompt, reads one line, and applies
@@ -1499,7 +1562,7 @@ JITCACHE_TEST(maintenanceCommandLinePromptsOnATerminal, No)
         if (!artifact)
             return;
         auto bodies = commitBodies(context, *artifact, 2);
-        if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Body, 10))
+        if (!bodies || !artifact->placeTemporary(context, TemporaryKind::Pack, 10))
             return;
         if (!terminal.type(typed)) {
             JITCACHE_FAIL(makeString(label, ": the terminal refused the answer"_s));
@@ -1515,7 +1578,7 @@ JITCACHE_TEST(maintenanceCommandLinePromptsOnATerminal, No)
         } else {
             if (run.exitCode != 4 || !run.out.contains("compact: declined"_s))
                 JITCACHE_FAIL(makeString(label, ": exit "_s, run.exitCode, ", out \""_s, run.out, '"'));
-            if (artifact->temporariesInCache() != 1 || artifact->bodiesInBodies() != 2 || !artifact->exists("cache/header"))
+            if (artifact->temporariesInCache() != 1 || artifact->bodiesInPack() != 2 || !artifact->exists("cache/header"))
                 JITCACHE_FAIL(makeString(label, ": the declined plan changed the artifact"_s));
         }
     }
@@ -1588,7 +1651,7 @@ JITCACHE_TEST(maintenanceCommandLineReportsAPlanChangedAtThePrompt, No)
     JITCACHE_CHECK(exitCode.load() == 5);
     if (!output.contains("compact: plan-changed"_s))
         JITCACHE_FAIL(makeString("the output is \""_s, output, '"'));
-    JITCACHE_CHECK(artifact->bodiesInBodies() == 4 && artifact->exists("cache/header"));
+    JITCACHE_CHECK(artifact->bodiesInPack() == 4 && artifact->exists("cache/header"));
 }
 
 } // namespace JSC::JITCache::Tests

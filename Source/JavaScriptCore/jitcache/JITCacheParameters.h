@@ -23,9 +23,17 @@ constexpr std::optional<uint64_t> installationBoundSmallestBody { };
 // The writer's staging buffer (container sub-SPEC section 8.1), until IB5 tunes it.
 constexpr size_t writerStagingBytes = 64 * 1024;
 
-// The least time between the starts of two listings that a refresh without inotify, or with a listing pending, makes
-// (container sub-SPEC section 6.3), until IB2 tunes it.
-constexpr uint64_t fallbackListingIntervalMilliseconds = 1000;
+// The number of index deltas a pack's chain may hold before a commit writes a full index instead of a delta, which bounds
+// the chain a reader walks when it opens the pack, until IB2 tunes it.
+constexpr uint32_t packDeltaChainBound = 32;
+
+// The least time between two attempts to reopen cache/pack after the mapped pack was marked retired but the path still
+// names it, which only a compaction that died between its mark and its rename leaves for long.
+constexpr uint64_t retiredPackReopenIntervalMilliseconds = 100;
+
+// The address space a reader maps beyond the pack's valid end, so the pack grows that far without a new mapping: at
+// least this many bytes, and at least the valid end itself.
+constexpr uint64_t packMappingSlackBytes = 256 * 1024 * 1024;
 
 // The number of ConsumerProducer runs IB10 chains between its Producer and its Consumer. Only the bench reads it.
 constexpr std::optional<unsigned> benchConsumerProducerGenerations { };

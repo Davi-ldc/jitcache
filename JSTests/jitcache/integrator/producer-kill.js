@@ -1,20 +1,20 @@
-// jitcache-runs: Producer --jitcache-test-kill=before-create@2; Maintenance clean $ARTIFACT; Consumer
-// jitcache-runs: Producer --jitcache-test-kill=after-create@2; Maintenance clean $ARTIFACT; Consumer
+// jitcache-runs: Producer --jitcache-test-kill=before-append@2; Maintenance clean $ARTIFACT; Consumer
 // jitcache-runs: Producer --jitcache-test-kill=mid-stream@2; Maintenance clean $ARTIFACT; Consumer
 // jitcache-runs: Producer --jitcache-test-kill=after-stream@2; Maintenance clean $ARTIFACT; Consumer
 // jitcache-runs: Producer --jitcache-test-kill=after-envelope@2; Maintenance clean $ARTIFACT; Consumer
 // jitcache-runs: Producer --jitcache-test-kill=after-reread@2; Maintenance clean $ARTIFACT; Consumer
-// jitcache-runs: Producer --jitcache-test-kill=after-rename@2; Maintenance clean $ARTIFACT; Consumer
+// jitcache-runs: Producer --jitcache-test-kill=after-index@2; Maintenance clean $ARTIFACT; Consumer
+// jitcache-runs: Producer --jitcache-test-kill=after-root@2; Maintenance clean $ARTIFACT; Consumer
 // jitcache-runs: Producer --jitcache-test-kill=after-reread@2; Maintenance clean $ARTIFACT; Consumer
 // jitcache-expect-exit: 0 kill
-// jitcache-check: 0:1 resources/clean-no-temporary.ts
-// jitcache-check: 1:1 resources/clean-one-temporary.ts
-// jitcache-check: 2:1 resources/clean-one-temporary.ts
-// jitcache-check: 3:1 resources/clean-one-temporary.ts
-// jitcache-check: 4:1 resources/clean-one-temporary.ts
-// jitcache-check: 5:1 resources/clean-one-temporary.ts
-// jitcache-check: 6:1 resources/clean-no-temporary.ts
-// jitcache-check: 7:1 resources/clean-one-temporary.ts
+// jitcache-check: 0:1 resources/clean-nothing-past-the-valid-end.ts
+// jitcache-check: 1:1 resources/clean-bytes-past-the-valid-end.ts
+// jitcache-check: 2:1 resources/clean-bytes-past-the-valid-end.ts
+// jitcache-check: 3:1 resources/clean-bytes-past-the-valid-end.ts
+// jitcache-check: 4:1 resources/clean-bytes-past-the-valid-end.ts
+// jitcache-check: 5:1 resources/clean-bytes-past-the-valid-end.ts
+// jitcache-check: 6:1 resources/clean-nothing-past-the-valid-end.ts
+// jitcache-check: 7:1 resources/clean-bytes-past-the-valid-end.ts
 
 // SPEC-integrator.md section 15.2, producer-kill.js: one sequence per kill point of harness sub-SPEC section 12, each a
 // Producer killed at its writer's second commit, then a clean, then a Consumer. The kill point counts every commit the
@@ -23,22 +23,23 @@
 // be committed at its compilation and take the second commit's place (resources/integrator.js says when one compiles).
 // - Sequences 0 to 6: pkFirst compiles first, and its commit is the first; pkSecond's is the second, which the kill
 //   interrupts. The Consumer imports pkFirst, committed before the kill. pkSecond's key holds no body after the six
-//   points before the rename, so the Consumer compiles it natively, and the new body after-rename, which it imports.
+//   points before the root, so the Consumer compiles it natively, and the new body after-root, which it imports.
 // - Sequence 7: the second commit recaptures pkFirst. After its compilation and first commit, pkFirst runs on in
 //   baseline code, where its two property ICs gain cases and its baseline counter makes progress, so its capture beats
 //   that body at the jitcacheDelta() that follows, and the kill interrupts the recapture after the reread. Before the
 //   delta the Producer checks that pkFirst's commit was its only one, which leaves pkFirst the delta's only candidate,
 //   and saves the bytes of every section of the body in the scratch directory. The Consumer imports the body and finds
 //   those bytes in it.
-// The clean after each kill removes the commit's temporary, one for the points from after-create to after-reread and
-// none for before-create and after-rename, which the checkers read in its summary. A killed run writes no status and no
+// The clean after each kill truncates the bytes the commit appended past the pack's valid end, which every point from
+// mid-stream to after-index leaves and before-append and after-root do not, as the checkers read in its summary and in
+// the pack. A killed run writes no status and no
 // heap description, and its oracle run, which has no kill point, runs to the end, so the script prints nothing (harness
 // sub-SPEC section 7.6).
 load("./resources/integrator.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {
     const sectionNames = ["ucb.identity", "ucb.core", "ucb.feedback", "image.baseline", "baked-facts.baseline", "image-twins.baseline", "cb.state", "cb.summary", "ICsBaseline"];
-    const afterRename = sequence === "6";
+    const afterRoot = sequence === "6";
     const recapture = sequence === "7";
 
     function pkFirst(point) {
@@ -88,10 +89,10 @@ load("./resources/integrator.js", "caller relative");
         return;
 
     expectInstalled(pkFirst);
-    if (afterRename) {
+    if (afterRoot) {
         expectInstalled(pkSecond);
         return;
     }
-    check(!hasBody(pkSecond), "pkSecond's key holds a body the kill before the rename should have kept out");
+    check(!hasBody(pkSecond), "pkSecond's key holds a body the kill before the root should have kept out");
     expectCompiledNatively(pkSecond);
 })(...arguments);

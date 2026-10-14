@@ -202,8 +202,6 @@ public:
     {
         StoreTesting::setFault(std::nullopt);
         StoreTesting::setRegistrySharing(true);
-        StoreTesting::setInotify(true);
-        StoreTesting::setFallbackListingInterval(std::nullopt);
         removeMainBuildIDForTesting(false);
     }
 };
@@ -249,12 +247,6 @@ static bool pathExists(const String& path)
 {
     struct stat fileStatus;
     return !::lstat(path.utf8().data(), &fileStatus);
-}
-
-static bool isDirectory(const String& path)
-{
-    struct stat fileStatus;
-    return !::stat(path.utf8().data(), &fileStatus) && S_ISDIR(fileStatus.st_mode);
 }
 
 static bool makeDirectory(TestContext& context, const String& path)
@@ -507,17 +499,6 @@ static Vector<uint8_t> headerWithFlippedOption(unsigned optionIndex)
     uint32_t crc = ~crc32cExtend(~0u, header.span().first(header.size() - 8));
     memcpySpan(header.mutableSpan().subspan(header.size() - 8, sizeof(crc)), asByteSpan(crc));
     return header;
-}
-
-// The commit epoch of <parent>/.cache.producer.lock, 8 bytes at offset 16 (container sub-SPEC section 2).
-static std::optional<uint64_t> lockFileEpoch(const String& parent)
-{
-    auto bytes = readFileBytes(makeString(parent, "/.cache.producer.lock"_s));
-    if (!bytes || bytes->size() < 24)
-        return std::nullopt;
-    uint64_t epoch = 0;
-    memcpySpan(asMutableByteSpan(epoch), bytes->span().subspan(16, sizeof(epoch)));
-    return epoch;
 }
 
 static bool sameScore(const CaptureScore& a, const CaptureScore& b)
@@ -1037,7 +1018,8 @@ JITCACHE_TEST(integratorStartOutcomesByRole, Yes)
         return;
     JITCACHE_CHECK(pathExists(directory->path("artifact/.cache.producer.lock"_s)));
     JITCACHE_CHECK(pathExists(directory->path("artifact/cache/header"_s)));
-    JITCACHE_CHECK(isDirectory(directory->path("artifact/cache/bodies"_s)));
+    JITCACHE_CHECK(pathExists(directory->path("artifact/cache/pack"_s)));
+    JITCACHE_CHECK(!pathExists(directory->path("artifact/cache/bodies"_s)));
     Status producerStatus = JITCache::status(producer->vm());
     JITCACHE_CHECK(producerStatus.state == SessionState::Started);
     JITCACHE_CHECK(producerStatus.role == Role::Producer);
@@ -1163,15 +1145,13 @@ JITCACHE_TEST(integratorStartRejections, Yes)
     // A header that differs from the process's in one must-match option is incompatible and names the option. A Producer
     // is rejected at start.artifact-exists after taking the lock, which creates the lock file, and a Consumer at
     // start.incompatible. A ConsumerProducer replaces the artifact with an empty one and says why at start.replaced: it
-    // removes the old artifact and the .cache.replaced an earlier replacement left, and bumps the epoch once. A Consumer
-    // then opens the new artifact.
+    // removes the old artifact and the .cache.replaced an earlier replacement left. A Consumer then opens the new artifact.
     String incompatible = directory->path("incompatible"_s);
     Vector<uint8_t> header = headerWithFlippedOption(0);
-    Vector<uint8_t> bodyBytes = patternBytes(33, 4);
-    String oldBodyName = String::fromUTF8(bodyFileName(testKey(10)).data());
+    Vector<uint8_t> packBytes = patternBytes(33, 4);
     if (!makeDirectory(context, incompatible) || !makeDirectory(context, directory->path("incompatible/cache"_s))
-        || !makeDirectory(context, directory->path("incompatible/cache/bodies"_s)) || !writeFile(context, directory->path("incompatible/cache/header"_s), header.span())
-        || !writeFile(context, makeString(incompatible, "/cache/bodies/"_s, oldBodyName), bodyBytes.span()))
+        || !writeFile(context, directory->path("incompatible/cache/header"_s), header.span())
+        || !writeFile(context, directory->path("incompatible/cache/pack"_s), packBytes.span()))
         return;
     checkRejected("a Producer over an incompatible artifact"_s, strictConfig(incompatible, Role::Producer), "start.artifact-exists"_s);
     StartResult rejected = JITCache::start(vm, strictConfig(incompatible, Role::Consumer));
@@ -1179,22 +1159,19 @@ JITCACHE_TEST(integratorStartRejections, Yes)
     JITCACHE_CHECK(rejected.detail.contains("evalMode"_s));
     JITCACHE_CHECK(!vm.jitCacheState());
     // What an earlier replacement left when it stopped before removing the old artifact.
-    if (!makeDirectory(context, directory->path("incompatible/.cache.replaced"_s)) || !makeDirectory(context, directory->path("incompatible/.cache.replaced/bodies"_s))
+    if (!makeDirectory(context, directory->path("incompatible/.cache.replaced"_s))
         || !writeFile(context, directory->path("incompatible/.cache.replaced/header"_s), header.span())
-        || !writeFile(context, makeString(incompatible, "/.cache.replaced/bodies/"_s, oldBodyName), bodyBytes.span()))
+        || !writeFile(context, directory->path("incompatible/.cache.replaced/pack"_s), packBytes.span()))
         return;
-    std::optional<uint64_t> epochBefore = lockFileEpoch(incompatible);
-    JITCACHE_CHECK(epochBefore.has_value());
     {
         ExtraVM replacing;
         StartResult replaced = JITCache::start(replacing.vm(), strictConfig(incompatible, Role::ConsumerProducer));
         if (startsAs(context, "a ConsumerProducer of an incompatible header"_s, replaced, StartOutcome::Started, "start.replaced"_s)) {
             JITCACHE_CHECK(replaced.detail.contains("evalMode"_s));
-            JITCACHE_CHECK(pathExists(directory->path("incompatible/cache/header"_s)) && pathExists(directory->path("incompatible/cache/bodies"_s)));
-            JITCACHE_CHECK(!pathExists(makeString(incompatible, "/cache/bodies/"_s, oldBodyName)));
+            JITCACHE_CHECK(pathExists(directory->path("incompatible/cache/header"_s)) && pathExists(directory->path("incompatible/cache/pack"_s)));
+            auto newPack = readFileBytes(directory->path("incompatible/cache/pack"_s));
+            JITCACHE_CHECK(newPack && !equalSpans(newPack->span(), packBytes.span()));
             JITCACHE_CHECK(!pathExists(directory->path("incompatible/.cache.replaced"_s)));
-            std::optional<uint64_t> epochAfter = lockFileEpoch(incompatible);
-            JITCACHE_CHECK(epochBefore && epochAfter && *epochAfter == *epochBefore + 1);
             ExtraVM reader;
             startsAs(context, "a Consumer of the replaced artifact"_s, JITCache::start(reader.vm(), strictConfig(incompatible, Role::Consumer)), StartOutcome::Started);
         }
@@ -1263,11 +1240,11 @@ JITCACHE_TEST(integratorStartFaults, Yes)
     };
 
     {
-        StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::Listing, EIO, std::nullopt });
+        StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::PackMap, EIO, std::nullopt });
         ExtraVM faulted;
         StartResult result = JITCache::start(faulted.vm(), strictConfig(artifact, Role::ConsumerProducer));
         StoreTesting::setFault(std::nullopt);
-        if (startsAs(context, "a listing that fails"_s, result, StartOutcome::Fault, "start.io"_s)) {
+        if (startsAs(context, "a pack mapping that fails"_s, result, StartOutcome::Fault, "start.io"_s)) {
             checkFaulted(faulted.vm(), "start.io"_s);
             Status reported = JITCache::status(faulted.vm());
             JITCACHE_CHECK(reported.role == Role::ConsumerProducer);
@@ -1280,11 +1257,25 @@ JITCACHE_TEST(integratorStartFaults, Yes)
         }
     }
 
+    // A pack that fails its own checks is the artifact's damage, which start reports as it reports a corrupt header.
+    {
+        String damaged = directory->path("damaged-pack"_s);
+        if (!createTestArtifact(context, damaged))
+            return;
+        std::array<uint8_t, 64> notAPack;
+        notAPack.fill('p');
+        if (!writeFile(context, directory->path("damaged-pack/cache/pack"_s), notAPack))
+            return;
+        ExtraVM faulted;
+        if (startsAs(context, "a damaged pack"_s, JITCache::start(faulted.vm(), strictConfig(damaged, Role::Consumer)), StartOutcome::Fault, "start.pack"_s))
+            checkFaulted(faulted.vm(), "start.pack"_s);
+    }
+
     String corrupt = directory->path("corrupt"_s);
     std::array<uint8_t, 64> notAHeader;
     notAHeader.fill('x');
     if (!makeDirectory(context, corrupt) || !makeDirectory(context, directory->path("corrupt/cache"_s))
-        || !makeDirectory(context, directory->path("corrupt/cache/bodies"_s)) || !writeFile(context, directory->path("corrupt/cache/header"_s), notAHeader))
+        || !writeFile(context, directory->path("corrupt/cache/header"_s), notAHeader))
         return;
     VM& vm = *context.vm();
     if (startsAs(context, "a corrupt header"_s, JITCache::start(vm, strictConfig(corrupt, Role::Consumer)), StartOutcome::Fault, "start.header"_s)) {
@@ -1296,8 +1287,8 @@ JITCACHE_TEST(integratorStartFaults, Yes)
 }
 
 // T-START with container test C8: a header-less cache/ holding only temporaries is reset and reused, while names that are
-// not temporaries stay; one whose bodies/ holds a body name is start.not-an-artifact and keeps everything; an artifact
-// with a header is start.artifact-exists.
+// not temporaries stay; one whose pack may hold a body is start.not-an-artifact and keeps everything; an artifact with a
+// header is start.artifact-exists.
 JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
 {
     ProcessHooksScope hooks;
@@ -1308,7 +1299,7 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     Vector<uint8_t> filler = patternBytes(33, 3);
 
     String remnant = directory->path("remnant"_s);
-    TemporaryFileName bodyTemporary = temporaryFileName(TemporaryKind::Body);
+    TemporaryFileName bodyTemporary = temporaryFileName(TemporaryKind::Pack);
     TemporaryFileName headerTemporary = temporaryFileName(TemporaryKind::Header);
     String bodyTemporaryPath = makeString(remnant, "/cache/"_s, String::fromUTF8(bodyTemporary.data()));
     String headerTemporaryPath = makeString(remnant, "/cache/"_s, String::fromUTF8(headerTemporary.data()));
@@ -1321,7 +1312,7 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     JITCACHE_CHECK(!pathExists(bodyTemporaryPath));
     JITCACHE_CHECK(!pathExists(headerTemporaryPath));
     JITCACHE_CHECK(pathExists(otherPath));
-    JITCACHE_CHECK(isDirectory(directory->path("remnant/cache/bodies"_s)));
+    JITCACHE_CHECK(pathExists(directory->path("remnant/cache/pack"_s)));
     auto header = readFileBytes(directory->path("remnant/cache/header"_s));
     JITCACHE_CHECK(header && equalSpans(header->span(), expectedHeader().span()));
     {
@@ -1330,9 +1321,9 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     }
 
     String withBody = directory->path("with-body"_s);
-    String bodyPath = makeString(withBody, "/cache/bodies/"_s, String::fromUTF8(bodyFileName(testKey(9)).data()));
-    String temporaryPath = makeString(withBody, "/cache/"_s, String::fromUTF8(temporaryFileName(TemporaryKind::Body).data()));
-    if (!makeDirectory(context, withBody) || !makeDirectory(context, directory->path("with-body/cache"_s)) || !makeDirectory(context, directory->path("with-body/cache/bodies"_s))
+    String bodyPath = makeString(withBody, "/cache/pack"_s);
+    String temporaryPath = makeString(withBody, "/cache/"_s, String::fromUTF8(temporaryFileName(TemporaryKind::Pack).data()));
+    if (!makeDirectory(context, withBody) || !makeDirectory(context, directory->path("with-body/cache"_s))
         || !writeFile(context, bodyPath, filler.span()) || !writeFile(context, temporaryPath, filler.span()))
         return;
     startsAs(context, "a remnant holding a body"_s, JITCache::start(vm, strictConfig(withBody, Role::Producer)), StartOutcome::Rejected, "start.not-an-artifact"_s);
@@ -1340,6 +1331,14 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     JITCACHE_CHECK(pathExists(bodyPath));
     JITCACHE_CHECK(pathExists(temporaryPath));
     JITCACHE_CHECK(!pathExists(directory->path("with-body/cache/header"_s)));
+
+    String withPack = directory->path("with-pack"_s);
+    if (!makeDirectory(context, withPack) || !makeDirectory(context, directory->path("with-pack/cache"_s))
+        || !writeFile(context, directory->path("with-pack/cache/pack"_s), filler.span()))
+        return;
+    startsAs(context, "a remnant holding a pack"_s, JITCache::start(vm, strictConfig(withPack, Role::Producer)), StartOutcome::Rejected, "start.not-an-artifact"_s);
+    JITCACHE_CHECK(!vm.jitCacheState());
+    JITCACHE_CHECK(pathExists(directory->path("with-pack/cache/pack"_s)));
 
     startsAs(context, "a producer over an artifact"_s, JITCache::start(vm, strictConfig(remnant, Role::Producer)), StartOutcome::Rejected, "start.artifact-exists"_s);
     JITCACHE_CHECK(!vm.jitCacheState());
@@ -1582,12 +1581,12 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     VMState& state = *vm.jitCacheState();
     JITCACHE_CHECK(JITCache::status(vm).progress.indexedBodies == 1);
 
-    // bodyVersion reads the index alone: a hook that fails every open, and then every listing, never fires for it.
+    // bodyVersion reads the index alone: a hook that fails every open, and then every mapping, never fires for it.
     StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::Open, EIO, std::nullopt });
     uint64_t token = state.bodyVersion(committedKey);
     JITCACHE_CHECK(token);
     JITCACHE_CHECK(!state.bodyVersion(absentKey));
-    StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::Listing, EIO, std::nullopt });
+    StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::PackMap, EIO, std::nullopt });
     JITCACHE_CHECK(state.bodyVersion(committedKey) == token);
     StoreTesting::setFault(std::nullopt);
     JITCACHE_CHECK(state.activityOn());
@@ -2143,7 +2142,7 @@ JITCACHE_TEST(integratorCommitChargesItsEntries, Yes)
     JITCACHE_CHECK(!keptScoreForTesting(vm, *secondKey));
 
     constexpr uint64_t keptBucketBytes = sizeof(KeyValuePair<BodyKey, SavedScore>);
-    constexpr uint64_t indexBucketBytes = sizeof(KeyValuePair<BodyKey, IndexEntry>);
+    constexpr uint64_t indexBucketBytes = sizeof(PackIndex::KeyValuePairType);
     uint64_t beforeFirstCommit = chargedBytes();
     DeltaResult firstCommit = JITCache::delta(vm);
     JITCACHE_CHECK(firstCommit.outcome == DeltaOutcome::Completed && firstCommit.committedBodies == 1);

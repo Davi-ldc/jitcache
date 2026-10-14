@@ -173,21 +173,18 @@ void BenchReport::flush()
     if (m_artifact) {
         IndexStatistics statistics = m_artifact->statistics();
         JITCacheBenchInternal::appendLine(m_buffer, m_pid, m_vmOrdinal, "index"_s, {
-            { "inotify"_s, statistics.hasInotify },
             { "bodies"_s, statistics.bodies },
+            { "generation"_s, statistics.generation },
+            { "pack.bytes"_s, statistics.packBytes },
+            { "pack.liveBytes"_s, statistics.liveBytes },
             { "tableBytes"_s, statistics.tableBytes },
             { "buildNanoseconds"_s, statistics.buildNanoseconds },
-            { "listings.count"_s, statistics.listings },
-            { "listings.nanoseconds"_s, statistics.listingNanoseconds },
-            { "listings.failed"_s, statistics.failedListings },
-            { "queueOverflows"_s, statistics.queueOverflows },
             { "refreshes.count"_s, statistics.refreshes },
             { "refreshes.nanoseconds"_s, statistics.refreshNanoseconds },
-            { "refreshes.deferred"_s, statistics.deferredRefreshes },
-            { "deferredMisses"_s, statistics.deferredMisses },
-            { "writerUpdates.count"_s, statistics.writerUpdates },
-            { "writerUpdates.timed"_s, statistics.timedWriterUpdates },
-            { "writerUpdates.nanoseconds"_s, statistics.writerUpdateNanoseconds },
+            { "appliedBlocks"_s, statistics.appliedBlocks },
+            { "reopens.count"_s, statistics.reopens },
+            { "reopens.failed"_s, statistics.failedReopens },
+            { "opens"_s, statistics.opens },
         });
     }
 
@@ -260,9 +257,9 @@ uint64_t benchThreadCPUNanoseconds()
 
 String bodyKeyHex(const BodyKey& key)
 {
-    // One encoding serves the file names and the reports, so a report's key names its body file.
-    BodyFileName name = bodyFileName(key);
-    return String { name.span().first(2 * BodyKey::byteSize) };
+    // One encoding serves the reports and the shell, which reads it back with bodyKeyFromHex.
+    auto digits = bodyKeyHexDigits(key);
+    return String { std::span<const char> { digits } };
 }
 
 RelinkTimer::RelinkTimer(VM& vm)

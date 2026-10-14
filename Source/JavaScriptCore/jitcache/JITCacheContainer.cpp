@@ -775,6 +775,214 @@ std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const ui
     return ContainerInternal::layoutOf(*envelope, directory);
 }
 
+// The pack.
+
+namespace ContainerInternal {
+
+static constexpr std::array<uint8_t, 8> packTag { 'J', 'I', 'T', 'C', 'P', 'A', 'C', 'K' };
+static constexpr std::array<uint8_t, 8> indexBlockTag { 'J', 'I', 'T', 'C', 'I', 'N', 'D', 'X' };
+static constexpr uint16_t packLayoutVersion = 1;
+static constexpr size_t packPrefixCRCOffset = 40;
+static constexpr size_t packRootCRCOffset = 56;
+static constexpr size_t packRecordCRCOffset = 56;
+static constexpr size_t packIndexCRCOffset = 24;
+static constexpr size_t packIndexEntryZeroOffset = 73;
+
+static std::optional<BodyKey> keyAt(std::span<const uint8_t> bytes, size_t offset)
+{
+    return BodyKey::fromBytes(bytes.subspan(offset).first<BodyKey::byteSize>());
+}
+
+} // namespace ContainerInternal
+
+std::optional<uint64_t> packAligned(uint64_t offset)
+{
+    if (offset > std::numeric_limits<uint64_t>::max() - (packAlignment - 1))
+        return std::nullopt;
+    return (offset + packAlignment - 1) & ~(packAlignment - 1);
+}
+
+std::optional<uint64_t> packRecordExtent(uint64_t bodySize)
+{
+    if (bodySize > std::numeric_limits<uint64_t>::max() - packRecordHeaderBytes)
+        return std::nullopt;
+    return packAligned(packRecordHeaderBytes + bodySize);
+}
+
+std::array<uint8_t, packPrefixBytes> encodePackPrefix(const PackPrefix& prefix)
+{
+    using namespace ContainerInternal;
+    std::array<uint8_t, packPrefixBytes> bytes { };
+    auto span = std::span { bytes };
+    memcpySpan(span.first(packTag.size()), std::span { packTag });
+    storeField<uint16_t>(span, 8, packLayoutVersion);
+    storeField<uint16_t>(span, 10, static_cast<uint16_t>(packPrefixBytes));
+    memcpySpan(span.subspan(16, prefix.headerDigest.size()), std::span { prefix.headerDigest });
+    storeField<uint64_t>(span, 32, prefix.identifier);
+    storeField<uint32_t>(span, packPrefixCRCOffset, crc32cOf(span.first(packPrefixCRCOffset)));
+    return bytes;
+}
+
+std::expected<PackPrefix, PackRejection> decodePackPrefix(std::span<const uint8_t> prefix, std::span<const uint8_t, 16> headerDigest)
+{
+    using namespace ContainerInternal;
+    if (prefix.size() < packRetiredOffset)
+        return std::unexpected("the file is shorter than the pack's prefix"_s);
+    if (!equalSpans(prefix.first(packTag.size()), std::span { packTag }))
+        return std::unexpected("the tag is not JITCPACK"_s);
+    if (loadField<uint32_t>(prefix, packPrefixCRCOffset) != crc32cOf(prefix.first(packPrefixCRCOffset)))
+        return std::unexpected("the prefix's CRC differs"_s);
+    if (loadField<uint16_t>(prefix, 8) != packLayoutVersion)
+        return std::unexpected("the layout version is not 1"_s);
+    if (loadField<uint16_t>(prefix, 10) != packPrefixBytes)
+        return std::unexpected("the prefix size is not 256"_s);
+    if (!isAllZero(prefix.subspan(12, 4)) || !isAllZero(prefix.subspan(44, 4)))
+        return std::unexpected("a reserved byte of the prefix is not zero"_s);
+    PackPrefix result;
+    memcpySpan(std::span { result.headerDigest }, prefix.subspan(16, result.headerDigest.size()));
+    result.identifier = loadField<uint64_t>(prefix, 32);
+    if (!result.identifier)
+        return std::unexpected("the pack identifier is zero"_s);
+    if (!equalSpans(std::span<const uint8_t> { result.headerDigest }, std::span<const uint8_t> { headerDigest }))
+        return std::unexpected("the pack belongs to another artifact header"_s);
+    return result;
+}
+
+std::array<uint8_t, packRootSlotBytes> encodePackRoot(const PackRoot& root)
+{
+    using namespace ContainerInternal;
+    std::array<uint8_t, packRootSlotBytes> bytes { };
+    auto span = std::span { bytes };
+    storeField<uint64_t>(span, 0, root.generation);
+    storeField<uint64_t>(span, 8, root.validEnd);
+    storeField<uint64_t>(span, 16, root.indexOffset);
+    storeField<uint32_t>(span, packRootCRCOffset, crc32cOf(span.first(packRootCRCOffset)));
+    return bytes;
+}
+
+std::optional<PackRoot> decodePackRoot(std::span<const uint8_t, packRootSlotBytes> slot)
+{
+    using namespace ContainerInternal;
+    std::span<const uint8_t> bytes = slot;
+    PackRoot root { loadField<uint64_t>(bytes, 0), loadField<uint64_t>(bytes, 8), loadField<uint64_t>(bytes, 16) };
+    if (!root.generation || loadField<uint32_t>(bytes, packRootCRCOffset) != crc32cOf(bytes.first(packRootCRCOffset)))
+        return std::nullopt;
+    if (!isAllZero(bytes.subspan(24, 32)) || !isAllZero(bytes.subspan(60, 4)))
+        return std::nullopt;
+    // The latest index block lies after the prefix and inside the valid bytes, and so does its header.
+    if (root.validEnd % packAlignment || root.indexOffset % packAlignment || root.indexOffset < packPrefixBytes
+        || root.indexOffset > root.validEnd || root.validEnd - root.indexOffset < packIndexBlockHeaderBytes)
+        return std::nullopt;
+    return root;
+}
+
+std::array<uint8_t, packRecordHeaderBytes> encodePackRecordHeader(const PackRecordHeader& header)
+{
+    using namespace ContainerInternal;
+    std::array<uint8_t, packRecordHeaderBytes> bytes { };
+    auto span = std::span { bytes };
+    memcpySpan(span.first(BodyKey::byteSize), header.key.bytes());
+    storeField<uint64_t>(span, 40, header.size);
+    storeField<uint64_t>(span, 48, header.version);
+    storeField<uint32_t>(span, packRecordCRCOffset, crc32cOf(span.first(packRecordCRCOffset)));
+    return bytes;
+}
+
+std::expected<PackRecordHeader, PackRejection> decodePackRecordHeader(std::span<const uint8_t, packRecordHeaderBytes> header)
+{
+    using namespace ContainerInternal;
+    std::span<const uint8_t> bytes = header;
+    if (loadField<uint32_t>(bytes, packRecordCRCOffset) != crc32cOf(bytes.first(packRecordCRCOffset)) || !isAllZero(bytes.subspan(60, 4)))
+        return std::unexpected("a record header's CRC differs"_s);
+    auto key = keyAt(bytes, 0);
+    if (!key)
+        return std::unexpected("a record header names no body key"_s);
+    return PackRecordHeader { *key, loadField<uint64_t>(bytes, 40), loadField<uint64_t>(bytes, 48) };
+}
+
+std::array<uint8_t, packIndexBlockHeaderBytes> encodePackIndexBlockHeader(const PackIndexBlock& block, std::span<const uint8_t> entries)
+{
+    using namespace ContainerInternal;
+    ASSERT(entries.size() == static_cast<size_t>(block.count) * packIndexEntryBytes);
+    std::array<uint8_t, packIndexBlockHeaderBytes> bytes { };
+    auto span = std::span { bytes };
+    memcpySpan(span.first(indexBlockTag.size()), std::span { indexBlockTag });
+    storeField<uint64_t>(span, 8, block.previous);
+    storeField<uint32_t>(span, 16, static_cast<uint32_t>(block.kind));
+    storeField<uint32_t>(span, 20, block.count);
+    storeField<uint32_t>(span, packIndexCRCOffset, ~crc32cExtend(crc32cExtend(~0u, span.first(packIndexCRCOffset)), entries));
+    return bytes;
+}
+
+std::expected<PackIndexBlock, PackRejection> decodePackIndexBlockHeader(std::span<const uint8_t, packIndexBlockHeaderBytes> header)
+{
+    using namespace ContainerInternal;
+    std::span<const uint8_t> bytes = header;
+    if (!equalSpans(bytes.first(indexBlockTag.size()), std::span { indexBlockTag }))
+        return std::unexpected("an index block's tag is not JITCINDX"_s);
+    uint32_t kind = loadField<uint32_t>(bytes, 16);
+    if (kind > static_cast<uint32_t>(PackIndexKind::Delta))
+        return std::unexpected("an index block's kind is neither full nor delta"_s);
+    if (!isAllZero(bytes.subspan(28, 4)))
+        return std::unexpected("a reserved byte of an index block is not zero"_s);
+    PackIndexBlock block { static_cast<PackIndexKind>(kind), loadField<uint64_t>(bytes, 8), loadField<uint32_t>(bytes, 20) };
+    if ((block.kind == PackIndexKind::Full) != !block.previous)
+        return std::unexpected("an index block's kind disagrees with its previous block"_s);
+    if (block.previous % packAlignment)
+        return std::unexpected("an index block's previous block is misaligned"_s);
+    return block;
+}
+
+std::optional<PackRejection> checkPackIndexBlockCRC(std::span<const uint8_t, packIndexBlockHeaderBytes> header, std::span<const uint8_t> entries)
+{
+    using namespace ContainerInternal;
+    std::span<const uint8_t> bytes = header;
+    if (loadField<uint32_t>(bytes, packIndexCRCOffset) != ~crc32cExtend(crc32cExtend(~0u, bytes.first(packIndexCRCOffset)), entries))
+        return "an index block's CRC differs"_s;
+    return std::nullopt;
+}
+
+void encodePackIndexEntry(const PackIndexEntry& entry, std::span<uint8_t> bytes)
+{
+    using namespace ContainerInternal;
+    RELEASE_ASSERT(bytes.size() == packIndexEntryBytes);
+    zeroSpan(bytes);
+    memcpySpan(bytes.first(BodyKey::byteSize), entry.key.bytes());
+    storeField<uint64_t>(bytes, 40, entry.offset);
+    storeField<uint64_t>(bytes, 48, entry.size);
+    storeField<uint64_t>(bytes, 56, entry.version);
+    storeField<uint32_t>(bytes, 64, entry.llintThreshold);
+    storeField<uint32_t>(bytes, 68, entry.counterProgress);
+    storeField<uint8_t>(bytes, 72, entry.highestTier);
+}
+
+std::expected<PackIndexEntry, PackRejection> decodePackIndexEntry(std::span<const uint8_t> bytes)
+{
+    using namespace ContainerInternal;
+    ASSERT(bytes.size() == packIndexEntryBytes);
+    auto key = keyAt(bytes, 0);
+    if (!key)
+        return std::unexpected("an index entry names no body key"_s);
+    if (!isAllZero(bytes.subspan(packIndexEntryZeroOffset)))
+        return std::unexpected("a reserved byte of an index entry is not zero"_s);
+    PackIndexEntry entry { *key, loadField<uint64_t>(bytes, 40), loadField<uint64_t>(bytes, 48), loadField<uint64_t>(bytes, 56),
+        loadField<uint32_t>(bytes, 64), loadField<uint32_t>(bytes, 68), loadField<uint8_t>(bytes, 72) };
+    if (entry.isTombstone()) {
+        if (entry.size || entry.version || entry.llintThreshold || entry.counterProgress || entry.highestTier)
+            return std::unexpected("a tombstone carries a body's fields"_s);
+        return entry;
+    }
+    if (entry.offset < packPrefixBytes || entry.offset % packAlignment || !entry.version)
+        return std::unexpected("an index entry's offset or commit identifier is malformed"_s);
+    return entry;
+}
+
+bool packEntryRepeatsEnvelope(const PackIndexEntry& entry, const BodyLayout& layout)
+{
+    return entry.version == layout.version && entry.highestTier == layout.highestTier
+        && entry.llintThreshold == layout.llintThreshold && entry.counterProgress == layout.counterProgress;
+}
+
 #if ENABLE(JITCACHE_TWINS)
 namespace ContainerTesting {
 

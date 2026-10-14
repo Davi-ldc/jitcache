@@ -503,11 +503,10 @@ static std::optional<BodyKey> bodyKeyArgument(JSGlobalObject* globalObject, JSVa
     if (value.isString()) {
         String hex = asString(value)->value(globalObject);
         RETURN_IF_EXCEPTION(scope, std::nullopt);
-        // The key's hex is its body file's name without ".bin" (JITCacheBench.h, bodyKeyHex), so the store's own name
-        // decoding reads it back.
-        if (hex.length() == 2 * BodyKey::byteSize && hex.containsOnlyASCII()) {
-            CString name = makeString(hex, ".bin"_s).latin1();
-            if (auto key = bodyKeyFromFileName(name.span()))
+        // The key's hex as bodyKeyHex writes it, which the store's own decoding reads back.
+        if (hex.length() == bodyKeyHexLength && hex.containsOnlyASCII()) {
+            CString digits = hex.latin1();
+            if (auto key = bodyKeyFromHex(digits.span()))
                 return key;
         }
     }
@@ -1497,6 +1496,10 @@ void didStartShellVM(VM& vm, StartOutcome outcome, bool logsResults)
     if (ArtifactWriter* writer = state->writer()) {
         writer->setFaultForTesting(writerFault);
         writer->setKillForTesting(writerKill);
+        // A compaction's kill point or fault needs a compaction, which the end of a delta then runs on any dead byte.
+        bool compactionHook = (writerKill && (writerKill->point == ArtifactWriter::KillPoint::CompactionBeforeRename || writerKill->point == ArtifactWriter::KillPoint::CompactionAfterRename))
+            || (writerFault && StringView { writerFault->check }.startsWith("compaction."_s));
+        writer->setCompactsEagerlyForTesting(compactionHook);
     }
     // H1's test entry, of part Integrator and check test-entry.
     TwinReportSink* report = state->twinReportSink();
