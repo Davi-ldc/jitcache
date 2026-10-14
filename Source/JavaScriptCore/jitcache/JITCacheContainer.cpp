@@ -196,7 +196,9 @@ static String firstDifferingField(const ArtifactHeader& artifact, const Artifact
 
 static constexpr std::array<uint8_t, 8> bodyTag { 'J', 'I', 'T', 'C', 'B', 'O', 'D', 'Y' };
 static constexpr uint16_t bodyLayoutVersion = 1;
-static constexpr uint8_t bodyHighestTier = 1; // the only highest tier of this version
+// The highest tier a body of this version holds: 0 for a body without an image, which holds the UCB lane's sections alone,
+// and 1 for a baseline capture (THREAD Capture).
+static constexpr uint8_t maximumBodyTier = 1;
 static constexpr size_t envelopeVersionOffset = 8;
 static constexpr size_t envelopeSizeOffset = 10;
 static constexpr size_t envelopeSectionCountOffset = 12;
@@ -274,7 +276,7 @@ static std::expected<BodyEnvelope, ContainerCheck> checkEnvelope(std::span<const
         && (envelope[envelopeZeroOffset]
             || !isAllZero(envelope.subspan(envelopeReservedOffset, envelopeReservedBytes))
             || !isAllZero(envelope.subspan(envelopeTrailerOffset))
-            || envelope[envelopeTierOffset] != bodyHighestTier))
+            || envelope[envelopeTierOffset] > maximumBodyTier))
         return std::unexpected(ContainerChecks::envelope);
 
     // B3.

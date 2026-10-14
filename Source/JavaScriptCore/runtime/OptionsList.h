@@ -406,6 +406,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, forceEagerCompilation, false, Normal, nullptr) \
     v(Int32, thresholdForJITAfterWarmUp, 500, Normal, nullptr) \
     v(Int32, thresholdForJITSoon, 100, Normal, nullptr) \
+    v(Bool, jitCacheImportLLIntProgress, true, Normal, "JITCache: a body imported without baseline code arms its LLInt counter with the progress it carries, at most one invocation short of crossing; false arms it from zero. A measurement switch."_s) \
     \
     v(Int32, thresholdForOptimizeAfterWarmUp, 1000, Normal, nullptr) \
     v(Int32, thresholdForOptimizeAfterLongWarmUp, 1000, Normal, nullptr) \

@@ -1060,7 +1060,8 @@ JITCACHE_TEST(containerBodyChecks, No)
         bytes[14] = 2;
         resealEnvelope(bytes);
     });
-    expectChanged("a highest tier of 0"_s, envelopeCheck, accepted, [](auto& bytes) {
+    // Tier 0, a body without an image, is a highest tier B2 accepts; one that holds tier-1 sections fails B7.
+    expectChanged("a highest tier of 0 over tier-1 sections"_s, requiredCheck, accepted, [](auto& bytes) {
         bytes[14] = 0;
         resealEnvelope(bytes);
     });

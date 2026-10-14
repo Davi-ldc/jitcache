@@ -3,6 +3,7 @@
 
 #include "ArithProfile.h"
 #include "JSCInlines.h"
+#include "Options.h"
 #include "SymbolTable.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
@@ -81,6 +82,10 @@ static constexpr uint32_t binaryCategoryMask = (1u << binaryCategoryBits) - 1;
 static constexpr uint32_t unaryCategoryMask = (1u << unaryCategoryBits) - 1;
 static constexpr uint32_t binaryBitsLimit = BinaryArithProfile::specialFastPathBit << 1;
 static constexpr uint32_t unaryBitsLimit = 1u << unaryCategoryBits;
+
+// The points one LLInt invocation adds to its body's counter: 5 at the prologue and 10 at the return
+// (llint/LowLevelInterpreter.asm, the prologue and checkSwitchToJITForEpilogue macros).
+static constexpr double llintInvocationPoints = 15;
 
 template<typename T>
 static T readField(std::span<const uint8_t> bytes, size_t offset)
@@ -338,6 +343,18 @@ static uint64_t unaryArithUnits(uint32_t bits)
     return std::popcount(bits & unaryCategoryMask);
 }
 
+// A UCB copy's categories (section 5.6): one per bit of a value prediction, and one per array flag, which a UCB copy holds
+// without the pruning mark.
+static uint64_t valueCategoryUnits(SpeculatedType prediction)
+{
+    return std::popcount(static_cast<uint64_t>(prediction));
+}
+
+static uint64_t arrayFlagUnits(OptionSet<ArrayProfileFlag> flags)
+{
+    return std::popcount((flags & restorableArrayProfileFlags).toRaw());
+}
+
 // A constant register as a SymbolTable, or null. An empty constant, which generation emits for TDZ checks, is no cell.
 static SymbolTable* symbolTableAt(UnlinkedCodeBlock& ucb, uint32_t index)
 {
@@ -502,7 +519,7 @@ bool constantBitsFit(UnlinkedCodeBlock& ucb, const FeedbackSection& section)
 }
 
 // Takes the UCB's cell lock for step 5, so the caller must not hold it.
-void seedFeedback(VM& vm, UnlinkedCodeBlock& ucb, const FeedbackSection& section)
+void seedFeedback(VM& vm, UnlinkedCodeBlock& ucb, const FeedbackSection& section, BodyImage image)
 {
     const FeedbackCounts& counts = section.counts();
     // With strict on, C3 and C9 have checked the counts and the constants; normal mode trusts the body (THREAD Session).
@@ -532,7 +549,8 @@ void seedFeedback(VM& vm, UnlinkedCodeBlock& ucb, const FeedbackSection& section
     // Step 5, under the cell lock that a marker's update of m_age takes (TierUpHistory).
     UCBFeedbackInternal::restoreTierUpHistory(ucb, { section.didOptimize(), section.quickDFGTierUp(), section.quickFTLTierUp() });
 
-    armLLIntCounter(ucb.llintExecuteCounter(), section.llintActiveThreshold(), section.llintProgress());
+    int32_t threshold = section.llintActiveThreshold();
+    armLLIntCounter(ucb.llintExecuteCounter(), threshold, importedLLIntProgress(threshold, section.llintProgress(), image));
 
     // No lock for the children: a UFE's visitor and finalizer write none of its bit-fields and only the VM thread writes
     // them, so nothing concurrent can undo the bit. FunctionExecutable::notifyCreation sets it the same way.
@@ -657,7 +675,49 @@ void armLLIntCounter(BaselineExecutionCounter& counter, int32_t threshold, doubl
     counter.m_totalCount = static_cast<float>(progress + slice);
 }
 
-UCBRichness liveRichness(UnlinkedCodeBlock& ucb)
+double importedLLIntProgress(int32_t threshold, double progress, BodyImage image)
+{
+    // armLLIntCounter defers a deferred counter whatever the progress, which then stays the captured -2^31 (I12).
+    if (image == BodyImage::Present || threshold == std::numeric_limits<int32_t>::max())
+        return progress;
+    // The measurement switch: the bench compares consumers whose counters keep the carried warm-up with consumers whose
+    // counters start from zero (THREAD Restoration leaves the default to that measurement).
+    if (!Options::jitCacheImportLLIntProgress())
+        return 0;
+    return carriedLLIntProgress(threshold, progress);
+}
+
+double carriedLLIntProgress(int32_t threshold, double progress)
+{
+    using namespace UCBFeedbackInternal;
+    if (threshold == std::numeric_limits<int32_t>::max())
+        return 0;
+    // The comparisons send a NaN, which only a body normal mode trusts can hold, to zero.
+    if (!(progress > 0))
+        return 0;
+    // The consumer's first invocation of the body then completes in the LLInt, profiling every site it reaches, before
+    // its return crosses the threshold, as the producer's warm-up would have.
+    double limit = static_cast<double>(threshold) - llintInvocationPoints;
+    if (!(limit > 0))
+        return 0;
+    return std::min(progress, limit);
+}
+
+uint32_t carriedLLIntPoints(int32_t threshold, double progress)
+{
+    // At most INT32_MAX - 15, so it fits.
+    return static_cast<uint32_t>(std::floor(carriedLLIntProgress(threshold, progress)));
+}
+
+bool llintCounterShowsExecution(UnlinkedCodeBlock& ucb)
+{
+    // Only the VM thread writes the counter, which holds no cell. Every deferral, deferIndefinitely's INT32_MAX, happens at
+    // a crossing (the LLInt's tier-up slow paths when shouldJIT refuses the body) or after a compile that a crossing started.
+    BaselineExecutionCounter& counter = ucb.llintExecuteCounter();
+    return counter.m_activeThreshold == std::numeric_limits<int32_t>::max() || counter.count() > 0;
+}
+
+UCBRichness liveRichness(UnlinkedCodeBlock& ucb, BodyImage image)
 {
     using namespace UCBFeedbackInternal;
 
@@ -667,23 +727,34 @@ UCBRichness liveRichness(UnlinkedCodeBlock& ucb)
     for (unsigned i = 0; i < ucb.numberOfUnaryArithProfiles(); ++i)
         richness.arithmeticUnits += unaryArithUnits(ucb.unaryArithProfile(i).bits());
     richness.exitSiteUnits = exitSiteCount(ucb);
+    if (image == BodyImage::Absent) {
+        // Accumulated state only, as writeFeedbackSection reads it; a marker's merge into a copy meanwhile costs only
+        // precision (THREAD Capture).
+        for (auto& profile : ucb.unlinkedValueProfiles())
+            richness.copyUnits += valueCategoryUnits(profile.prediction());
+        for (auto& profile : ucb.unlinkedArrayProfiles())
+            richness.copyUnits += arrayFlagUnits(profile.arrayProfileFlags());
+    }
     return richness;
 }
 
-std::optional<UCBRichness> savedRichness(std::span<const uint8_t> feedbackSection, bool strict)
+UCBRichness savedRichness(const FeedbackSection& section, BodyImage image)
 {
     using namespace UCBFeedbackInternal;
 
-    auto section = FeedbackSection::parse(feedbackSection, strict);
-    if (!section)
-        return std::nullopt;
-    const FeedbackCounts& counts = section->counts();
+    const FeedbackCounts& counts = section.counts();
     UCBRichness richness;
     for (uint32_t i = 0; i < counts.binaryArithProfiles; ++i)
-        richness.arithmeticUnits += binaryArithUnits(section->binaryArithBits(i));
+        richness.arithmeticUnits += binaryArithUnits(section.binaryArithBits(i));
     for (uint32_t i = 0; i < counts.unaryArithProfiles; ++i)
-        richness.arithmeticUnits += unaryArithUnits(section->unaryArithBits(i));
+        richness.arithmeticUnits += unaryArithUnits(section.unaryArithBits(i));
     richness.exitSiteUnits = counts.exitSites;
+    if (image == BodyImage::Absent) {
+        for (uint32_t i = 0; i < counts.valueProfiles; ++i)
+            richness.copyUnits += valueCategoryUnits(section.prediction(i));
+        for (uint32_t i = 0; i < counts.arrayProfiles; ++i)
+            richness.copyUnits += arrayFlagUnits(section.arrayProfileFlags(i));
+    }
     return richness;
 }
 

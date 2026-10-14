@@ -53,6 +53,16 @@ bool VMState::strict() const
     return m_config.strict;
 }
 
+CaptureScope VMState::captureScope() const
+{
+    return m_config.captureScope;
+}
+
+bool VMState::capturesUncompiledBodies() const
+{
+    return captureScope() == CaptureScope::All && productionActive();
+}
+
 UCBRegistry& VMState::registry()
 {
     return m_registry;

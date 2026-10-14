@@ -14,12 +14,13 @@ function scaled(value)
 
 (function main(role, scratch, artifact, sequence) {
     const t = ucbTest(role, scratch, artifact, sequence);
+    // The reads surround the call alone: t.check, a body that ran in the Producer, has a body of its own under the default
+    // capture scope and would import between them at its first call.
     const before = t.statistics();
-    if (t.imports && before)
-        t.check(before.imports >= 1 && before.records.Imported >= 1, () => `the module body did not import before it ran: ${t.describe(before)}`);
-
     let total = scaled(1);
     const after = t.statistics();
+    if (t.imports && before)
+        t.check(before.imports >= 1 && before.records.Imported >= 1, () => `the module body did not import before it ran: ${t.describe(before)}`);
     if (t.imports)
         t.expect("the module's function", t.delta(before, after), { imports: 1 });
     for (let i = 0; i < 400; ++i)

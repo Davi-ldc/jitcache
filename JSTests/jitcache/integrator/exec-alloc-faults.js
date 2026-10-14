@@ -39,7 +39,8 @@
 // through the delta at exit, so the image twin, which replays its MathIC regeneration, catches a snippet fault a capture
 // held (SPEC-image.md section 11.3). The Consumer runs unfuzzed, calls every function, and reads each committed body's
 // sections: no ucb.feedback holds a deferred LLInt counter, an m_activeThreshold of INT32_MAX (SPEC-ucb.md section 5.2),
-// and every cb.state carries its baseline counter (no site is polymorphic, SPEC-cb.md I16), never a deferred one
+// a body without an image, which the delta captures from code that ran without compiling, holds no cb.state, and every
+// other cb.state carries its baseline counter (no site is polymorphic, SPEC-cb.md I16), never a deferred one
 // (SPEC-cb.md section 3.2), which a plan fault raised after the plan's effects would leave. No body reoptimizes, where
 // adjustedCounterValue would defer a counter natively. A Producer whose fault came early commits little or nothing, so
 // its Consumer may install nothing. The runner requires each step from some n and compares every output with the
@@ -103,6 +104,12 @@ load("./resources/integrator.js", "caller relative");
                 continue;
             check(i32(feedback, 40) !== INT32_MAX, `${fn.name}'s committed ucb.feedback holds a deferred LLInt counter`);
             const state = sectionOf(fn, "call", "cb.state");
+            // A body that ran without compiling, such as main, is captured without an image under the default capture
+            // scope, and holds the UCB lane's sections alone (THREAD Capture).
+            if (sectionOf(fn, "call", "image.baseline") === null) {
+                check(state === null, `${fn.name}'s committed body holds a cb.state without an image`);
+                continue;
+            }
             check(state !== null, `${fn.name}'s committed body has no cb.state`);
             checkSame(u8(state, 3), 1, `the counter mode of ${fn.name}'s cb.state, which has no polymorphic site`);
             check(i32(state, 28) !== INT32_MAX, `${fn.name}'s committed cb.state carries a deferred baseline counter`);

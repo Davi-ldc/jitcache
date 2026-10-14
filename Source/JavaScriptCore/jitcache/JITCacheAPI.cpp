@@ -170,6 +170,11 @@ static bool isRole(Role role)
     return role == Role::Consumer || role == Role::Producer || role == Role::ConsumerProducer;
 }
 
+static bool isCaptureScope(CaptureScope scope)
+{
+    return scope == CaptureScope::All || scope == CaptureScope::Compiled;
+}
+
 // A descriptor closed when it goes out of scope.
 class ScopedDescriptor {
     WTF_MAKE_NONCOPYABLE(ScopedDescriptor);
@@ -503,6 +508,18 @@ ASCIILiteral name(Role role)
     return { };
 }
 
+ASCIILiteral name(CaptureScope scope)
+{
+    switch (scope) {
+    case CaptureScope::All:
+        return "all"_s;
+    case CaptureScope::Compiled:
+        return "compiled"_s;
+    }
+    // As for a role: start rejects a value outside the enumeration at start.config.
+    return { };
+}
+
 ASCIILiteral name(FaultClass faultClass)
 {
     switch (faultClass) {
@@ -526,6 +543,15 @@ std::optional<Role> parseRole(StringView text)
     for (Role role : { Role::Consumer, Role::Producer, Role::ConsumerProducer }) {
         if (text == name(role))
             return role;
+    }
+    return std::nullopt;
+}
+
+std::optional<CaptureScope> parseCaptureScope(StringView text)
+{
+    for (CaptureScope scope : { CaptureScope::All, CaptureScope::Compiled }) {
+        if (text == name(scope))
+            return scope;
     }
     return std::nullopt;
 }
@@ -569,6 +595,8 @@ StartResult start(VM& vm, const Config& config)
         return { StartOutcome::Rejected, "start.config"_s, "artifactPath is empty"_s };
     if (!isRole(config.role))
         return { StartOutcome::Rejected, "start.config"_s, makeString("role "_s, static_cast<unsigned>(config.role), " is none of Consumer, Producer and ConsumerProducer"_s) };
+    if (!isCaptureScope(config.captureScope))
+        return { StartOutcome::Rejected, "start.config"_s, makeString("captureScope "_s, static_cast<unsigned>(config.captureScope), " is neither All nor Compiled"_s) };
     bool producing = config.role != Role::Consumer;
     std::optional<size_t> producerLimitBytes;
     if (producing) {

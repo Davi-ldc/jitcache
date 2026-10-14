@@ -77,7 +77,7 @@ A header that fails its checks does not stop `clean`, which needs only names; it
 
 ### 4.1 Scores
 
-The writer stamped L and P, the terms THREAD Maintenance defines, in each envelope (container sub-SPEC section 4.1); P is the CB lane's `counterProgress`, floored, capped and zero for a body whose counter does not travel (SPEC-cb.md section 4.3). The score is `(double(L) + double(P)) / double(B)`, with B the body file's size.
+The writer stamped L and P, the terms THREAD Maintenance defines, in each envelope (container sub-SPEC section 4.1); P is the CB lane's `counterProgress`, floored, capped and zero for a body whose counter does not travel (SPEC-cb.md section 4.3). A body of tier 0 has L the LLInt progress its import carries, `carriedLLIntPoints`, and P zero (SPEC-ucb.md section 8.3), so compact needs no case of its own for it. The score is `(double(L) + double(P)) / double(B)`, with B the body file's size.
 
 ### 4.2 Planning
 

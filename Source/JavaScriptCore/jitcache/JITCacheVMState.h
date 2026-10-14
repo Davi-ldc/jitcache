@@ -42,6 +42,10 @@ public:
     bool importsEnabled() const; // role Consumer or ConsumerProducer, and activity on (any thread)
     bool productionActive() const; // producing, activity on and production not ended (any thread)
     bool strict() const; // Config::strict (any thread)
+    CaptureScope captureScope() const; // Config::captureScope, which start checked (any thread)
+    // Production is active with the scope All: delta also captures the bodies that ran without compiling, so function UCB
+    // records keep their holder UFE (SPEC-ucb.md sections 6.1 and 8.3).
+    bool capturesUncompiledBodies() const;
     UCBRegistry& registry();
     uint64_t bodyVersion(const BodyKey&);
     BodyLookup openBody(const BodyKey&);

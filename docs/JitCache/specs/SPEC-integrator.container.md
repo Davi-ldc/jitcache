@@ -149,7 +149,7 @@ A body file holds the three parts THREAD Storage names.
 | 8 | 2 | layout version, 1 |
 | 10 | 2 | envelope size, 128 |
 | 12 | 2 | N, the number of sections, 1 to 64 |
-| 14 | 1 | the highest tier the body holds, 1 in this version |
+| 14 | 1 | the highest tier the body holds: 0 for a body without an image, which holds the UCB lane's sections alone, 1 for a baseline capture |
 | 15 | 1 | 0 |
 | 16 | 40 | the body key |
 | 56 | 8 | the commit identifier: nonzero, drawn with `cryptographicallyRandomValues` for every write of the file |
@@ -192,7 +192,7 @@ The checksum is the CRC-32C of RFC 3720: the Castagnoli polynomial `0x1EDC6F41`,
 | check | name | integrity, both modes | structure, `Full` only |
 |---|---|---|---|
 | B1 | `container.size` | the file is at least 128 bytes and its size equals the envelope's file size | |
-| B2 | `container.envelope` | the tag, layout version 1, envelope size 128, N from 1 to 64, and the envelope's CRC | the zero bytes and a highest tier of 1 |
+| B2 | `container.envelope` | the tag, layout version 1, envelope size 128, N from 1 to 64, and the envelope's CRC | the zero bytes and a highest tier of 0 or 1 |
 | B3 | `container.key` | the envelope's key equals `expectedKey`, the key the file's name encodes | |
 | B4 | `container.header-digest` | the envelope's header digest equals the opened artifact's | |
 | B5 | `container.version` | | the commit identifier is not zero |

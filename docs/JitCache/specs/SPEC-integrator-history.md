@@ -243,3 +243,7 @@ Task 8 waits in twins builds for each lane's twin check, which install steps 14 
 ### The option table lives in options.md
 
 The SPEC first listed the fixed options itself, assembled from THREAD's list and every lane's rows. The must-match, fixed and free options of the five sets moved to options.md, whose fixed table keeps the row order `checkFixedOptions()` walks, so each option's class, value and reason sit in one table that every set cites; this SPEC keeps the header, the check and the build-time table.
+
+## An absent body loses to every candidate
+
+The glue scored an absent saved body as the empty `CaptureScore`, which every capture beat while every capture was of tier 1. A capture without an image is of tier 0, and one whose UCB copies hold no category and whose counter carries no whole point, a body that ran once or was deferred, ties the empty score, so `beats` would have kept nothing for it, against THREAD's "any candidate beats an absent body". Such a body still saves its consumer the parse and the generation. The glue now compares with `beats` only when a saved score exists (section 8.2).

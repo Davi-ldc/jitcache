@@ -170,7 +170,7 @@ HeaderDigest artifactHeaderDigest(std::span<const uint8_t> header);
 //   8    2   layout version, 1
 //   10   2   envelope size, 128
 //   12   2   N, the number of sections, 1 to 64
-//   14   1   the highest tier the body holds, 1 in this version
+//   14   1   the highest tier the body holds: 0 without an image, 1 for a baseline capture
 //   15   1   0
 //   16   40  the body key
 //   56   8   the commit identifier: nonzero, drawn with cryptographicallyRandomValues for every write of the file
@@ -232,7 +232,7 @@ uint32_t encodeBodyDirectory(std::span<const BodyDirectoryEntry>, std::span<uint
 //
 //   B1 container.size           integrity: the file is at least 128 bytes and its size equals the envelope's file size
 //   B2 container.envelope       integrity: the tag, layout version 1, envelope size 128, N from 1 to 64, the envelope's
-//                               CRC; structure: the zero bytes and a highest tier of 1
+//                               CRC; structure: the zero bytes and a highest tier of 0 or 1
 //   B3 container.key            integrity: the envelope's key equals the key the file's name encodes
 //   B4 container.header-digest  integrity: the envelope's header digest equals the opened artifact's
 //   B5 container.version        structure: the commit identifier is not zero

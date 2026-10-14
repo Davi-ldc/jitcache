@@ -125,6 +125,10 @@ struct UCBRecord {
     // Origin Decoded, in a VM whose production is active: the butterfly map of the body of provenance Generated the UCB
     // was last seeded or attached from (sections 7.3.3, 7.3.4 and 8.2); ceil(N / 8) bytes.
     std::optional<Vector<uint8_t>> generatedButterflyMap;
+    // Function code, in a VM whose production is active with the capture scope All: the UFE whose request produced the
+    // UCB, which delta needs to capture a body that no CodeBlock holds (section 8.3). A conservative root can keep the UCB
+    // alive after the UFE dies, so the UFE's destructor hook clears the field (section 6.3). Null otherwise.
+    UnlinkedFunctionExecutable* holder { nullptr };
 };
 
 // One per VM, owned by the integrator's per-VM state (R-INT-1), created when start configures the VM and destroyed after
@@ -184,6 +188,19 @@ public:
     bool suppliedDigestVerified(SourceID) const;
     void markSuppliedDigestVerified(SourceID);
 
+    // Delta's walk of every recorded UCB (section 8.3). Under the lock the walk only copies, so the caller tests each cell
+    // after it, outside the lock: a cell's liveness test takes its block's lock, which the leaf rule forbids here.
+    struct RecordedCodeBlock {
+        UnlinkedCodeBlock* codeBlock;
+        UnlinkedFunctionExecutable* holder; // the record's, or null
+    };
+    // VM thread. Only the VM thread's requests and the destructor hooks change the count, and the hooks run only where the
+    // VM thread sweeps, so between this call and copyRecordedCodeBlocks a caller that does neither sees the same records.
+    size_t recordedCodeBlockCount() const;
+    // VM thread. Copies each recorded UCB with its record's holder into `out`, at most out.size() of them, and returns how
+    // many it copied.
+    size_t copyRecordedCodeBlocks(std::span<RecordedCodeBlock> out) const;
+
     // Destructors: the thread sweeping the VM's heap (F12).
     void unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock*);
     void unlinkedFunctionExecutableDestroyed(const UnlinkedFunctionExecutable*);
@@ -203,6 +220,9 @@ private:
     UncheckedKeyHashMap<const UnlinkedFunctionExecutable*, ChildIdentity> m_children WTF_GUARDED_BY_LOCK(m_lock);
     UncheckedKeyHashMap<const UnlinkedFunctionExecutable*, RootIdentity> m_roots WTF_GUARDED_BY_LOCK(m_lock);
     UncheckedKeyHashMap<const UnlinkedCodeBlock*, std::unique_ptr<UCBRecord>> m_codeBlocks WTF_GUARDED_BY_LOCK(m_lock); // boxed: WTF's HashTable refuses buckets above 150 bytes
+    // The UCBs whose records name each holder (UCBRecord::holder), so that the holder's destructor hook clears those
+    // records' field. A UFE holds one UCB per specialization, and an older one lives on only while a CodeBlock keeps it.
+    UncheckedKeyHashMap<const UnlinkedFunctionExecutable*, Vector<const UnlinkedCodeBlock*, 1>> m_heldCodeBlocks WTF_GUARDED_BY_LOCK(m_lock);
     UncheckedKeyHashSet<SourceID> m_verifiedSuppliedDigests WTF_GUARDED_BY_LOCK(m_lock);
     UCBStatistics m_statistics; // not under m_lock: only the VM thread's engine and readers touch it
 };

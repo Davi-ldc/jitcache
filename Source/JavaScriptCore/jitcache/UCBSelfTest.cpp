@@ -1141,15 +1141,29 @@ static bool testFeedbackSection(VM& vm, SelfTestPart& u5)
     for (unsigned i = 0; i < source.numberOfUnaryArithProfiles(); ++i)
         expectedRichness.arithmeticUnits += static_cast<uint64_t>(std::popcount(source.unaryArithProfile(i).bits() & ((1u << 10) - 1)));
     expectedRichness.exitSiteUnits = fixtureExitSiteCount;
-    UCBRichness live = liveRichness(source);
-    auto saved = savedRichness(section.span(), true);
-    bool richnessAgrees = live.arithmeticUnits == expectedRichness.arithmeticUnits && live.exitSiteUnits == expectedRichness.exitSiteUnits
-        && saved && saved->arithmeticUnits == expectedRichness.arithmeticUnits && saved->exitSiteUnits == expectedRichness.exitSiteUnits;
+    UCBRichness live = liveRichness(source, BodyImage::Present);
+    auto savedSection = FeedbackSection::parse(section.span(), true);
+    std::optional<UCBRichness> saved;
+    if (savedSection)
+        saved = savedRichness(*savedSection, BodyImage::Present);
+    bool richnessAgrees = live.arithmeticUnits == expectedRichness.arithmeticUnits && live.exitSiteUnits == expectedRichness.exitSiteUnits && !live.copyUnits
+        && saved && saved->arithmeticUnits == expectedRichness.arithmeticUnits && saved->exitSiteUnits == expectedRichness.exitSiteUnits && !saved->copyUnits;
     if (!u5.check(richnessAgrees, "liveRichness or savedRichness does not count section 5.6's units"_s))
+        return false;
+    // Without an image the UCB copies count too, one unit per prediction bit and per array flag, alike live and saved.
+    UCBRichness liveWithoutImage = liveRichness(source, BodyImage::Absent);
+    UCBRichness savedWithoutImage = savedSection ? savedRichness(*savedSection, BodyImage::Absent) : UCBRichness { };
+    uint64_t expectedCopyUnits = 0;
+    for (auto& profile : source.unlinkedValueProfiles())
+        expectedCopyUnits += static_cast<uint64_t>(std::popcount(static_cast<uint64_t>(profile.prediction())));
+    for (auto& profile : source.unlinkedArrayProfiles())
+        expectedCopyUnits += static_cast<uint64_t>(std::popcount(profile.arrayProfileFlags().toRaw()));
+    if (!u5.check(liveWithoutImage.copyUnits == expectedCopyUnits && savedWithoutImage.copyUnits == expectedCopyUnits && liveWithoutImage.total() == savedWithoutImage.total(),
+        "the richness of a body without an image does not count its UCB copies alike live and saved"_s))
         return false;
     Vector<uint8_t> brokenMagic = section;
     brokenMagic[0] ^= 0xff;
-    if (!u5.check(!savedRichness(brokenMagic.span(), true) && savedRichness(brokenMagic.span(), false), "savedRichness does not answer as FeedbackSection::parse does"_s))
+    if (!u5.check(!FeedbackSection::parse(brokenMagic.span(), true) && FeedbackSection::parse(brokenMagic.span(), false), "FeedbackSection::parse does not reject a broken magic with strict on alone"_s))
         return false;
 
     // Seeding (section 5.3) a second generation of the program, which no holder has published.
@@ -1158,7 +1172,7 @@ static bool testFeedbackSection(VM& vm, SelfTestPart& u5)
         return false;
     if (!u5.check(!feedbackFits(*unrelated.codeBlock.get(), *parsed), "C3 accepts a UCB with other counts"_s))
         return false;
-    seedFeedback(vm, target, *parsed);
+    seedFeedback(vm, target, *parsed, BodyImage::Present);
     if (!u5.check(sameFeedback(source, target), "seedFeedback did not leave the captured feedback in the seeded UCB"_s))
         return false;
     BaselineExecutionCounter& seededCounter = target.llintExecuteCounter();
@@ -4025,7 +4039,8 @@ private:
     VMState& m_state;
 };
 
-// The three sections a capture of a UCB writes (sections 4.2 and 5.2).
+// The three sections a capture of a UCB writes (sections 4.2 and 5.2), in a body with an image: an empty image section
+// gives it highest tier 1, so its imports and attaches leave pending imports, which no part here installs.
 struct TestBody {
     Vector<uint8_t> identity;
     Vector<uint8_t> core;
@@ -4033,10 +4048,11 @@ struct TestBody {
 
     Ref<ValidatedBody> validated(const BodyKey& key, uint64_t version) const
     {
-        std::array<ValidatedBody::TestSection, 3> sections { {
+        std::array<ValidatedBody::TestSection, 4> sections { {
             { SectionKind::UCBIdentity, identity.span() },
             { SectionKind::UCBCore, core.span() },
             { SectionKind::UCBFeedback, feedback.span() },
+            { SectionKind::ImageBaseline, { } },
         } };
         return ValidatedBody::createForTesting(key, version, sections);
     }
@@ -4685,7 +4701,7 @@ static bool testDecodedButterflyProvenance(VM& vm, VMState& state, JSGlobalObjec
         CodeBlock* codeBlock = functionExecutable->newCodeBlockFor(CodeSpecializationKind::CodeForCall, jsFunction, globalObject->globalScope());
         if (!codeBlock || codeBlock->unlinkedCodeBlock() != slot)
             return false;
-        auto sections = buildSections(vm, *codeBlock, state.twinBudget().get());
+        auto sections = buildSections(vm, *codeBlock->unlinkedCodeBlock(), holderOf(*codeBlock), state.twinBudget().get());
         if (!sections)
             return false;
         auto identity = parseIdentitySection(sections->identity.span(), true);

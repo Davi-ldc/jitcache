@@ -17,16 +17,22 @@ class VM;
 
 namespace JSC::JITCache {
 
+// The tiers a body's envelope names (THREAD Capture): a baseline capture is tier 1, and a capture without an image, which
+// holds the UCB lane's three sections alone, is tier 0, below every capture with one.
+constexpr uint8_t imagelessTier = 0;
+constexpr uint8_t baselineTier = 1;
+
 // Capture scores (SPEC-integrator.md section 8.2). A live candidate's score is tier 1, the UCB lane's liveRichness
 // total plus the CB lane's scoreLive richness units, the ICs lane's IC sites with cases, and scoreLive's counterWithheld
-// and counter progress, with the ICs lane called before the CB lane for the same CB in the same pause (II22). A score
-// about to be committed comes from what the builders returned for the bytes they wrote (II23).
+// and counter progress, with the ICs lane called before the CB lane for the same CB in the same pause (II22). A body that
+// ran without an image scores tier 0, the UCB lane's liveRichness with its UCB copies, and its carried LLInt progress. A
+// score about to be committed comes from what the builders returned for the bytes they wrote (II23).
 struct CaptureScore {
-    uint8_t tier { 0 }; // 1 for a baseline capture
+    uint8_t tier { 0 }; // imagelessTier or baselineTier
     uint64_t richness { 0 }; // the UCB lane's units plus the CB lane's units
     uint32_t icSitesWithCases { 0 };
     bool counterWithheld { false }; // the polymorphic rule withheld the counter (SPEC-cb.md section 4.3)
-    uint32_t counterProgress { 0 };
+    uint32_t counterProgress { 0 }; // tier 0: the LLInt progress the body carries (carriedLLIntPoints)
 };
 struct SavedScore {
     CaptureScore score;

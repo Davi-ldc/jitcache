@@ -542,6 +542,22 @@ static std::optional<Digest256> recordContextDigest(VMState& vmState, RequestSta
     return digest;
 }
 
+// The holder a record of the request's UCB keeps (section 6.1): the requesting UFE, for a function body in a VM that
+// captures bodies without a CodeBlock (VMState::capturesUncompiledBodies), and none otherwise.
+static UnlinkedFunctionExecutable* recordedHolder(VMState& vmState, const RequestState& state)
+{
+    if (state.kind != RequestKind::FunctionBody || !vmState.capturesUncompiledBodies())
+        return nullptr;
+    return state.functionExecutable;
+}
+
+// Whether the body holds an image (THREAD Capture). With strict on, container check B7 has matched its sections to the
+// envelope's highest tier; normal mode trusts the envelope.
+static BodyImage imageOf(const ValidatedBody& body)
+{
+    return body.highestTier() ? BodyImage::Present : BodyImage::Absent;
+}
+
 // Recording stops for good when cache activity turns off; existing records stay (section 6.2). A record the registry
 // refuses stays in the caller's temporary and goes after the call, outside the registry's lock.
 static bool addRecord(VMState& vmState, UnlinkedCodeBlock& codeBlock, UCBRecord&& record)
@@ -1053,10 +1069,11 @@ UnlinkedCodeBlock* importBody(RequestState& state)
         rebuildAtomStringButterflies(vm, *codeBlock, *identity);
     }
 
-    // Step 9.
+    // Step 9. A body without an image keeps its LLInt counter's progress only up to one invocation short of crossing.
+    BodyImage image = imageOf(body.get());
     {
         PartScope scope(&timer, RequestPart::Seeding, CostAccount::Counted);
-        seedFeedback(vm, *codeBlock, *feedback);
+        seedFeedback(vm, *codeBlock, *feedback, image);
     }
 
     // Step 10.
@@ -1072,19 +1089,23 @@ UnlinkedCodeBlock* importBody(RequestState& state)
         vm.heap.reportExtraMemoryAllocated(codeBlock, codeBlock->instructions().sizeInBytes() + codeBlock->metadataSizeInBytes());
     }
 
-    // Step 12.
+    // Step 12. A body without an image leaves no pending import, since its CodeBlocks start in the LLInt as natively; its
+    // record is stamped with the index token instead, so a request for the published UCB skips the body that has nothing
+    // to attach until the index lists another at the key (section 7.3.4).
     {
         PartScope scope(&timer, RequestPart::Records, CostAccount::Counted);
+        bool hasImage = image == BodyImage::Present;
         UCBRecord record {
             .key = *key,
             .context = recordedContextMeasured(state, &timer),
             .origin = UCBOrigin::Imported,
             .keyFeatures = keyFeaturesOf(state),
-            .missedBodyVersion = std::nullopt,
+            .missedBodyVersion = hasImage ? std::nullopt : std::optional<uint64_t> { indexToken },
             .matchedBodyVersion = body->version(),
-            .pendingImport = PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Seeded),
+            .pendingImport = hasImage ? RefPtr<PendingImport> { PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Seeded) } : nullptr,
             .suppliedDigestProvider = state.suppliedDigestProvider,
             .generatedButterflyMap = std::nullopt,
+            .holder = recordedHolder(*vmState, state),
         };
         bool recorded = addRecord(*vmState, *codeBlock, WTF::move(record));
         // The UCB was just decoded, so nothing has recorded it, and nothing since step 1 has turned cache activity off.
@@ -1141,6 +1162,7 @@ void seedDecoded(RequestState& state, UnlinkedCodeBlock& codeBlock)
             .pendingImport = nullptr,
             .suppliedDigestProvider = state.suppliedDigestProvider,
             .generatedButterflyMap = std::nullopt,
+            .holder = recordedHolder(*vmState, state),
         };
         addRecord(*vmState, codeBlock, WTF::move(record));
         state.settled = true;
@@ -1215,24 +1237,28 @@ void seedDecoded(RequestState& state, UnlinkedCodeBlock& codeBlock)
     }
 
     // Step 6. The parse fields stay the decode's own (section 7.4).
+    BodyImage image = imageOf(body.get());
     {
         PartScope scope(&timer, RequestPart::Seeding, CostAccount::Counted);
-        seedFeedback(vm, codeBlock, *feedback);
+        seedFeedback(vm, codeBlock, *feedback, image);
     }
 
-    // Step 7.
+    // Step 7. As at an import (section 7.3.1, step 12), a body without an image leaves no pending import and stamps the
+    // record with the index token.
     {
         PartScope scope(&timer, RequestPart::Records, CostAccount::Counted);
+        bool hasImage = image == BodyImage::Present;
         UCBRecord record {
             .key = *key,
             .context = recordedContextMeasured(state, &timer),
             .origin = UCBOrigin::Decoded,
             .keyFeatures = keyFeaturesOf(state),
-            .missedBodyVersion = std::nullopt,
+            .missedBodyVersion = hasImage ? std::nullopt : std::optional<uint64_t> { indexToken },
             .matchedBodyVersion = body->version(),
-            .pendingImport = PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Seeded),
+            .pendingImport = hasImage ? RefPtr<PendingImport> { PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Seeded) } : nullptr,
             .suppliedDigestProvider = state.suppliedDigestProvider,
             .generatedButterflyMap = generatedButterflyMapFor(*vmState, *identity),
+            .holder = recordedHolder(*vmState, state),
         };
         bool recorded = addRecord(*vmState, codeBlock, WTF::move(record));
         // U is unpublished, so nothing has recorded it.
@@ -1307,6 +1333,12 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
         return;
     }
     Ref<ValidatedBody> body = lookup.body().releaseNonNull();
+    // A body without an image has nothing to attach: what it carries seeds a UCB only before publication (THREAD
+    // Restoration). Requests for U skip it until the index lists another body at the key.
+    if (imageOf(body.get()) == BodyImage::Absent) {
+        registry.setMissedBodyVersion(codeBlock, indexToken);
+        return;
+    }
     const UnlinkedFunctionExecutable* holder = state.functionExecutable;
 
     std::optional<IdentitySection> identity;
@@ -1390,6 +1422,7 @@ void recordGenerated(RequestState& state, UnlinkedCodeBlock& codeBlock)
         .pendingImport = nullptr,
         .suppliedDigestProvider = state.suppliedDigestProvider,
         .generatedButterflyMap = std::nullopt,
+        .holder = recordedHolder(*vmState, state),
     };
     addRecord(*vmState, codeBlock, WTF::move(record));
     state.settled = true;
@@ -1434,6 +1467,7 @@ void recordDecodedSlot(RequestState& state, UnlinkedFunctionCodeBlock& codeBlock
         .pendingImport = nullptr,
         .suppliedDigestProvider = WTF::move(suppliedDigestProvider),
         .generatedButterflyMap = std::nullopt,
+        .holder = recordedHolder(*vmState, state),
     };
     addRecord(*vmState, codeBlock, WTF::move(record));
 }

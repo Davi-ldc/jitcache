@@ -175,7 +175,14 @@ uint32_t envelopeLLIntThreshold(UnlinkedCodeBlock& ucb)
     return static_cast<uint32_t>(std::max<int32_t>(ucb.thresholdForJIT(Options::thresholdForJITAfterWarmUp()), 0));
 }
 
-std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, const CodeBlock& codeBlock, ProducerBudget& budget)
+const UnlinkedFunctionExecutable* holderOf(const CodeBlock& codeBlock)
+{
+    if (codeBlock.codeType() != FunctionCode)
+        return nullptr;
+    return uncheckedDowncast<FunctionExecutable>(codeBlock.ownerExecutable())->unlinkedExecutable();
+}
+
+std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, ProducerBudget& budget)
 {
     using namespace UCBCaptureInternal;
 
@@ -183,20 +190,16 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, const CodeBl
     VMState* state = vm.jitCacheState();
     RELEASE_ASSERT(state);
     UCBRegistry& registry = state->registry();
-    UnlinkedCodeBlock& ucb = *codeBlock.unlinkedCodeBlock();
 
     // The glue calls this only for a candidate whose captureRecord answered in the same pause, and a record lives as long as
-    // its UCB, which the CodeBlock keeps alive (I1, I3).
+    // its UCB, which a CodeBlock or, at delta's walk of the registry, the last collection's marks keep alive (I1, I3).
     std::optional<UCBRegistry::RecordView> record = captureRecord(vm, ucb);
     RELEASE_ASSERT(record);
     IdentityKind identityKind = record->key.identityKind();
     UnlinkedCodeBlockCoreKind coreKind = coreKindFor(identityKind);
 
-    // Function code: the UFE whose slot holds the UCB, whose request produced it. It is the core's holder (codec E14) and
-    // gives the identity section its holder digest and parse fields.
-    const UnlinkedFunctionExecutable* holder = nullptr;
-    if (codeBlock.codeType() == FunctionCode)
-        holder = uncheckedDowncast<FunctionExecutable>(codeBlock.ownerExecutable())->unlinkedExecutable();
+    // Function code: the UFE whose request produced the UCB. It is the core's holder (codec E14) and gives the identity
+    // section its holder digest and parse fields.
     ASSERT(!!holder == (coreKind == UnlinkedCodeBlockCoreKind::Function));
 
     // Step 1: SC1 and SC2, which check what the capture builds from the producer's own state, so a failure is a recording

@@ -132,9 +132,10 @@ static UCBTwinsTierUpHistory ucbTwinsTierUpHistory(UnlinkedCodeBlock& codeBlock)
 }
 
 // T4: the UCB feedback equals the capture record. The exit sites are read under the UCB's m_lock and the tier-up history
-// under its cell lock, as capture reads them. Exit sites compare as a set; the LLInt counter's progress up to the float
-// rounding of m_totalCount, the precision the native counter keeps (section 5.5), and exactly for a deferred record.
-static void ucbTwinsCompareFeedback(UnlinkedCodeBlock& codeBlock, const FeedbackSection& section, UCBTwinReporter& reporter)
+// under its cell lock, as capture reads them. Exit sites compare as a set; the LLInt counter's progress, which a body
+// without an image carries only up to one invocation short of crossing (importedLLIntProgress), up to the float rounding
+// of m_totalCount, the precision the native counter keeps (section 5.5), and exactly for a deferred record.
+static void ucbTwinsCompareFeedback(UnlinkedCodeBlock& codeBlock, const FeedbackSection& section, BodyImage image, UCBTwinReporter& reporter)
 {
     const FeedbackCounts& counts = section.counts();
     if (liveFeedbackCounts(codeBlock) != counts) {
@@ -176,7 +177,7 @@ static void ucbTwinsCompareFeedback(UnlinkedCodeBlock& codeBlock, const Feedback
 
     BaselineExecutionCounter& counter = codeBlock.llintExecuteCounter();
     int32_t threshold = section.llintActiveThreshold();
-    double progress = section.llintProgress();
+    double progress = importedLLIntProgress(threshold, section.llintProgress(), image);
     bool counterMatches = counter.m_activeThreshold == threshold;
     if (counterMatches) {
         if (threshold == std::numeric_limits<int32_t>::max())
@@ -185,7 +186,7 @@ static void ucbTwinsCompareFeedback(UnlinkedCodeBlock& codeBlock, const Feedback
             counterMatches = std::abs(counter.count() - progress) <= std::max<double>(std::abs(counter.m_totalCount), 1.0) * 0x1p-23;
     }
     if (!counterMatches)
-        reporter.difference("T4"_s, makeString("the LLInt counter holds threshold "_s, counter.m_activeThreshold, " and progress "_s, counter.count(), ", the capture record "_s, threshold, " and "_s, progress));
+        reporter.difference("T4"_s, makeString("the LLInt counter holds threshold "_s, counter.m_activeThreshold, " and progress "_s, counter.count(), ", where the capture record arms "_s, threshold, " and "_s, progress));
 
     for (unsigned i = 0; i < counts.functionDecls; ++i) {
         if (codeBlock.functionDecl(i)->singletonHasBeenInvalidated() != section.childSingletonInvalidated(ChildTable::Declarations, i))
@@ -427,7 +428,7 @@ void verifyImport(const RequestState& state, UnlinkedCodeBlock& imported, const 
     // T4, against the capture record the body carries. The import parsed it already; strict off reads it where the layout
     // puts each field.
     if (auto feedback = FeedbackSection::parse(body.section(SectionKind::UCBFeedback), false))
-        ucbTwinsCompareFeedback(imported, *feedback, reporter);
+        ucbTwinsCompareFeedback(imported, *feedback, body.highestTier() ? BodyImage::Present : BodyImage::Absent, reporter);
 
     // T5 and T6.
     ucbTwinsCompareChildren(vm, imported, twin, holder, reporter);
@@ -458,7 +459,7 @@ void verifyMatched(UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutabl
 
     if (seeded) {
         if (auto feedback = FeedbackSection::parse(body.section(SectionKind::UCBFeedback), false))
-            ucbTwinsCompareFeedback(codeBlock, *feedback, reporter);
+            ucbTwinsCompareFeedback(codeBlock, *feedback, body.highestTier() ? BodyImage::Present : BodyImage::Absent, reporter);
     }
 }
 

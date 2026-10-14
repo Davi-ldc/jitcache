@@ -386,6 +386,9 @@ static Config strictConfig(const String& path, Role role)
     if (role != Role::Consumer)
         config.producerLimitBytes = testProducerLimitBytes;
     config.strict = true;
+    // These tests count what the CodeBlock walk and the finalize capture commit; RunOnceCaptureTests.cpp covers the scope
+    // All, under which delta also commits the bodies that ran without compiling.
+    config.captureScope = CaptureScope::Compiled;
     return config;
 }
 

@@ -163,8 +163,11 @@ bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& reco
     // A UCB keeps the key it was recorded under (THREAD Identity). The functor runs only when the map inserts, so a refused
     // record stays with the caller, which drops it after this returns. Boxing it mallocs under the lock, which section 6.3
     // allows; UCBRecord is the plain struct of section 6.1, without the TZone allocation makeUnique requires.
-    if (!m_codeBlocks.ensure(&codeBlock, [&] { return makeUniqueWithoutFastMallocCheck<UCBRecord>(WTF::move(record)); }).isNewEntry)
+    auto added = m_codeBlocks.ensure(&codeBlock, [&] { return makeUniqueWithoutFastMallocCheck<UCBRecord>(WTF::move(record)); });
+    if (!added.isNewEntry)
         return false;
+    if (UnlinkedFunctionExecutable* holder = added.iterator->value->holder)
+        m_heldCodeBlocks.ensure(holder, [] { return Vector<const UnlinkedCodeBlock*, 1> { }; }).iterator->value.append(&codeBlock);
     for (unsigned i = 0; i < children.size(); ++i) {
         const UnlinkedFunctionExecutable* child = children[i];
         ChildTable table = i < declarationCount ? ChildTable::Declarations : ChildTable::Expressions;
@@ -306,6 +309,28 @@ void UCBRegistry::markSuppliedDigestVerified(SourceID provider)
     m_verifiedSuppliedDigests.add(provider);
 }
 
+size_t UCBRegistry::recordedCodeBlockCount() const
+{
+    UCBRegistryInternal::CriticalSectionMark mark;
+    Locker locker { m_lock };
+    return m_codeBlocks.size();
+}
+
+size_t UCBRegistry::copyRecordedCodeBlocks(std::span<RecordedCodeBlock> out) const
+{
+    UCBRegistryInternal::CriticalSectionMark mark;
+    Locker locker { m_lock };
+    size_t copied = 0;
+    for (auto& entry : m_codeBlocks) {
+        if (copied == out.size())
+            break;
+        // The keys are the recorded cells themselves, which the registry only observes; delta reads them through the UCB's
+        // accessors, which are non-const natively (section 5.4).
+        out[copied++] = { const_cast<UnlinkedCodeBlock*>(entry.key), entry.value->holder };
+    }
+    return copied;
+}
+
 void UCBRegistry::unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock* codeBlock)
 {
     // Declared before the lock, so the record's pending import and provider go after it is released (section 6.3).
@@ -314,6 +339,15 @@ void UCBRegistry::unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock* codeBlock)
         UCBRegistryInternal::CriticalSectionMark mark;
         Locker locker { m_lock };
         removed = m_codeBlocks.take(codeBlock);
+        if (removed && removed->holder) {
+            auto iterator = m_heldCodeBlocks.find(removed->holder);
+            ASSERT(iterator != m_heldCodeBlocks.end());
+            if (iterator != m_heldCodeBlocks.end()) {
+                iterator->value.removeFirst(codeBlock);
+                if (iterator->value.isEmpty())
+                    m_heldCodeBlocks.remove(iterator);
+            }
+        }
     }
 }
 
@@ -328,6 +362,13 @@ void UCBRegistry::unlinkedFunctionExecutableDestroyed(const UnlinkedFunctionExec
         Locker locker { m_lock };
         child = m_children.takeOptional(executable);
         root = m_roots.takeOptional(executable);
+        // A UCB this UFE produced may outlive it, kept by a conservative root alone, so its record forgets the holder
+        // (UCBRecord::holder). Freeing the list is allowed under the lock.
+        for (const UnlinkedCodeBlock* codeBlock : m_heldCodeBlocks.take(executable)) {
+            auto iterator = m_codeBlocks.find(codeBlock);
+            if (iterator != m_codeBlocks.end() && iterator->value->holder == executable)
+                iterator->value->holder = nullptr;
+        }
     }
 }
 

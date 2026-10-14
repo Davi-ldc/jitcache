@@ -1,4 +1,6 @@
-// jitcache-runs: Off --diskCachePath=.; Producer --diskCachePath=. --jitcache-delta-at-exit; Consumer --diskCachePath=.
+// jitcache-runs: Off --diskCachePath=.; Producer --diskCachePath=. --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer --diskCachePath=.
+// The Producer captures compiled bodies only: the windows count the requests of the bodies under test, and with the
+// scope all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js covers it).
 // jitcache-pin: off its runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
 // SPEC-ucb.md section 13.3, decoded-slots.js: a program whose provider carries cached bytecode with nested function

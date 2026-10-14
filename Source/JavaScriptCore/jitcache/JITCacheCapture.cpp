@@ -21,7 +21,9 @@
 #include "UCBCapture.h"
 #include "UCBFeedback.h"
 #include "UCBRegistry.h"
+#include "UCBSections.h"
 #include "UnlinkedCodeBlock.h"
+#include "UnlinkedFunctionExecutable.h"
 #include "VM.h"
 #include <array>
 #include <expected>
@@ -39,10 +41,10 @@
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
 
-// The capture glue (SPEC-integrator.md section 8): the finalize capture BaselineJITPlan::finalize calls, delta, the
-// scores that order captures, the kept summaries, and the commit of one capture through the writer. Everything runs on
-// the VM thread with JS paused; nothing here allocates a cell, drains a profile, stops for the collector or finalizes a
-// plan, so captures never nest (section 8.7).
+// The capture glue (SPEC-integrator.md section 8): the finalize capture BaselineJITPlan::finalize calls, delta with its
+// walk of the UCB registry for the bodies that ran without compiling, the scores that order captures, the kept summaries,
+// and the commit of one capture through the writer. Everything runs on the VM thread with JS paused; nothing here
+// allocates a cell, drains a profile, stops for the collector or finalizes a plan, so captures never nest (section 8.7).
 
 namespace JSC::JITCache {
 
@@ -305,16 +307,34 @@ static std::expected<LiveScore, CBFault> scoreLiveCandidate(CodeBlock& codeBlock
     uint64_t afterCB = clock.now();
     if (!cbScore)
         return std::unexpected(cbScore.error());
-    UCBRichness ucbRichness = liveRichness(*codeBlock.unlinkedCodeBlock());
+    UCBRichness ucbRichness = liveRichness(*codeBlock.unlinkedCodeBlock(), BodyImage::Present);
     uint64_t end = clock.now();
 
     LiveScore live;
-    live.score = CaptureScore { 1, ucbRichness.total() + cbScore->richnessUnits, ics.summary.icSitesWithCases, cbScore->counterWithheld, cbScore->counterProgress };
+    live.score = CaptureScore { baselineTier, ucbRichness.total() + cbScore->richnessUnits, ics.summary.icSitesWithCases, cbScore->counterWithheld, cbScore->counterProgress };
     live.exitSiteUnits = ucbRichness.exitSiteUnits;
     live.hasPolymorphicSite = ics.hasPolymorphicSite;
     live.summarizeBaselineICsNanoseconds = afterICs - start;
     live.scoreLiveNanoseconds = afterCB - afterICs;
     live.liveRichnessNanoseconds = end - afterCB;
+    return live;
+}
+
+// A body that ran without an image (THREAD Capture): tier 0, below every capture with an image, scored by the UCB lane
+// alone, its UCB copies included, with the LLInt progress it carries in place of the baseline counter's. Neither IC sites
+// nor a withheld counter apply.
+static LiveScore scoreImagelessCandidate(UnlinkedCodeBlock& ucb, const CaptureClock& clock)
+{
+    uint64_t start = clock.now();
+    UCBRichness richness = liveRichness(ucb, BodyImage::Absent);
+    BaselineExecutionCounter& counter = ucb.llintExecuteCounter();
+    uint32_t progress = carriedLLIntPoints(counter.m_activeThreshold, counter.count());
+    uint64_t end = clock.now();
+
+    LiveScore live;
+    live.score = CaptureScore { imagelessTier, richness.total(), 0, false, progress };
+    live.exitSiteUnits = richness.exitSiteUnits;
+    live.liveRichnessNanoseconds = end - start;
     return live;
 }
 
@@ -586,16 +606,93 @@ static CommitSections commitSectionsFor(const UCBSections& ucb, const ImageCaptu
     return CommitSections { std::span { sources } };
 }
 
+// A body without an image: the UCB lane's three sections alone, the sections tier 0 requires (container check B7).
+static CommitSections commitSectionsFor(const UCBSections& ucb)
+{
+    std::array sources {
+        SectionSource::inMemory(SectionKind::UCBIdentity, ucb.identity.span()),
+        SectionSource::inMemory(SectionKind::UCBCore, ucb.core->span()),
+        SectionSource::inMemory(SectionKind::UCBFeedback, ucb.feedback.span()),
+    };
+    return CommitSections { std::span { sources } };
+}
+
+// THREAD Capture: any candidate beats an absent body, a tier-0 capture with no richness and no carried progress included;
+// otherwise beats decides.
+static bool beatsSavedBody(const CaptureScore& candidate, const std::optional<CaptureScore>& saved)
+{
+    return !saved || beats(candidate, *saved);
+}
+
 struct CommitOutcome {
     enum class Kind : uint8_t { Committed, Beaten, NotEligible, Faulted };
     Kind kind;
     uint64_t fileSize { 0 }; // Committed only
 };
 
+// Steps 8 to 10 of section 8.4, for a capture whose built sections still beat the saved body: charges the entries the
+// commit adds, commits through the writer and keeps the committed score.
+static CommitOutcome commitBody(VMState& state, ProducerBudget& budget, const CommitStamp& stamp, const CommitSections& sections,
+    const CaptureScore& committed, const CaptureClock& clock, CaptureTrace& trace)
+{
+    using Kind = CommitOutcome::Kind;
+    const BodyKey& key = stamp.key;
+
+    // Step 8: charge the entries the commit adds before anything is written. An index entry the writer adds joins the
+    // state's index charge at once, so a commit that fails, or whose index update finds the object gone, leaves its
+    // charge for the end of production to release.
+    OpenedArtifact* artifact = state.artifact();
+    ASSERT(artifact);
+    size_t indexCharge = 0;
+    if (!artifact->containsKey(key)) {
+        indexCharge = entryChargeBuckets * indexBucketBytes;
+        if (!budget.tryCharge(indexCharge)) {
+            raiseBudgetLimit(state, makeString("an index entry; "_s, bodyDetail(key)));
+            return { Kind::Faulted };
+        }
+        state.addIndexEntryCharge(indexCharge);
+    }
+    KeptSummaries* kept = state.keptSummaries();
+    bool keptHasEntry = kept && kept->scores.contains(key);
+    ScopedCharge keptCharge(budget);
+    if (!keptHasEntry && !keptCharge.tryCharge(keptEntryCharge(state))) {
+        raiseBudgetLimit(state, makeString("a kept summary; "_s, bodyDetail(key)));
+        return { Kind::Faulted };
+    }
+
+    // Step 9. While the bench report is open, the writer times its parts for the capture event.
+    ArtifactWriter* writer = state.writer();
+    ASSERT(writer);
+    CommitTiming timing;
+    auto result = writer->commit(stamp, sections, clock.report() ? &timing : nullptr);
+    if (!result) {
+        state.raiseRecordingFault({ }, result.error().check, makeString(result.error().detail, "; "_s, bodyDetail(key)));
+        return { Kind::Faulted };
+    }
+
+    // Step 10: the writer's reread checked every section of the file against the checksums of these same bytes, so the
+    // kept score describes the file.
+    SavedScore keptScore { committed, result->version };
+    if (keptHasEntry)
+        kept->scores.set(key, keptScore);
+    else
+        addKeptEntry(state, budget, key, keptScore, keptCharge.take());
+    ++state.progress().capturesCommitted;
+    state.progress().bytesCommitted += result->fileSize;
+    if (clock.report()) {
+        // Every charge this capture made is still held here, the lanes' outputs and any ICs buffer included.
+        CaptureTrace::CommitTrace commitTrace { timing, { }, budget.chargedBytes(), state.keptSummaries()->chargedBytes, indexCharge };
+        for (const SectionSource& source : sections.sources())
+            commitTrace.sectionBytes[static_cast<size_t>(source.kind)] = source.size;
+        trace.commit = commitTrace;
+    }
+    return { Kind::Committed, result->fileSize };
+}
+
 // Section 8.4: builds one capture whose live score beats the saved body's and commits it. Each lane's output holds its own
 // charges and releases them when it goes, and the ICs buffer is freed before its charge is released, so every return
 // leaves only what a commit keeps: the kept entry, the index entry's charge and the body.
-static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock, const BodyKey& key, const CaptureScore& saved,
+static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock, const BodyKey& key, const std::optional<CaptureScore>& saved,
     const CaptureClock& clock, CaptureTrace& trace)
 {
     using Kind = CommitOutcome::Kind;
@@ -627,10 +724,10 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
 
     // Step 3.
     start = clock.now();
-    auto ucbSections = buildSections(vm, codeBlock, budget);
+    auto ucbSections = buildSections(vm, ucb, holderOf(codeBlock), budget);
     UCBRichness ucbRichness;
     if (ucbSections)
-        ucbRichness = liveRichness(ucb);
+        ucbRichness = liveRichness(ucb, BodyImage::Present);
     times.buildSections = clock.now() - start;
     if (!ucbSections) {
         raiseCaptureFault(state, budget, "ucb"_s, ucbCaptureCheckName(ucbSections.error()), bodyDetail(key));
@@ -669,65 +766,57 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
     // compute from the committed file, so no lane's bytes are read back (II23). A drain between the scoring and the build
     // can move it, so the capture stops when the build no longer wins.
     const CBScore& cbScore = cbState->score();
-    CaptureScore committed { 1, ucbRichness.total() + cbScore.richnessUnits, ics->summary.icSitesWithCases, cbScore.counterWithheld, cbScore.counterProgress };
+    CaptureScore committed { baselineTier, ucbRichness.total() + cbScore.richnessUnits, ics->summary.icSitesWithCases, cbScore.counterWithheld, cbScore.counterProgress };
     trace.committed = committed;
     trace.committedExitSiteUnits = ucbRichness.exitSiteUnits;
-    if (!beats(committed, saved))
+    if (!beatsSavedBody(committed, saved))
         return { Kind::Beaten };
 
     // Step 7: the L and P compact orders by. P is zero for a body whose counter does not travel (CB I16).
-    CommitStamp stamp { key, envelopeLLIntThreshold(ucb), cbScore.counterProgress, 1 };
+    CommitStamp stamp { key, envelopeLLIntThreshold(ucb), cbScore.counterProgress, baselineTier };
 
-    // Step 8: charge the entries the commit adds before anything is written. An index entry the writer adds joins the
-    // state's index charge at once, so a commit that fails, or whose index update finds the object gone, leaves its
-    // charge for the end of production to release.
-    OpenedArtifact* artifact = state.artifact();
-    ASSERT(artifact);
-    size_t indexCharge = 0;
-    if (!artifact->containsKey(key)) {
-        indexCharge = entryChargeBuckets * indexBucketBytes;
-        if (!budget.tryCharge(indexCharge)) {
-            raiseBudgetLimit(state, makeString("an index entry; "_s, bodyDetail(key)));
-            return { Kind::Faulted };
-        }
-        state.addIndexEntryCharge(indexCharge);
-    }
-    KeptSummaries* kept = state.keptSummaries();
-    bool keptHasEntry = kept && kept->scores.contains(key);
-    ScopedCharge keptCharge(budget);
-    if (!keptHasEntry && !keptCharge.tryCharge(keptEntryCharge(state))) {
-        raiseBudgetLimit(state, makeString("a kept summary; "_s, bodyDetail(key)));
+    // Steps 8 to 10.
+    return commitBody(state, budget, stamp, commitSectionsFor(*ucbSections, *image, *cbState, icsBuffer.span()), committed, clock, trace);
+}
+
+// Section 8.4 for a body that ran without an image (section 8.6, phase 3): the UCB lane's sections alone, built from the
+// UCB and the holder its record keeps, at tier 0. Its L is the LLInt progress it carries and its P zero (THREAD
+// Maintenance).
+static CommitOutcome commitImagelessCapture(VM& vm, VMState& state, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, const BodyKey& key,
+    const std::optional<CaptureScore>& saved, const CaptureClock& clock, CaptureTrace& trace)
+{
+    using Kind = CommitOutcome::Kind;
+    ProducerBudget& budget = *state.producerBudget();
+    CaptureTrace::BuildTimes times;
+
+    // Step 3; there is no image, ICs or CB state to build.
+    uint64_t start = clock.now();
+    auto ucbSections = buildSections(vm, ucb, holder, budget);
+    times.buildSections = clock.now() - start;
+    if (!ucbSections) {
+        raiseCaptureFault(state, budget, "ucb"_s, ucbCaptureCheckName(ucbSections.error()), bodyDetail(key));
         return { Kind::Faulted };
     }
+    trace.build = times;
 
-    // Step 9. While the bench report is open, the writer times its parts for the capture event.
-    ArtifactWriter* writer = state.writer();
-    ASSERT(writer);
-    CommitSections sections = commitSectionsFor(*ucbSections, *image, *cbState, icsBuffer.span());
-    CommitTiming timing;
-    auto result = writer->commit(stamp, sections, clock.report() ? &timing : nullptr);
-    if (!result) {
-        state.raiseRecordingFault({ }, result.error().check, makeString(result.error().detail, "; "_s, bodyDetail(key)));
-        return { Kind::Faulted };
-    }
+    // Step 6: the score of the bytes just built. Markers merge into the UCB copies of the value predictions without a lock,
+    // so the score is read from the feedback section the builder wrote, the lane's summary in the file, rather than from
+    // the UCB again.
+    auto feedback = FeedbackSection::parse(ucbSections->feedback.span(), false);
+    RELEASE_ASSERT(feedback);
+    UCBRichness richness = savedRichness(*feedback, BodyImage::Absent);
+    uint32_t progress = carriedLLIntPoints(feedback->llintActiveThreshold(), feedback->llintProgress());
+    CaptureScore committed { imagelessTier, richness.total(), 0, false, progress };
+    trace.committed = committed;
+    trace.committedExitSiteUnits = richness.exitSiteUnits;
+    if (!beatsSavedBody(committed, saved))
+        return { Kind::Beaten };
 
-    // Step 10: the writer's reread checked every section of the file against the checksums of these same bytes, so the
-    // kept score describes the file.
-    SavedScore keptScore { committed, result->version };
-    if (keptHasEntry)
-        kept->scores.set(key, keptScore);
-    else
-        addKeptEntry(state, budget, key, keptScore, keptCharge.take());
-    ++state.progress().capturesCommitted;
-    state.progress().bytesCommitted += result->fileSize;
-    if (clock.report()) {
-        // Every charge this capture made is still held here, the lanes' outputs and the ICs buffer included.
-        CaptureTrace::CommitTrace commitTrace { timing, { }, budget.chargedBytes(), state.keptSummaries()->chargedBytes, indexCharge };
-        for (const SectionSource& source : sections.sources())
-            commitTrace.sectionBytes[static_cast<size_t>(source.kind)] = source.size;
-        trace.commit = commitTrace;
-    }
-    return { Kind::Committed, result->fileSize };
+    // Step 7.
+    CommitStamp stamp { key, progress, 0, imagelessTier };
+
+    // Steps 8 to 10.
+    return commitBody(state, budget, stamp, commitSectionsFor(*ucbSections), committed, clock, trace);
 }
 
 static ASCIILiteral eventOutcome(CommitOutcome::Kind kind)
@@ -735,22 +824,33 @@ static ASCIILiteral eventOutcome(CommitOutcome::Kind kind)
     return kind == CommitOutcome::Kind::Committed ? "committed"_s : "beaten"_s;
 }
 
-// Phase 1's candidates (section 8.6, step 3): each key's candidates in decreasing order under beats, a tie after the ones
-// met earlier. The table is charged per key as a production table's entry. A key's vector has one inline slot, which the
+// A candidate of phase 1 (section 8.6, step 3): an eligible CodeBlock.
+struct CodeBlockCandidate {
+    CodeBlock* codeBlock;
+    LiveScore live;
+};
+
+// A candidate of phase 3 (section 8.6): a recorded UCB whose body ran without an eligible CodeBlock, with the holder
+// its record keeps for function code.
+struct ImagelessCandidate {
+    UnlinkedCodeBlock* codeBlock;
+    const UnlinkedFunctionExecutable* holder;
+    LiveScore live;
+};
+
+// The candidates of phase 1 or phase 3: each key's candidates in decreasing order under beats, a tie after the ones met
+// earlier. The table is charged per key as a production table's entry. A key's vector has one inline slot, which the
 // entry's buckets hold, and grows only explicitly: the whole new heap capacity is charged before the growth and the old
 // heap capacity released after it. Destroying the table frees it and then releases every charge, since the table lives
 // only inside one delta and is no production memory.
+template<typename Candidate>
 class DeltaCandidates {
     WTF_MAKE_NONCOPYABLE(DeltaCandidates);
 public:
-    struct Candidate {
-        CodeBlock* codeBlock;
-        LiveScore live;
-    };
     static constexpr size_t inlineCandidates = 1;
     using Candidates = Vector<Candidate, inlineCandidates>;
     using Table = HashMap<BodyKey, Candidates, BodyKeyHash, BodyKeyHashTraits>;
-    static constexpr size_t bucketBytes = sizeof(Table::KeyValuePairType);
+    static constexpr size_t bucketBytes = sizeof(typename Table::KeyValuePairType);
 
     explicit DeltaCandidates(ProducerBudget& budget)
         : m_budget(budget)
@@ -765,7 +865,7 @@ public:
     }
 
     // False when a charge was refused, with nothing added.
-    [[nodiscard]] bool add(const BodyKey& key, CodeBlock& codeBlock, const LiveScore& live)
+    [[nodiscard]] bool add(const BodyKey& key, const Candidate& candidate)
     {
         auto iterator = m_table.find(key);
         if (iterator == m_table.end()) {
@@ -773,7 +873,7 @@ public:
             if (!m_budget.tryCharge(charge))
                 return false;
             m_chargedBytes += charge;
-            m_table.add(key, Candidates { }).iterator->value.append(Candidate { &codeBlock, live });
+            m_table.add(key, Candidates { }).iterator->value.append(candidate);
             return true;
         }
 
@@ -794,17 +894,17 @@ public:
         }
         size_t position = candidates.size();
         for (size_t index = 0; index < candidates.size(); ++index) {
-            if (beats(live.score, candidates[index].live.score)) {
+            if (beats(candidate.live.score, candidates[index].live.score)) {
                 position = index;
                 break;
             }
         }
-        candidates.insert(position, Candidate { &codeBlock, live });
+        candidates.insert(position, candidate);
         return true;
     }
 
     const Table& table() const { return m_table; }
-    // The table only grows, so its charge once phase 1 ends is its largest (IB7).
+    // The table only grows, so its charge once its phase's walk ends is its largest (IB7).
     size_t chargedBytes() const { return m_chargedBytes; }
 
 private:
@@ -820,19 +920,153 @@ struct DeltaCounts {
     uint64_t deferredKeys { 0 };
     uint64_t phase1Nanoseconds { 0 };
     uint64_t phase2Nanoseconds { 0 };
+    uint64_t phase3Nanoseconds { 0 };
     // What delta's duration and memory scale with (IB7): the CodeBlocks phase 1 walked, the candidates among them, and
     // the candidate table's charge.
     uint64_t codeBlocks { 0 };
     uint64_t candidates { 0 };
     uint64_t candidateTableBytes { 0 };
+    // Phase 3's: the recorded UCBs it walked, those whose body never ran, the candidates among them, and the charges of
+    // the registry's copy and of the candidate table.
+    uint64_t recordedCodeBlocks { 0 };
+    uint64_t neverRan { 0 };
+    uint64_t imagelessCandidates { 0 };
+    uint64_t registryCopyBytes { 0 };
+    uint64_t imagelessTableBytes { 0 };
     bool faulted { false };
 };
 
-// Steps 3 and 4 of section 8.6. The candidate table lives only inside this call.
+// Phase 2 and phase 3 commit a key's candidates the same way: score the saved body once, then take the candidates in
+// order until one commits or does not beat it. A candidate whose capture is NotEligible is passed over, as an ineligible
+// CodeBlock is. Returns false after a fault.
+template<typename Candidate, typename Commit>
+static bool commitKey(VMState& state, ProducerBudget& budget, const BodyKey& key, const Vector<Candidate, 1>& candidates,
+    const CaptureClock& clock, DeltaCounts& counts, const Commit& commit)
+{
+    SavedScoring saved = scoreSavedBody(state, budget, key, clock);
+    if (saved.outcome == SavedScoring::Outcome::Faulted)
+        return false;
+    if (saved.outcome == SavedScoring::Outcome::Deferred) {
+        ++counts.deferredKeys;
+        const auto& first = candidates.first();
+        CaptureTrace trace { "delta"_s, key, first.live, std::nullopt, saved.readNanoseconds, std::nullopt, 0, first.live.hasPolymorphicSite, std::nullopt, std::nullopt };
+        recordCaptureEvent(clock.report(), trace, "deferred"_s);
+        return true;
+    }
+
+    std::optional<CaptureScore> scoredSaved = saved.saved ? std::optional { saved.saved->score } : std::nullopt;
+    for (auto& candidate : candidates) {
+        CaptureTrace trace { "delta"_s, key, candidate.live, scoredSaved, saved.readNanoseconds, std::nullopt, 0, candidate.live.hasPolymorphicSite, std::nullopt, std::nullopt };
+        if (!beatsSavedBody(candidate.live.score, scoredSaved)) {
+            recordCaptureEvent(clock.report(), trace, "beaten"_s);
+            return true;
+        }
+        CommitOutcome outcome = commit(candidate, scoredSaved, trace);
+        if (outcome.kind == CommitOutcome::Kind::NotEligible)
+            continue;
+        if (outcome.kind == CommitOutcome::Kind::Faulted)
+            return false;
+        if (outcome.kind == CommitOutcome::Kind::Committed) {
+            ++counts.committedBodies;
+            counts.committedBytes += outcome.fileSize;
+        }
+        recordCaptureEvent(clock.report(), trace, eventOutcome(outcome.kind));
+        return true;
+    }
+    return true;
+}
+
+// Whether phase 1 found an eligible CodeBlock of the key (THREAD Capture). A CodeBlock whose image phase 2 found
+// unrecordable is no longer eligible (Image R-INT-6), so a key whose every candidate turned out so is captured without an
+// image.
+static bool hasEligibleCodeBlock(const DeltaCandidates<CodeBlockCandidate>& compiled, const BodyKey& key)
+{
+    auto iterator = compiled.table().find(key);
+    if (iterator == compiled.table().end())
+        return false;
+    for (auto& candidate : iterator->value) {
+        RefPtr<JITCode> code = candidate.codeBlock->jitCode();
+        if (code && isImageCapturable(static_cast<const BaselineJITCode&>(*code)))
+            return true;
+    }
+    return false;
+}
+
+// Phase 3 of section 8.6, with the capture scope All: the bodies that ran without an eligible CodeBlock, reached through
+// the UCB registry, so that bodies whose CodeBlocks died are reached too, and captured without an image (THREAD Capture).
+// The registry's copy and the candidate table live only inside this call.
+static void runImagelessPhase(VM& vm, VMState& state, ProducerBudget& budget, const DeltaCandidates<CodeBlockCandidate>& compiled,
+    const CaptureClock& clock, DeltaCounts& counts)
+{
+    uint64_t start = clock.now();
+    DeltaCandidates<ImagelessCandidate> candidates(budget);
+    {
+        // The registry copies under its leaf lock, and each cell is tested afterwards, outside it (SPEC-ucb.md section
+        // 6.3). Nothing between the count and the copy can add or remove a record (UCBRegistry::recordedCodeBlockCount).
+        UCBRegistry& registry = state.registry();
+        size_t count = registry.recordedCodeBlockCount();
+        CheckedSize copyBytes = count;
+        copyBytes *= sizeof(UCBRegistry::RecordedCodeBlock);
+        ScopedCharge copyCharge(budget);
+        if (copyBytes.hasOverflowed() || !copyCharge.tryCharge(copyBytes.value())) {
+            raiseBudgetLimit(state, makeString("delta's copy of "_s, count, " UCB records"_s));
+            counts.faulted = true;
+            return;
+        }
+        counts.registryCopyBytes = copyBytes.value();
+        Vector<UCBRegistry::RecordedCodeBlock> recorded(count);
+        recorded.shrink(registry.copyRecordedCodeBlocks(recorded.mutableSpan()));
+        counts.recordedCodeBlocks = recorded.size();
+
+        for (auto& entry : recorded) {
+            UnlinkedCodeBlock& ucb = *entry.codeBlock;
+            // A UCB the last collection found dead is not swept yet, and its constants and child UFEs may name cells already
+            // swept. A live one keeps them, and nothing in delta can complete a collection (section 8.6, step 1).
+            if (ucb.isPendingDestruction())
+                continue;
+            // A UCB proves only a request, such as a module's link or a CachedCall callee's preparation.
+            if (!llintCounterShowsExecution(ucb)) {
+                ++counts.neverRan;
+                continue;
+            }
+            auto record = captureRecord(vm, ucb);
+            if (!record || hasEligibleCodeBlock(compiled, record->key))
+                continue;
+            // Function code is encoded through its holder, which the record keeps while the UFE lives; one that is dead but
+            // not swept yet is skipped with its body.
+            UnlinkedFunctionExecutable* holder = entry.holder;
+            if (coreKindFor(record->key.identityKind()) == UnlinkedCodeBlockCoreKind::Function && (!holder || holder->isPendingDestruction()))
+                continue;
+            ++state.progress().captureCandidates;
+            ++counts.imagelessCandidates;
+            if (!candidates.add(record->key, ImagelessCandidate { &ucb, holder, scoreImagelessCandidate(ucb, clock) })) {
+                raiseBudgetLimit(state, makeString("delta's table of bodies without an image; "_s, bodyDetail(record->key)));
+                counts.faulted = true;
+                return;
+            }
+        }
+    }
+    counts.imagelessTableBytes = candidates.chargedBytes();
+    counts.eligibleKeys += candidates.table().size();
+
+    // Commits are independent, so their order is the table's.
+    for (auto& entry : candidates.table()) {
+        bool committedOrBeaten = commitKey(state, budget, entry.key, entry.value, clock, counts, [&](const ImagelessCandidate& candidate, const std::optional<CaptureScore>& saved, CaptureTrace& trace) {
+            return commitImagelessCapture(vm, state, *candidate.codeBlock, candidate.holder, entry.key, saved, clock, trace);
+        });
+        if (!committedOrBeaten) {
+            counts.faulted = true;
+            break;
+        }
+    }
+    counts.phase3Nanoseconds = clock.now() - start;
+}
+
+// The three phases of section 8.6. The candidate tables live only inside this call.
 static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget, const CaptureClock& clock)
 {
     DeltaCounts counts;
-    DeltaCandidates candidates(budget);
+    DeltaCandidates<CodeBlockCandidate> candidates(budget);
     bool strict = state.strict();
 
     // Phase 1, under the CodeBlock set's lock, which forEachCodeBlockIgnoringJITPlans requires and which completes no
@@ -861,7 +1095,7 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
                 pendingFault = PendingFault { false, description(live.error().check), bodyDetail(record->key) };
                 return;
             }
-            if (!candidates.add(record->key, *codeBlock, *live))
+            if (!candidates.add(record->key, CodeBlockCandidate { codeBlock, *live }))
                 pendingFault = PendingFault { true, budgetLimit, makeString("delta's candidate table; "_s, bodyDetail(record->key)) };
         });
     }
@@ -879,51 +1113,24 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
 
     // Phase 2, without the lock. The CodeBlock pointers stay valid: each was in the CodeBlock set, and nothing between the
     // phases can complete a collection, since the VM thread holds heap access, reaches no stop point and allocates no cell.
-    // Commits are independent, so their order is the table's.
+    // Commits are independent, so their order is the table's. A NotEligible image makes that CB an ineligible one, so the
+    // key's next candidate gets the same test, until one commits or does not beat the saved body.
     start = clock.now();
     for (auto& entry : candidates.table()) {
-        const BodyKey& key = entry.key;
-        SavedScoring saved = scoreSavedBody(state, budget, key, clock);
-        if (saved.outcome == SavedScoring::Outcome::Faulted) {
+        bool committedOrBeaten = commitKey(state, budget, entry.key, entry.value, clock, counts, [&](const CodeBlockCandidate& candidate, const std::optional<CaptureScore>& saved, CaptureTrace& trace) {
+            return commitCapture(vm, state, *candidate.codeBlock, entry.key, saved, clock, trace);
+        });
+        if (!committedOrBeaten) {
             counts.faulted = true;
             break;
         }
-        if (saved.outcome == SavedScoring::Outcome::Deferred) {
-            ++counts.deferredKeys;
-            const auto& first = entry.value.first();
-            CaptureTrace trace { "delta"_s, key, first.live, std::nullopt, saved.readNanoseconds, std::nullopt, 0, first.live.hasPolymorphicSite, std::nullopt, std::nullopt };
-            recordCaptureEvent(clock.report(), trace, "deferred"_s);
-            continue;
-        }
-
-        CaptureScore savedScore = saved.saved ? saved.saved->score : CaptureScore { };
-        std::optional<CaptureScore> scoredSaved = saved.saved ? std::optional { saved.saved->score } : std::nullopt;
-        // A NotEligible image makes that CB an ineligible one, so the key's next candidate gets the same test, until one
-        // commits or does not beat the saved body.
-        for (auto& candidate : entry.value) {
-            CaptureTrace trace { "delta"_s, key, candidate.live, scoredSaved, saved.readNanoseconds, std::nullopt, 0, candidate.live.hasPolymorphicSite, std::nullopt, std::nullopt };
-            if (!beats(candidate.live.score, savedScore)) {
-                recordCaptureEvent(clock.report(), trace, "beaten"_s);
-                break;
-            }
-            CommitOutcome outcome = commitCapture(vm, state, *candidate.codeBlock, key, savedScore, clock, trace);
-            if (outcome.kind == CommitOutcome::Kind::NotEligible)
-                continue;
-            if (outcome.kind == CommitOutcome::Kind::Faulted) {
-                counts.faulted = true;
-                break;
-            }
-            if (outcome.kind == CommitOutcome::Kind::Committed) {
-                ++counts.committedBodies;
-                counts.committedBytes += outcome.fileSize;
-            }
-            recordCaptureEvent(clock.report(), trace, eventOutcome(outcome.kind));
-            break;
-        }
-        if (counts.faulted)
-            break;
     }
     counts.phase2Nanoseconds = clock.now() - start;
+
+    // Phase 3, with the capture scope All, after every key of phase 2 has been decided, so that only a key whose every
+    // CodeBlock turned out ineligible can still meet a body without an image.
+    if (!counts.faulted && state.captureScope() == CaptureScope::All)
+        runImagelessPhase(vm, state, budget, candidates, clock, counts);
     return counts;
 }
 
@@ -933,17 +1140,24 @@ std::expected<CaptureScore, SummaryRejection> scoreSections(uint8_t tier, std::s
     std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics, bool strict)
 {
     using namespace JITCacheCaptureInternal;
-    // With strict off no reader rejects. With it on, the empty answer of savedRichness is the glue's to raise (UCB R-INT-5).
-    auto ucbRichness = savedRichness(ucbFeedback, strict);
-    if (!ucbRichness)
+    // With strict off no reader rejects. With it on, the UCB lane's empty parse is the glue's to raise (UCB R-INT-5).
+    auto feedback = FeedbackSection::parse(ucbFeedback, strict);
+    if (!feedback)
         return std::unexpected(SummaryRejection { "ucb"_s, "saved-summary"_s });
+    // A body without an image holds no CB or ICs summary: the UCB lane's summary is its whole score, its UCB copies
+    // included, with the LLInt progress it carries in place of the baseline counter's (THREAD Capture).
+    if (tier == imagelessTier) {
+        UCBRichness richness = savedRichness(*feedback, BodyImage::Absent);
+        return CaptureScore { imagelessTier, richness.total(), 0, false, carriedLLIntPoints(feedback->llintActiveThreshold(), feedback->llintProgress()) };
+    }
+    UCBRichness ucbRichness = savedRichness(*feedback, BodyImage::Present);
     auto cbScore = decodeSummary(cbSummary, strict);
     if (!cbScore)
         return std::unexpected(SummaryRejection { "cb"_s, description(cbScore.error().check) });
     auto icsSummary = ICs::readBaselineICsSummary(ics, strict ? ICs::StrictChecks::Yes : ICs::StrictChecks::No);
     if (!icsSummary)
         return std::unexpected(SummaryRejection { "ics"_s, icsCheckName(icsSummary.error().check) });
-    return CaptureScore { tier, ucbRichness->total() + cbScore->richnessUnits, icsSummary->icSitesWithCases, cbScore->counterWithheld, cbScore->counterProgress };
+    return CaptureScore { tier, ucbRichness.total() + cbScore->richnessUnits, icsSummary->icSitesWithCases, cbScore->counterWithheld, cbScore->counterProgress };
 }
 
 void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const BaselineCompileTiming* timing)
@@ -998,14 +1212,13 @@ void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const Baseline
         recordCaptureEvent(clock.report(), trace, "deferred"_s);
         return;
     }
-    CaptureScore savedScore = saved.saved ? saved.saved->score : CaptureScore { };
-    if (!beats(live->score, savedScore)) {
+    if (!beatsSavedBody(live->score, scoredSaved)) {
         recordCaptureEvent(clock.report(), trace, "beaten"_s);
         return;
     }
 
     // Step 6. A NotEligible image ends this CB's capture without a fault, as for an ineligible CB.
-    CommitOutcome outcome = commitCapture(vm, *state, codeBlock, record->key, savedScore, clock, trace);
+    CommitOutcome outcome = commitCapture(vm, *state, codeBlock, record->key, scoredSaved, clock, trace);
     if (outcome.kind == CommitOutcome::Kind::Committed || outcome.kind == CommitOutcome::Kind::Beaten)
         recordCaptureEvent(clock.report(), trace, eventOutcome(outcome.kind));
 }
@@ -1048,9 +1261,15 @@ DeltaResult delta(VM& vm)
             { "outcome"_s, String { counts.faulted ? "faulted"_s : "completed"_s } },
             { "phase1Nanoseconds"_s, counts.phase1Nanoseconds },
             { "phase2Nanoseconds"_s, counts.phase2Nanoseconds },
+            { "phase3Nanoseconds"_s, counts.phase3Nanoseconds },
             { "codeBlocks"_s, counts.codeBlocks },
             { "candidates"_s, counts.candidates },
             { "candidateTableBytes"_s, counts.candidateTableBytes },
+            { "recordedCodeBlocks"_s, counts.recordedCodeBlocks },
+            { "neverRan"_s, counts.neverRan },
+            { "imagelessCandidates"_s, counts.imagelessCandidates },
+            { "registryCopyBytes"_s, counts.registryCopyBytes },
+            { "imagelessTableBytes"_s, counts.imagelessTableBytes },
             { "eligibleKeys"_s, counts.eligibleKeys },
             { "committedBodies"_s, counts.committedBodies },
             { "committedBytes"_s, counts.committedBytes },
@@ -1069,7 +1288,7 @@ DeltaResult delta(VM& vm)
         return faulted(counts);
     }
 
-    // Steps 3 and 4 free the candidate table and release its charges before they return.
+    // Steps 3 and 4, the three phases, free their candidate tables and release the charges before they return.
     DeltaCounts counts = runDeltaPhases(vm, *state, budget, CaptureClock(report));
     finish(counts);
     if (counts.faulted)

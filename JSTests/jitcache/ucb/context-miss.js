@@ -1,7 +1,9 @@
-// jitcache-runs: Producer --diskCachePath=. --jitcache-delta-at-exit; Consumer --diskCachePath=.
-// jitcache-runs: Off --diskCachePath=.; Producer --diskCachePath=. --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --diskCachePath=.; ConsumerProducer --diskCachePath=. --jitcache-delta-at-exit; Consumer
+// jitcache-runs: Producer --diskCachePath=. --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer --diskCachePath=.
+// jitcache-runs: Off --diskCachePath=.; Producer --diskCachePath=. --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer
+// jitcache-runs: Producer --diskCachePath=. --jitcache-capture=compiled; ConsumerProducer --diskCachePath=. --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer
 // jitcache-expect-no-install: 1:2
+// The producing runs capture compiled bodies only: the windows count the requests of the bodies under test, and with the
+// scope all each window's own action, which ran in the producer, would have a body too (run-once-capture.js covers it).
 // jitcache-pin: off its runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
 // SPEC-ucb.md section 13.3, context-miss.js: what matches a UCB the native path decoded from its provider's bytecode

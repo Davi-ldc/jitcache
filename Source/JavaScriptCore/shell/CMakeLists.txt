@@ -101,6 +101,7 @@ if (ENABLE_JITCACHE_TWINS)
         ../jitcache/tests/JITCacheCBTwinsTests.cpp
         ../jitcache/tests/ICSectionTests.cpp
         ../jitcache/tests/ICLiveTests.cpp
+        ../jitcache/tests/RunOnceCaptureTests.cpp
     )
     set(testjitcache_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
     set(testjitcache_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES} "${JAVASCRIPTCORE_DIR}/jitcache/tests")
