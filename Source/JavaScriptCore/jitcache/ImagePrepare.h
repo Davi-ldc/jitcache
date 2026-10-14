@@ -41,14 +41,18 @@ struct PrepareFailure {
 };
 
 // The wall time of four stages of prepareImage, read from CLOCK_MONOTONIC for the install event when a bench report is
-// open (harness sub-SPEC section 9.2): the executable allocations of step 5, the copies of step 6, the resolution and
-// patching of every fixup in steps 8 and 9, and the instruction-cache flush of step 11.
+// open (harness sub-SPEC section 9.2): the executable allocations of step 5, the population and copies of step 6, the
+// resolution and patching of every fixup in steps 8 and 9, and the instruction-cache flush of step 11.
 struct PrepareTimings {
     uint64_t allocateNanoseconds { 0 };
     uint64_t copyNanoseconds { 0 };
     uint64_t patchNanoseconds { 0 };
     uint64_t flushNanoseconds { 0 };
 };
+
+// The number of pages that the length bytes from start span: the pages step 6 populates when there are two or more, and
+// that the install event reports for an image's linked bytes.
+unsigned pagesSpanned(const void* start, size_t length);
 
 // A finished BaselineJITCode that nothing outside it references yet. Destroying it frees the code, its snippets, its
 // MathICs and its rebuilt record, and leaves the VM's statistics untouched; thunks the resolution generated stay, as the

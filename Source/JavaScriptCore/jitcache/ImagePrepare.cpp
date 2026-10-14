@@ -23,12 +23,20 @@
 #include "PerfLog.h"
 #include "ProducerBudget.h"
 #include "UnlinkedCodeBlock.h"
-#include <wtf/Atomics.h>
-#include <wtf/MonotonicTime.h>
-#include <wtf/SimpleStats.h>
+#include <atomic>
 #include <utility>
+#include <wtf/Atomics.h>
+#include <wtf/MathExtras.h>
+#include <wtf/MonotonicTime.h>
+#include <wtf/PageBlock.h>
+#include <wtf/SimpleStats.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/StringPrintStream.h>
+
+#if OS(LINUX)
+#include <errno.h>
+#include <sys/mman.h>
+#endif
 
 namespace JSC::JITCache {
 
@@ -52,6 +60,39 @@ template<PtrTag tag>
 static CodeLocationLabel<tag> locationAt(const void* start, uint32_t offset)
 {
     return CodeLocationLabel<tag>(CodePtr<tag>::fromUntaggedPtr(const_cast<void*>(addressAt(start, offset))));
+}
+
+#if OS(LINUX)
+#if defined(MADV_POPULATE_WRITE)
+static constexpr int populateWriteAdvice = MADV_POPULATE_WRITE;
+#else
+static constexpr int populateWriteAdvice = 23; // the value Linux 5.14 gave MADV_POPULATE_WRITE, which older headers lack
+#endif
+#endif
+
+// Step 6's population of the image's pages. On Linux the executable pool is one private anonymous mapping, under libpas
+// and under the MetaAllocator alike, whose pages fault in at their first write: OSAllocator::commit only advises
+// MADV_WILLNEED, which populates nothing. Both allocators fill the pool lowest address first, so an image that reaches
+// past its first page writes pages no earlier allocation touched, and one MADV_POPULATE_WRITE faults them in together
+// before the copy, which would otherwise take one fault per page. An image inside one page skips the call, since that
+// page most likely holds an earlier allocation already. A kernel older than 5.14 refuses the advice with EINVAL, after
+// which no image asks again, and the copy faults the pages in as before. jitCachePopulateImagePages turns it off, so that
+// one build measures both.
+static void populatePages(void* start, size_t size)
+{
+#if OS(LINUX)
+    static std::atomic<bool> kernelRefusesAdvice { false };
+    if (!Options::jitCachePopulateImagePages() || kernelRefusesAdvice.load(std::memory_order_relaxed))
+        return;
+    unsigned pages = pagesSpanned(start, size);
+    if (pages < 2)
+        return;
+    if (madvise(roundDownToMultipleOf(pageSize(), start), pages * pageSize(), populateWriteAdvice) && errno == EINVAL)
+        kernelRefusesAdvice.store(true, std::memory_order_relaxed);
+#else
+    UNUSED_PARAM(start);
+    UNUSED_PARAM(size);
+#endif
 }
 
 // Writes the fixup's resolved value with its form's link writer (table 3.2). Each footprint holds its form's canonical
@@ -234,6 +275,14 @@ static std::unique_ptr<ImageRecord> rebuildRecord(ProducerBudget& budget, const 
 
 } // namespace ImagePrepareInternal
 
+unsigned pagesSpanned(const void* start, size_t length)
+{
+    uintptr_t page = pageSize();
+    uintptr_t first = roundDownToMultipleOf(page, reinterpret_cast<uintptr_t>(start));
+    uintptr_t end = roundUpToMultipleOf(page, reinterpret_cast<uintptr_t>(start) + length);
+    return static_cast<unsigned>((end - first) / page);
+}
+
 PreparedImage::PreparedImage(Ref<BaselineJITCode>&& code, Ref<ExecutableMemoryHandle>&& imageMemory)
     : m_code(WTF::move(code))
     , m_imageMemory(WTF::move(imageMemory))
@@ -342,8 +391,9 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         return snippets[index] ? snippets[index]->start().untaggedPtr() : nullptr;
     });
 
-    // Step 6: one copy each of the image's and the snippets' linked bytes.
+    // Step 6: the image's pages populated, then one copy each of the image's and the snippets' linked bytes.
     startStage();
+    populatePages(imageStart, header.codeSize);
     performJITMemcpy<jitMemcpyRepatch>(imageStart, view.code().data(), header.codeSize);
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
         performJITMemcpy<jitMemcpyRepatch>(const_cast<void*>(snippetStarts[index]), snippet.code.data(), snippet.code.size());
