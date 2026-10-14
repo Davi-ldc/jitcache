@@ -1,4 +1,7 @@
 // jitcache-host: bun
+// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer
+// The Producer captures compiled bodies only: the windows count the requests of the bodies under test, and with the
+// scope all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js covers it).
 
 // SPEC-ucb.md section 13.3, builtin-roots.js, sections 3.5, 7.2.4, 7.2.6 and 7.3.6: builtin roots, whose identity is
 // recorded at their creation and whose source digest is supplied rather than computed from their text.
@@ -24,8 +27,7 @@
 // which their Producers ran hot, imports or is seeded inside it: only the builtin's and the internal module's bodies
 // can. The output, this script's and the app's, equals the JITCache-off run.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4); Bun calls delta at exit for every
-// producing VM, the app's included.
+// Bun calls delta at exit for every producing VM, the app's included, and the app gets the run's capture scope.
 const path = require("node:path");
 const vm = require("node:vm");
 const { context } = require("./resources/ucb-bun.js");

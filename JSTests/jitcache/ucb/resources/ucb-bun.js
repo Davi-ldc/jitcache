@@ -212,6 +212,7 @@ class Context {
                 flags.push(overRunArtifact ? `${name}=c` : argument);
                 break;
             case "--jitcache-strict":
+            case "--jitcache-capture":
             case "--jitcache-twins-report":
                 flags.push(argument);
                 break;
