@@ -168,6 +168,10 @@ public:
     static std::expected<CompactionResult, CompactionFailure> compactPack(const CompactionTarget&, const CompactionSource&,
         const ScopedLambda<bool(const BodyKey&)>& excludes, bool timed);
 
+    // The points of a commit or compaction where a test build can kill the process. Every build names them, so the
+    // commit path marks each point once; only test builds act on the mark.
+    enum class KillPoint : uint8_t { BeforeAppend, MidStream, AfterStream, AfterEnvelope, AfterReread, AfterIndex, AfterRoot, CompactionBeforeRename, CompactionAfterRename };
+
 #if ENABLE(JITCACHE_TWINS)
     // n counts this writer's commits from 1, or its compactions for a compaction.* check or point.
     struct FaultForTesting {
@@ -177,7 +181,6 @@ public:
     void setFaultForTesting(std::optional<FaultForTesting>);
     static std::optional<ASCIILiteral> faultCheckNamed(StringView);
     // raise(SIGKILL) at the point of the n-th commit, or of the n-th compaction for a compaction point.
-    enum class KillPoint : uint8_t { BeforeAppend, MidStream, AfterStream, AfterEnvelope, AfterReread, AfterIndex, AfterRoot, CompactionBeforeRename, CompactionAfterRename };
     struct KillForTesting {
         KillPoint point;
         uint64_t n;
