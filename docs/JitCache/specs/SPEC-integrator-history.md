@@ -126,7 +126,7 @@ Bun calls `start` in `Zig__GlobalObject__create`, right after it takes the API l
 
 Bun later dropped two of the shell's flags. `--jitcache-log` printed JSON lines no Bun user reads, and `--jitcache-max-memory` asked users to size a limit that the bench sets once for every host (`defaultProducerLimitBytes`), so the producer limit became the host's to set. The shell keeps both for the tests. Without the log, a Bun user would never learn that JITCache had turned itself off, so every way it does warns once per process, as `Busy` already did: a rejected `start` at once, and a fault at exit, the first point a host without callbacks can read it. The runner still needs Bun's final statuses, so twins builds write them when the run has a twin report.
 
-Bun calls `delta` in `VirtualMachine::on_exit`, after the user's exit handlers and before teardown, the same point where it persists the Node compile cache. THREAD's "no implicit `delta`" constrains JITCache; the host chooses when to call it, and process exit is the idle point a serverless instance reaches.
+Bun calls `delta` in `VirtualMachine::on_exit`, after the user's exit handlers and before teardown, the same point where it persists the Node compile cache. THREAD's "no implicit `delta`" constrains JITCache; the host chooses when to call it, and process exit is the idle point a serverless instance reaches. Bun first called it at every exit of a producing VM and dropped the shell's `--jitcache-delta-at-exit`. Davi made it opt-in on 2026-10-13, with that flag and the shell's syntax: the macro benches compare consumers of a producer with and without an exit `delta`, and a deployment decides whether its producers pay for one.
 
 ### `bun jitcache` is a subcommand
 

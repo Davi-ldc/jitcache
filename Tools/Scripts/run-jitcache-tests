@@ -73,13 +73,14 @@ const bunPassedFlags = new Set([
   "--jitcache",
   "--jitcache-mode",
   "--jitcache-strict",
+  "--jitcache-delta-at-exit",
   "--jitcache-bench-report",
   "--jitcache-twins-report",
   "--jitcache-twins-record-layout",
   "--jitcache-twins-avoid-layout",
   "--jitcache-body-events",
 ]);
-const bunDroppedFlags = new Set(["--jitcache-delta-at-exit", "--jitcache-log", "--jitcache-describe-heap"]);
+const bunDroppedFlags = new Set(["--jitcache-log", "--jitcache-describe-heap"]);
 
 const hostArchitecture = process.arch === "x64" ? "x86_64" : process.arch === "arm64" ? "aarch64" : process.arch;
 
