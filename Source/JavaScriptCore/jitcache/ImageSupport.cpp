@@ -7,6 +7,7 @@
 #include "CallMode.h"
 #include "InlineCacheCompiler.h"
 #include "JIT.h"
+#include "JITCacheVMState.h"
 #include "JITThunks.h"
 #include "JSCConfig.h"
 #include "JSCInlines.h"
@@ -21,7 +22,9 @@
 #include <bit>
 #include <limits>
 #include <mutex>
+#include <wtf/HashMap.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/TZoneMallocInlines.h>
 
 #if OS(LINUX)
 #include <link.h>
@@ -264,6 +267,61 @@ StringSwitchRanks rankStringSwitches(const UnlinkedCodeBlock& unlinkedCodeBlock)
     return ranks;
 }
 
+// The support targets a VM's preparations resolved (SPEC-image.md section 10.3, step 8): the baseline thunks, the property
+// ICs' slow-path thunks by access type and the slow-path function thunks, whose native lookups each take JITThunks' lock, a
+// hash lookup and a reference. JITThunks keeps every thunk it hands out for the VM's life, so a kept address stays valid.
+// The other kinds resolve without a lock: a process address, an array element or a lazily created entry.
+class SupportTargetTable {
+    WTF_MAKE_NONCOPYABLE(SupportTargetTable);
+    WTF_MAKE_TZONE_ALLOCATED(SupportTargetTable);
+public:
+    SupportTargetTable() = default;
+
+    // As resolveSupport; the first resolution of a kept kind fills its slot.
+    CodePtr<NoPtrTag> resolve(VM& vm, const ImageTarget& target)
+    {
+        CodePtr<NoPtrTag>* slot = nullptr;
+        switch (target.kind) {
+        case TargetKind::BaselineThunk:
+            ASSERT(isValidBaselineThunk(target.a));
+            slot = &m_baselineThunks[target.a];
+            break;
+        case TargetKind::InlineCacheSlowPathThunk:
+            ASSERT(isValidAccessType(target.a));
+            slot = &m_inlineCacheSlowPathThunks[target.a];
+            break;
+        case TargetKind::SlowPathThunk:
+            slot = &m_slowPathThunks.add(reinterpret_cast<uintptr_t>(CodeSymbol { target.payload }.address()), CodePtr<NoPtrTag> { }).iterator->value;
+            break;
+        default:
+            return resolveSupport(vm, target);
+        }
+        if (!*slot)
+            *slot = resolveSupport(vm, target);
+        return *slot;
+    }
+
+private:
+    std::array<CodePtr<NoPtrTag>, static_cast<size_t>(BaselineThunk::ConsistencyCheck) + 1> m_baselineThunks { };
+    std::array<CodePtr<NoPtrTag>, numberOfAccessTypes> m_inlineCacheSlowPathThunks { };
+    HashMap<uintptr_t, CodePtr<NoPtrTag>> m_slowPathThunks; // by the slow-path function's address
+};
+
+WTF_MAKE_TZONE_ALLOCATED_IMPL(SupportTargetTable);
+
+SupportTargetTable* supportTargetTableFor(VM& vm)
+{
+    VMState* state = vm.jitCacheState();
+    if (!state)
+        return nullptr;
+    if (!state->supportTargetTable()) {
+        state->setSupportTargetTable(VMState::SupportTargetTableHolder(new SupportTargetTable, [](SupportTargetTable* table) {
+            delete table;
+        }));
+    }
+    return state->supportTargetTable();
+}
+
 const void* resolveTarget(const ResolutionContext& context, const ImageTarget& target)
 {
     switch (target.kind) {
@@ -274,6 +332,8 @@ const void* resolveTarget(const ResolutionContext& context, const ImageTarget& t
     case TargetKind::InlineCacheSlowPathThunk:
     case TargetKind::VirtualCallThunk:
     case TargetKind::ProcessThunk:
+        if (context.supportTargets)
+            return context.supportTargets->resolve(context.vm, target).taggedPtr();
         return resolveSupport(context.vm, target).taggedPtr();
     case TargetKind::VMAddress:
         ASSERT(isValidVMAddress(target.a));

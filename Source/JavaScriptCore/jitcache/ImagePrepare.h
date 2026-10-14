@@ -40,6 +40,16 @@ struct PrepareFailure {
     ImageCheck check; // S5 for InvalidMaterial, else None
 };
 
+// The wall time of four stages of prepareImage, read from CLOCK_MONOTONIC for the install event when a bench report is
+// open (harness sub-SPEC section 9.2): the executable allocations of step 5, the copies of step 6, the resolution and
+// patching of every fixup in steps 8 and 9, and the instruction-cache flush of step 11.
+struct PrepareTimings {
+    uint64_t allocateNanoseconds { 0 };
+    uint64_t copyNanoseconds { 0 };
+    uint64_t patchNanoseconds { 0 };
+    uint64_t flushNanoseconds { 0 };
+};
+
 // A finished BaselineJITCode that nothing outside it references yet. Destroying it frees the code, its snippets, its
 // MathICs and its rebuilt record, and leaves the VM's statistics untouched; thunks the resolution generated stay, as the
 // VM's first use of them would leave them.
@@ -58,7 +68,7 @@ public:
     Ref<BaselineJITCode> commit(VM&, CodeBlock& installing) &&;
 
 private:
-    friend std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict);
+    friend std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict, PrepareTimings*);
     PreparedImage(Ref<BaselineJITCode>&&, Ref<ExecutableMemoryHandle>&& imageMemory);
 
     RefPtr<BaselineJITCode> m_code;
@@ -73,8 +83,9 @@ private:
 // exactly in a ConsumerProducer VM whose production is active, rebuilds the image's record, in twins builds with the twin
 // data of the twins section; a refused charge leaves the image without one, and the budget raises the recording fault
 // (R-INT-2). The borrowed payload need live only until the call returns: the prepared image keeps copies of everything it
-// reads. In twins builds the SkipPatch test hook makes it skip its first patch, so S5 fails (T7).
-std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict);
+// reads. In twins builds the SkipPatch test hook makes it skip its first patch, so S5 fails (T7). A non-null timings
+// receives the stages' times; null costs nothing.
+std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict, PrepareTimings* = nullptr);
 
 } // namespace JITCache
 } // namespace JSC

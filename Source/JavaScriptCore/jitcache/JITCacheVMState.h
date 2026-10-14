@@ -31,6 +31,7 @@ class OpenedArtifact;
 class ProducerLock;
 struct ImageTwinCheckState; // twins builds; defined in JITCacheInstall.cpp (harness sub-SPEC section 3)
 struct KeptSummaries; // the capture glue's kept summaries (section 8.3); defined in JITCacheCapture.cpp
+class SupportTargetTable; // the Image lane's resolved support targets (SPEC-image.md section 10.3); defined in ImageSupport.h
 
 class VMState final {
     WTF_MAKE_NONCOPYABLE(VMState);
@@ -47,6 +48,11 @@ public:
     void raiseInvalidMaterial(ASCIILiteral step, String detail); // step is a full name, such as "ucb.identity"
     void raiseInvalidMaterial(ASCIILiteral part, ASCIILiteral check, String detail);
     void raiseRecordingFault(ASCIILiteral part, ASCIILiteral check, String detail);
+    // The Image lane's table of the support targets its preparations resolved, which prepareImage creates with a deleter
+    // of the lane's own at the VM's first preparation, so neither this header nor the destructor's file names its type.
+    using SupportTargetTableHolder = std::unique_ptr<SupportTargetTable, void (*)(SupportTargetTable*)>;
+    SupportTargetTable* supportTargetTable(); // null before the VM's first image preparation
+    void setSupportTargetTable(SupportTargetTableHolder&&);
 #if ENABLE(JITCACHE_TWINS)
     TwinReportSink* twinReportSink(); // non-null while a twin report is open
     Ref<ProducerBudget> twinBudget(); // ProducerBudget::createUnlimited(), for twin compiles
@@ -168,6 +174,9 @@ private:
 
     // The UCB lane's registry, which the destructor destroys after every UCB and UFE destructor has run (section 4.6).
     UCBRegistry m_registry;
+
+    // The Image lane's resolved support targets; an empty holder calls nothing.
+    SupportTargetTableHolder m_supportTargetTable { nullptr, nullptr };
 
     std::unique_ptr<ProducerLock> m_producerLock; // producing roles; destroying it releases the lock
     RefPtr<OpenedArtifact> m_artifact; // shared by the VMs of the process that open the artifact; null after a start fault

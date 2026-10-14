@@ -75,6 +75,8 @@ struct StringSwitchRanks {
 };
 StringSwitchRanks rankStringSwitches(const UnlinkedCodeBlock&);
 
+class SupportTargetTable; // defined in ImageSupport.cpp
+
 // What resolveTarget reads besides the VM. Each span is indexed as its target's a: mathICs and snippetStarts by MathIC
 // index (a snippet start is null for a MathIC without one), switchTableBases by simple switch table, stringSwitchTables
 // by string switch table.
@@ -90,6 +92,9 @@ struct ResolutionContext {
     std::span<const StringJumpTable> stringSwitchTables; // with their code locations filled (section 3.7)
     std::span<const void* const> snippetStarts;
     const StringSwitchRanks* ranks { nullptr };
+    // The VM's table of resolved support targets, which saves the native lookup after a target's first resolution; null
+    // resolves each through resolveSupport. Only prepareImage, on the VM thread, passes one.
+    SupportTargetTable* supportTargets { nullptr };
 };
 
 // The value a valid target resolves to: what the image holds at the fixup, an address or a branch target. The producer's
@@ -101,6 +106,10 @@ const void* resolveTarget(const ResolutionContext&, const ImageTarget&);
 // A support target (Operation, CommonThunk, BaselineThunk, SlowPathThunk, InlineCacheSlowPathThunk, VirtualCallThunk or
 // ProcessThunk) through the native lookup its key names.
 CodePtr<NoPtrTag> resolveSupport(VM&, const ImageTarget&);
+
+// The VM's table of resolved support targets (SPEC-image.md section 10.3, step 8), created at the first call with this
+// file's deleter and kept in the VM's JITCache state; null for a VM without that state. VM thread.
+SupportTargetTable* supportTargetTableFor(VM&);
 
 } // namespace JITCache
 } // namespace JSC

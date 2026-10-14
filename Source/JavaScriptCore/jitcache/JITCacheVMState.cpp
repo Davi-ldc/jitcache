@@ -280,6 +280,17 @@ ArtifactWriter* VMState::writer()
     return m_writer.get();
 }
 
+SupportTargetTable* VMState::supportTargetTable()
+{
+    return m_supportTargetTable.get();
+}
+
+void VMState::setSupportTargetTable(SupportTargetTableHolder&& table)
+{
+    ASSERT(!m_supportTargetTable);
+    m_supportTargetTable = WTF::move(table);
+}
+
 KeptSummaries* VMState::keptSummaries()
 {
     return m_keptSummaries.get();

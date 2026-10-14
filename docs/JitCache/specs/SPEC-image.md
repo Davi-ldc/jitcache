@@ -905,7 +905,10 @@ public:
     Ref<BaselineJITCode> commit(VM&, CodeBlock& installing); // infallible; consumes the object; returns code()
 };
 
-std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict); // not const: steps 2 and 13 call UCB accessors that have no const overload; a non-null budget rebuilds the record (step 14)
+// The wall time of steps 5, 6, 8 and 9 together, and 11, for the install event (harness sub-SPEC section 9.2).
+struct PrepareTimings { uint64_t allocateNanoseconds { 0 }; uint64_t copyNanoseconds { 0 }; uint64_t patchNanoseconds { 0 }; uint64_t flushNanoseconds { 0 }; };
+
+std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict, PrepareTimings* = nullptr); // not const: steps 2 and 13 call UCB accessors that have no const overload; a non-null budget rebuilds the record (step 14); a non-null timings receives the stages' CLOCK_MONOTONIC times, and null reads no clock
 }
 ```
 
@@ -926,7 +929,7 @@ The glue calls these in THREAD Restoration's order under R-INT-7, and `prepareIm
 5. Allocate the image with `ExecutableAllocator::singleton().allocate(codeSize, JITCompilationCanFail)`, and each snippet with its `snippetSize` the same way; a null result is `ExecutableMemoryExhausted`. A handle can be larger than requested (N20); its slack stays unwritten, as natively.
 6. Copy the image's `codeSize` bytes and each snippet's `snippetSize` bytes once with `performJITMemcpy`.
 7. Fill the switch tables' code locations, now that the image's start is known: every simple table's `m_ctiDefault`, list tables included, as `JIT::link` sets it, each dense table's `m_ctiOffsets`, and each string table's `m_ctiOffsets` default included, at the image start plus the section's offsets. `SwitchStringRankCase` targets read them in step 8, as the producer's resolution read the tables `JIT::link` filled (section 3.7).
-8. Resolve every fixup target with `resolveTarget` and the consumer's context (image start, the MathICs of step 2, the table storage of step 3 with the code locations of step 7, the ranks of step 4, the snippet starts of step 5).
+8. Resolve every fixup target with `resolveTarget` and the consumer's context (image start, the MathICs of step 2, the table storage of step 3 with the code locations of step 7, the ranks of step 4, the snippet starts of step 5, and the VM's `SupportTargetTable` from `supportTargetTableFor`). The table keeps the baseline thunks, the property ICs' slow-path thunks and the slow-path function thunks after their first resolution, whose native lookups each take `JITThunks`' lock; JITThunks keeps every thunk for its VM's life, so a kept address stays valid, and the first resolution of each still generates missing support as the VM's first use would.
 9. Patch every snippet fixup, then every image fixup, with its form's writer (table 3.2) on the executable memory. Since each footprint holds its form's encoding (step 1), each writer writes only inside its footprint, apart from the jump islands the ARM64 writers allocate (N21).
 10. Under strict, S5, the read-back after patching: each patched footprint decodes, as S1 does with islands followed, to the consumer's resolution of its target. S5 guards an installation, so a failure is invalid material.
 11. Flush the instruction cache over `[start, start + codeSize)` and each snippet's `[start, start + snippetSize)` with `MacroAssembler::cacheFlush`, as `LinkBuffer::performFinalization` does over the linked size.

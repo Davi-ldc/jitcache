@@ -152,6 +152,7 @@ struct InstalledBody {
     uint64_t codeSize;
     uint32_t imageCodeSize;
     uint32_t imageFixupCount;
+    PrepareTimings prepareTimings; // the stages of step 7's prepareImage
 };
 
 static void recordInstallEvent(const InstallMeasurement& measurement, const InstalledBody& installed, uint64_t totalNanoseconds, uint64_t bodyReleaseNanoseconds, bool supportGenerated)
@@ -169,6 +170,10 @@ static void recordInstallEvent(const InstallMeasurement& measurement, const Inst
         { "steps.bakedFacts"_s, step(InstallStep::BakedFacts) },
         { "steps.gate"_s, step(InstallStep::Gate) },
         { "steps.prepareImage"_s, step(InstallStep::PrepareImage) },
+        { "prepareImage.allocate"_s, installed.prepareTimings.allocateNanoseconds },
+        { "prepareImage.copy"_s, installed.prepareTimings.copyNanoseconds },
+        { "prepareImage.patch"_s, installed.prepareTimings.patchNanoseconds },
+        { "prepareImage.flush"_s, installed.prepareTimings.flushNanoseconds },
         { "steps.cbPrepare"_s, step(InstallStep::CBPrepare) },
         { "steps.prepareBaselineICs"_s, step(InstallStep::PrepareBaselineICs) },
         { "steps.seedLinkedState"_s, step(InstallStep::SeedLinkedState) },
@@ -376,7 +381,8 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     // whose production is active, where the image rebuilds its record (Image R-INT-7).
     ProducerContext* producerContext = state->producerContextIfActive();
     RefPtr<ProducerBudget> budget = producerContext ? RefPtr<ProducerBudget> { producerContext->budget() } : nullptr;
-    auto prepared = prepareImage(vm, ucb, view, budget.get(), strict);
+    PrepareTimings prepareTimings;
+    auto prepared = prepareImage(vm, ucb, view, budget.get(), strict, measurement.report() ? &prepareTimings : nullptr);
     measurement.endStep(InstallStep::PrepareImage);
     if (!prepared) {
         switch (prepared.error().outcome) {
@@ -473,7 +479,7 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     stashImageTwinCheck(*state, PendingImageTwinCheck { &newborn, WTF::move(code), Ref<ValidatedBody> { *body }, view });
 #endif
     if (!measurement.report()) {
-        // Outside twins builds the last reference: its drop unmaps the body (container sub-SPEC section 7.2).
+        // Outside twins builds the last reference: its drop frees the body's buffer (container sub-SPEC section 7.2).
         body = nullptr;
         return InstallOutcome::Installed;
     }
@@ -481,7 +487,7 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     uint64_t totalEnd = benchThreadCPUNanoseconds();
     body = nullptr;
     uint64_t releaseEnd = benchThreadCPUNanoseconds();
-    recordInstallEvent(measurement, InstalledBody { key, restore, codeSize, imageCodeSize, imageFixupCount }, totalEnd - measurement.startNanoseconds(),
+    recordInstallEvent(measurement, InstalledBody { key, restore, codeSize, imageCodeSize, imageFixupCount, prepareTimings }, totalEnd - measurement.startNanoseconds(),
         releaseEnd - totalEnd, measurement.supportGenerated());
 
     // Step 19.

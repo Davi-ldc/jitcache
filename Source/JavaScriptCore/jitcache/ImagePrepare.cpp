@@ -24,6 +24,7 @@
 #include "ProducerBudget.h"
 #include "UnlinkedCodeBlock.h"
 #include <wtf/Atomics.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/SimpleStats.h>
 #include <utility>
 #include <wtf/StdLibExtras.h>
@@ -275,10 +276,21 @@ Ref<BaselineJITCode> PreparedImage::commit(VM& vm, CodeBlock& installing) &&
     return code;
 }
 
-std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, const ImageSectionsView& view, ProducerBudget* budget, bool strict)
+std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, const ImageSectionsView& view, ProducerBudget* budget, bool strict, PrepareTimings* timings)
 {
     using namespace ImagePrepareInternal;
     const auto& header = view.header();
+
+    // The timed stages; without timings nothing reads the clock.
+    MonotonicTime stageStart;
+    auto startStage = [&] {
+        if (timings)
+            stageStart = MonotonicTime::now();
+    };
+    auto endStage = [&](uint64_t PrepareTimings::* field) {
+        if (timings)
+            timings->*field += (MonotonicTime::now() - stageStart).nanosecondsAs<uint64_t>();
+    };
 
     // Step 1. Validation is the glue's, under strict only (R-INT-3); every footprint holds its form's canonical encoding in
     // either mode (I8), which the writers of step 9 rely on.
@@ -310,6 +322,7 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
     StringSwitchRanks ranks = rankStringSwitches(unlinkedCodeBlock);
 
     // Step 5. A handle can be larger than requested (N20); its slack stays unwritten, as natively.
+    startStage();
     RefPtr<ExecutableMemoryHandle> image = ExecutableAllocator::singleton().allocate(header.codeSize, JITCompilationCanFail);
     if (!image)
         return std::unexpected(PrepareFailure { PrepareOutcome::ExecutableMemoryExhausted, ImageCheck::None });
@@ -323,16 +336,19 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
     });
     if (!allocatedSnippets)
         return std::unexpected(PrepareFailure { PrepareOutcome::ExecutableMemoryExhausted, ImageCheck::None });
+    endStage(&PrepareTimings::allocateNanoseconds);
     void* imageStart = image->start().untaggedPtr();
     Vector<const void*> snippetStarts(header.mathICCount, [&](size_t index) -> const void* {
         return snippets[index] ? snippets[index]->start().untaggedPtr() : nullptr;
     });
 
     // Step 6: one copy each of the image's and the snippets' linked bytes.
+    startStage();
     performJITMemcpy<jitMemcpyRepatch>(imageStart, view.code().data(), header.codeSize);
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
         performJITMemcpy<jitMemcpyRepatch>(const_cast<void*>(snippetStarts[index]), snippet.code.data(), snippet.code.size());
     });
+    endStage(&PrepareTimings::copyNanoseconds);
 
     // Step 7: the tables' code locations, as JIT::link fills them, before any SwitchStringRankCase target reads them.
     view.forEachSimpleSwitchTable([&](unsigned index, const ImageSimpleSwitchTable& table) {
@@ -363,15 +379,18 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         .stringSwitchTables = stringSwitchTables.span(),
         .snippetStarts = snippetStarts.span(),
         .ranks = &ranks,
+        .supportTargets = supportTargetTableFor(vm),
     };
     bool skipsNextPatch = false;
 #if ENABLE(JITCACHE_TWINS)
     skipsNextPatch = imageTestHook() == ImageTestHook::SkipPatch;
 #endif
+    startStage();
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
         patchFixups(const_cast<void*>(snippetStarts[index]), snippet.fixups, context, skipsNextPatch);
     });
     patchFixups(imageStart, view.fixups(), context, skipsNextPatch);
+    endStage(&PrepareTimings::patchNanoseconds);
 
     // Step 10: S5, the read-back after patching: each patched footprint decodes, islands followed, to the consumer's
     // resolution of its target. It guards an installation, so a failure is invalid material.
@@ -386,10 +405,12 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
     }
 
     // Step 11, over the linked bytes, as LinkBuffer::performFinalization flushes.
+    startStage();
     MacroAssembler::cacheFlush(imageStart, header.codeSize);
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
         MacroAssembler::cacheFlush(const_cast<void*>(snippetStarts[index]), snippet.code.size());
     });
+    endStage(&PrepareTimings::flushNanoseconds);
 
     // Step 12. A MathIC without inline code keeps the null locations and empty m_code it was created with.
     for (unsigned index = 0; index < header.mathICCount; ++index) {
