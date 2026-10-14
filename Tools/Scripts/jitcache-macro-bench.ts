@@ -1,18 +1,20 @@
 #!/usr/bin/env bun
-// JITCache's macro benches (docs/JitCache/HARNESS.md, Benches): how long a fresh Bun process takes to finish serving a
-// case of PerformanceTests/JITCache with JITCache off and as a consumer. Every Bun process runs pinned to one CPU with
-// Bun's shipped configuration, so concurrent JIT stays on and its worker competes with execution, as on a small
-// serverless instance.
+// JITCache's macro benches (docs/JitCache/HARNESS.md, Benches): what each request costs a fresh Bun process serving a
+// case of PerformanceTests/JITCache with JITCache off and as a consumer, and how long the process takes to finish. Every
+// Bun process runs pinned to one CPU with Bun's shipped configuration, so concurrent JIT stays on and its worker competes
+// with execution, as on a small serverless instance.
 //
-// A repetition starts with fresh producers for each case and branch: one calls delta at exit and one never does. Then,
-// for each scenario, processes with JITCache off and consumers of the first producer's artifact run interleaved; the
-// longest scenario adds consumers of the second producer's artifact, and a few consumers run after the artifact's pages
-// were dropped from the page cache. After the last repetition, untimed runs write JITCache's bench report and log every
-// optimizing compile by call. Every process must compute the same checksum at each call as every other process of its
-// case and branch. The records go to results.jsonl, and summary.md is built from that file alone, so --summarize can
-// rebuild it and pool several runs.
+// A repetition starts with fresh producers for each case and branch: one calls delta at exit and one never does, and a
+// second capture scope (--capture) adds one that calls delta under it. Then, for each scenario, processes with JITCache
+// off and consumers of the first producer's artifact run interleaved, beside the variants the run asks for: consumers of
+// the other producers, consumers that arm imported LLInt counters from zero, and cold processes, which start after the
+// files every process reads, and a consumer's artifact, were dropped from the page cache. After the last repetition,
+// untimed runs write JITCache's bench report and log the compiles of each call. Every process must compute the
+// same checksum at each call as every other process of its case and branch. The records go to results.jsonl, and
+// summary.md and request-curves.tsv are built from that file alone, so --summarize can rebuild them and pool several runs.
 
-import { accessSync, appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dlopen, FFIType } from "bun:ffi";
+import { accessSync, appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { cpus, homedir, hostname, loadavg, release } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -26,22 +28,40 @@ const defaultCases: CaseName[] = ["hono", "elysia", "react-ssr", "preact-ssr", "
 const branchNames = ["fixed", "varied"] as const;
 type Branch = (typeof branchNames)[number];
 
-// `producer` calls delta at exit and `producerNoDelta` never does, so its artifact keeps only the captures made at each
-// baseline compile. `consumer` reads the first one's artifact, `consumerCold` the same artifact after its pages left the
-// page cache, and `consumerNoDelta` the second one's.
-type Mode = "off" | "consumer" | "consumerNoDelta" | "consumerCold" | "producer" | "producerNoDelta";
-const comparedModes: Mode[] = ["off", "consumer", "consumerNoDelta", "consumerCold"];
+// The capture scopes of Bun's --jitcache-capture: `all` also captures, at delta, the bodies that ran without compiling.
+const captureScopes = ["all", "compiled"] as const;
+type CaptureScope = (typeof captureScopes)[number];
+type ScopeName = "All" | "Compiled";
+const scopeName = (scope: CaptureScope): ScopeName => (scope === "all" ? "All" : "Compiled");
+
+// `producer` calls delta at exit, under the run's first capture scope when it names one, and `producerNoDelta` never
+// does, so its artifact keeps only the captures made at each baseline compile; `producerAll` or `producerCompiled` calls
+// delta under the run's second scope. `consumer` reads the first one's artifact, `consumerNoLLIntProgress` the same with
+// the LLInt counters of imported bodies armed from zero, `consumerNoDelta` the second one's, and `consumerAll` or
+// `consumerCompiled` the third one's. `offCold` and `consumerCold` start after the files every process reads, and the
+// consumer's artifact, were dropped from the page cache.
+type Mode = "off" | "offCold" | "consumer" | "consumerCold" | "consumerNoDelta" | "consumerNoLLIntProgress" | `consumer${ScopeName}` | "producer" | "producerNoDelta" | `producer${ScopeName}`;
+const comparedModes: Mode[] = ["off", "consumer", "consumerAll", "consumerCompiled", "consumerNoLLIntProgress", "consumerNoDelta", "offCold", "consumerCold"];
+// What each compared mode is measured against: a cold consumer against a cold JITCache-off process, which read the same
+// files from storage besides the artifact, and every other mode against off.
+const referenceOf = (mode: Mode): Mode | null => (mode === "off" ? null : mode === "consumerCold" ? "offCold" : "off");
 // Producers and timed processes are measured. Report runs write JITCache's bench report, whose clock reads only
-// consumers would pay, and census runs log every optimizing compile, so neither is timed.
+// consumers would pay, and census runs log every compile they request, so neither is timed.
 type Purpose = "producer" | "timed" | "report" | "census";
 
 // HARNESS.md's target: a case at least 20% faster to finish than with JITCache off.
 const targetRatio = 0.8;
+// The headline metric (HARNESS.md, Benches): the median and p90 of request k for k = 1 to requestCurveCalls, of the sum
+// of requests 2 to requestSumLast in each process, and of startup plus request 1. The summary shows the k of
+// requestTableCalls and request-curves.tsv every k.
+const requestCurveCalls = 50;
+const requestSumLast = 35;
+const requestTableCalls = [1, 2, 3, 5, 10, 20, 35, 50];
 // The calls after which the summary gives the time to finish, the k of its Ck/W, and the last calls of its census
 // windows.
 const finishCalls = [1, 10, 50, 100, 500];
 const curveCalls = [1, 2, 5, 10, 50, 100, 500];
-const censusBounds = [10, 50, 100, 500];
+const censusBounds = [1, 2, 5, 10, 50, 100, 500];
 // W is the median of the producers' last ten calls, 91 to 100 when they serve 100.
 const warmedCalls = 10;
 // A process pinned to one CPU spends at most its wall time in CPU time; more means it also ran elsewhere.
@@ -63,18 +83,26 @@ const usage = `Usage: bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun execu
                               producers and the untimed runs
   --repetitions=3             each with fresh producers
   --producer-calls=100
-  --cold-processes=3          consumers per scenario, case and branch in each repetition that start after the
-                              artifact's pages are dropped from the page cache
+  --capture=all|compiled      the capture scope every producer passes to Bun's --jitcache-capture, by default none, so
+                              Bun's own default; a second scope after a comma adds producers that call delta under it
+                              and their consumers, consumerAll or consumerCompiled
+  --compare-llint-progress    add consumers whose imported bodies arm their LLInt counters from zero
+                              (BUN_JSC_jitCacheImportLLIntProgress=0), consumerNoLLIntProgress
+  --cold-processes=3          JITCache-off processes and consumers each, per scenario, case and branch in each
+                              repetition, that start after the Bun executable, this directory with its node_modules,
+                              the transpiler cache and a consumer's artifact are dropped from the page cache
   --cpu=<n>                   the CPU every Bun process is pinned to, by default the highest this process may use
-  --census, --no-census       count the optimizing compiles of each call in an untimed off process and consumer
-  --reports, --no-reports     run an untimed warm and cold consumer per scenario with JITCache's bench report
+  --census, --no-census       count the baseline compiles each call starts and the DFG and FTL compiles it requests,
+                              in an untimed off process and each warm consumer variant
+  --reports, --no-reports     run untimed consumers per scenario with JITCache's bench report: warm, cold and the
+                              second capture scope's
   --out=<directory>           jitcache-macro/<time> beside the Bun executable by default
   --timeout=<seconds>         1800 by default; a process that runs longer is killed and fails
-  --check                     correctness only: 1 repetition, 1 process per mode, scenarios of 5 and 20 calls,
+  --check                     correctness only: 1 repetition, 1 process per mode, scenarios of 5 and 35 calls,
                               producers of 20 calls and no build lock, so it can run beside a build; its times
                               measure nothing
-  --summarize                 rebuild summary.md from results files, pooling them; it goes beside the only file, or
-                              to --out, which several files require`;
+  --summarize                 rebuild summary.md and request-curves.tsv from results files, pooling them; they go
+                              beside the only file, or to --out, which several files require`;
 
 class UsageError extends Error {}
 
@@ -89,7 +117,9 @@ interface Options {
   processes: number; // per mode, scenario, case and branch in a repetition
   repetitions: number;
   producerCalls: number;
-  coldProcesses: number; // per scenario, case and branch in a repetition
+  capture: CaptureScope[]; // the producers' scopes, first the main one; empty leaves Bun's default
+  compareLLIntProgress: boolean; // whether consumerNoLLIntProgress runs
+  coldProcesses: number; // of each cold mode, per scenario, case and branch in a repetition
   cpu: number; // the CPU every Bun process is pinned to
   census: boolean;
   reports: boolean;
@@ -179,10 +209,13 @@ function parseCommandLine(argv: string[], allowed: number[]): Command {
 
   const cases = list("--cases", defaultCases, oneOf("--cases", caseNames));
   const branches = list("--branches", branchNames, oneOf("--branches", branchNames));
-  const scenarios = list("--scenarios", check ? [5, 20] : [50, 500], text => integer(text, "--scenarios", 0)).sort((a, b) => a - b);
+  // A check's longer scenario reaches request 35, so its summary computes the sum of requests 2 to 35.
+  const scenarios = list("--scenarios", check ? [5, requestSumLast] : [50, 500], text => integer(text, "--scenarios", 0)).sort((a, b) => a - b);
   const processes = number("--processes", check ? 1 : 10, 0);
   const repetitions = number("--repetitions", check ? 1 : 3, 1);
   const producerCalls = number("--producer-calls", check ? 20 : 100, 1);
+  const capture = list("--capture", [], oneOf("--capture", captureScopes));
+  const compareLLIntProgress = takeFlag("--compare-llint-progress");
   const coldProcesses = number("--cold-processes", check ? 1 : 3, 0);
   const cpu = number("--cpu", Math.max(...allowed), 0);
   if (!allowed.includes(cpu)) throw new UsageError(`--cpu names CPU ${cpu}, which this process may not use`);
@@ -200,7 +233,7 @@ function parseCommandLine(argv: string[], allowed: number[]): Command {
     const existing = statSync(out, { throwIfNoEntry: false });
     if (existing && (!existing.isDirectory() || readdirSync(out).length)) throw new UsageError(`--out names a file or a directory that is not empty: ${out}`);
   }
-  return { kind: "run", options: { bun, cases, branches, scenarios, processes, repetitions, producerCalls, coldProcesses, cpu, census, reports, out, timeoutSeconds, check } };
+  return { kind: "run", options: { bun, cases, branches, scenarios, processes, repetitions, producerCalls, capture, compareLLIntProgress, coldProcesses, cpu, census, reports, out, timeoutSeconds, check } };
 }
 
 function integer(text: string, name: string, minimum: number): number {
@@ -345,8 +378,10 @@ function machineFacts(): MachineFacts {
 
 // Every Bun process gets these variables and no other, so no JSC_ or BUN_JSC_ option and no Bun setting reaches it from
 // the driver's environment. NODE_ENV is production, as in a deployment, and run.ts requires it. BUN_DEBUG_QUIET_LOGS=1
-// keeps a debug Bun's scoped logs out of standard output, which carries run.ts's events; a release Bun ignores it.
-function processEnvironment(): Record<string, string> {
+// keeps a debug Bun's scoped logs out of standard output, which carries run.ts's events; a release Bun ignores it. The
+// run's own transpiler cache, which Bun fills with the transpiled sources of 4 KiB or more, holds only what the bench's
+// processes read, so a cold process can drop all of it and nothing another run left behind serves it.
+function processEnvironment(transpilerCache: string): Record<string, string> {
   const environment: Record<string, string> = {};
   for (const name of ["PATH", "HOME", "TMPDIR", "LANG"]) {
     const value = process.env[name];
@@ -354,6 +389,7 @@ function processEnvironment(): Record<string, string> {
   }
   environment.NODE_ENV = "production";
   environment.BUN_DEBUG_QUIET_LOGS = "1";
+  environment.BUN_RUNTIME_TRANSPILER_CACHE_PATH = transpilerCache;
   return environment;
 }
 
@@ -545,27 +581,40 @@ interface EndLine {
   threads: Record<string, number>; // by name
 }
 
+// What a cold process's drop did to one group of the files it reads.
+interface PageCacheGroup {
+  name: string;
+  files: number;
+  bytes: number;
+  residentBytes: number | null; // what mincore found cached right after the drop, or null when the drop failed
+}
+
 interface ProcessRecord extends Job {
   kind: "process";
   run?: number; // the results file a pooled summary read it from
   label: string;
   command: string[];
+  environment: Record<string, string>; // what the process got beyond the run's environment
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
   wallMilliseconds: number | null; // from the spawn to the exit
   startupMilliseconds: number | null; // the ready line's Bun.nanoseconds()
+  endMilliseconds: number | null; // the end line's Bun.nanoseconds(); wall time minus it is the exit time
   callMilliseconds: number[];
   variants: number[];
   checksums: string[]; // the first 16 hex digits of each response's SHA-256, plenty to tell responses apart
   cpuMicroseconds: { user: number; system: number } | null; // every thread's
   contextSwitches: { voluntary: number; involuntary: number } | null;
+  inputBlocks: number | null; // getrusage's ru_inblock: the 512-byte blocks read from storage, where the kernel counts them
   end: EndLine | null;
   pinnedCpu: { busyMilliseconds: number; stealMilliseconds: number; idleMilliseconds: number } | null; // from /proc/stat
-  pageCache: { files: number; residentBytes: number | null } | null; // a cold consumer's artifact after the drop, by fincore
-  committedBodies: number | null; // a producer's
+  pageCache: PageCacheGroup[] | null; // a cold process's drop
+  committedBodies: number | null; // a producer's, packed and loose
+  packedBodies: number | null; // those of a producer's that its artifact's pack holds, or null without a pack
   report: ReportCounts | null; // a report run's
-  compiles: { dfg: number[]; ftl: number[] } | null; // a census run's, at 0 before call 1 and at k during call k
+  // A census run's compiles by tier, as readCensus counts them, at 0 before call 1 and at k during call k.
+  compiles: { baseline: number[]; dfg: number[]; ftl: number[] } | null;
   strayLines: number; // standard output lines that are no event of run.ts
   problems: string[];
 }
@@ -574,7 +623,9 @@ interface Context {
   options: Options;
   environment: Record<string, string>;
   deltaAtExitFlag: boolean; // whether the Bun takes --jitcache-delta-at-exit
-  fincore: boolean;
+  transpilerCache: string; // every Bun process's BUN_RUNTIME_TRANSPILER_CACHE_PATH
+  pageCache: PageCache | null; // when the run has cold processes
+  driverRunsBun: boolean; // whether the Bun is the executable that runs this driver, whose pages cannot be dropped
   clockTicks: number; // per second, /proc/stat's unit
   processDirectory: string;
 }
@@ -593,22 +644,55 @@ function labelOf(job: Job): string {
   }
 }
 
-// The artifact a producer writes and its consumers read, one per producer, repetition, case and branch.
-function artifactOf(options: Options, job: Job): string | null {
-  if (job.mode === "off") return null;
-  const producer = job.mode === "producerNoDelta" || job.mode === "consumerNoDelta" ? "no-delta" : "delta";
-  return join(options.out, "artifacts", `r${job.repetition}-${job.case}-${job.branch}-${producer}`);
+const isCold = (mode: Mode) => mode === "offCold" || mode === "consumerCold";
+// The second capture scope's producer and consumer, when the run names one.
+const secondScopeOf = (options: Options): CaptureScope | null => options.capture[1] ?? null;
+
+// The artifact a producer writes and its consumers read, one per producer, repetition, case and branch, and the capture
+// scope that producer passes, or null for Bun's default.
+function artifactOf(options: Options, job: Job): { path: string; scope: CaptureScope | null } | null {
+  let producer: string;
+  let scope = options.capture[0] ?? null;
+  switch (job.mode) {
+    case "off":
+    case "offCold":
+      return null;
+    case "producerNoDelta":
+    case "consumerNoDelta":
+      producer = "no-delta";
+      break;
+    case "producerAll":
+    case "consumerAll":
+    case "producerCompiled":
+    case "consumerCompiled":
+      scope = secondScopeOf(options)!;
+      producer = `delta-${scope}`;
+      break;
+    default:
+      producer = "delta";
+  }
+  return { path: join(options.out, "artifacts", `r${job.repetition}-${job.case}-${job.branch}-${producer}`), scope };
 }
 
-function commandOf(context: Context, job: Job, artifact: string | null, reportPath: string | null): { command: string[]; killAtEnd: boolean } {
+// The JSC options a mode sets, beyond the run's environment.
+function modeEnvironment(job: Job): Record<string, string> {
+  const environment: Record<string, string> = {};
+  if (job.mode === "consumerNoLLIntProgress") environment.BUN_JSC_jitCacheImportLLIntProgress = "0";
+  // JSC then logs the compiles readCensus counts.
+  if (job.purpose === "census") environment.BUN_JSC_logCompilationChanges = "true";
+  return environment;
+}
+
+function commandOf(context: Context, job: Job, artifact: { path: string; scope: CaptureScope | null } | null, reportPath: string | null): { command: string[]; killAtEnd: boolean } {
   // JITCache's flags go before the script, where Bun reads its own. A consumer takes the default mode.
-  const flags = artifact === null ? [] : [`--jitcache=${artifact}`];
+  const flags = artifact === null ? [] : [`--jitcache=${artifact.path}`];
   let killAtEnd = false;
   if (job.purpose === "producer") {
     flags.push("--jitcache-mode=p");
+    if (artifact!.scope !== null) flags.push(`--jitcache-capture=${artifact!.scope}`);
     // A Bun that takes --jitcache-delta-at-exit calls delta at exit only when given it. An older one always does, so its
     // no-delta producer kills itself right after its end line, before the exit hook can run.
-    if (job.mode === "producer" && context.deltaAtExitFlag) flags.push("--jitcache-delta-at-exit");
+    if (job.mode !== "producerNoDelta" && context.deltaAtExitFlag) flags.push("--jitcache-delta-at-exit");
     killAtEnd = job.mode === "producerNoDelta" && !context.deltaAtExitFlag;
   }
   if (reportPath !== null) flags.push(`--jitcache-bench-report=${reportPath}`);
@@ -626,40 +710,43 @@ async function runJob(context: Context, job: Job): Promise<ProcessRecord> {
   const reportPath = job.purpose === "report" ? `${base}.bench.jsonl` : null;
   const artifact = artifactOf(options, job);
   const { command, killAtEnd } = commandOf(context, job, artifact, reportPath);
+  const own = modeEnvironment(job);
   const record: ProcessRecord = {
     kind: "process",
     ...job,
     label,
     command,
+    environment: own,
     exitCode: null,
     signal: null,
     timedOut: false,
     wallMilliseconds: null,
     startupMilliseconds: null,
+    endMilliseconds: null,
     callMilliseconds: [],
     variants: [],
     checksums: [],
     cpuMicroseconds: null,
     contextSwitches: null,
+    inputBlocks: null,
     end: null,
     pinnedCpu: null,
     pageCache: null,
     committedBodies: null,
+    packedBodies: null,
     report: null,
     compiles: null,
     strayLines: 0,
     problems: [],
   };
-  if (job.mode === "consumerCold") dropPageCache(artifact!, context.fincore, record);
+  const dropped = isCold(job.mode) ? await dropPageCache(context, artifact?.path ?? null, record) : [];
 
-  // A census run has JSC log every optimizing compile it requests, on standard error between run.ts's call markers.
-  const environment = job.purpose === "census" ? { ...context.environment, BUN_JSC_logCompilationChanges: "true" } : context.environment;
   const stdout = openSync(files.stdout, "w");
   const stderr = openSync(files.stderr, "w");
   const before = cpuCounters(options.cpu);
   try {
     const started = performance.now();
-    const child = Bun.spawn(command, { cwd: benchDirectory, env: environment, stdin: "ignore", stdout, stderr });
+    const child = Bun.spawn(command, { cwd: benchDirectory, env: { ...context.environment, ...own }, stdin: "ignore", stdout, stderr });
     const timer = setTimeout(() => {
       record.timedOut = true;
       child.kill("SIGKILL");
@@ -673,6 +760,7 @@ async function runJob(context: Context, job: Job): Promise<ProcessRecord> {
     if (usage) {
       record.cpuMicroseconds = { user: Number(usage.cpuTime.user), system: Number(usage.cpuTime.system) };
       record.contextSwitches = { voluntary: Number(usage.contextSwitches.voluntary), involuntary: Number(usage.contextSwitches.involuntary) };
+      record.inputBlocks = Number(usage.ops.in);
     }
   } catch (error) {
     record.problems.push(`could not start: ${(error as Error).message}`);
@@ -685,6 +773,9 @@ async function runJob(context: Context, job: Job): Promise<ProcessRecord> {
     const milliseconds = (ticks: number) => (ticks * 1000) / context.clockTicks;
     record.pinnedCpu = { busyMilliseconds: milliseconds(after.busy - before.busy), stealMilliseconds: milliseconds(after.steal - before.steal), idleMilliseconds: milliseconds(after.idle - before.idle) };
   }
+  // The files a cold process dropped go back into the page cache, so the processes after it start as warm as before: a
+  // cold hono process would otherwise leave React's node_modules on storage for the next react-ssr process.
+  for (const file of dropped) context.pageCache!.warm(file);
 
   const stderrText = readText(files.stderr) ?? "";
   readEvents(readText(files.stdout) ?? "", job, record);
@@ -696,10 +787,9 @@ async function runJob(context: Context, job: Job): Promise<ProcessRecord> {
     for (const line of stderrText.split("\n")) if (line.startsWith("warn: JITCache")) record.problems.push(`warned: ${line}`);
   }
   if (job.purpose === "producer") {
-    // sync writes the bodies back, so no write-back runs during a measured process and a cold consumer's drop finds
-    // clean pages it can evict.
+    // sync writes the bodies back, so no write-back runs during a measured process.
     Bun.spawnSync(["sync"]);
-    record.committedBodies = countBodies(artifact!);
+    countBodies(artifact!.path, record);
     if (!record.committedBodies) record.problems.push("committed no body");
   }
   if (reportPath !== null) readReportRun(reportPath, record);
@@ -758,6 +848,9 @@ function readEvents(text: string, job: Job, record: ProcessRecord) {
       const threads = event.threads !== null && typeof event.threads === "object" ? (event.threads as Record<string, number>) : {};
       const cpusAllowed = typeof event.cpusAllowed === "string" ? event.cpusAllowed : null;
       record.end = { rssBytes: numberOr(event.rssBytes, null), peakRssBytes: numberOr(event.peakRssBytes, null), cpusAllowed, hardwareConcurrency: numberOr(event.hardwareConcurrency, null), threads };
+      const end = numberOr(event.endNanoseconds, null);
+      if (end === null) record.problems.push("printed an end line without endNanoseconds");
+      else record.endMilliseconds = Math.round(end / 100) / 1e4;
     }
   }
   if (!ready) record.problems.push("printed no ready line");
@@ -789,32 +882,113 @@ function checkPinning(record: ProcessRecord, cpu: number) {
   }
 }
 
-// dd's nocache flag with count=0 asks the kernel to drop a file's pages from the page cache (posix_fadvise with
-// POSIX_FADV_DONTNEED), which evicts the clean pages the producer's sync left. fincore, where it exists, checks that they
-// left.
-function dropPageCache(artifact: string, fincore: boolean, record: ProcessRecord) {
-  let files: string[];
-  try {
-    files = listFiles(artifact);
-  } catch (error) {
-    record.problems.push(`found no artifact to drop from the page cache: ${(error as Error).message}`);
-    return;
-  }
-  for (const file of files) {
-    const result = Bun.spawnSync(["dd", `if=${file}`, "iflag=nocache", "count=0", "status=none"], { stdout: "ignore", stderr: "pipe" });
-    if (!result.success) {
-      record.problems.push(`could not drop ${file} from the page cache: ${result.stderr.toString().trim()}`);
-      break;
+// libc through Bun's FFI, since fincore and vmtouch are missing on some machines. posix_fadvise with POSIX_FADV_DONTNEED
+// evicts a file's clean pages, and mincore over a read-only mapping of the file tells which of its pages are cached
+// without reading any. The kernel keeps every page some process maps.
+class PageCache {
+  private readonly libc = dlopen("libc.so.6", {
+    posix_fadvise: { args: [FFIType.i32, FFIType.i64, FFIType.i64, FFIType.i32], returns: FFIType.i32 },
+    mmap: { args: [FFIType.ptr, FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i64], returns: FFIType.ptr },
+    munmap: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+    mincore: { args: [FFIType.ptr, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+    getpagesize: { args: [], returns: FFIType.i32 },
+  }).symbols;
+  readonly pageSize = this.libc.getpagesize();
+  private readonly buffer = new Uint8Array(1 << 20);
+
+  drop(path: string) {
+    const fd = openSync(path, "r");
+    try {
+      const error = this.libc.posix_fadvise(fd, 0, 0, 4); // POSIX_FADV_DONTNEED, over the whole file
+      if (error) throw new Error(`posix_fadvise failed on ${path} with error ${error}`);
+    } finally {
+      closeSync(fd);
     }
   }
-  let residentBytes: number | null = null;
-  if (fincore && files.length) {
-    const result = Bun.spawnSync(["fincore", "--bytes", "--noheadings", "--output", "RES", ...files], { stdout: "pipe", stderr: "pipe" });
-    if (result.success) residentBytes = sum(result.stdout.toString().split("\n").filter(Boolean).map(Number));
-    else record.problems.push(`could not check the page cache with fincore: ${result.stderr.toString().trim()}`);
-    if (residentBytes) record.problems.push(`kept ${residentBytes} bytes of its artifact in the page cache after the drop`);
+
+  // The file's size, and the bytes of it the page cache holds.
+  probe(path: string): { bytes: number; residentBytes: number } {
+    const fd = openSync(path, "r");
+    try {
+      const bytes = fstatSync(fd).size;
+      if (!bytes) return { bytes, residentBytes: 0 };
+      const address = this.libc.mmap(null, bytes, 1, 1, fd, 0); // PROT_READ, MAP_SHARED
+      // MAP_FAILED is (void*)-1, far above any user-space address.
+      if (address === null || address >= 2 ** 53) throw new Error(`mmap failed on ${path}`);
+      try {
+        const pages = new Uint8Array(Math.ceil(bytes / this.pageSize));
+        if (this.libc.mincore(address, bytes, pages)) throw new Error(`mincore failed on ${path}`);
+        let residentBytes = 0;
+        pages.forEach((page, index) => {
+          if (page & 1) residentBytes += Math.min(this.pageSize, bytes - index * this.pageSize);
+        });
+        return { bytes, residentBytes };
+      } finally {
+        this.libc.munmap(address, bytes);
+      }
+    } finally {
+      closeSync(fd);
+    }
   }
-  record.pageCache = { files: files.length, residentBytes };
+
+  // Reads the whole file, which brings its pages back into the page cache.
+  warm(path: string) {
+    const fd = openSync(path, "r");
+    try {
+      while (readSync(fd, this.buffer) > 0) {}
+    } finally {
+      closeSync(fd);
+    }
+  }
+}
+
+// HARNESS.md Benches: a cold process starts after the files it reads from storage left the page cache, the Bun
+// executable, this directory with its node_modules and the transpiler cache, and a consumer's artifact as well, so cold
+// consumers and cold JITCache-off processes pay the same reads but the artifact's. sync first writes back what a process
+// left dirty, such as the transpiler cache's new entries, since only clean pages can leave, and mincore then checks that
+// every page left. A process the driver just reaped can still map its files for a few milliseconds after its exit was
+// reported (a JITCache consumer up to about 20 ms on WSL's kernel), so a group that keeps pages is dropped again until
+// none stays, for up to dropPatienceMilliseconds. The Bun that runs this driver stays mapped for good, so a run that
+// measures that Bun drops everything else. Returns the dropped files.
+const dropPatienceMilliseconds = 1000;
+
+async function dropPageCache(context: Context, artifact: string | null, record: ProcessRecord): Promise<string[]> {
+  const pageCache = context.pageCache!;
+  const groups: { name: string; files: () => string[] }[] = [
+    { name: "Bun executable", files: () => (context.driverRunsBun ? [] : [realpathSync(context.options.bun)]) },
+    { name: "bench directory", files: () => listFiles(benchDirectory) },
+    { name: "transpiler cache", files: () => (existsSync(context.transpilerCache) ? listFiles(context.transpilerCache) : []) },
+  ];
+  if (artifact !== null) groups.push({ name: "artifact", files: () => listFiles(artifact) });
+  Bun.spawnSync(["sync"]);
+  // Drops the files and returns the bytes the page cache still holds.
+  const drop = (files: string[]) => {
+    for (const file of files) pageCache.drop(file);
+    return sum(files.map(file => pageCache.probe(file).residentBytes));
+  };
+  const deadline = performance.now() + dropPatienceMilliseconds;
+  const dropped: string[] = [];
+  record.pageCache = [];
+  for (const group of groups) {
+    const result: PageCacheGroup = { name: group.name, files: 0, bytes: 0, residentBytes: null };
+    record.pageCache.push(result);
+    try {
+      const files = group.files();
+      result.files = files.length;
+      result.bytes = sum(files.map(file => statSync(file).size));
+      dropped.push(...files);
+      let residentBytes = drop(files);
+      while (residentBytes && performance.now() < deadline) {
+        await Bun.sleep(5);
+        residentBytes = drop(files);
+      }
+      result.residentBytes = residentBytes;
+      if (residentBytes) record.problems.push(`kept ${residentBytes} of the ${result.bytes} bytes of the ${group.name} in the page cache ${dropPatienceMilliseconds} ms after the drop`);
+    } catch (error) {
+      record.problems.push(`could not drop the ${group.name} from the page cache: ${(error as Error).message}`);
+    }
+  }
+  return dropped;
 }
 
 function listFiles(directory: string): string[] {
@@ -827,12 +1001,53 @@ function listFiles(directory: string): string[] {
   return files;
 }
 
-// The bodies an artifact holds, by their names (SPEC-integrator.container.md section 1.1).
-function countBodies(artifact: string): number {
+// A producer's bodies (SPEC-integrator.container.md section 4.6): those of cache/pack, which delta and compact write, and
+// the files of cache/bodies/ whose key the pack's index does not list, since a loose body supersedes its packed copy.
+function countBodies(artifact: string, record: ProcessRecord) {
+  let loose: string[] = [];
   try {
-    return readdirSync(join(artifact, "cache", "bodies")).filter(name => /^[0-9a-f]{80}\.bin$/.test(name)).length;
+    loose = readdirSync(join(artifact, "cache", "bodies")).flatMap(name => /^([0-9a-f]{80})\.bin$/.exec(name)?.[1] ?? []);
   } catch {
-    return 0;
+    // A producer that committed nothing may leave no bodies/.
+  }
+  const packed = readPackKeys(join(artifact, "cache", "pack"), record);
+  record.packedBodies = packed?.size ?? null;
+  record.committedBodies = (packed?.size ?? 0) + loose.filter(key => !packed?.has(key)).length;
+}
+
+// The keys a pack's index lists, as the hex that names their loose files; null without a pack. The header (64 bytes)
+// starts with JITCPACK and its layout version, 1, as 2 bytes at 8, and holds N, the body count, at 32, I, the index's
+// offset, at 40, and the pack's size, I + 80 N, at 48, each 8 bytes little-endian like every integer of the container.
+// The index holds N entries of 80 bytes, each starting with its body's 40-byte key. The engine checks the rest, the CRC
+// among it.
+function readPackKeys(path: string, record: ProcessRecord): Set<string> | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const header = new Uint8Array(64);
+    const fields = new DataView(header.buffer);
+    const size = fstatSync(fd).size;
+    if (readSync(fd, header, 0, 64, 0) !== 64 || new TextDecoder().decode(header.subarray(0, 8)) !== "JITCPACK" || fields.getUint16(8, true) !== 1) {
+      record.problems.push(`left a pack, ${path}, whose header is not one of layout 1`);
+      return null;
+    }
+    const count = Number(fields.getBigUint64(32, true));
+    const indexOffset = Number(fields.getBigUint64(40, true));
+    if (Number(fields.getBigUint64(48, true)) !== size || indexOffset + 80 * count !== size) {
+      record.problems.push(`left a pack, ${path}, of ${size} bytes whose header gives ${count} bodies with their index at ${indexOffset}`);
+      return null;
+    }
+    const index = new Uint8Array(80 * count);
+    if (readSync(fd, index, 0, index.length, indexOffset) !== index.length) throw new Error(`could not read the index of ${path}`);
+    const keys = new Set<string>();
+    for (let entry = 0; entry < count; ++entry) keys.add(Buffer.from(index.subarray(80 * entry, 80 * entry + 40)).toString("hex"));
+    return keys;
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -849,40 +1064,71 @@ function readReportRun(path: string, record: ProcessRecord) {
   if (counts.malformedLines) record.problems.push(`wrote ${plural(counts.malformedLines, "bench report line that is", "bench report lines that are")} no event`);
 }
 
-// JSC logs `DFG(Driver) compiling <code block> with <mode>, instructions size = <n>` when it requests an optimizing
-// compile, on the thread that runs the call, so the line falls between that call's markers, and the log's lock keeps it
-// whole. A JIT worker writes its own lines in pieces, so a marker can land inside one of them and end that line.
+// With logCompilationChanges, JSC logs `DFG(Driver) compiling <code block> with <mode>, instructions size = <n>` when it
+// requests an optimizing compile, on the thread that runs the call, so the line falls between that call's markers. It
+// logs no baseline request, so baseline compiles count where a JIT worker starts each one: `DFG(Plan) compiling <code
+// block> with Baseline, instructions size = <n>`. A window thus holds the baseline compiles that ran in it, when the
+// worker took the one CPU from the calls, and a plan still queued when the process exits never counts.
+// (verboseCompilationQueue would log every request, but it can deadlock: JITWorklist::enqueue prints the queue under the
+// worklist's lock, and a worker prints the worklist, which takes that lock, under the log's.) The log's lock keeps each JSC line whole against
+// other JSC lines, but a marker can land inside a worker's line and end it; the worker's next bytes continue that line,
+// since the call's thread cannot log until the worker releases the lock. The census therefore joins the text a marker
+// cut with the line after it, and counts a joined line in the window where it started.
 function readCensus(text: string, calls: number, record: ProcessRecord) {
-  const dfg = new Array<number>(calls + 1).fill(0);
-  const ftl = new Array<number>(calls + 1).fill(0);
+  const compiles = { baseline: new Array<number>(calls + 1).fill(0), dfg: new Array<number>(calls + 1).fill(0), ftl: new Array<number>(calls + 1).fill(0) };
   let call = 0;
+  let pending = ""; // a worker's line that markers cut, so far
+  let pendingCall = 0; // the window where it started
   for (const line of text.split("\n")) {
-    const compile = /^DFG\(Driver\) compiling .* with (\w+), instructions size = \d+$/.exec(line);
-    if (compile) {
-      const mode = compile[1];
-      if (mode === "DFG" || mode === "UnlinkedDFG") dfg[call]++;
-      else if (mode === "FTL" || mode === "FTLForOSREntry") ftl[call]++;
-      else record.problems.push(`logged an optimizing compile in mode ${mode}, which the census does not count`);
+    if (call < calls && line.endsWith(`call ${call + 1}`)) {
+      const cut = line.slice(0, -`call ${call + 1}`.length);
+      if (!pending && cut) pendingCall = call;
+      pending += cut;
+      ++call;
       continue;
     }
-    if (call < calls && line.endsWith(`call ${call + 1}`)) ++call;
+    const whole = pending + line;
+    const window = pending ? pendingCall : call;
+    pending = "";
+    const request = /^DFG\(Driver\) compiling .* with (\w+), instructions size = \d+$/.exec(whole);
+    if (request) {
+      const mode = request[1];
+      if (mode === "DFG" || mode === "UnlinkedDFG") compiles.dfg[window]++;
+      else if (mode === "FTL" || mode === "FTLForOSREntry") compiles.ftl[window]++;
+      else record.problems.push(`logged an optimizing compile in mode ${mode}, which the census does not count`);
+    } else if (/^DFG\(Plan\) compiling .* with Baseline, instructions size = \d+$/.test(whole)) {
+      compiles.baseline[window]++;
+    }
   }
   if (call !== calls) record.problems.push(`marked ${call} of its ${calls} calls on standard error`);
-  record.compiles = { dfg, ftl };
+  record.compiles = compiles;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The plan
 
+// The warm consumer modes the run compares besides `consumer`: the second capture scope's and the one whose imported
+// LLInt counters start from zero.
+function consumerVariants(options: Options): Mode[] {
+  const second = secondScopeOf(options);
+  const modes: Mode[] = [];
+  if (second !== null) modes.push(`consumer${scopeName(second)}`);
+  if (options.compareLLIntProgress) modes.push("consumerNoLLIntProgress");
+  return modes;
+}
+
 // One repetition's jobs in the order they run: the producers, then, for each process index, the modes of every case,
 // branch and scenario in an order that rotates with the index, so no mode always runs right after the same one. Cold
-// consumer c, counted from 0, runs at index floor(c * processes / coldProcesses) + 1, which spreads them over the indexes.
+// pair c, an off process and a consumer counted from 0, runs at index floor(c * processes / coldProcesses) + 1, which
+// spreads the pairs over the indexes.
 function repetitionJobs(options: Options, repetition: number): Job[] {
   const jobs: Job[] = [];
   const longest = options.scenarios.at(-1)!;
+  const second = secondScopeOf(options);
+  const producers: Mode[] = ["producer", "producerNoDelta", ...(second === null ? [] : [`producer${scopeName(second)}` as const])];
   for (const name of options.cases) {
     for (const branch of options.branches) {
-      for (const mode of ["producer", "producerNoDelta"] as const) jobs.push({ purpose: "producer", case: name, branch, scenario: null, calls: options.producerCalls, mode, repetition, index: 1 });
+      for (const mode of producers) jobs.push({ purpose: "producer", case: name, branch, scenario: null, calls: options.producerCalls, mode, repetition, index: 1 });
     }
   }
   for (let index = 1; index <= options.processes; ++index) {
@@ -891,9 +1137,9 @@ function repetitionJobs(options: Options, repetition: number): Job[] {
       for (const branch of options.branches) {
         for (const scenario of options.scenarios) {
           const job = (mode: Mode, modeIndex: number): Job => ({ purpose: "timed", case: name, branch, scenario, calls: scenario, mode, repetition, index: modeIndex });
-          const group = [job("off", index), job("consumer", index)];
+          const group = [job("off", index), job("consumer", index), ...consumerVariants(options).map(mode => job(mode, index))];
           if (scenario === longest) group.push(job("consumerNoDelta", index));
-          for (const cold of colds) group.push(job("consumerCold", cold + 1));
+          for (const cold of colds) group.push(job("offCold", cold + 1), job("consumerCold", cold + 1));
           const shift = (index - 1) % group.length;
           jobs.push(...group.slice(shift), ...group.slice(0, shift));
         }
@@ -903,21 +1149,24 @@ function repetitionJobs(options: Options, repetition: number): Job[] {
   return jobs;
 }
 
-// After the last repetition, on its artifacts: for each case and branch, a warm and a cold consumer of every scenario
-// that write the bench report, and the census's off process and consumer, which make the longest scenario's calls.
+// After the last repetition, on its artifacts: for each case and branch, the consumers of every scenario that write the
+// bench report, warm, cold and of the second capture scope, and the census's off process and warm consumers, which make
+// the longest scenario's calls.
 function untimedJobs(options: Options): Job[] {
   const jobs: Job[] = [];
   const repetition = options.repetitions;
   const longest = options.scenarios.at(-1)!;
+  const second = secondScopeOf(options);
   for (const name of options.cases) {
     for (const branch of options.branches) {
       if (options.reports) {
+        const modes: Mode[] = ["consumer", "consumerCold", ...(second === null ? [] : [`consumer${scopeName(second)}` as const])];
         for (const scenario of options.scenarios) {
-          for (const mode of ["consumer", "consumerCold"] as const) jobs.push({ purpose: "report", case: name, branch, scenario, calls: scenario, mode, repetition, index: 1 });
+          for (const mode of modes) jobs.push({ purpose: "report", case: name, branch, scenario, calls: scenario, mode, repetition, index: 1 });
         }
       }
       if (options.census) {
-        for (const mode of ["off", "consumer"] as const) jobs.push({ purpose: "census", case: name, branch, scenario: null, calls: longest, mode, repetition, index: 1 });
+        for (const mode of ["off", "consumer", ...consumerVariants(options)] as Mode[]) jobs.push({ purpose: "census", case: name, branch, scenario: null, calls: longest, mode, repetition, index: 1 });
       }
     }
   }
@@ -929,11 +1178,12 @@ function progressLine(record: ProcessRecord): string {
   const parts = [`startup ${milliseconds(record.startupMilliseconds)}`];
   if (calls.length) parts.push(`call 1 ${milliseconds(calls[0])}`);
   if (calls.length > 1) parts.push(`call ${calls.length} ${milliseconds(calls.at(-1))}`);
-  parts.push(`wall ${milliseconds(record.wallMilliseconds)}`, `CPU ${milliseconds(cpuMillisecondsOf(record))}`);
-  if (record.committedBodies !== null) parts.push(`${plural(record.committedBodies, "body", "bodies")} committed`);
+  parts.push(`wall ${milliseconds(record.wallMilliseconds)}`, `exit ${milliseconds(exitMillisecondsOf(record))}`, `CPU ${milliseconds(cpuMillisecondsOf(record))}`);
+  if (record.committedBodies !== null) parts.push(`${plural(record.committedBodies, "body", "bodies")} committed${record.packedBodies === null ? "" : `, ${record.packedBodies} packed`}`);
   if (record.report) parts.push(`${plural(record.report.installs, "install", "installs")}`);
-  if (record.compiles) parts.push(`${sum(record.compiles.dfg)} DFG and ${sum(record.compiles.ftl)} FTL compiles`);
-  if (record.pageCache) parts.push(`${plural(record.pageCache.files, "artifact file", "artifact files")} dropped from the page cache`);
+  if (record.compiles) parts.push(`${sum(record.compiles.baseline)} baseline compiles started, ${sum(record.compiles.dfg)} DFG and ${sum(record.compiles.ftl)} FTL requested`);
+  if (record.pageCache) parts.push(`${plural(sum(record.pageCache.map(group => group.files)), "file", "files")} dropped from the page cache`);
+  if (isCold(record.mode) && record.inputBlocks !== null) parts.push(`${mebibytes(record.inputBlocks * 512)} MiB read from storage`);
   const line = `${record.label}: ${parts.join(", ")}`;
   return record.problems.length ? `${line}\n  FAILED: ${record.problems.join("\n  FAILED: ")}` : line;
 }
@@ -963,7 +1213,9 @@ interface RunRecord extends MachineFacts {
   pinnedCpuSiblings: number[]; // the CPUs that share a core with options.cpu, itself included
   driverCpu: number | null;
   driverNote: string | null;
-  fincore: boolean;
+  driverRunsBun: boolean; // whether the Bun is the executable that runs the driver, whose pages no drop evicts
+  pageSize: number | null; // the page cache's, when the run has cold processes
+  taskIoAccounting: boolean; // whether the kernel counts each task's storage reads, which ru_inblock gives
   clockTicks: number;
   environment: Record<string, string>; // every Bun process's
 }
@@ -1024,18 +1276,37 @@ type Measure = (record: ProcessRecord) => number | null;
 
 const cpuMillisecondsOf: Measure = record => (record.cpuMicroseconds ? (record.cpuMicroseconds.user + record.cpuMicroseconds.system) / 1000 : null);
 const peakMebibytes: Measure = record => (typeof record.end?.peakRssBytes === "number" ? record.end.peakRssBytes / 1048576 : null);
+// Wall time minus Bun's clock at the end line: the exit after that line, with the exec before Bun's clock starts, which
+// every mode pays alike.
+const exitMillisecondsOf: Measure = record => (record.wallMilliseconds !== null && typeof record.endMilliseconds === "number" ? record.wallMilliseconds - record.endMilliseconds : null);
+const storageMebibytes: Measure = record => (typeof record.inputBlocks === "number" ? (record.inputBlocks * 512) / 1048576 : null);
 // Startup plus the first k calls, as run.ts times them.
 const finishedAfter =
   (calls: number): Measure =>
   record =>
     record.startupMilliseconds === null || record.callMilliseconds.length < calls ? null : record.startupMilliseconds + sum(record.callMilliseconds.slice(0, calls));
+// The headline metric's measures, as tmp/ops/next-round/scratch/request-curves.ts computed them for the 10-14 digest:
+// request k is call k; the requests 2 to 35 of one process add up in call order; startup plus request 1 adds Bun's clock
+// at the ready line to call 1, leaving out only the exec before that clock and the microseconds between the ready line
+// and call 1.
+const requestAt =
+  (k: number): Measure =>
+  record =>
+    record.callMilliseconds[k - 1] ?? null;
+const laterRequests: Measure = record => (record.callMilliseconds.length < requestSumLast ? null : sum(record.callMilliseconds.slice(1, requestSumLast)));
+const firstRequestWithStartup: Measure = record => (record.startupMilliseconds === null || !record.callMilliseconds.length ? null : record.startupMilliseconds + record.callMilliseconds[0]);
 // Orders repetitions as they ran, across pooled runs too.
 const repetitionOrder = (record: { run?: number; repetition: number }) => (record.run ?? 0) * 1_000_000 + record.repetition;
 const labelIn = (pool: Pool, record: ProcessRecord) => (pool.runs.length > 1 ? `run ${(record.run ?? 0) + 1} ${record.label}` : record.label);
 
+const requestGuide = [
+  `The headline metric (HARNESS.md, Benches). A cell gives the median/p90 in ms over a mode's processes, pooled over the repetitions, where p90 is the nearest rank, the ceil(0.9 n)-th value in ascending order. Column k is request k, call k of each process; sum 2 to ${requestSumLast} adds requests 2 to ${requestSumLast} in each process; startup + 1 adds Bun's clock at the ready line to request 1.`,
+  `Against its reference, a mode's cell gives its median minus the reference's in ms and, in parentheses, its median over the reference's. consumerCold's reference is offCold, which reads the same files from storage but the artifact; every other mode's is off. request-curves.tsv beside this file holds every request k up to ${requestCurveCalls}.`,
+].join(" ");
+
 const readingGuide = [
-  "A cell over several processes gives their median, and wall and CPU time add the range in parentheses. CPU time adds the user and system time of all of a process's threads; peak memory is its VmHWM at its end line.",
-  `A ratio divides a mode's median by the median of the off processes in the same table, pooled over the repetitions, and each repetition's own ratio follows in parentheses. Bold marks a ratio at or below ${targetRatio.toFixed(2)}, the target in HARNESS.md.`,
+  "The sections by case and branch give the time to finish, secondary to the per-request latency, beside the census and JITCache's bench report. A cell over several processes gives their median, and wall and CPU time add the range in parentheses. CPU time adds the user and system time of all of a process's threads; peak memory is its VmHWM at its end line; exit is wall time minus Bun's clock at the end line, so it holds the exit after that line and the exec before Bun's clock starts; read from storage is getrusage's block input.",
+  `A ratio divides a mode's median by the median of its reference's processes in the same table, pooled over the repetitions, and each repetition's own ratio follows in parentheses; consumerCold's reference is offCold, every other mode's off. Bold marks a ratio at or below ${targetRatio.toFixed(2)}, the target in HARNESS.md.`,
   "After k calls means startup plus the first k calls, as run.ts times them. W is the producers' warmed call, the median of their calls 91 to 100 that sent the same variant. Ck is a mode's median time for call k (Nk with JITCache off), so Ck/W says how close call k comes to the warmed call.",
 ].join(" ");
 
@@ -1047,7 +1318,7 @@ function summarize(pool: Pool): { text: string; passed: boolean } {
   if (revisions.length > 1) lines.push(`The pooled runs used different Bun builds (${revisions.join(", ")}), so their numbers do not compare.`, "");
   if (pool.runs.some(run => run.options.check)) lines.push("A check (--check) takes no build lock and may run beside a build, so its times measure nothing; only its checks count.", "");
   if (pool.repetitions.length) lines.push(...pool.repetitions.map(repetition => `- ${describeRepetition(repetition, pool)}`), "");
-  lines.push("## Checks", "", ...describeProblems(problems), "", "## Reading the tables", "", readingGuide, "");
+  lines.push("## Checks", "", ...describeProblems(problems), "", ...requestLines(pool), "## Reading the tables", "", readingGuide, "");
   for (const name of caseNames) {
     for (const branch of branchNames) {
       const records = pool.processes.filter(record => record.case === name && record.branch === branch);
@@ -1055,6 +1326,132 @@ function summarize(pool: Pool): { text: string; passed: boolean } {
     }
   }
   return { text: lines.join("\n"), passed: !problems.length };
+}
+
+interface TimedGroup {
+  case: CaseName;
+  branch: Branch;
+  scenario: number;
+  mode: Mode;
+  records: ProcessRecord[];
+}
+
+// The timed processes of each case, branch, scenario and mode, in the order the tables give them.
+function timedGroups(pool: Pool): TimedGroup[] {
+  const timed = pool.processes.filter(record => record.purpose === "timed" && record.scenario !== null);
+  const scenarios = [...new Set(timed.map(record => record.scenario!))].sort((a, b) => a - b);
+  const groups: TimedGroup[] = [];
+  for (const name of caseNames) {
+    for (const branch of branchNames) {
+      for (const scenario of scenarios) {
+        for (const mode of comparedModes) {
+          const records = timed.filter(record => record.case === name && record.branch === branch && record.scenario === scenario && record.mode === mode);
+          if (records.length) groups.push({ case: name, branch, scenario, mode, records });
+        }
+      }
+    }
+  }
+  return groups;
+}
+
+// The per-request measures of a scenario's processes, those its calls reach: request k for k up to `last`, the sum of
+// requests 2 to 35, and startup plus request 1.
+function requestMeasures(scenario: number, ks: number[]): { label: string; name: string; measure: Measure }[] {
+  if (!scenario) return [];
+  return [
+    ...ks.filter(k => k <= scenario).map(k => ({ label: String(k), name: `call${k}`, measure: requestAt(k) })),
+    ...(scenario >= requestSumLast ? [{ label: `sum 2 to ${requestSumLast}`, name: `sum_calls_2_${requestSumLast}`, measure: laterRequests }] : []),
+    { label: "startup + 1", name: "startup_plus_call1", measure: firstRequestWithStartup },
+  ];
+}
+
+// The headline section: each mode against its reference, then each case's per-request table by scenario, as the 10-14
+// digest gave them.
+function requestLines(pool: Pool): string[] {
+  const groups = timedGroups(pool);
+  if (!groups.length) return [];
+  const lines = ["## Per-request latency", "", requestGuide, ""];
+  const find = (name: CaseName, branch: Branch, scenario: number, mode: Mode) => groups.find(group => group.case === name && group.branch === branch && group.scenario === scenario && group.mode === mode)?.records ?? [];
+  for (const mode of comparedModes) {
+    const reference = referenceOf(mode);
+    const mine = groups.filter(group => group.mode === mode);
+    if (reference === null || !mine.length) continue;
+    const scenarios = [...new Set(mine.map(group => group.scenario))].sort((a, b) => a - b);
+    const columns = scenarios.flatMap(scenario => requestMeasures(scenario, []).map(column => ({ ...column, scenario })));
+    if (!columns.length) continue;
+    lines.push(`| ${mode} against ${reference} | ${columns.map(column => `${column.label}, ${plural(column.scenario, "call", "calls")}`).join(" | ")} |`, `|---|${columns.map(() => "---|").join("")}`);
+    for (const name of caseNames) {
+      for (const branch of branchNames) {
+        if (!mine.some(group => group.case === name && group.branch === branch)) continue;
+        const cells = columns.map(({ scenario, measure }) => {
+          const a = median(find(name, branch, scenario, mode).map(measure));
+          const b = median(find(name, branch, scenario, reference).map(measure));
+          return a === null || b === null || b === 0 ? "n/a" : `${a >= b ? "+" : "-"}${Math.abs(a - b).toFixed(2)} (${(a / b).toFixed(2)})`;
+        });
+        lines.push(`| ${name} ${branch} | ${cells.join(" | ")} |`);
+      }
+    }
+    lines.push("");
+  }
+  for (const name of caseNames) {
+    const scenarios = [...new Set(groups.filter(group => group.case === name).map(group => group.scenario))].sort((a, b) => a - b);
+    for (const scenario of scenarios) {
+      const columns = requestMeasures(scenario, requestTableCalls);
+      if (!columns.length) continue;
+      lines.push(`| ${name}, ${plural(scenario, "call", "calls")} | ${columns.map(column => column.label).join(" | ")} |`, `|---|${columns.map(() => "---|").join("")}`);
+      for (const group of groups.filter(group => group.case === name && group.scenario === scenario)) {
+        const cells = columns.map(({ measure }) => {
+          const values = group.records.map(measure);
+          const middle = median(values);
+          return middle === null ? "n/a" : `${latency(middle)}/${latency(p90(values)!)}`;
+        });
+        lines.push(`| ${group.branch} ${group.mode} | ${cells.join(" | ")} |`);
+      }
+      lines.push("");
+    }
+  }
+  return lines;
+}
+
+// request-curves.tsv: for each case, branch, scenario and mode, each per-request measure up to request 50 and the time
+// to finish's main measures, with the processes, the median and p90, and the median against the mode's reference. An
+// empty cell has no value.
+function requestCurves(pool: Pool): string {
+  const groups = timedGroups(pool);
+  const rows = [["case", "branch", "scenario", "mode", "measure", "n", "median_ms", "p90_ms", "reference", "reference_median_ms", "minus_reference_ms", "over_reference"]];
+  const format = (value: number | null, digits: number) => (value === null ? "" : value.toFixed(digits));
+  const ks = [...Array(requestCurveCalls).keys()].map(k => k + 1);
+  for (const group of groups) {
+    const reference = referenceOf(group.mode);
+    const referenceRecords = reference === null ? [] : (groups.find(other => other.case === group.case && other.branch === group.branch && other.scenario === group.scenario && other.mode === reference)?.records ?? []);
+    const measures = [
+      ...requestMeasures(group.scenario, ks),
+      { name: "startup", measure: (record: ProcessRecord) => record.startupMilliseconds },
+      { name: "exit", measure: exitMillisecondsOf },
+      { name: "wall", measure: (record: ProcessRecord) => record.wallMilliseconds },
+      { name: "cpu", measure: cpuMillisecondsOf },
+    ];
+    for (const { name, measure } of measures) {
+      const values = present(group.records.map(measure));
+      const middle = median(values);
+      const theirs = reference === null ? null : median(referenceRecords.map(measure));
+      rows.push([
+        group.case,
+        group.branch,
+        String(group.scenario),
+        group.mode,
+        name,
+        String(values.length),
+        format(middle, 4),
+        format(p90(values), 4),
+        reference ?? "",
+        format(theirs, 4),
+        format(middle === null || theirs === null ? null : middle - theirs, 4),
+        format(divide(middle, theirs), 3),
+      ]);
+    }
+  }
+  return `${rows.map(row => row.join("\t")).join("\n")}\n`;
 }
 
 function describeRun(run: RunRecord, pool: Pool): string {
@@ -1065,12 +1462,17 @@ function describeRun(run: RunRecord, pool: Pool): string {
   const end = pool.ends.find(record => record.run === run.run);
   const siblings = run.pinnedCpuSiblings.filter(cpu => cpu !== options.cpu);
   const users = run.who ? run.who.split("\n").map(line => line.trim().split(/\s+/).slice(0, 2).join(" on ")).join("; ") : "nobody";
+  const capture = options.capture ?? [];
   return [
     `${pool.runs.length > 1 ? `Run ${(run.run ?? 0) + 1}: ` : ""}Bun ${run.bun}, revision ${run.revision}.`,
     run.deltaAtExitFlag ? "" : "This Bun has no --jitcache-delta-at-exit and calls delta at every producer's exit, so the producers without delta kill themselves right after their end line.",
     `Host ${run.host}, kernel ${run.kernel}, ${run.cpus} CPUs (${run.cpuModel ?? "model unknown"}), transparent huge pages ${run.transparentHugePages ?? "n/a"}, ${gibibytes(memory.totalBytes)} of memory (${gibibytes(memory.availableBytes)} available) and ${gibibytes(memory.swapTotalBytes)} of swap (${gibibytes(swapUsed)} in use); logged in: ${users}.`,
     `Every Bun process ran on CPU ${options.cpu}${siblings.length ? `, which shares its core with CPU ${joinWords(siblings.map(String))}` : ""}, and the driver ${run.driverCpu === null ? "had no CPU of its own" : `ran on CPU ${run.driverCpu}`}${run.driverNote ? ` (${run.driverNote})` : ""}.`,
-    `${plural(options.repetitions, "repetition", "repetitions")} of ${plural(options.processes, "process", "processes")} per mode, scenarios of ${joinWords(options.scenarios.map(String))} calls, producers of ${options.producerCalls} calls and ${plural(options.coldProcesses, "cold consumer", "cold consumers")} per scenario and repetition.`,
+    `${plural(options.repetitions, "repetition", "repetitions")} of ${plural(options.processes, "process", "processes")} per mode, scenarios of ${joinWords(options.scenarios.map(String))} calls, producers of ${options.producerCalls} calls and ${plural(options.coldProcesses, "cold pair", "cold pairs")}, a JITCache-off process and a consumer, per scenario and repetition.`,
+    capture.length ? `The producers passed --jitcache-capture=${capture[0]}${capture[1] ? `, and producer${scopeName(capture[1])} --jitcache-capture=${capture[1]}` : ""}.` : "",
+    options.compareLLIntProgress ? "consumerNoLLIntProgress ran with BUN_JSC_jitCacheImportLLIntProgress=0." : "",
+    run.driverRunsBun ? "The driver runs this Bun itself, so its executable stays in the page cache when cold processes start." : "",
+    run.taskIoAccounting === false ? "This kernel counts no task's storage reads, so read from storage stays at 0." : "",
     `Started ${run.started} with a load average of ${load(run.loadAverage)}${end ? ` and finished ${end.finished} with ${load(end.loadAverage)}` : "; the run has no end record"}. Command line: ${run.argv.join(" ")}.`,
   ]
     .filter(Boolean)
@@ -1134,11 +1536,17 @@ function caseLines(pool: Pool, records: ProcessRecord[], name: CaseName, branch:
 function describeProducers(producers: ProcessRecord[]): string {
   if (!producers.length) return "No producer ran.";
   const calls = joinWords([...new Set(producers.map(record => String(record.calls)))], "or");
-  const committed = (["producer", "producerNoDelta"] as const).flatMap(mode => {
-    const counts = producers.filter(record => record.mode === mode).map(record => (record.committedBodies === null ? "n/a" : String(record.committedBodies)));
-    return counts.length ? [`${joinWords(counts)} bodies ${mode === "producer" ? "when they called delta at exit" : "when they did not"}`] : [];
+  const kinds: [Mode, string][] = [
+    ["producer", "when they called delta at exit"],
+    ["producerAll", "when they called delta under the scope all"],
+    ["producerCompiled", "when they called delta under the scope compiled"],
+    ["producerNoDelta", "when they did not call delta"],
+  ];
+  const committed = kinds.flatMap(([mode, when]) => {
+    const counts = producers.filter(record => record.mode === mode).map(record => (record.committedBodies === null ? "n/a" : `${record.committedBodies}${typeof record.packedBodies === "number" ? ` (${record.packedBodies} packed)` : ""}`));
+    return counts.length ? [`${joinWords(counts)} bodies ${when}`] : [];
   });
-  return `Producers of ${calls} calls, one of each kind per repetition, committed ${committed.join(", and ")}.`;
+  return `Producers of ${calls} calls, one of each kind per repetition, committed ${committed.join(", ")}.`;
 }
 
 // W by variant: the median of the producers' last ten calls that sent it. In the fixed branch that is the median of
@@ -1161,15 +1569,28 @@ function describeWarmed(warmed: Map<number, number>, producers: ProcessRecord[])
   return `W by variant, the median of their ${span} that sent it, in ms: ${[...warmed].map(([variant, value]) => `${variant}: ${fixed(value)}`).join(", ")}.`;
 }
 
-// The optimizing compiles requested in each window of calls. A producer that stops after P calls takes warm baseline
-// state only from bodies still in baseline then, so most DFG compiles should come after call P.
+// The compiles of each window of calls, by tier, as readCensus counts them. Native baseline compiles show how soon a
+// mode's bodies leave the LLInt, imported or not. A producer that stops after P calls takes warm baseline state only from
+// bodies still in baseline then, so most DFG compiles should come after call P.
 function censusLines(pool: Pool, census: ProcessRecord[]): string[] {
   const calls = Math.max(...census.map(record => record.calls));
   const bounds = calls ? [...censusBounds.filter(bound => bound < calls), calls] : [];
-  const windows = [{ label: "startup", from: 0, to: 0 }, ...bounds.map((to, i) => ({ label: `${i ? bounds[i - 1] + 1 : 1}-${to}`, from: i ? bounds[i - 1] + 1 : 1, to })), { label: "all", from: 0, to: calls }];
-  const modes = (["off", "consumer"] as const).filter(mode => census.some(record => record.mode === mode));
-  const count = (mode: Mode, kind: "dfg" | "ftl", from: number, to: number) => {
-    const value = median(census.filter(record => record.mode === mode).map(record => sum(record.compiles![kind].slice(from, to + 1))));
+  const windows = [
+    { label: "startup", from: 0, to: 0 },
+    ...bounds.map((to, i) => {
+      const from = i ? bounds[i - 1] + 1 : 1;
+      return { label: from === to ? String(to) : `${from}-${to}`, from, to };
+    }),
+    { label: "all", from: 0, to: calls },
+  ];
+  const modes = comparedModes.filter(mode => census.some(record => record.mode === mode));
+  const tiers = [
+    ["baseline", "baseline"],
+    ["dfg", "DFG"],
+    ["ftl", "FTL"],
+  ] as const;
+  const count = (mode: Mode, tier: "baseline" | "dfg" | "ftl", from: number, to: number) => {
+    const value = median(census.filter(record => record.mode === mode && record.compiles![tier]).map(record => sum(record.compiles![tier].slice(from, to + 1))));
     return value === null ? "n/a" : String(value);
   };
   // The DFG compiles after the call where the producer stopped, over all of a mode's census runs.
@@ -1178,16 +1599,16 @@ function censusLines(pool: Pool, census: ProcessRecord[]): string[] {
     const runs = census.filter(record => record.mode === mode);
     const late = sum(runs.map(record => sum(record.compiles!.dfg.slice(producerCalls(record) + 1))));
     const all = sum(runs.map(record => sum(record.compiles!.dfg)));
-    return `${late} of ${all}${all ? ` (${Math.round((late / all) * 100)}%)` : ""} ${mode === "off" ? "with JITCache off" : "in the consumer"}`;
+    return `${late} of ${all}${all ? ` (${Math.round((late / all) * 100)}%)` : ""} ${mode === "off" ? "with JITCache off" : `in ${mode}`}`;
   });
   const stops = [...new Set(census.map(producerCalls))];
   const where = `call ${joinWords(stops.map(String), "or")}, where the producers stopped`;
   return [
-    `Census: one untimed process per mode made ${plural(calls, "call", "calls")}, and JSC requested these DFG and FTL compiles in each window of calls.`,
+    `Census: one untimed process per mode made ${plural(calls, "call", "calls")}. In each window of calls, the JIT worker started these baseline compiles and the calls requested these DFG and FTL compiles; a baseline plan still queued at exit counts nowhere.`,
     "",
-    `| calls | ${modes.flatMap(mode => [`${mode}: DFG`, `${mode}: FTL`]).join(" | ")} |`,
-    `|---|${modes.map(() => "---|---|").join("")}`,
-    ...windows.map(({ label, from, to }) => `| ${label} | ${modes.flatMap(mode => [count(mode, "dfg", from, to), count(mode, "ftl", from, to)]).join(" | ")} |`),
+    `| | ${windows.map(window => window.label).join(" | ")} |`,
+    `|---|${windows.map(() => "---|").join("")}`,
+    ...modes.flatMap(mode => tiers.map(([tier, name]) => `| ${mode}, ${name} | ${windows.map(({ from, to }) => count(mode, tier, from, to)).join(" | ")} |`)),
     "",
     calls > Math.min(...stops) ? `DFG compiles after ${where}: ${joinWords(shares)}.` : `The census ends before or at ${where}, so it shows nothing after it.`,
     "",
@@ -1198,9 +1619,9 @@ function scenarioLines(records: ProcessRecord[], scenario: number, warmed: Map<n
   const timed = records.filter(record => record.purpose === "timed");
   const of = (mode: Mode) => timed.filter(record => record.mode === mode);
   const modes = comparedModes.filter(mode => of(mode).length);
-  const off = of("off");
   // The pinned CPU idles only while the process waits on something other than its own threads' work, such as the
-  // kernel's teardown of an inotify watch at exit; JITCache off idles about none, so that row has no ratio.
+  // kernel's teardown of an inotify watch at exit or a read from storage; JITCache off idles about none warm, so that
+  // row has no ratio, nor has the storage row, which warm processes keep at 0.
   const rows: { label: string; ratioLabel?: string; measure: Measure; range?: boolean; unit: string; noRatio?: true }[] = [
     { label: "wall time", measure: record => record.wallMilliseconds, range: true, unit: "ms" },
     { label: "CPU time", measure: cpuMillisecondsOf, range: true, unit: "ms" },
@@ -1210,7 +1631,9 @@ function scenarioLines(records: ProcessRecord[], scenario: number, warmed: Map<n
     ...[...finishCalls.filter(calls => calls < scenario), scenario]
       .filter(calls => calls > 0)
       .map(calls => ({ label: `after ${plural(calls, "call", "calls")}`, measure: finishedAfter(calls), unit: "ms" })),
+    { label: "exit", measure: exitMillisecondsOf, unit: "ms" },
     { label: "peak memory", measure: peakMebibytes, unit: "MiB" },
+    { label: "read from storage", measure: storageMebibytes, unit: "MiB", noRatio: true },
   ];
   const lines = [`### ${plural(scenario, "call", "calls")}`, ""];
   if (modes.length) {
@@ -1218,21 +1641,26 @@ function scenarioLines(records: ProcessRecord[], scenario: number, warmed: Map<n
     for (const { label, measure, range, unit } of rows) lines.push(`| ${label}, ${unit} | ${modes.map(mode => cell(of(mode), measure, range ?? false)).join(" | ")} |`);
     lines.push("");
   }
-  const compared = modes.filter(mode => mode !== "off");
-  if (off.length && compared.length) {
-    lines.push(`| ratio to off | ${compared.join(" | ")} |`, `|---|${compared.map(() => "---|").join("")}`);
+  const compared = modes.filter(mode => referenceOf(mode) !== null && of(referenceOf(mode)!).length);
+  if (compared.length) {
+    lines.push(`| ratio to reference | ${compared.join(" | ")} |`, `|---|${compared.map(() => "---|").join("")}`);
     for (const { label, ratioLabel, measure, noRatio } of rows) {
-      if (!noRatio) lines.push(`| ${ratioLabel ?? label} | ${compared.map(mode => ratioCell(of(mode), off, measure)).join(" | ")} |`);
+      if (!noRatio) lines.push(`| ${ratioLabel ?? label} | ${compared.map(mode => ratioCell(of(mode), of(referenceOf(mode)!), measure)).join(" | ")} |`);
     }
     lines.push("");
   }
-  const cold = of("consumerCold");
-  const warm = of("consumer");
-  if (cold.length && warm.length) {
-    const versus = (measure: Measure) => ratio(divide(median(cold.map(measure)), median(warm.map(measure))));
-    const resident = present(cold.map(record => record.pageCache?.residentBytes));
-    const checked = resident.length ? `fincore found at most ${Math.max(...resident)} bytes of the artifact still cached after a drop` : "fincore was missing, so nothing checked that the pages left";
-    lines.push(`Cold consumers, which start after their artifact's pages are dropped from the page cache, took ${versus(record => record.wallMilliseconds)} times the warm consumers' wall time and ${versus(record => record.startupMilliseconds)} times their startup; ${checked}.`, "");
+  // What the cold processes' drops did, group by group, and whether mincore found any page left.
+  const drops = timed.flatMap(record => record.pageCache ?? []);
+  if (drops.length) {
+    const names = [...new Set(drops.map(group => group.name))];
+    const described = names.map(name => {
+      const groups = drops.filter(group => group.name === name);
+      return `the ${name} (${plural(median(groups.map(group => group.files))!, "file", "files")}, ${mebibytes(median(groups.map(group => group.bytes))!)} MiB)`;
+    });
+    const resident = present(drops.map(group => group.residentBytes));
+    const failed = drops.length - resident.length;
+    const checked = `${resident.some(Boolean) ? `mincore found up to ${Math.max(...resident)} bytes of a group still cached` : "mincore found none of their pages still cached"}${failed ? `, and ${plural(failed, "drop", "drops")} failed` : ""}`;
+    lines.push(`Each cold process started after the driver dropped from the page cache ${joinWords(described)}; ${checked}. Afterwards the driver read every dropped file back.`, "");
   }
   const points = curveCalls.filter(calls => calls <= scenario);
   if (warmed.size && modes.length && points.length) {
@@ -1249,7 +1677,7 @@ function scenarioLines(records: ProcessRecord[], scenario: number, warmed: Map<n
   }
   const reports = records.filter(record => record.purpose === "report" && record.report);
   if (reports.length) {
-    const columns = (["consumer", "consumerCold"] as const).filter(mode => reports.some(record => record.mode === mode));
+    const columns = comparedModes.filter(mode => reports.some(record => record.mode === mode));
     const counts: [string, (counts: ReportCounts) => number][] = [
       ["installs", counts => counts.installs],
       ["imports", counts => counts.requests.import ?? 0],
@@ -1259,7 +1687,7 @@ function scenarioLines(records: ProcessRecord[], scenario: number, warmed: Map<n
     lines.push(
       "Untimed consumers with JITCache's bench report:",
       "",
-      `| | ${columns.map(mode => (mode === "consumer" ? "warm consumer" : "cold consumer")).join(" | ")} |`,
+      `| | ${columns.join(" | ")} |`,
       `|---|${columns.map(() => "---|").join("")}`,
       ...counts.map(([label, read]) => `| ${label} | ${columns.map(mode => spread(reports.filter(record => record.mode === mode).map(record => read(record.report!)))).join(" | ")} |`),
       "",
@@ -1315,8 +1743,17 @@ function median(values: (number | null | undefined)[]): number | null {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+// The nearest rank: the ceil(0.9 n)-th value in ascending order.
+function p90(values: (number | null | undefined)[]): number | null {
+  const sorted = present(values).sort((a, b) => a - b);
+  return sorted.length ? sorted[Math.ceil(0.9 * sorted.length) - 1] : null;
+}
+
 // Milliseconds or mebibytes, with the precision their size calls for.
 const fixed = (value: number) => value.toFixed(Math.abs(value) < 10 ? 2 : Math.abs(value) < 1000 ? 1 : 0);
+// A request's milliseconds, as the 10-14 digest wrote them: a warm request takes tens of microseconds.
+const latency = (value: number) => value.toFixed(value < 1 ? 3 : value < 10 ? 2 : 1);
+const mebibytes = (bytes: number) => fixed(bytes / 1048576);
 const ratio = (value: number | null) => (value === null ? "n/a" : value.toFixed(2));
 const markedRatio = (value: number | null) => (value !== null && value <= targetRatio ? `**${ratio(value)}**` : ratio(value));
 
@@ -1349,8 +1786,38 @@ function refusal(): string | null {
   if (!statSync(join(benchDirectory, "node_modules"), { throwIfNoEntry: false })?.isDirectory()) return `${benchDirectory} has no node_modules; run bun install --frozen-lockfile there`;
   // Bun reads bunfig.toml from the directory it runs in, so a file there would configure every process.
   if (existsSync(join(benchDirectory, "bunfig.toml"))) return `${benchDirectory} holds a bunfig.toml, which would configure every Bun process the bench runs`;
-  for (const tool of ["taskset", "dd", "sync", "flock", "getconf", "who"]) if (!Bun.which(tool)) return `${tool} is not on PATH`;
+  for (const tool of ["taskset", "sync", "flock", "getconf", "who"]) if (!Bun.which(tool)) return `${tool} is not on PATH`;
   return null;
+}
+
+// What keeps the run from using this Bun: a flag or JSC option the run needs that the Bun lacks. Bun lists the JITCache
+// flags it takes in its help, and exits at startup on a BUN_JSC_ option its JSC does not have.
+function bunRefusal(options: Options, help: string, environment: Record<string, string>): string | null {
+  if (options.capture.length && !help.includes("--jitcache-capture")) return `--capture needs a Bun that takes --jitcache-capture, which ${options.bun} does not list in its help`;
+  if (options.compareLLIntProgress) {
+    const result = Bun.spawnSync([options.bun, "-e", "0"], { env: { ...environment, ...modeEnvironment({ mode: "consumerNoLLIntProgress", purpose: "timed" } as Job) }, stdout: "pipe", stderr: "pipe" });
+    if (!result.success) return `--compare-llint-progress needs a Bun whose JSC has the option jitCacheImportLLIntProgress, and ${options.bun} failed with it: ${result.stderr.toString().trim().split("\n")[0]}`;
+  }
+  return null;
+}
+
+// Cold processes, timed or the cold consumer the reports run, need the page cache's FFI.
+const runsCold = (options: Options) => (options.processes > 0 && options.coldProcesses > 0) || options.reports;
+
+const sameFile = (a: string, b: string) => {
+  const [first, second] = [statSync(a), statSync(b)];
+  return first.dev === second.dev && first.ino === second.ino;
+};
+
+// summary.md and request-curves.tsv, both built from the pooled records alone.
+function writeSummary(pool: Pool, directory: string): { text: string; passed: boolean; summaryPath: string; curvesPath: string } {
+  const { text, passed } = summarize(pool);
+  mkdirSync(directory, { recursive: true });
+  const summaryPath = join(directory, "summary.md");
+  const curvesPath = join(directory, "request-curves.tsv");
+  writeFileSync(summaryPath, text);
+  writeFileSync(curvesPath, requestCurves(pool));
+  return { text, passed, summaryPath, curvesPath };
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -1371,12 +1838,8 @@ async function main(argv: string[]): Promise<number> {
       console.error(`jitcache-macro-bench: ${(error as Error).message}`);
       return 1;
     }
-    const { text, passed } = summarize(pool);
-    const directory = command.out ?? dirname(command.files[0]);
-    mkdirSync(directory, { recursive: true });
-    const summaryPath = join(directory, "summary.md");
-    writeFileSync(summaryPath, text);
-    console.log(`${text}\nsummary: ${summaryPath}`);
+    const { text, passed, summaryPath, curvesPath } = writeSummary(pool, command.out ?? dirname(command.files[0]));
+    console.log(`${text}\nsummary: ${summaryPath}\nrequest curves: ${curvesPath}`);
     return passed ? 0 : 1;
   }
 
@@ -1386,22 +1849,39 @@ async function main(argv: string[]): Promise<number> {
     console.error(`jitcache-macro-bench: ${refused}`);
     return 1;
   }
-  const processDirectory = join(options.out, "processes");
-  mkdirSync(processDirectory, { recursive: true });
-  mkdirSync(join(options.out, "artifacts"));
-  const results = new ResultsFile(join(options.out, "results.jsonl"));
-  const environment = processEnvironment();
+  const transpilerCache = join(options.out, "transpiler-cache");
+  const environment = processEnvironment(transpilerCache);
   const clockTicks = Number(Bun.spawnSync(["getconf", "CLK_TCK"]).stdout.toString().trim()) || 100;
+  let pageCache: PageCache | null = null;
+  if (runsCold(options)) {
+    try {
+      pageCache = new PageCache();
+    } catch (error) {
+      console.error(`jitcache-macro-bench: cold processes need libc through bun:ffi, which failed: ${(error as Error).message}; --cold-processes=0 --no-reports runs none`);
+      return 1;
+    }
+  }
   const driver = pinDriver(options.cpu, allowed.list);
   // A check measures nothing, so it leaves the lock to the builds it may run beside.
   const releaseLock = options.check ? async () => {} : await takeBuildLock();
+  let results: ResultsFile;
   try {
     const probe = (flag: string) => Bun.spawnSync([options.bun, flag], { env: environment, stdout: "pipe", stderr: "pipe" });
     const revisionProbe = probe("--revision");
     const revision = revisionProbe.stdout.toString().trim() || `--revision failed: ${revisionProbe.stderr.toString().trim()}`;
-    // A Bun that takes --jitcache-delta-at-exit lists it in its help.
-    const deltaAtExitFlag = probe("--help").stdout.toString().includes("--jitcache-delta-at-exit");
-    const context: Context = { options, environment, deltaAtExitFlag, fincore: Bun.which("fincore") !== null, clockTicks, processDirectory };
+    const help = probe("--help").stdout.toString();
+    const deltaAtExitFlag = help.includes("--jitcache-delta-at-exit");
+    const bunRefused = bunRefusal(options, help, environment);
+    if (bunRefused) {
+      console.error(`jitcache-macro-bench: ${bunRefused}`);
+      return 1;
+    }
+    const processDirectory = join(options.out, "processes");
+    mkdirSync(processDirectory, { recursive: true });
+    mkdirSync(join(options.out, "artifacts"));
+    results = new ResultsFile(join(options.out, "results.jsonl"));
+    const driverRunsBun = sameFile(options.bun, process.execPath);
+    const context: Context = { options, environment, deltaAtExitFlag, transpilerCache, pageCache, driverRunsBun, clockTicks, processDirectory };
     const runRecord: RunRecord = {
       kind: "run",
       started: new Date().toISOString(),
@@ -1414,13 +1894,15 @@ async function main(argv: string[]): Promise<number> {
       pinnedCpuSiblings: smtSiblings(options.cpu),
       driverCpu: driver.cpu,
       driverNote: driver.note,
-      fincore: context.fincore,
+      driverRunsBun,
+      pageSize: pageCache?.pageSize ?? null,
+      taskIoAccounting: existsSync("/proc/self/io"),
       clockTicks,
       environment,
     };
     results.write(runRecord);
     console.log(
-      `${options.bun} (${revision}): ${options.cases.join(", ")}; ${joinWords([...options.branches])} branches; scenarios of ${joinWords(options.scenarios.map(String))} calls; ${plural(options.processes, "process", "processes")} per mode in ${plural(options.repetitions, "repetition", "repetitions")}. Bun runs on CPU ${options.cpu}, and the driver ${driver.cpu === null ? `has no CPU of its own: ${driver.note}` : `on CPU ${driver.cpu}`}.${deltaAtExitFlag ? "" : " This Bun has no --jitcache-delta-at-exit, so the producers without delta kill themselves after their end line."}`,
+      `${options.bun} (${revision}): ${options.cases.join(", ")}; ${joinWords([...options.branches])} branches; scenarios of ${joinWords(options.scenarios.map(String))} calls; ${plural(options.processes, "process", "processes")} per mode in ${plural(options.repetitions, "repetition", "repetitions")}. Bun runs on CPU ${options.cpu}, and the driver ${driver.cpu === null ? `has no CPU of its own: ${driver.note}` : `on CPU ${driver.cpu}`}.${deltaAtExitFlag ? "" : " This Bun has no --jitcache-delta-at-exit, so the producers without delta kill themselves after their end line."}${driverRunsBun && runsCold(options) ? " The driver runs this Bun itself, so cold processes start with its executable cached." : ""}`,
     );
     const run = async (job: Job) => {
       const record = await runJob(context, job);
@@ -1441,10 +1923,8 @@ async function main(argv: string[]): Promise<number> {
   }
   const end: EndRecord = { kind: "end", finished: new Date().toISOString(), loadAverage: loadavg() };
   results.write(end);
-  const { text, passed } = summarize(readResults([results.path]));
-  const summaryPath = join(options.out, "summary.md");
-  writeFileSync(summaryPath, text);
-  console.log(`\n${text}\nresults: ${results.path}\nsummary: ${summaryPath}`);
+  const { text, passed, summaryPath, curvesPath } = writeSummary(readResults([results.path]), options.out);
+  console.log(`\n${text}\nresults: ${results.path}\nsummary: ${summaryPath}\nrequest curves: ${curvesPath}`);
   return passed ? 0 : 1;
 }
 

@@ -8,10 +8,11 @@
 // process then ends right after its ready line.
 //
 // Standard output carries JSON lines for Tools/Scripts/jitcache-macro-bench.ts: a ready line, one line per call and an
-// end line. Each goes out through a synchronous write to fd 1, so a process that ends or kills itself right after a line
-// has written all of it. --mark-calls writes `call <n>` to standard error right before call n; JSC's compile log goes
-// there too, so the log splits by call. --kill-at-end sends the process SIGKILL right after its end line, so Bun's exit
-// hook, which runs JITCache's delta in a producer, never runs.
+// end line. The ready and end lines carry Bun.nanoseconds(), Bun's clock since its VirtualMachine was created, so the
+// driver can tell startup and the exit from the wall time it measures. Each line goes out through a synchronous write to
+// fd 1, so a process that ends or kills itself right after a line has written all of it. --mark-calls writes `call <n>`
+// to standard error right before call n; JSC's compile log goes there too, so the log splits by call. --kill-at-end sends
+// the process SIGKILL right after its end line, so Bun's exit hook, which runs JITCache's delta in a producer, never runs.
 
 import { readdirSync, readFileSync, writeSync } from "node:fs";
 
@@ -160,7 +161,8 @@ try {
     if (request.save) saved.set(request.save, JSON.parse(new TextDecoder().decode(body)));
     emitLine({ event: "call", call, variant, milliseconds, checksum: checksum(response, body) });
   }
-  emitLine({ event: "end", ...endFacts() });
+  // The clock is read last, after the end facts, so the driver's exit time starts at the end line's write.
+  emitLine({ event: "end", ...endFacts(), endNanoseconds: Bun.nanoseconds() });
   if (parsed.killAtEnd) process.kill(process.pid, "SIGKILL");
   // Otherwise the process ends when its event loop is empty, and Bun's exit hook then runs JITCache's delta in a producer.
 } catch (error) {
