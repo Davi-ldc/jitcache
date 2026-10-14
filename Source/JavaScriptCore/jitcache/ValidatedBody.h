@@ -40,8 +40,9 @@ static_assert(static_cast<unsigned>(SectionKind::ICsBaseline) + 1 == numberOfSec
 class OpenedArtifact;
 
 // One body file that passed the container checks its VM runs: the integrity checks always and the structure checks under
-// strict (container sub-SPEC sections 4.5 and 7.2). It holds a private read-only mapping of the file, so its bytes stay
-// readable and unchanged while it lives, whatever happens to the file (THREAD Storage). A pending import pins it.
+// strict (container sub-SPEC sections 4.5 and 7.2). It holds the file's bytes in a buffer it owns, read once when the body
+// was opened, so they stay readable and unchanged while it lives, whatever happens to the file (THREAD Storage). A
+// pending import pins it.
 class ValidatedBody final : public ThreadSafeRefCounted<ValidatedBody> {
     WTF_MAKE_TZONE_ALLOCATED(ValidatedBody);
 public:
@@ -51,8 +52,8 @@ public:
     uint32_t llintThreshold() const; // the envelope's L (container sub-SPEC section 4.1); 0 for a test body
     uint32_t counterProgress() const; // the envelope's P; 0 for a test body
     std::span<const uint8_t> section(SectionKind) const; // empty when absent; starts 8-byte aligned
-    size_t fileSize() const; // the mapped file's size, or a test body's buffer size
-    ~ValidatedBody(); // unmaps or frees; any thread that holds no JITCache lock
+    size_t fileSize() const; // the file's size, or a test body's buffer size
+    ~ValidatedBody(); // frees the buffer; any thread that holds no JITCache lock
 
 #if ENABLE(JITCACHE_TWINS)
     // A body no container check has seen, for the parts' own tests: the sections are copied into one buffer, in the
@@ -67,22 +68,21 @@ public:
 #endif
 
 private:
-    friend class OpenedArtifact; // open builds a body from a mapping validateBody accepted (container sub-SPEC section 7.2)
+    friend class OpenedArtifact; // open builds a body from the bytes validateBody accepted (container sub-SPEC section 7.2)
     using SectionSpans = std::array<std::span<const uint8_t>, numberOfSectionKinds>; // by SectionKind; empty when absent
-    // Takes the mapping, which the destructor unmaps. open fills the version, the tier, L, P and the spans from
-    // validateBody's BodyLayout, so this header needs nothing from JITCacheContainer.h.
+    // Takes the buffer, whose address moving does not change, so the spans into it stay valid. open fills the version, the
+    // tier, L, P and the spans from validateBody's BodyLayout, so this header needs nothing from JITCacheContainer.h.
     ValidatedBody(const BodyKey&, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress,
-        std::span<const uint8_t> mapping, const SectionSpans&);
+        MallocSpan<uint8_t>&& bytes, const SectionSpans&);
 
     const BodyKey m_key;
     const uint64_t m_version;
     const uint8_t m_highestTier;
     const uint32_t m_llintThreshold; // the envelope's L; 0 for a test body
     const uint32_t m_counterProgress; // the envelope's P; 0 for a test body
-    const std::span<const uint8_t> m_mapping; // the private mapping the destructor unmaps; empty for a test body
-    const SectionSpans m_sections; // spans into m_mapping, or into m_testBuffer for a test body
+    const MallocSpan<uint8_t> m_bytes; // the file, or createForTesting's copy of its sections; fastMalloc aligns it to at least 8 bytes
+    const SectionSpans m_sections; // spans into m_bytes
 #if ENABLE(JITCACHE_TWINS)
-    MallocSpan<uint8_t> m_testBuffer; // createForTesting's copy of its sections; fastMalloc aligns it to at least 8 bytes
     Function<void()> m_onDestroy;
 #endif
 };

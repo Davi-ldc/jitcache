@@ -162,7 +162,7 @@ A body file holds the three parts THREAD Storage names.
 | 120 | 4 | CRC32C of bytes [0, 120) |
 | 124 | 4 | 0 |
 
-The commit identifier is the body version THREAD Maintenance names, which compact compares and `ValidatedBody::version()` returns (SPEC-integrator.md section 6.2); the index holds tokens instead (section 6.1). ([history](SPEC-integrator-history.md#bodies-are-mapped-checksummed-with-crc32c-and-versioned-by-random-identifiers))
+The commit identifier is the body version THREAD Maintenance names, which compact compares and `ValidatedBody::version()` returns (SPEC-integrator.md section 6.2); the index holds tokens instead (section 6.1). ([history](SPEC-integrator-history.md#bodies-are-read-into-a-buffer-checksummed-with-crc32c-and-versioned-by-random-identifiers))
 
 ### 4.2 Section directory
 
@@ -183,7 +183,7 @@ The entries are in strictly increasing order of (type id, tier), which is the or
 
 ### 4.4 CRC32C
 
-The checksum is the CRC-32C of RFC 3720: the Castagnoli polynomial `0x1EDC6F41`, reflected (`0x82F63B78`), initial value `0xFFFFFFFF`, final XOR `0xFFFFFFFF`; `crc32c("123456789")` is `0xE3069283`. `JITCachePlatform.h` declares `uint32_t crc32cExtend(uint32_t state, std::span<const uint8_t>)`, with `crc32c(bytes) = ~crc32cExtend(~0u, bytes)`, so the writer can checksum a stream. `crc32cExtend` calls the engine's own `crc32c` of `runtime/CachedTypes.cpp`, the function the bytecode cache checksums its payloads with, which takes the same running state and uses the CPU's CRC32 instructions where they exist (SSE4.2 on x86_64, `__ARM_FEATURE_CRC32` on ARM64, which Bun's `-march=armv8-a+crc` defines) and a byte table otherwise. That function loses `static` (SPEC-integrator.md section 14.2) and `JITCachePlatform.h` declares it in `namespace JSC`, so one implementation serves both formats. ([history](SPEC-integrator-history.md#bodies-are-mapped-checksummed-with-crc32c-and-versioned-by-random-identifiers))
+The checksum is the CRC-32C of RFC 3720: the Castagnoli polynomial `0x1EDC6F41`, reflected (`0x82F63B78`), initial value `0xFFFFFFFF`, final XOR `0xFFFFFFFF`; `crc32c("123456789")` is `0xE3069283`. `JITCachePlatform.h` declares `uint32_t crc32cExtend(uint32_t state, std::span<const uint8_t>)`, with `crc32c(bytes) = ~crc32cExtend(~0u, bytes)`, so the writer can checksum a stream. `crc32cExtend` calls the engine's own `crc32c` of `runtime/CachedTypes.cpp`, the function the bytecode cache checksums its payloads with, which takes the same running state and uses the CPU's CRC32 instructions where they exist (SSE4.2 on x86_64, `__ARM_FEATURE_CRC32` on ARM64, which Bun's `-march=armv8-a+crc` defines) and a byte table otherwise. That function loses `static` (SPEC-integrator.md section 14.2) and `JITCachePlatform.h` declares it in `namespace JSC`, so one implementation serves both formats. ([history](SPEC-integrator-history.md#bodies-are-read-into-a-buffer-checksummed-with-crc32c-and-versioned-by-random-identifiers))
 
 ### 4.5 Validation
 
@@ -480,9 +480,9 @@ struct SavedSummaryRead { StoreOutcome outcome; std::unique_ptr<SavedSummaries> 
 
 ### 7.2 Mapping and checking
 
-`open` refreshes the index and looks the key up the same way. For a present key it opens the body name, takes its size with `fstat`, maps it with `mmap(nullptr, size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0)` and closes the descriptor; the populated mapping costs one call where page-by-page faults would cost one per page, and the checksums read every byte anyway. It then runs `validateBody` over the mapping in the caller's mode. Success creates the `ValidatedBody` through its private constructor, and the body owns the mapping and unmaps it in its destructor; a failure unmaps it first. The `VMState`'s mapping of each outcome is in SPEC-integrator.md section 6.2, and every case is in section 7's table. ([history](SPEC-integrator-history.md#bodies-are-mapped-checksummed-with-crc32c-and-versioned-by-random-identifiers))
+`open` refreshes the index and looks the key up the same way. For a present key it opens the body name, takes its size with `fstat`, reads the whole file with `pread` into a buffer from `MallocSpan<uint8_t>::tryMalloc`, and closes the descriptor. A failed allocation is `ENOMEM`, and a file that ends before the size `fstat` gave fails B1, as one shorter than an envelope does. It then runs `validateBody` over the buffer in the caller's mode. Success creates the `ValidatedBody` through its private constructor, which takes the buffer, and the body frees it in its destructor; a failure frees it at once. The `VMState`'s mapping of each outcome is in SPEC-integrator.md section 6.2, and every case is in section 7's table. ([history](SPEC-integrator-history.md#bodies-are-read-into-a-buffer-checksummed-with-crc32c-and-versioned-by-random-identifiers))
 
-A private mapping of a file that JITCache never rewrites keeps the validated bytes readable after the file is unlinked or replaced by a rename (THREAD Storage).
+The buffer keeps the validated bytes readable after the file is unlinked or replaced by a rename (THREAD Storage).
 
 ### 7.3 Reading a saved score
 
@@ -496,7 +496,7 @@ The glue's handling of each outcome, and the mapping's lifetime and exemption fr
 
 ### 7.4 Trust
 
-The checksums reject damaged material; neither mode defends against a writer of the artifact directory, who could as well plant valid code. Only the producer, maintenance and the human write it, and JITCache never truncates or rewrites a published body. A process that truncates a body file a consumer has mapped can make that consumer fault when it reads the lost pages, as with any mapped file.
+The checksums reject damaged material; neither mode defends against a writer of the artifact directory, who could as well plant valid code. Only the producer, maintenance and the human write it, and JITCache never truncates or rewrites a published body. A process that truncates a body file while `open` reads it makes the read fail B1; a scoring read (section 7.3) that has mapped the file can fault on the lost pages, as with any mapped file.
 
 ### 7.5 Twins-build fault hook
 

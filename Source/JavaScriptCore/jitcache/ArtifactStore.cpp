@@ -11,6 +11,7 @@
 #include <wtf/ASCIICType.h>
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/HashFunctions.h>
+#include <wtf/MallocSpan.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/Vector.h>
@@ -365,13 +366,13 @@ static void discardEvents(int inotifyFd)
 }
 
 struct MapFailure {
-    int error { 0 }; // the errno of openat, fstat or mmap; 0 when check names the failure
-    ContainerCheck check; // B1, for a file shorter than an envelope, which is not mapped
+    int error { 0 }; // the errno of openat, fstat, mmap, malloc or pread; 0 when check names the failure
+    ContainerCheck check; // B1, for a file shorter than an envelope or than the size fstat gave
 };
 
-// Opens the key's body name relative to bodiesFd, takes its size with fstat, maps the whole file privately and read-only,
-// and closes the descriptor. The caller owns the mapping.
-static std::expected<std::span<const uint8_t>, MapFailure> mapBodyFile(StoreCall call, int bodiesFd, const BodyKey& key, int extraMapFlags)
+// The scoring read's access (section 7.3): opens the key's body name relative to bodiesFd, takes its size with fstat, maps
+// the whole file privately and read-only without populating it, and closes the descriptor. The caller owns the mapping.
+static std::expected<std::span<const uint8_t>, MapFailure> mapBodyFile(StoreCall call, int bodiesFd, const BodyKey& key)
 {
     if (int injected = injectedOpenError(call))
         return std::unexpected(MapFailure { injected, { } });
@@ -391,11 +392,59 @@ static std::expected<std::span<const uint8_t>, MapFailure> mapBodyFile(StoreCall
         return std::unexpected(MapFailure { 0, ContainerChecks::size });
     }
     size_t size = static_cast<size_t>(status.st_size);
-    void* address = mmap(nullptr, size, PROT_READ, MAP_PRIVATE | extraMapFlags, fd, 0);
+    void* address = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
     closeKeepingErrno(fd);
     if (address == MAP_FAILED)
         return std::unexpected(MapFailure { errno, { } });
     return unsafeMakeSpan(static_cast<const uint8_t*>(address), size);
+}
+
+// Opens the key's body name relative to bodiesFd, takes its size with fstat, reads the whole file with pread into a buffer
+// the caller owns, and closes the descriptor. A file that ends before the size fstat gave fails B1, as one shorter than an
+// envelope does: JITCache never truncates a published body, so only another writer of the directory can cause it.
+static std::expected<MallocSpan<uint8_t>, MapFailure> readBodyFile(StoreCall call, int bodiesFd, const BodyKey& key)
+{
+    if (int injected = injectedOpenError(call))
+        return std::unexpected(MapFailure { injected, { } });
+    BodyFileName name = bodyFileName(key);
+    int fd = openAt(bodiesFd, name.data(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return std::unexpected(MapFailure { errno, { } });
+
+    struct stat status;
+    if (fstat(fd, &status)) {
+        closeKeepingErrno(fd);
+        return std::unexpected(MapFailure { errno, { } });
+    }
+    // B1: a file shorter than the envelope holds no envelope to read.
+    if (status.st_size < static_cast<off_t>(bodyEnvelopeBytes)) {
+        ::close(fd);
+        return std::unexpected(MapFailure { 0, ContainerChecks::size });
+    }
+    auto bytes = MallocSpan<uint8_t>::tryMalloc(static_cast<size_t>(status.st_size));
+    if (!bytes.span().data()) {
+        ::close(fd);
+        return std::unexpected(MapFailure { ENOMEM, { } });
+    }
+    std::span<uint8_t> remaining = bytes.mutableSpan();
+    off_t offset = 0;
+    while (!remaining.empty()) {
+        ssize_t count = ::pread(fd, remaining.data(), remaining.size(), offset);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            closeKeepingErrno(fd);
+            return std::unexpected(MapFailure { errno, { } });
+        }
+        if (!count) {
+            ::close(fd);
+            return std::unexpected(MapFailure { 0, ContainerChecks::size });
+        }
+        remaining = remaining.subspan(static_cast<size_t>(count));
+        offset += count;
+    }
+    ::close(fd);
+    return bytes;
 }
 
 static void unmap(std::span<const uint8_t> mapping)
@@ -822,30 +871,30 @@ BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
         return { StoreOutcome::Absent, nullptr, { } };
 
     // The file work runs outside m_indexLock (section 6.4).
-    auto mapped = mapBodyFile(StoreCall::Open, m_bodiesFd, key, MAP_POPULATE);
-    if (!mapped) {
-        if (!mapped.error().error)
-            return { StoreOutcome::Invalid, nullptr, { mapped.error().check, 0 } };
-        int error = mapped.error().error;
+    auto read = readBodyFile(StoreCall::Open, m_bodiesFd, key);
+    if (!read) {
+        if (!read.error().error)
+            return { StoreOutcome::Invalid, nullptr, { read.error().check, 0 } };
+        int error = read.error().error;
         if (error == ENOENT)
             eraseIfTokenIs(key, tokenBeforeOpen);
         return { outcomeOfError(error), nullptr, failureOfError(error) };
     }
 
-    std::span<const uint8_t> file = *mapped;
+    MallocSpan<uint8_t> bytes = WTF::move(*read);
+    std::span<const uint8_t> file = bytes.span();
+    size_t fileSize = file.size();
     auto layout = validateBody(file, key, headerDigest(), mode);
-    if (!layout) {
-        unmap(file);
-        return { StoreOutcome::Invalid, nullptr, { layout.error(), 0 }, file.size() };
-    }
+    if (!layout)
+        return { StoreOutcome::Invalid, nullptr, { layout.error(), 0 }, fileSize };
 
     ValidatedBody::SectionSpans sections { };
     for (size_t index = 0; index < numberOfSectionKinds; ++index)
         sections[index] = sectionIn(file, *layout, static_cast<SectionKind>(index));
-    // The body owns the mapping from here and unmaps it in its destructor.
+    // The body owns the buffer from here; moving it keeps its address, so the spans stay valid.
     Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, layout->version, layout->highestTier, layout->llintThreshold,
-        layout->counterProgress, file, sections));
-    return { StoreOutcome::Found, WTF::move(body), { }, file.size() };
+        layout->counterProgress, WTF::move(bytes), sections));
+    return { StoreOutcome::Found, WTF::move(body), { }, fileSize };
 #endif
 }
 
@@ -866,8 +915,8 @@ SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, Validati
         tokenBeforeOpen = currentToken(key);
     }
 
-    // Without MAP_POPULATE: the read faults in only the envelope, the directory and the three summary sections.
-    auto mapped = mapBodyFile(StoreCall::ReadSavedSummaries, m_bodiesFd, key, 0);
+    // Unpopulated: the read faults in only the envelope, the directory and the three summary sections.
+    auto mapped = mapBodyFile(StoreCall::ReadSavedSummaries, m_bodiesFd, key);
     if (!mapped) {
         if (!mapped.error().error)
             return { StoreOutcome::Invalid, nullptr, { mapped.error().check, 0 } };

@@ -361,7 +361,7 @@ These allocations are not production memory and go uncharged:
 
 - the parent-key registry and the digests the UCB lane keeps for identity (each TDZ environment's, SPEC-ucb.md section 3.4), which serve every role (THREAD Session);
 - the index's other entries, which listings and refreshes create, and the writer too when it applies the queued events of changes made before its VM took the lock: they hold the bodies on disk and what other processes commit, which every importing VM needs whoever produces;
-- the scoring read's mapping of a saved body (container sub-SPEC section 7.3), and in twins builds the mapping of the body `rewriteSection` opens through the store's `open` (container sub-SPEC section 8.3): each borrows page-cache pages of a file JITCache does not own for production, and each is unmapped, with the store's object that holds it, before the scoring returns or the rewrite's commit starts;
+- the scoring read's mapping of a saved body (container sub-SPEC section 7.3), which borrows page-cache pages of a file JITCache does not own for production, and in twins builds the buffer of the body `rewriteSection` reads through the store's `open` (container sub-SPEC section 8.3), which only test builds hold: each goes, with the store's object that holds it, before the scoring returns or the rewrite's commit starts;
 - the bench report's buffer (harness sub-SPEC section 9.1), which exists only in bench runs, whatever the role, and holds measurements.
 
 The registry's and the index's allocations crash when memory runs out, as any native allocation does. Everything else the integrator allocates for production is charged (II4).
@@ -515,8 +515,8 @@ public:
     uint32_t llintThreshold() const;                        // the envelope's L (container sub-SPEC section 4.1); 0 for a test body
     uint32_t counterProgress() const;                       // the envelope's P; 0 for a test body
     std::span<const uint8_t> section(SectionKind) const;    // empty when absent; starts 8-byte aligned
-    size_t fileSize() const;                                // the mapped file's size, or a test body's buffer size
-    ~ValidatedBody();                                       // unmaps or frees; any thread that holds no JITCache lock
+    size_t fileSize() const;                                // the file's size, or a test body's buffer size
+    ~ValidatedBody();                                       // frees the buffer; any thread that holds no JITCache lock
 
 #if ENABLE(JITCACHE_TWINS)
     // A body no container check has seen, for the parts' own tests: the sections are copied into one buffer, in the
@@ -528,22 +528,21 @@ public:
 #endif
 
 private:
-    friend class OpenedArtifact;   // open builds a body from a mapping validateBody accepted (container sub-SPEC section 7.2)
+    friend class OpenedArtifact;   // open builds a body from the bytes validateBody accepted (container sub-SPEC section 7.2)
     using SectionSpans = std::array<std::span<const uint8_t>, numberOfSectionKinds>;   // by SectionKind; empty when absent
-    // Takes the mapping, which the destructor unmaps. open fills the version, the tier, L, P and the spans from
-    // validateBody's BodyLayout, so this header needs nothing from JITCacheContainer.h.
+    // Takes the buffer, whose address moving does not change, so the spans into it stay valid. open fills the version, the
+    // tier, L, P and the spans from validateBody's BodyLayout, so this header needs nothing from JITCacheContainer.h.
     ValidatedBody(const BodyKey&, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress,
-        std::span<const uint8_t> mapping, const SectionSpans&);
+        MallocSpan<uint8_t>&& bytes, const SectionSpans&);
 
     const BodyKey m_key;
     const uint64_t m_version;
     const uint8_t m_highestTier;
     const uint32_t m_llintThreshold;            // the envelope's L; 0 for a test body
     const uint32_t m_counterProgress;           // the envelope's P; 0 for a test body
-    const std::span<const uint8_t> m_mapping;   // the private mapping the destructor unmaps; empty for a test body
-    const SectionSpans m_sections;              // spans into m_mapping, or into m_testBuffer for a test body
+    const MallocSpan<uint8_t> m_bytes;          // the file, or createForTesting's copy of its sections; fastMalloc aligns it to 8 bytes or more
+    const SectionSpans m_sections;              // spans into m_bytes
 #if ENABLE(JITCACHE_TWINS)
-    MallocSpan<uint8_t> m_testBuffer;           // createForTesting's copy of its sections; fastMalloc aligns it to 8 bytes or more
     Function<void()> m_onDestroy;
 #endif
 };
@@ -751,7 +750,7 @@ Before step 1, when `vm.jitCacheState()` is non-null, the function calls its `re
 15. `CBCounterRestore restore = cbImport.finishCounter(newborn)` (SPEC-cb.md section 5.3). Twins builds, while `twinReportSink()` is non-null (R-ALL-2): `cbImport.verifyTwins(newborn, restore, *twinReportSink())` (CB R-INT-6).
 16. `newborn.ownerExecutable()->installCode(&newborn)`.
 17. `registry().resolvePendingImport(ucb, import, ImportResolution::Installed)`.
-18. Count `Progress::installs`. Twins builds: stash the CB, the code, the body and the parsed view for the image twin check that `prepareForExecutionImpl` runs once it returns, in the image twin-check state, which the VM's first stash creates (harness sub-SPEC section 3). Then drop `body`: step 17 released the pending import's reference, so outside twins builds this one is the last and its drop unmaps the body (container sub-SPEC section 7.2). When a bench report is open, the function closes the `install` event's total before the drop, times the drop on its own as `bodyRelease` (IB1), and then records the event (harness sub-SPEC section 9.2). ([history](SPEC-integrator-history.md#measurement-choices))
+18. Count `Progress::installs`. Twins builds: stash the CB, the code, the body and the parsed view for the image twin check that `prepareForExecutionImpl` runs once it returns, in the image twin-check state, which the VM's first stash creates (harness sub-SPEC section 3). Then drop `body`: step 17 released the pending import's reference, so outside twins builds this one is the last and its drop frees the body's buffer (container sub-SPEC section 7.2). When a bench report is open, the function closes the `install` event's total before the drop, times the drop on its own as `bodyRelease` (IB1), and then records the event (harness sub-SPEC section 9.2). ([history](SPEC-integrator-history.md#measurement-choices))
 19. Return `Installed`.
 
 Steps 3 to 9 write nothing to the CB, the UCB or the VM's statistics: the image preparation keeps its effects inside the `PreparedImage` until `commit` (SPEC-image.md I11), and the other two preparations only read (SPEC-cb.md I5, SPEC-ics.md I1). A failure there leaves the CB at its link state, and `prepareForExecutionImpl` goes on with `setupLLInt` or `setupJIT`. Steps 11 to 17 cannot fail: their only cell allocations are the CB lane's realm step and lazy-operand holder, which run under the deferrals of step 2 and crash on exhaustion as their native twins do.
@@ -1192,7 +1191,7 @@ The tests spawn `bunExe()` with the flags of section 11.2, `--jitcache-strict` i
 
 These serve the bench loop THREAD Execution ends with. The bench report (harness sub-SPEC section 9) carries every measurement below, except what IB10 reads from committed bodies and native logs, the event counts IB11 reads from body-event dumps, and what no VM's report sees, which the bench takes from outside the process: IB8's Bun startup, the process's wall and CPU time in each configuration, and IB9's planning, the time and peak resident set of a `compact` with ratio 1 and no confirmation on an artifact without temporaries, which plans the whole artifact's deletion and changes nothing (THREAD Maintenance).
 
-- IB1. Opening a body: `openBody` per body and per KiB (mapping, integrity checks, checksums), with cold and warm page caches, apart from installation as THREAD's opening requires, and the release of an installed body's mapping, the `install` event's `bodyRelease` (section 7.2, step 18). If the release weighs for small bodies, as an unmap's TLB shootdown in a process with JIT workers and markers can, the first change to measure is reading a body with one `pread` into an owned buffer in place of the mapping.
+- IB1. Opening a body: `openBody` per body and per KiB (the read, integrity checks, checksums), with cold and warm page caches, apart from installation as THREAD's opening requires, and the release of an installed body's buffer, the `install` event's `bodyRelease` (section 7.2, step 18). ([history](SPEC-integrator-history.md#bodies-are-read-into-a-buffer-checksummed-with-crc32c-and-versioned-by-random-identifiers))
 - IB2. The index: build time and the index's bytes per body against the number of bodies, beside the number of bodies the run requested, since every process lists and keeps the whole artifact whatever it requests; an absent and a present `bodyVersion`, each a read of the index (SPEC-ucb.md B4); the epoch check and refresh cost in a consumer process beside a committing producer, the relistings an inotify overflow forces among them counted apart, since each runs at a request point under `m_indexLock`, and, for an object without inotify, the listings per second and the bodies a deferred listing left as misses against `fallbackListingIntervalMilliseconds`; and the writer's index update in a producing process whose other VMs share the index. If listing or index memory weighs, the first change to measure is compact entries: a 16-byte key fingerprint beside the `IndexEntry` in an open-addressing table, where the store's `openat` by full name confirms a hit and a false one costs an `ENOENT`. ([history](SPEC-integrator-history.md#the-index-holds-tokens))
 - IB3. The import cost THREAD's opening bounds, set per body against the native cost THREAD's opening defines, for every body at or above `installationBoundSmallestBody`. The import side is everything JITCache does at the body's request point, which the UCB lane measures part by part, divides between the bound and what THREAD measures apart and records in the `request` event (SPEC-ucb.md section 14, B2), plus the install function's VM-thread CPU time, the `install` event's total, whose step breakdown explains it (section 7.2; harness sub-SPEC section 9.1); the bench joins the two events by key, each install with a request written before it (harness sub-SPEC section 9.4). The native side is the `compile` event (harness sub-SPEC section 9.3). Both sides run with per-VM support already generated, as THREAD's bound requires: an `install` or `compile` event that reports `supportGenerated` gives no sample, a body left without a sample on a side is set aside, and the bench reports how many were (harness sub-SPEC sections 9.3 and 9.4). Decoding, reading and faulting the artifact (IB1), and the key digest with the context digests and each TDZ environment's first digest (SPEC-ucb.md B1), are measured apart, as THREAD's opening lists them.
 - IB4. Capture pause per body, at the finalize capture and in `delta`: scoring, each lane's build, the writer's stream, reread and publish.

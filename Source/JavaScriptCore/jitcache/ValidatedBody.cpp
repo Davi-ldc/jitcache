@@ -4,10 +4,6 @@
 #include <wtf/Assertions.h>
 #include <wtf/TZoneMallocInlines.h>
 
-#if OS(LINUX)
-#include <sys/mman.h>
-#endif
-
 #if ENABLE(JITCACHE_TWINS)
 #include <algorithm>
 #include <optional>
@@ -19,13 +15,13 @@ namespace JSC::JITCache {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ValidatedBody);
 
-ValidatedBody::ValidatedBody(const BodyKey& key, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress, std::span<const uint8_t> mapping, const SectionSpans& sections)
+ValidatedBody::ValidatedBody(const BodyKey& key, uint64_t version, uint8_t highestTier, uint32_t llintThreshold, uint32_t counterProgress, MallocSpan<uint8_t>&& bytes, const SectionSpans& sections)
     : m_key(key)
     , m_version(version)
     , m_highestTier(highestTier)
     , m_llintThreshold(llintThreshold)
     , m_counterProgress(counterProgress)
-    , m_mapping(mapping)
+    , m_bytes(WTF::move(bytes))
     , m_sections(sections)
 {
 }
@@ -35,17 +31,6 @@ ValidatedBody::~ValidatedBody()
 #if ENABLE(JITCACHE_TWINS)
     if (m_onDestroy)
         m_onDestroy();
-#endif
-    // The store maps a body from a page boundary and hands over exactly what mmap returned (container sub-SPEC
-    // section 7.2); a test body has no mapping, and its buffer goes with m_testBuffer.
-#if OS(LINUX)
-    if (!m_mapping.empty()) {
-        int result = munmap(const_cast<uint8_t*>(m_mapping.data()), m_mapping.size());
-        ASSERT_UNUSED(result, !result);
-    }
-#else
-    // Off Linux the store maps nothing (SPEC-integrator.md section 11).
-    ASSERT(m_mapping.empty());
 #endif
 }
 
@@ -82,11 +67,7 @@ std::span<const uint8_t> ValidatedBody::section(SectionKind kind) const
 
 size_t ValidatedBody::fileSize() const
 {
-#if ENABLE(JITCACHE_TWINS)
-    if (m_mapping.empty())
-        return m_testBuffer.span().size();
-#endif
-    return m_mapping.size();
+    return m_bytes.span().size();
 }
 
 #if ENABLE(JITCACHE_TWINS)
@@ -159,8 +140,7 @@ Ref<ValidatedBody> ValidatedBody::createForTesting(const BodyKey& key, uint64_t 
 
     // Moving the buffer into the body keeps its address, so the spans stay valid. A test body has no envelope, so its L
     // and P are 0.
-    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, version, highestTier, 0, 0, { }, spans));
-    body->m_testBuffer = WTF::move(buffer);
+    Ref<ValidatedBody> body = adoptRef(*new ValidatedBody(key, version, highestTier, 0, 0, WTF::move(buffer), spans));
     body->m_onDestroy = WTF::move(onDestroy);
     return body;
 }
