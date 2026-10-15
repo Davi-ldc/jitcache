@@ -1,8 +1,8 @@
 // The app of decoded-slots-bun.js, built with `bun build --compile --bytecode` together with
 // decoded-slots-bun-module.js, which it requires at run time. Bun decodes their functions lazily from the bytecode the
-// executable embeds, which holds one body per function, the call body of an ordinary function (eager generation for
-// bytecode caches, SPEC-ucb.md F2). The Consumer's checks, which the comments below state, are those of
-// decoded-slots.js for this cache (SPEC-ucb.md section 13.3).
+// executable embeds, which holds one body per function, the call body of an ordinary function, as eager generation for
+// bytecode caches leaves it. The Consumer's checks, which the comments below state, are those of decoded-slots.js for
+// this cache.
 const path = require("node:path");
 const { appContext } = require("./ucb-bun.js");
 
@@ -49,19 +49,19 @@ lines.push(t.window("dbB's first call", () => dbB(1), consumer ? { attaches: 1 }
 
 // dbC's construction decodes its call slot, whose long string constant decodes as a plain string while the body's atom
 // map marks it, so the call slot's first request misses AtomMap without a stamp. That call then reads o[key], whose
-// property key makes the constant's JSString an atom in place (F19).
+// property key makes the constant's JSString an atom in place.
 const first = require(modulePath);
 lines.push(t.window("dbC's first construction", () => new first.dbC(3), consumer ? { "records.Decoded": [">=", 1] } : { }).value);
 lines.push(t.window("dbC's first call", () => first.dbC("x", { [longKey]: 5 }), consumer ? { attaches: 0, "misses.AtomMap": 1 } : { }));
 
 // The attach needs a later request for that same UCB, which deleting code cannot make: this cache holds one body per
 // function, so the construction filled dbC's construct slot beside the decoded call slot, and publishing it put the UFE
-// in the clearable set (F1, section 7.5), whose slots Bun.shrink() clears, the decoded call slot included. The
+// in the clearable set, whose slots Bun.shrink() clears, the decoded call slot included. The
 // module's second evaluation makes one, as the second realm of decoded-slots.js does: it runs on the program the
 // CodeCache kept from the first, whose functions become new FunctionExecutables of the same UFEs, so its dbC's first
 // call is a new CodeBlock's request for the live decoded slot. It attaches now that the marked constant is an atom, at
-// the commit identifier it matched at, computing no digest (section 7.3.4 step 5). Until then the call slot runs only
-// its first call, since baseline code parked on its UCB would serve the new CodeBlock instead (step 2).
+// the commit identifier it matched at, computing no digest. Until then the call slot runs only its first call, since
+// baseline code parked on its UCB would serve the new CodeBlock instead and stop the attach.
 delete require.cache[require.resolve(modulePath)];
 const second = require(modulePath);
 t.check(second.dbC !== first.dbC, "requiring the module again did not evaluate it again");

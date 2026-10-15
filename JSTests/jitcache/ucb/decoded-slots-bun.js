@@ -1,7 +1,7 @@
 // jitcache-host: bun
 
-// SPEC-ucb.md section 13.3, decoded-slots.js, the variant marked Bun: the slots of functions Bun decodes lazily from a
-// `bun build --compile --bytecode` executable. The app, resources/decoded-slots-bun-app.js with
+// decoded-slots.js for Bun: the slots of functions Bun decodes lazily from a `bun build --compile --bytecode`
+// executable. The app, resources/decoded-slots-bun-app.js with
 // resources/decoded-slots-bun-module.js embedded beside it, runs as a JITCache VM of its own with this run's role
 // (resources/ucb-bun.js, runApp) and checks, in the Consumer, that the requested slot of each lazily decoded function
 // is seeded at its first call and its child at its own; that `new` first on an ordinary function, whose call body alone
@@ -12,11 +12,11 @@
 // second evaluation of the module, which runs on the program the CodeCache kept from the first, as the second realm of
 // decoded-slots.js does. The executable keeps that constant's characters out of its other strings, since such a build
 // keeps every string of four or more characters in one shared table, where an identifier with those characters would
-// make the constant an atom at its decode. T4 holds at every seeding (section 13.2). The app's output, which this run
-// prints, equals the JITCache-off run.
+// make the constant an atom at its decode. The twin check of every seeding finds the feedback it restored equal to the
+// capture's. The app's output, which this run prints, equals the JITCache-off run.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4); Bun calls delta at exit for every
-// producing VM, the app's included.
+// The runs use the lane's default sequence, so the test's own VM calls delta at exit in the Producer; the app calls
+// none (resources/ucb-bun.js).
 const path = require("node:path");
 const { context } = require("./resources/ucb-bun.js");
 

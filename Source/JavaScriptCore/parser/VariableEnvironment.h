@@ -372,7 +372,7 @@ private:
     mutable Variables m_variables;
     unsigned m_hash;
     // JITCache: the digest of the names, computed on the VM thread when a holder digest first reaches this environment
-    // and freed with the names (SPEC-ucb.md section 3.4).
+    // and freed with the names.
     std::unique_ptr<std::array<uint8_t, 32>> m_contentDigest;
 };
 

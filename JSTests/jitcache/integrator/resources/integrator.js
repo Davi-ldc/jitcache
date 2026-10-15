@@ -1,39 +1,26 @@
-// What the integrator's JS tests share (SPEC-integrator.md section 15.2): assertions, readers of a body's sections and of
-// a body's event counts, and the scratch files the runs of one sequence hand each other. The runner gives every run its
-// role, scratch path, artifact path and sequence index (harness sub-SPEC section 7.3), and each script passes them to
-// the function that holds its body, so this file's top level declares functions only and nothing it leaves reachable
-// depends on the role (SPEC-integrator.md R-ALL-4).
+// What the integrator's JS tests share: assertions, readers of a body's sections and of a body's event counts, and the
+// scratch files the runs of one sequence hand each other. This file binds the assertions and the byte reader of
+// ../../resources/jitcache.js as globals beside its own. The runner gives every run its role, scratch path, artifact path
+// and sequence index, and each script passes them to the function that holds its body, so this file's top level declares
+// functions and binds the shared ones only, and nothing it leaves reachable depends on the role.
 //
-// The jitcache* shell functions exist only in twins builds (harness sub-SPEC section 5.2), which every script of this
-// directory requires. A script's Off path calls them only where hasTwins() holds, so the pin, which has none of them,
-// runs that path too (harness sub-SPEC section 11).
+// The jitcache* shell functions exist only in twins builds, which every script of this directory requires. A script's
+// Off path calls them only where hasTwins() holds. The pin has none of them, and the pin comparison runs this build
+// without them too, so both of its sides skip those branches.
 //
-// A test's own code must not compile where a script counts compiles or commits. Every function here has a recorded
-// key, so its baseline compilation is also a commit in a producing run, which a script that counts its writer's
-// commits, as producer-kill.js does, would take for one of its own. In an Off run, a compilation that only the calls of
-// a hasTwins() branch cause is code the pin comparison finds in this build's run and not in the pin's (harness sub-SPEC
-// section 11.4). The LLInt compiles a function at its 34th call, since a call earns 15 of the 500 points it needs, or
-// once a loop in it has run about 500 times, and with --useLLInt=false at its first call. So a helper builds its
-// message, and calls label, only once its check has failed; a script calls hex only where an extra compilation or
-// commit changes nothing it checks; and with the LLInt off an Off path calls no helper behind hasTwins().
+// A test's own code must not compile where a script counts compiles or commits. Every function here and in the shared
+// file has a recorded key, so its baseline compilation is also a commit in a producing run, which a script that counts
+// its writer's commits, as producer-kill.js does, would take for one of its own. The LLInt compiles a function at its
+// 34th call, since a call earns 15 of the 500 points it needs, or once a loop in it has run about 500 times, and with
+// --useLLInt=false at its first call. So a helper builds its message, and calls label, only once its check has failed,
+// and a script calls hex only where an extra compilation or commit changes nothing it checks.
+
+var jitcache = load("../../resources/jitcache.js", "caller relative");
+var { fail, check, checkSame, byteReader } = jitcache;
 
 const INT32_MAX = 0x7fffffff;
 
 // Assertions. Each throws, which fails the run on its exit code.
-
-function fail(message) {
-    throw new Error(message);
-}
-
-function check(condition, message) {
-    if (!condition)
-        fail(message);
-}
-
-function checkSame(actual, expected, what) {
-    if (actual !== expected)
-        fail(`${what} is ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
-}
 
 // Fails unless actual and expected, each an ArrayBuffer or a Uint8Array, hold the same bytes, and names the first
 // difference rather than printing every byte. A null actual is a section the body lacks.
@@ -78,10 +65,10 @@ function bodyKey(fn, kind = "call") {
     return key;
 }
 
-// The section of that key's current body file, by the lane's name of SPEC-integrator.md section 6.1, as an ArrayBuffer,
-// or null when the key holds no body.
+// The section of that key's current body file, by its name such as "cb.summary", as an ArrayBuffer, or null when the
+// key holds no body.
 function sectionOf(fn, kind, name) {
-    return jitcacheReadSection(bodyKey(fn, kind), name);
+    return jitcache.readSection(bodyKey(fn, kind), name);
 }
 
 function hasBody(fn, kind = "call") {
@@ -100,22 +87,10 @@ function hex(buffer) {
     return text;
 }
 
-function u8(buffer, offset) {
-    return new DataView(buffer).getUint8(offset);
-}
-
-function u32(buffer, offset) {
-    return new DataView(buffer).getUint32(offset, true);
-}
-
-function i32(buffer, offset) {
-    return new DataView(buffer).getInt32(offset, true);
-}
-
-// Event counts (harness sub-SPEC section 10.2).
+// Event counts.
 
 function events(fn, kind = "call") {
-    const counts = jitcacheBodyEvents(fn, kind);
+    const counts = jitcache.bodyEvents(fn, kind);
     if (!counts)
         fail(`${label(fn, kind)} has no CodeBlock whose events could be read`);
     return counts;

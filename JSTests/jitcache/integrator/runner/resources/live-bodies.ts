@@ -1,4 +1,4 @@
-// The checker of events-live-bodies.js (harness sub-SPEC H6): for each function the Producer recorded, the body-event
+// The checker of events-live-bodies.js: for each function the Producer recorded, the body-event
 // dump has a line with its key and exactly the counts jitcacheBodyEvents gave for it at the end of the script.
 //   bun live-bodies.ts <stdout> <stderr> <scratch>
 import { readFileSync } from "node:fs";

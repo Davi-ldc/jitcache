@@ -7,9 +7,10 @@
 // jitcache-expect-no-install: 0:1
 // jitcache-expect-no-install: 1:1
 
-// SPEC-image.md T8. useExecutableAllocationFuzz fails the n-th executable allocation that may fail
-// (ExecutableAllocator::allocate counts every JITCompilationCanFail request). hot is the one body these runs compile:
-// main's loops stay in the LLInt, and hot touches no property, so no IC allocates before it. In the first two sequences
+// Executable memory that runs out at an import or at a regeneration. useExecutableAllocationFuzz fails the n-th
+// executable allocation that may fail (ExecutableAllocator::allocate counts every JITCompilationCanFail request). hot
+// is the one body these runs compile: main's loops stay in the LLInt, and hot touches no property, so no IC allocates
+// before it. In the first two sequences
 // the producer compiles hot from int32s, regenerates its add at the first double and commits the image with its snippet
 // at its delta at exit. Each consumer's first such allocation is hot's import: the image (n = 1) and then its snippet
 // (n = 2), and the failure of either is ExecutableMemoryExhausted at exec-alloc.jitcache-image, which turns cache

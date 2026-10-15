@@ -1,17 +1,17 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: scopes. Reads and writes of a global var, a global let and a global property, one of them
-// promoted from unresolved, reach resolve_scope, get_from_scope and put_to_scope through the scope thunks (census D3 to
-// D6), whose keys the native selection fixes (D4). Closures read variables one to twelve scopes up, below and above the
-// depth of eight at which resolve_scope loops, and their ClosureVar shapes are baked facts (section 7). with makes a
-// dynamic scope; a sloppy direct eval injects a var, which turns the accesses around it into their var-injection forms;
-// direct eval also runs as call_direct_eval, whose slow case falls back to a virtual call when eval is shadowed (A11,
-// E3). new Function, an indirect eval and the eval code are roots and children of their own. A function a tainted
-// source defines enters with the taint store of op_enter (C16) when $vm.runTaintedString exists, as in twins runs.
-// The consumer checks that its images carry (T1): the resolve_scope thunks of the global var, property and lexical var
-// readGlobals reads, and of the var-injection form inner's sloppy-eval scope gives its read of globalVariable (D3); the
-// get_from_scope thunks of the same four, by the keys the native selection links (D4); put_to_scope's slow-path thunk
-// (D6); the regular virtual call of call_direct_eval's slow case (A11, E3); and the taint flag op_enter stores (C16).
+// Scopes in imported images, each import twin-checked. Reads and writes of a global var, a global let and a global
+// property, one of them promoted from unresolved, reach resolve_scope, get_from_scope and put_to_scope through the scope
+// thunks, whose keys the native selection fixes. Closures read variables one to twelve scopes up, below and above the
+// depth of eight at which resolve_scope loops, and their ClosureVar shapes are baked facts. with makes a dynamic scope;
+// a sloppy direct eval injects a var, which turns the accesses around it into their var-injection forms; direct eval
+// also runs as call_direct_eval, whose slow case falls back to a virtual call when eval is shadowed. new Function, an
+// indirect eval and the eval code are roots and children of their own. A function a tainted source defines enters with
+// the taint store of op_enter when $vm.runTaintedString exists, as in twins runs.
+// The consumer checks that its images carry: the resolve_scope thunks of the global var, property and lexical var
+// readGlobals reads, and of the var-injection form inner's sloppy-eval scope gives its read of globalVariable; the
+// get_from_scope thunks of the same four, by the keys the native selection links; put_to_scope's slow-path thunk; the
+// regular virtual call of call_direct_eval's slow case; and the taint flag op_enter stores.
 var globalVariable = 1;
 let globalLexical = 2;
 globalThis.globalProperty = 3;

@@ -2,14 +2,14 @@
 // jitcache-runs: Producer; ConsumerProducer --jitcache-max-memory=4096
 // jitcache-expect-fault: 1:1 budget.limit
 
-// SPEC-integrator.md section 15.2, consumer-producer.js. Every run of both sequences drives cpBody 40 times with integer
-// fields, and the Producer commits it at its compilation, the 34th call.
+// A ConsumerProducer recaptures what it imported, or stops producing at its limit. Every run of both sequences drives
+// cpBody 40 times with integer fields, and the Producer commits it at its compilation, the 34th call.
 // - Sequence 0: the ConsumerProducer imports cpBody and installs it at its first call. It then learns what the Producer
 //   never saw: doubles, which give cpBody's value profiles new categories once a full collection folds them in, so its
 //   jitcacheDelta() commits a richer body for cpBody's key, whose cb.summary changes. The Consumer installs that body,
 //   the one whose cb.summary the ConsumerProducer saved in the scratch directory.
 // - Sequence 1: the ConsumerProducer's limit of one page ends its production at budget.limit, which run 1 declares:
-//   cpFresh, a body only it runs, compiles, and either recording's charge or the capture's is refused (section 4.5).
+//   cpFresh, a body only it runs, compiles, and either recording's charge or the capture's is refused.
 //   Production ends and activity stays on, so cpBody, which it calls only afterwards, still imports and installs.
 // The runner compares every output with the JITCache-off run's, so the work only one role does prints nothing.
 load("./resources/integrator.js", "caller relative");

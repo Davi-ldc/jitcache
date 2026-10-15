@@ -1,7 +1,7 @@
 // jitcache-runs: Off --useBaselineJIT=false
 // jitcache-check: 0 resources/llint-counts.ts
 
-// Harness sub-SPEC H6, with the baseline JIT off: a function without branches gains, at each of three calls, as many
+// Body events with the baseline JIT off: a function without branches gains, at each of three calls, as many
 // llintInstructions as its bytecode has instructions, and so does one that calls eval directly; a function whose loop
 // runs n times gains, over n = 0, 1 and 2, amounts in arithmetic progression; and every other count of the three stays
 // 0. The script prints each function's gains and other counts as JSON lines, and dumps the first two functions'

@@ -50,8 +50,8 @@ public:
     bool isKnownToBeLiveAfterGC() final;
     bool isKnownToBeLiveDuringGC(AbstractSlotVisitor&) final;
 
-    // JITCache: whether this plan's compilation records its image (SPEC-integrator.md section 4.4, SPEC-image.md
-    // R-INT-12). The constructor writes it on the VM thread before the plan is enqueued or compiled, and whichever thread
+    // JITCache: whether this plan's compilation records its image, which takes a producing VM and a key for the body.
+    // The constructor writes it on the VM thread before the plan is enqueued or compiled, and whichever thread
     // compiles only reads it, so it needs no lock.
     bool jitCacheRecordsImage() const { return m_jitCacheRecordsImage; }
 
@@ -60,9 +60,10 @@ private:
 
     RefPtr<BaselineJITCode> m_jitCode;
     bool m_jitCacheRecordsImage { false };
-    // JITCache: the native cost of harness sub-SPEC section 9.3. The constructor sets m_jitCacheMeasure on the VM thread
-    // when the VM has an open bench report. While it is set, compileInThreadImpl writes the other two on the thread that
-    // compiles, and finalize reads them on the VM thread after the worklist has handed it the plan, as it reads m_jitCode.
+    // JITCache: what this compilation costs natively, which the bench sets against installing an image. The constructor
+    // sets m_jitCacheMeasure on the VM thread when the VM has an open bench report. While it is set, compileInThreadImpl
+    // writes the other two on the thread that compiles, and finalize reads them on the VM thread after the worklist has
+    // handed it the plan, as it reads m_jitCode.
     bool m_jitCacheMeasure { false };
     bool m_jitCacheSupportGenerated { false }; // per-VM support generated during the compilation's measured span
     uint64_t m_jitCacheCompileNanoseconds { 0 }; // thread CPU time of the compilation after its profile drain

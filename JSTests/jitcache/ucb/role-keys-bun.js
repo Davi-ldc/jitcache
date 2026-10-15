@@ -3,8 +3,8 @@
 // jitcache-runs: Producer; ConsumerProducer --jitcache-delta-at-exit; Consumer
 // jitcache-expect-no-install: 1:1
 
-// SPEC-ucb.md section 13.3, role-keys.js, the variant marked Bun: an indirect eval evaluated after vm.compileFunction has
-// left its context's global scope extension set, so its request carries the with-scope bit (F11). globalFuncEval reads
+// role-keys.js for Bun: an indirect eval evaluated after vm.compileFunction has left its context's global scope
+// extension set, so its request carries the with-scope bit. globalFuncEval reads
 // the extension; vm.runInThisContext would not, since a vm.Script requests on an executable of its own that keeps the
 // clear bit. Its body keys alike in every role: a Producer's capture imports in a Consumer and in a ConsumerProducer
 // (sequence 0), and a ConsumerProducer that generated it commits a body a Consumer imports (sequence 1), as in

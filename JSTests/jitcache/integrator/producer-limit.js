@@ -1,11 +1,10 @@
 // jitcache-runs: Producer --jitcache-max-memory=4096
 // jitcache-expect-fault: 0 budget.limit
 
-// SPEC-integrator.md section 15.2, producer-limit.js. A Producer whose limit is one page cannot hold what production
-// charges: plBody's compilation records its image, and its capture builds the lanes' sections and needs the writer's
-// staging buffer, so whichever of those charges comes first is refused, and every refusal of a production charge is
-// raised as budget.limit (section 4.5). Production ends with nothing committed, jitcacheDelta() throws naming the fault,
-// and the runner compares the output with the JITCache-off run's.
+// A Producer whose limit is one page cannot hold what production charges: plBody's compilation records its image, and
+// its capture builds the lanes' sections and needs the writer's staging buffer, so whichever of those charges comes
+// first is refused, and every refusal of a production charge is raised as budget.limit. Production ends with nothing
+// committed, jitcacheDelta() throws naming the fault, and the runner compares the output with the JITCache-off run's.
 load("./resources/integrator.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

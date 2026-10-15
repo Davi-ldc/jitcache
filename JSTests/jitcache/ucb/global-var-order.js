@@ -1,12 +1,12 @@
-// SPEC-ucb.md section 13.3, global-var-order.js, F10: a program with forty vars and twenty lets, then a program that
-// redeclares several of them. A hashed declaration map iterates in the order of its layout, which the core carries
-// (SPEC-ucb.codec.md, E4), so the global object's property order (Object.keys and the heap description the oracle
-// compares) and the redeclaration error the second program throws equal the JITCache-off run when both programs import.
+// A program with forty vars and twenty lets, then a program that redeclares several of them. A hashed declaration map
+// iterates in the order of its layout, which the core carries, so the global object's property order (Object.keys and
+// the heap description the oracle compares) and the redeclaration error the second program throws equal the
+// JITCache-off run when both programs import.
 //
 // The second program has to run to be captured, so every run first evaluates it in a realm of its own, where nothing
 // conflicts, then evaluates the first program and the second one in the main realm. The Consumer imports both programs
 // (statistics, imports); the second one's evaluation in the main realm meets its imported UCB through the CodeCache.
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
+// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

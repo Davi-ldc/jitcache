@@ -1,13 +1,13 @@
 // jitcache-runs: Producer --useConcurrentGC=false; Consumer
 // jitcache-requires: twins
 
-// SPEC-ics.md T5: what an optimizing compile would read from an imported IC before its first consumer visit, as
+// What an optimizing compile would read from an imported IC before its first consumer visit, as
 // PropertyInlineCache::summary gives it. The producer gives a put_by_id site cases (the body's anchor), gives a second
 // site up with no case listed, sends a non-cell base through a third, leaves a fourth unreached, and makes a fifth, a
 // get_by_id of name, give up on its eighth case and then visits it only with those eight shapes, so its tookSlowPath
-// stays clear. Before any visit the consumer reads the put site as considered and empty (Simple, the generic put of
-// THREAD Caches), the given-up site and the non-cell site as slow, the unreached site as never considered and the fifth
-// site as considered and empty, back on its *Optimize operation.
+// stays clear. Before any visit the consumer reads the put site as considered and empty (Simple, which an optimizing
+// compile turns into a generic put), the given-up site and the non-cell site as slow, the unreached site as never
+// considered and the fifth site as considered and empty, back on its *Optimize operation.
 load("./resources/ics.js", "caller relative");
 
 (function main(role) {

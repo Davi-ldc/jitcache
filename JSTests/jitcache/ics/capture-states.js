@@ -1,10 +1,11 @@
 // jitcache-runs: Producer --useConcurrentGC=false; Consumer
 // jitcache-requires: twins
 
-// SPEC-ics.md T3. The producer drives property ICs and call-link sites into every state SPEC-ics.md section 5 names, checks
-// the states it reached, saves each body's snapshot and passes every body to delta(). Each body's first property IC lists a
-// case when delta() runs and anchors it. The consumer creates each body's CodeBlock with one skip call and checks that its
-// snapshot is what section 6.1 derives from the saved one; the twin check of every import covers I3 to I5 beside it.
+// The producer drives property ICs and call-link sites into every state the capture tells apart, checks the states it
+// reached, saves each body's snapshot and passes every body to delta(). Each body's first property IC lists a case when
+// delta() runs and anchors it. The consumer creates each body's CodeBlock with one skip call and checks that its snapshot
+// is what restoration derives from the saved one, which resources/ics.js spells out; beside it, the twin check of every
+// import covers the seeded call links, the attached IC state and their round trip.
 load("./resources/ics.js", "caller relative");
 
 (function main(role) {
@@ -326,7 +327,8 @@ load("./resources/ics.js", "caller relative");
         expectFields("calls monomorphic", callIn("monomorphic"), { mode: "Monomorphic" });
         expectFields("calls polymorphic", callIn("polymorphic"), { mode: "Polymorphic", hasSeenClosure: false });
         expectFields("calls closures", callIn("closures"), { mode: "Polymorphic", hasSeenClosure: true });
-        // A collected closure whose executable outlived it would give hasSeenClosure here and leave E2 unexercised.
+        // A collected closure whose executable outlived it would give hasSeenClosure here and leave setClearedByGC, which
+        // JITCache adds to CallLinkInfo, unexercised.
         expectFields("calls collected", callIn("collected"), { mode: "Init", seenOnce: false, clearedByGC: true, hasSeenClosure: false });
         expectFields("calls construct", callSite("calls", saved.calls, "op_construct", 0), { mode: "Virtual", clearedByVirtual: true });
         expectFields("calls varargs", callSite("calls", saved.calls, "op_call_varargs", 0), { mode: "Monomorphic", maxArgumentCountIncludingThisForVarargs: 6 });
@@ -336,8 +338,8 @@ load("./resources/ics.js", "caller relative");
         expectLayout("evalCaller", saved.evalCaller, ["GetById"]);
         callSite("evalCaller", saved.evalCaller, "op_call_direct_eval", 0);
 
-        // holdsGaveUp marks exactly the sites driven onto their *GaveUp operation, which checks those access types' E3
-        // entries against the engine.
+        // holdsGaveUp marks exactly the sites driven onto their *GaveUp operation, which checks the give-up operation
+        // JITCache maps each of those access types to against the engine.
         const gaveUp = new Set([`gets ${getsSite.foldedGaveUp}`, `gets ${getsSite.dictionary}`, `gets ${getsSite.beside}`, `others ${othersIC.instanceOf}`, `others ${othersIC.direct}`]);
         for (const [name, state] of Object.entries(saved)) {
             state.propertyICs.forEach((ic, index) => {

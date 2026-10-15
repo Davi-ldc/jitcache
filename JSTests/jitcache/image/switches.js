@@ -1,12 +1,12 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: switches. A dense integer switch and a dense character switch load their jump table's base
-// (census C12, SwitchTableBase), sparse integer and character switches compile to a list of comparisons, an inline
-// switch_string compares atoms by address and jumps to each case through a ranked fixup (C13, A16, SwitchStringRankAtom and
+// Switches in imported images, each import twin-checked. A dense integer switch and a dense character switch load their
+// jump table's base (SwitchTableBase), sparse integer and character switches compile to a list of comparisons, an inline
+// switch_string compares atoms by address and jumps to each case through a ranked fixup (SwitchStringRankAtom and
 // SwitchStringRankCase), and a switch_string past maximumInlineStringSwitchCaseCount (64) cases calls
 // operationSwitchStringWithUnknownKeyType, which reads the image's string table. Each function runs 60 times, with atoms,
 // with strings built at run time and with values no case names, before the producer's delta at exit captures it. The
-// consumer checks that its images carry the SwitchTableBase, SwitchStringRankAtom and SwitchStringRankCase targets (T1).
+// consumer checks that its images carry the SwitchTableBase, SwitchStringRankAtom and SwitchStringRankCase targets.
 (function main(role, scratch, artifact, sequence) {
     function dense(n) {
         switch (n) {

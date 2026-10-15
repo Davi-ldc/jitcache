@@ -1,14 +1,16 @@
-// SPEC-ucb.md section 13.3, tdz-scale.mjs, F26 and I25: what a body costs does not grow with the names its enclosing
-// scopes declare. The test writes two modules into the sequence's scratch directory and imports them: one with 5,000
-// top-level bindings, 4,000 consts and 1,000 imports, and one with ten. Each starts with the same 200 small exported
-// function declarations, each holding a nested closure, followed by a function that wraps the same bindings as consts
-// around the same 200 declarations, as Bun wraps a CommonJS module, so that the module's TDZ link and the wrapper's name
-// every binding. Both start at the same offsets in both modules, so their bodies differ only in their enclosing scopes.
+// What a body costs does not grow with the names its enclosing scopes declare, since the VM interns each TDZ
+// environment by content and a holder digest covers an environment once. The test writes two modules into the
+// sequence's scratch directory and imports them: one with 5,000 top-level bindings, 4,000 consts and 1,000 imports,
+// and one with ten. Each starts with the same 200 small exported function declarations, each holding a nested closure,
+// followed by a function that wraps the same bindings as consts around the same 200 declarations, as Bun wraps a
+// CommonJS module, so that the module's TDZ link and the wrapper's name every binding. Both start at the same offsets
+// in both modules, so their bodies differ only in their enclosing scopes.
 // - In the Consumer every function and closure imports (statistics, imports), and tdzEnvironmentDigests grows by the few
 //   distinct environments the holder digests reach, not by the number of functions.
 // - In twins runs each small function's and closure's ucb.core, read with jitcacheReadSection, has the size it has in
-//   the module of ten bindings; T1 and T5 hold at every import (section 13.2).
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
+//   the module of ten bindings; at every import the twin check finds the core encoding and the child UFEs' fields
+//   equal to the twin's.
+// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 
 await (async function main(role, scratch, artifact, sequence) {

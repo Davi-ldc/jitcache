@@ -142,7 +142,7 @@ def compute_builtin_source_metadata(characters):
     while characters[len(characters) - close_brace_offset_from_end] != '}':
         close_brace_offset_from_end += 1
 
-    # JITCache's source digest of these characters (SPEC-ucb.md section 3.5): SHA-256 of the byte 1, which names the
+    # JITCache's source digest of these characters: SHA-256 of the byte 1, which names the
     # Latin-1 encoding, then one byte per character. Builtin sources are 8-bit: they are emitted as a char array that
     # BuiltinExecutables reads as Latin-1, so a character above 0xFF fails here as it would in that array.
     source_digest = hashlib.sha256(b'\x01' + characters.encode('latin-1')).digest()

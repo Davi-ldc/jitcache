@@ -208,12 +208,12 @@ namespace JSC {
         static ThunkGenerator baselineThunkGenerator(JITCache::BaselineThunk);
 
         // The generator emitMathICFast gives the MathIC of an add, sub, mul or negate instruction (Op), built from the UCB
-        // alone, so that a JITCache import rebuilds each MathIC it restores with the same function (SPEC-image.md section
-        // 6.3). Defined in JITInlines.h, which both callers include, since the deduced return type needs the definition.
+        // alone, so that a JITCache import rebuilds each MathIC it restores with the same function. Defined in
+        // JITInlines.h, which both callers include, since the deduced return type needs the definition.
         template<typename Op> static auto mathICGeneratorFor(const UnlinkedCodeBlock&, const JSInstruction*);
 
 #if ENABLE(JITCACHE_TWINS)
-        // The image check's twin compile (SPEC-image.md section 11.3, step 4): creates the twin recorder at once, so that
+        // The image check's twin compile: creates the twin recorder at once, so that
         // compileAndLinkWithoutFinalizing records into it with the producer's seeds and compile inputs, in any VM. The
         // seeds and inputs must outlive this JIT.
         void setJITCacheTwin(Ref<JITCache::ProducerBudget>&&, const JITCache::TwinSeeds&, const JITCache::TwinCompileInputs&);
@@ -932,8 +932,8 @@ namespace JSC {
 
         bool m_isShareable { true };
 
-        // JITCache: records this compilation's references while its VM produces, and leaves the record on the code
-        // (SPEC-image.md section 4). Attached to this assembler for the whole compilation; JIT.cpp, where the
+        // JITCache: records this compilation's references while its VM produces, and leaves the record on the code.
+        // Attached to this assembler for the whole compilation; JIT.cpp, where the
         // constructor and destructor live, sees the complete type.
         std::unique_ptr<JITCache::ImageRecorder> m_imageRecorder;
     };

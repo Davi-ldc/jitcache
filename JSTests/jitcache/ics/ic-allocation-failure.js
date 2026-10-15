@@ -22,8 +22,8 @@
 // jitcache-expect-fault: 0 exec-alloc.mathic-snippet
 // jitcache-require-fault: 0 exec-alloc.ic-handler
 
-// SPEC-ics.md T9: an IC stub or handler that cannot get executable memory raises exec-alloc.ic-handler before the slow
-// path writes its give-up (E5). The fuzzer fails the n-th executable allocation that may fail:
+// An IC stub or handler that cannot get executable memory raises exec-alloc.ic-handler before the slow path writes its
+// give-up. The fuzzer fails the n-th executable allocation that may fail:
 // ExecutableAllocator::allocate counts every JITCompilationCanFail request of every thread, and the directory's default
 // keeps concurrent JIT off, so each n names one allocation. The first two are the baseline plans of reads and of ics.js's
 // snapshot, which reachBaseline calls the same number of times. The next thirty-two are the stubs of reads's sites,
@@ -31,7 +31,7 @@
 // natively, that each visit reads the right values and that at most one site gave up, listing no case. A Producer also
 // checks that its status names what failed: exec-alloc.baseline-plan when reads stayed in the LLInt,
 // exec-alloc.ic-handler exactly when a site gave up. Whatever the fault, delta() then throws naming it. The runner checks
-// that some run reports exec-alloc.ic-handler and that each output equals the JITCache-off run's (T6).
+// that some run reports exec-alloc.ic-handler and that each output equals the JITCache-off run's.
 load("./resources/ics.js", "caller relative");
 
 (function main(role) {

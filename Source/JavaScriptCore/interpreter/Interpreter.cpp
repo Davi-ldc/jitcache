@@ -221,7 +221,7 @@ JSValue eval(CallFrame* callFrame, JSValue thisValue, JSScope* callerScopeChain,
         else
             evalContextType = EvalContextType::None;
 
-        // JITCache: the call site, through which the eval's key names its caller (SPEC-ucb.md section 7.2.3).
+        // JITCache: the call site, through which the eval's key names its caller.
         JITCache::DirectEvalSite site { callerUnlinkedCodeBlock, bytecodeIndex };
         eval = DirectEvalExecutable::create(globalObject, makeSource(programSource, callerBaselineCodeBlock->source().provider()->sourceOrigin(), sourceTaintedOrigin), lexicallyScopedFeatures, derivedContextType, callerUnlinkedCodeBlock->needsClassFieldInitializer(), callerUnlinkedCodeBlock->privateBrandRequirement(), isArrowFunctionContext, callerBaselineCodeBlock->ownerExecutable()->isInsideOrdinaryFunction(), evalContextType, &variablesUnderTDZ, &privateNameEnvironment, &site);
         EXCEPTION_ASSERT(!!scope.exception() == !eval);

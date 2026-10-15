@@ -54,7 +54,7 @@
 #if ENABLE(JITCACHE_TWINS)
 namespace JSC::JITCache {
 
-// What this process did with one body (SPEC-integrator.harness.md section 10.1): every UCB starts at zero, whether
+// What this process did with one body: every UCB starts at zero, whether
 // generated, decoded or imported, and no section carries the counts. Each writer runs on the VM thread or while it is
 // stopped, and every reader on the VM thread, so the counters are plain integers.
 struct BodyEventCounts {
@@ -506,7 +506,7 @@ public:
     BaselineExecutionCounter& llintExecuteCounter() LIFETIME_BOUND { return m_llintExecuteCounter; }
 
 #if ENABLE(JITCACHE_TWINS)
-    // JITCache twins builds: this body's event counts (SPEC-integrator.harness.md section 10.1).
+    // JITCache twins builds: this body's event counts.
     JITCache::BodyEventCounts& jitCacheEventCounts() LIFETIME_BOUND { return m_jitCacheEventCounts; }
     const JITCache::BodyEventCounts& jitCacheEventCounts() const LIFETIME_BOUND { return m_jitCacheEventCounts; }
 #endif
@@ -528,7 +528,8 @@ private:
 #endif
 
 #if ENABLE(JITCACHE_TWINS)
-    // The last data member (SPEC-integrator.md M10). The LLInt adds to its first field through LLIntOffsetsExtractor.
+    // The last data member, so the members before it keep the offsets plain builds give them. The LLInt adds to its
+    // first field through LLIntOffsetsExtractor.
     JITCache::BodyEventCounts m_jitCacheEventCounts;
 #endif
 

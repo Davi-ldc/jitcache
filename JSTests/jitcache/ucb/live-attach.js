@@ -3,33 +3,33 @@
 // jitcache-expect-no-install: 0:1
 // jitcache-expect-no-install: 1:1
 
-// SPEC-ucb.md section 13.3, live-attach.js, section 7.3.4: a request that meets a live UCB, at a CodeCache hit or at a
-// filled UFE slot, attaches a pending import to it only when that pays.
+// A request that meets a live UCB, at a CodeCache hit or at a filled UFE slot, attaches a pending import to it only
+// when that pays.
 //
 // Sequence 0. The Producer only creates the artifact. In the ConsumerProducer a function laF, declared by a program
 // evaluated in realms of its own (runString), and a looping program L, evaluated with loadString, are generated while
 // the artifact holds no body for them, reach the baseline, and are captured and committed by this VM; their code is then
 // parked in their UCBs' sharing slots.
 // - While the code is parked, laF's filled slot in a new realm attaches nothing, and a loop of loadString(L) computes no
-//   source digest after its first request (statistics; step 2 of section 7.3.4). Each of these windows runs while a
-//   CodeBlock that uses the parked code is on the stack: laF's inside the last call of the realm whose laF compiled the
-//   body, which laF makes through its `during` argument, and L's inside the evaluation that compiled L, which calls
-//   laDuring() at its end. That CodeBlock holds a reference to the code, and Heap::releaseUnusedSharedBaselineCode
-//   releases only code that its UCB alone holds, so no collection can release it before the window's requests,
-//   whenever the collector runs (--collectContinuously=true included).
+//   source digest after its first request (statistics), since parked code stops an attach first. Each of these windows
+//   runs while a CodeBlock that uses the parked code is on the stack: laF's inside the last call of the realm whose laF
+//   compiled the body, which laF makes through its `during` argument, and L's inside the evaluation that compiled L,
+//   which calls laDuring() at its end. That CodeBlock holds a reference to the code, and
+//   Heap::releaseUnusedSharedBaselineCode releases only code that its UCB alone holds, so no collection can release it
+//   before the window's requests, whenever the collector runs (--collectContinuously=true included).
 // - Once the parked code is released, the next request of each attaches, and its newborn CodeBlock installs the body
 //   (statistics attaches, jitcacheProgress installs). Releasing parked code takes the death of every CodeBlock that uses
 //   it and a full collection after that: this run gives the release no lease (--codeBlockAgingLeaseMultiplier=0,
 //   Heap::releaseUnusedSharedBaselineCode), and the test drops the realms and collects. A collection can keep a dead
 //   realm alive through a stale stack word, so each release is tried a few times.
 // - A later release and attach at the same commit identifier re-checks nothing: laF computes no digest, and L only its
-//   request key, whose source digest guards against a CodeCache collision (I21).
+//   request key, whose source digest guards against a CodeCache collision.
 // - In twins runs the ConsumerProducer then rewrites laF's body so that its context differs, which commits it under a new
 //   index token: the next request after a release misses Context and stamps that token, and a request at the same token
 //   after the miss reads nothing (statistics misses.BodyUnchanged, and no digest).
 // Sequence 1. The Producer captures laF and L; the Consumer runs with a jitAllowlist that names no function, so the
-// shouldJIT gate drops each import at its install (statistics gateDrops), which stamps the index token as missed
-// (section 6.4), and every later request at that token reads nothing (statistics misses.BodyUnchanged, and no digest).
+// shouldJIT gate drops each import at its install (statistics gateDrops), which stamps the index token as missed, and
+// every later request at that token reads nothing (statistics misses.BodyUnchanged, and no digest).
 // Neither the gate's Consumer nor a ConsumerProducer whose release a stale stack word kept from happening has to
 // install anything, so both declare jitcache-expect-no-install; twins runs check the installs themselves.
 //
@@ -170,7 +170,7 @@ load("./resources/ucb.js", "caller relative");
         // A miss, then a request at the index token it was stamped with. In twins runs this VM rewrites the first byte
         // of laF's body's context digest (jitcacheRewriteSection), which commits the body under a new token, so the next
         // request after a release matches the live UCB again and misses Context, stamped; the request after that finds
-        // the stamp current and reads nothing (section 7.3.2, the paragraph after its steps). The miss installs nothing,
+        // the stamp current and reads nothing. The miss installs nothing,
         // so the UCB parks no code and the second request needs no release.
         if (t.twins) {
             const realm = runString(programText);

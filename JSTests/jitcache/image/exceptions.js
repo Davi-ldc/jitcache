@@ -1,18 +1,17 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: exceptions and catch. The bodies throw from JavaScript, from operations, from a getter an IC
-// calls and from native functions, and catch in baseline code, so their images hold op_throw's handler thunk (census
-// C5), the exception checks after operations (A3, A17), and op_catch's references (C8 to C11): the VM, topEntryFrame and
+// Exceptions and catch in imported images, each import twin-checked. The bodies throw from JavaScript, from operations,
+// from a getter an IC calls and from native functions, and catch in baseline code, so their images hold op_throw's
+// handler thunk, the exception checks after operations, and op_catch's references: the VM, topEntryFrame and
 // targetMachinePCForThrow. A call the LLInt leaves by an exception earns only its prologue's 5 of the 15 tier-up points,
 // so the loops run long enough for the producer to compile the throwing functions too: thrower returns at one call in
 // seven, so the first loop runs 140 times, and deepest, middle and outer never return, so the stack loop runs 120 times.
 // The consumer installs each function at its first call and checks that it did. The output, a stack trace included,
-// must equal the JITCache-off run's; concurrent JIT stays off so that every import meets its twin check (T2).
-// The consumer checks that its images carry (T1): op_throw's jump to its handler thunk (C5); the pending exception each
-// exception check tests, and debug builds compare (A3, B7); the jumps to HandleException (A17); op_catch's
-// topEntryFrame (C8, A9), VM (C9, C10) and targetMachinePCForThrow (C11, A12); the ValueIsFalsey thunk of each if over
-// a number (C4); and, in debug builds, which every twins build is, the topCallFrame store before each operation call
-// (A2).
+// must equal the JITCache-off run's; concurrent JIT stays off so that every import meets its twin check.
+// The consumer checks that its images carry: op_throw's jump to its handler thunk; the pending exception each exception
+// check tests, and debug builds compare; the jumps to HandleException; op_catch's topEntryFrame, VM and
+// targetMachinePCForThrow; the ValueIsFalsey thunk of each if over a number; and, in debug builds, which every twins
+// build is, the topCallFrame store before each operation call.
 (function main(role, scratch, artifact, sequence) {
     let finallyCount = 0;
 

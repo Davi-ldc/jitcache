@@ -1,15 +1,15 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --collectContinuously=true --useConcurrentJIT=false; ConsumerProducer --jitcache-delta-at-exit --collectContinuously=true --useConcurrentJIT=false; Consumer --collectContinuously=true --useConcurrentJIT=false
 // jitcache-runs: Producer --jitcache-delta-at-exit --collectContinuously=true --useConcurrentJIT=true; ConsumerProducer --jitcache-delta-at-exit --collectContinuously=true --useConcurrentJIT=true; Consumer --collectContinuously=true --useConcurrentJIT=true
 
-// SPEC-cb.md section 11.3, concurrency, in two sequences whose every run collects continuously, so markers drain and
-// merge profiles while captures read them and while imports seed them (N3, N11). Each sequence captures in delta in its
-// Producer and its ConsumerProducer, which also imports, as does its Consumer; the capture and restoration paths assert
-// I2 and I3 in debug-local (AssertNoGC), and no run may crash.
+// Concurrency, in two sequences whose every run collects continuously, so markers drain and merge profiles while
+// captures read them and while imports seed them. Each sequence captures in delta in its Producer and its
+// ConsumerProducer, which also imports, as does its Consumer; in debug-local the capture and restoration paths assert
+// that no collection runs inside them (AssertNoGC), and no run may crash.
 // - The first sequence keeps concurrent JIT off. Every lane's twins pass; this lane's run before installCode, before any
 //   marker can reach the CB.
 // - The second turns it on, so DFG compiles run beside the captures and the imports. Its output must equal the
 //   JITCache-off run's, and this lane's twins still pass, since its counter check compares with what finishCounter
-//   decided (section 11.1). The Image lane's check skips every import here, and the runner treats those skips as no
+//   decided. The Image lane's check skips every import here, and the runner treats those skips as no
 //   difference because the runs turn concurrent JIT on.
 // The six bodies of the rounds are first called at the start of round 0, before the run has compiled anything to the
 // DFG, so their imports meet a DFG compile only by chance. The chain bodies arrange the meeting. Each is first called at

@@ -7,7 +7,7 @@
 // jitcache-runs: Producer
 // jitcache-runs: Producer
 
-// Harness sub-SPEC H5: each pair that H5 names as alike to JavaScript describes alike, so every sequence passes.
+// Each pair of forms that JavaScript cannot tell apart describes alike, so every sequence passes.
 // Sequence k makes its Producer run and the oracle's Off run differ in one such way, and the oracle compares their
 // end-of-run descriptions. That makes this file the control of describe-differences.js, whose two runs differ in a way
 // JavaScript can reach. Sequence 4 meets both forms of its pair inside each run instead, for the reason it gives. Where

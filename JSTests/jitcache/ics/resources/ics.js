@@ -1,36 +1,13 @@
-// Shared by every script in JSTests/jitcache/ics/ (SPEC-ics.md section 11.2). This is the only file that names the shell
-// functions twins builds register for the lane (jitcacheICsSnapshot, jitcacheDelta, jitcacheStatus) and the runner's
-// argument convention: the shell's global arguments hold the role, the scratch path, the artifact path and the sequence
-// index. Its top level declares functions only, so nothing it leaves reachable depends on the run's role.
+// Shared by every script in JSTests/jitcache/ics/. It binds as globals what the scripts take from
+// ../../resources/jitcache.js: the readers of the runner's arguments, the assertions and the status wrapper. This is the
+// only file that names the shell function jitcacheICsSnapshot. Its top level declares functions and binds the shared
+// ones only, so nothing it leaves reachable depends on the run's role.
 
-// The runner's arguments, read on each call.
-
-function role() {
-    return globalThis.arguments[0];
-}
-
-function sequence() {
-    return Number(globalThis.arguments[3]);
-}
+var jitcache = load("../../resources/jitcache.js", "caller relative");
+var { role, sequence, fail, check, checkSame, status } = jitcache;
 
 function scratchFile(name) {
-    return `${globalThis.arguments[1]}/${name}.json`;
-}
-
-// Assertions. Each throws, which ends the run with a nonzero exit.
-
-function fail(message) {
-    throw new Error(message);
-}
-
-function check(condition, message) {
-    if (!condition)
-        fail(message);
-}
-
-function checkSame(actual, expected, what) {
-    if (actual !== expected)
-        fail(`${what} is ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+    return jitcache.scratchPath(`${name}.json`);
 }
 
 // Checks that object has each field of fields with the same value, reporting every difference at once.
@@ -54,19 +31,14 @@ function keepAlive(...values) {
 // The twins shell functions.
 
 // The executable's CodeBlock of kind "call" or "construct" (its baseline alternative for an optimized one) as
-// SPEC-ics.md section 11.1 spells it, or undefined when the executable has none.
+// jitcacheICsSnapshot describes it, or undefined when the executable has none.
 function snapshot(fn, kind = "call") {
     return jitcacheICsSnapshot(fn, kind);
 }
 
-// The full step name of the VM's first fault, or null.
-function status() {
-    return jitcacheStatus();
-}
-
 // Checks each body's anchor, then saves what every body learned. A body is a function or a [fn, kind] pair, and each must
 // be in baseline with a property IC that lists a case, so its delta capture beats its finalize capture on the IC count at
-// the latest (SPEC-ics.md section 11.2). Returns what jitcacheDelta() returns.
+// the latest. Returns what the shared delta wrapper returns.
 function delta(...bodies) {
     for (const body of bodies) {
         const [fn, kind] = Array.isArray(body) ? body : [body, "call"];
@@ -76,7 +48,7 @@ function delta(...bodies) {
         if (!state.propertyICs.some(ic => ic.caseCount > 0))
             fail(`delta: ${fn.name} (${kind}) has no property IC that lists a case`);
     }
-    return jitcacheDelta();
+    return jitcache.delta();
 }
 
 // Bodies under test.
@@ -209,7 +181,7 @@ function callSite(label, state, opcode, metadataID) {
     return site;
 }
 
-// SPEC-ics.md section 6.1 in JavaScript, written apart from the C++ derivation: the state a CodeBlock that installs an
+// Restoration's derivation in JavaScript, written apart from the C++ one: the state a CodeBlock that installs an
 // import has before any of its sites runs, derived from the producer's snapshot of the captured CodeBlock. Each field of
 // the record is read from the snapshot field of the same name. Fields the derivation leaves as installation builds them
 // take installation's value: no case, the Unset shape (no body under test reads length, whose mold starts at ArrayLength)

@@ -1,21 +1,23 @@
-// Readers of the Image lane's sections for the scripts that compare captures (SPEC-image.md sections 8.2, 8.3 and 11.2),
-// the check a script makes that its imports happened (HARNESS.md, Tests), and the check that its images carry the
-// targets its header claims, which together cover table 3.3 and the census (T1). A script loads this file inside its main
+// Readers of the Image lane's sections for the scripts that compare captures, the check a script makes that its imports
+// happened (HARNESS.md, Tests), and the check that its images carry the targets its header claims, which together cover
+// every target kind and every site that records one. A script loads this file inside its main
 // function, const sections = load("./resources/image-sections.js", "caller relative"), which returns the object at the end
 // of this file and defines no global, so concurrency.js can load several corpus scripts that each load it. Every field is
 // little-endian and every region starts 8-byte aligned. The image.baseline reader walks the regions in the order
 // ImageSectionsView::locate does and returns each region's bytes beside the entries it decodes, so the scripts compare
-// captures region by region. Only twins builds register the shell functions the readers and checks call (harness
-// sub-SPEC section 5.2), and the pin has none of them, so scripts call the readers and checks only in twins runs and
-// never in the Off role, which the oracle and the pin comparison run. A script whose Off run calls one of those functions
-// itself, as a wait that polls jitcacheBodyEvents until a CodeBlock ages out does, declares jitcache-pin: off with its
-// reason (SPEC-integrator.md R-ALL-4).
+// captures region by region. Only twins builds register the shell functions the readers and checks call, and the pin
+// has none of them, so scripts call the readers and checks only in twins runs and never in the Off role, which the
+// oracle and the pin comparison run. A script whose Off run calls one of those functions itself, as a wait that polls
+// jitcacheBodyEvents until a CodeBlock ages out does, declares jitcache-pin: off with its reason.
 (function () {
     "use strict";
 
+    // The shared byte reader. Its file defines no global either, so this load leaves the global object as it was.
+    const { byteReader } = load("../../resources/jitcache.js", "caller relative");
+
     const imageFixupForm = Object.freeze({ Pointer: 1, Call: 2, Jump: 3 });
 
-    // Table 3.3's order, which the section's kind byte numbers from 1.
+    // The target kinds, in the order the section's kind byte numbers them from 1.
     const imageTargetKind = Object.freeze({
         Operation: 1, CommonThunk: 2, BaselineThunk: 3, SlowPathThunk: 4, InlineCacheSlowPathThunk: 5, VirtualCallThunk: 6,
         ProcessThunk: 7, VMAddress: 8, VMCell: 9, StructureIDBase: 10, UCBConstantCell: 11, UCBConstantAtom: 12,
@@ -23,9 +25,9 @@
         SwitchStringRankCase: 17, MathIC: 18, SwitchTableBase: 19, ImageOffset: 20, SnippetEntry: 21,
     });
 
-    // The a field of the kinds table 3.3 keys by an enumeration (sections 3.4 and 3.6). BaselineThunk, ProcessThunk,
-    // VMAddress and VMCell are the lane's own and number their entries from 1. CommonJITThunkID and CallMode are the
-    // engine's, stored as their native values, which the header's build ID fixes (section 8.1): CommonJITThunkID counts
+    // The a field of the target kinds keyed by an enumeration. BaselineThunk, ProcessThunk, VMAddress and VMCell are the
+    // lane's own and number their entries from 1. CommonJITThunkID and CallMode are the engine's, stored as their native
+    // values, which the header's build ID fixes: CommonJITThunkID counts
     // the entries of JSC_FOR_EACH_COMMON_THUNK (jit/JITThunks.h) from 0, and CallMode those of bytecode/CallMode.h.
     const commonJITThunkID = Object.freeze({ ReturnFromBaseline: 4, HandleException: 63, ThrowStackOverflowAtPrologue: 73 });
     const callMode = Object.freeze({ Regular: 0, Tail: 1, Construct: 2 });
@@ -54,8 +56,7 @@
     // MathICKind, the kind byte of region 9.
     const imageMathICKind = Object.freeze({ Add: 1, Sub: 2, Mul: 3, Negate: 4 });
 
-    // CompileInputKind and StrictEqualityAtomOperand (section 11.1), the kind and value bytes of the twins section's compile
-    // inputs.
+    // CompileInputKind and StrictEqualityAtomOperand, the kind and value bytes of the twins section's compile inputs.
     const twinCompileInputKind = Object.freeze({
         ResolveScopeType: 1, GetFromScopeType: 2, PutToScopeType: 3, GetByIdMode: 4, IteratorOpenMode: 5,
         AsyncIteratorOpenMode: 6, EnumeratorMetadata: 7, StrictEqualityAtomOperand: 8,
@@ -97,39 +98,38 @@
         return `{site ${fixup.site}, form ${fixup.form}, kind ${fixup.kind}, a ${fixup.a}, b ${fixup.b}, payload ${fixup.payload}}`;
     }
 
-    function readImageFixups(view, offset, count) {
+    function readImageFixups(read, offset, count) {
         const fixups = [];
         for (let i = 0; i < count; ++i, offset += 24) {
             fixups.push({
-                site: view.getUint32(offset, true),
-                form: view.getUint8(offset + 4),
-                kind: view.getUint8(offset + 5),
-                a: view.getUint32(offset + 8, true),
-                b: view.getUint32(offset + 12, true),
-                payload: view.getBigInt64(offset + 16, true),
+                site: read.u32(offset),
+                form: read.u8(offset + 4),
+                kind: read.u8(offset + 5),
+                a: read.u32(offset + 8),
+                b: read.u32(offset + 12),
+                payload: read.i64(offset + 16),
             });
         }
         return fixups;
     }
 
-    // image.baseline (section 8.2): the 56-byte header, then code, fixups, calls, molds, simple and string switch tables,
+    // image.baseline: the 56-byte header, then code, fixups, calls, molds, simple and string switch tables,
     // code map, constant pool, MathICs and the snippets of the MathICs whose flags say they have one.
     function parseImageSection(buffer) {
-        const view = new DataView(buffer);
-        const u32 = offset => view.getUint32(offset, true);
+        const read = byteReader(buffer);
         const header = {
-            codeSize: u32(0),
-            arityEntryOffset: u32(4),
-            fixupCount: u32(8),
-            callCount: u32(12),
-            moldCount: u32(16),
-            simpleSwitchTableCount: u32(20),
-            stringSwitchTableCount: u32(24),
-            codeMapCount: u32(28),
-            constantPoolCount: u32(32),
-            mathICCount: u32(36),
-            livenessRateBits: view.getBigUint64(40, true),
-            fullnessRateBits: view.getBigUint64(48, true),
+            codeSize: read.u32(0),
+            arityEntryOffset: read.u32(4),
+            fixupCount: read.u32(8),
+            callCount: read.u32(12),
+            moldCount: read.u32(16),
+            simpleSwitchTableCount: read.u32(20),
+            stringSwitchTableCount: read.u32(24),
+            codeMapCount: read.u32(28),
+            constantPoolCount: read.u32(32),
+            mathICCount: read.u32(36),
+            livenessRateBits: read.u64(40),
+            fullnessRateBits: read.u64(48),
         };
         let offset = 56;
         const region = length => {
@@ -140,20 +140,20 @@
 
         const code = region(header.codeSize);
         offset = imageSectionAlign(offset);
-        const fixups = readImageFixups(view, offset, header.fixupCount);
+        const fixups = readImageFixups(read, offset, header.fixupCount);
         offset += 24 * header.fixupCount;
         const calls = region(8 * header.callCount);
         const molds = region(16 * header.moldCount);
 
         const simpleStart = offset;
         for (let i = 0; i < header.simpleSwitchTableCount; ++i)
-            offset += 8 + 4 * u32(offset + 4);
+            offset += 8 + 4 * read.u32(offset + 4);
         const simpleTables = new Uint8Array(buffer, simpleStart, offset - simpleStart);
         offset = imageSectionAlign(offset);
 
         const stringStart = offset;
         for (let i = 0; i < header.stringSwitchTableCount; ++i)
-            offset += 4 + 4 * u32(offset);
+            offset += 4 + 4 * read.u32(offset);
         const stringTables = new Uint8Array(buffer, stringStart, offset - stringStart);
         offset = imageSectionAlign(offset);
 
@@ -166,15 +166,15 @@
             const at = offset + 32 * index;
             mathICs.push({
                 index,
-                kind: view.getUint8(at),
-                flags: view.getUint8(at + 1),
-                bytecodeOffset: u32(at + 4),
-                inlineStart: u32(at + 8),
-                inlineEnd: u32(at + 12),
-                slowPathStart: u32(at + 16),
-                slowPathCall: u32(at + 20),
-                snippetSize: u32(at + 24),
-                snippetFixupCount: u32(at + 28),
+                kind: read.u8(at),
+                flags: read.u8(at + 1),
+                bytecodeOffset: read.u32(at + 4),
+                inlineStart: read.u32(at + 8),
+                inlineEnd: read.u32(at + 12),
+                slowPathStart: read.u32(at + 16),
+                slowPathCall: read.u32(at + 20),
+                snippetSize: read.u32(at + 24),
+                snippetFixupCount: read.u32(at + 28),
                 entry: new Uint8Array(buffer, at, 32),
                 snippet: null,
             });
@@ -185,7 +185,7 @@
                 continue;
             const snippetCode = region(mathIC.snippetSize);
             offset = imageSectionAlign(offset);
-            const snippetFixups = readImageFixups(view, offset, mathIC.snippetFixupCount);
+            const snippetFixups = readImageFixups(read, offset, mathIC.snippetFixupCount);
             offset += 24 * mathIC.snippetFixupCount;
             mathIC.snippet = { code: snippetCode, fixups: snippetFixups };
         }
@@ -195,7 +195,7 @@
         return { header, code, fixups, calls, molds, simpleTables, stringTables, codeMap, constantPool, mathICs };
     }
 
-    // A fixup's footprint [start, end) in its code (table 3.2). An x86_64 Jump is five bytes after E9 and six after 0F 8x.
+    // A fixup's footprint [start, end) in its code, by its form. An x86_64 Jump is five bytes after E9 and six after 0F 8x.
     function imageFootprint(fixup, code, arm64) {
         const site = fixup.site;
         if (arm64) {
@@ -218,29 +218,28 @@
         }
     }
 
-    // image-twins.baseline (section 11.2): the 48-byte header, then the BinarySwitch seeds, the compile inputs, the binary
+    // image-twins.baseline: the 48-byte header, then the BinarySwitch seeds, the compile inputs, the binary
     // and unary arithmetic profile bits, the regeneration log and the producer values. Returns the header, the compile
     // inputs and the log, each log entry with its assembler seeds in attach order, null where the attach's assembler drew
     // none.
     function parseTwinsSection(buffer) {
-        const view = new DataView(buffer);
-        const u32 = offset => view.getUint32(offset, true);
+        const read = byteReader(buffer);
         const header = {
-            flags: view.getUint8(0),
-            assemblerSeed: u32(4),
-            binarySwitchSeedCount: u32(8),
-            inputCount: u32(12),
-            binaryArithProfileCount: u32(16),
-            unaryArithProfileCount: u32(20),
-            regenerationCount: u32(24),
-            producerValueCount: u32(28),
+            flags: read.u8(0),
+            assemblerSeed: read.u32(4),
+            binarySwitchSeedCount: read.u32(8),
+            inputCount: read.u32(12),
+            binaryArithProfileCount: read.u32(16),
+            unaryArithProfileCount: read.u32(20),
+            regenerationCount: read.u32(24),
+            producerValueCount: read.u32(28),
         };
         let offset = imageSectionAlign(48 + 4 * header.binarySwitchSeedCount);
 
         // Each input: u32 bytecode offset, u8 kind, u8 value, u16 reserved, u32 local scope depth.
         const inputs = [];
         for (let i = 0; i < header.inputCount; ++i, offset += 12)
-            inputs.push({ bytecodeOffset: u32(offset), kind: view.getUint8(offset + 4), value: view.getUint8(offset + 5), localScopeDepth: u32(offset + 8) });
+            inputs.push({ bytecodeOffset: read.u32(offset), kind: read.u8(offset + 4), value: read.u8(offset + 5), localScopeDepth: read.u32(offset + 8) });
         offset = imageSectionAlign(offset);
         offset = imageSectionAlign(offset + 2 * header.binaryArithProfileCount);
         offset = imageSectionAlign(offset + 2 * header.unaryArithProfileCount);
@@ -249,15 +248,15 @@
         // u32 seed per attach, padded to 8.
         const regenerations = [];
         for (let i = 0; i < header.regenerationCount; ++i) {
-            const attachCount = view.getUint8(offset + 6);
-            const seedMask = view.getUint8(offset + 7);
+            const attachCount = read.u8(offset + 6);
+            const seedMask = read.u8(offset + 7);
             const seeds = [];
             for (let slot = 0; slot < attachCount; ++slot)
-                seeds.push(seedMask & (1 << slot) ? u32(offset + 16 + 4 * slot) : null);
+                seeds.push(seedMask & (1 << slot) ? read.u32(offset + 16 + 4 * slot) : null);
             regenerations.push({
-                mathICIndex: u32(offset),
-                profileBitsAtEntry: view.getUint16(offset + 4, true),
-                replacement: view.getBigInt64(offset + 8, true),
+                mathICIndex: read.u32(offset),
+                profileBitsAtEntry: read.u16(offset + 4),
+                replacement: read.i64(offset + 8),
                 seeds,
             });
             offset += imageSectionAlign(16 + 4 * attachCount);
@@ -269,13 +268,13 @@
         return { header, inputs, regenerations };
     }
 
-    // image-twins.baseline (section 11.2): equal except the capture-process token, header bytes 32 to 48, and the producer
+    // image-twins.baseline: equal except the capture-process token, header bytes 32 to 48, and the producer
     // values, the region that ends the section, which hold the capturing process's own token and resolutions.
     function sameTwinsExceptCapturingProcess(a, b) {
         const x = new Uint8Array(a);
         const y = new Uint8Array(b);
-        const countA = new DataView(a).getUint32(28, true);
-        const countB = new DataView(b).getUint32(28, true);
+        const countA = byteReader(a).u32(28);
+        const countB = byteReader(b).u32(28);
         if (x.length !== y.length || countA !== countB)
             return false;
         const producerValues = x.length - 8 * countA;
@@ -290,14 +289,14 @@
 
     // Whether this run determines which bodies it imports, so that a script checks its imports: a Consumer or a
     // ConsumerProducer of a twins build, which alone has jitcacheBodyEvents, with concurrent JIT off. With it on, as in
-    // concurrency.js (T14), a producer can exit before it finalizes a plan it enqueued, so which bodies it committed
+    // concurrency.js, a producer can exit before it finalizes a plan it enqueued, so which bodies it committed
     // depends on the schedule.
     function checksImports(role) {
         return (role === "Consumer" || role === "ConsumerProducer") && typeof jitcacheBodyEvents === "function" && !jscOptions().useConcurrentJIT;
     }
 
     // fn's CodeBlock of kind installed an imported body when it was created, so its UCB began no LLInt instruction and
-    // compiled no baseline code in this process (harness sub-SPEC section 10.1); throws otherwise. A body the producer
+    // compiled no baseline code in this process; throws otherwise. A body the producer
     // never compiled has no file to import, so a script checks only bodies its producer runs past the LLInt's tier-up.
     function expectImported(fn, kind = "call", label = fn.name) {
         const counts = jitcacheBodyEvents(fn, kind);
@@ -316,9 +315,9 @@
             expectImported(fn, kind, label);
     }
 
-    // Whether a parsed image.baseline holds ARM64 code, read from the canonical footprint of its first Pointer fixup
-    // (section 3.2): on x86_64 a movabs whose eight immediate bytes end at the site, on ARM64 a movz Xd, #0 that starts
-    // there. Every image has one, since its prologue compares the soft stack limit (census B1).
+    // Whether a parsed image.baseline holds ARM64 code, read from the canonical footprint of its first Pointer fixup: on
+    // x86_64 a movabs whose eight immediate bytes end at the site, on ARM64 a movz Xd, #0 that starts there. Every image
+    // has one, since its prologue compares the soft stack limit.
     function isArm64Image(image) {
         const code = image.code;
         const pointer = image.fixups.find(fixup => fixup.form === imageFixupForm.Pointer);
@@ -342,11 +341,11 @@
     }
 
     // The fixups of a parsed image.baseline whose footprints lie in the slow call of one of its MathICs with inline code,
-    // from the slow path's start to the call's return point (region 9's slowPathStart and slowPathCall). There
+    // from the slow path's start to the call's return point (the MathIC entry's slowPathStart and slowPathCall). There
     // JIT::emitMathICSlow emits only the call's arguments and its far call, so the references there are the call's
-    // Operation, in debug builds the top call frame, and the one operand that names the MathIC (census F3) or its
-    // arithmetic profile (F4). A profile there is therefore F4's, while anywhere else it can be a profile write (A14) or the
-    // operand of a site without inline code (F2), which have the same target.
+    // Operation, in debug builds the top call frame, and the one operand that names the MathIC or its arithmetic
+    // profile. A profile there is therefore that operand, while anywhere else it can be a profile write or the operand
+    // of a site without inline code, which have the same target.
     function mathICSlowCallFixups(image, arm64) {
         const slowCalls = image.mathICs.filter(mathIC => !(mathIC.flags & imageMathICFlags.noInlineCode));
         return image.fixups.filter(fixup => {
@@ -378,10 +377,10 @@
         return { fixups, mathICSlowCall: mathICSlowCallFixups(image, arm64), accessTypes, arm64 };
     }
 
-    // T1's check of a script's claims, in a run that determines its imports (checksImports): the images of bodies, an
+    // The check of a script's claims, in a run that determines its imports (checksImports): the images of bodies, an
     // object from a kind ("call" or "construct") to an object from a label to a function, together carry a fixup of each
-    // target claims names. A claim gives the census site or section it comes from, its kind and form by their names in
-    // imageTargetKind and imageFixupForm, and its a by name where table 3.3 keys a by an enumeration (targetFieldA); a
+    // target claims names. A claim gives the site it comes from, which an error names, its kind and form by their names
+    // in imageTargetKind and imageFixupForm, and its a by name where the kind keys a by an enumeration (targetFieldA); a
     // kind whose a is an index into the body's own tables is claimed without one. A claim with eachMoldAccessType holds
     // one fixup for each access type the bodies' molds list, and a claim with arch "arm64" holds for ARM64 code only. A
     // claim with where "mathICSlowCall" holds only a fixup that lies in a MathIC's slow call (mathICSlowCallFixups), for a

@@ -14,11 +14,11 @@ function acbNotEqualsBeta(s)
 }
 
 // The comparison and `key` share one constant register, since generation makes one constant per string. o[key] reads
-// through that constant's own value (get_by_val), whose property key makes its JSString an atom in place (SPEC-ucb.md
-// F19); o["..."] would compile to get_by_id with an identifier of its own, which leaves the constant as it is, and
-// could even make the decode give the constant its atom (F19). No other identifier of this module holds these
-// characters. `key` is a let: Bun's runtime transpiler inlines a const whose value is a literal (const_values in its
-// parser, with inlining on for target bun), which would turn o[key] back into o["..."].
+// through that constant's own value (get_by_val), whose property key makes its JSString an atom in place, since a
+// string constant's atom-ness only grows; o["..."] would compile to get_by_id with an identifier of its own, which
+// leaves the constant as it is, and could even make the decode give the constant its atom. No other identifier of this
+// module holds these characters. `key` is a let: Bun's runtime transpiler inlines a const whose value is a literal
+// (const_values in its parser, with inlining on for target bun), which would turn o[key] back into o["..."].
 function acbDelta(s, o)
 {
     let key = "atom-constants-b-delta-long";

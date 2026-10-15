@@ -3,10 +3,11 @@
 // jitcache-requires: twins
 // jitcache-pin: off its Off runs call jitcacheICsSnapshot, which only twins builds have, and E1 changes their baseline super_construct code
 
-// SPEC-ics.md T2, first script: the super_construct cache of a CodeBlock born in baseline (sequence 0, LLInt off) fills
-// as the LLInt fills it (sequence 1, baseline JIT off). Each derived class is constructed with skip, which returns before
-// super, then with new.target A, A again and B, and the cache reads Empty, A, A and then the marker for several callees.
-// Before E1 the baseline template stored back the callee it loaded, so sequence 0 stayed Empty.
+// The first of the two super_construct scripts: the super_construct cache of a CodeBlock born in baseline (sequence 0,
+// LLInt off) fills as the LLInt fills it (sequence 1, baseline JIT off). Each derived class is constructed with skip,
+// which returns before super, then with new.target A, A again and B, and the cache reads Empty, A, A and then the marker
+// for several callees. Before JITCache fixed the baseline super_construct store, the template stored back the callee it
+// loaded, so sequence 0 stayed Empty.
 load("./resources/ics.js", "caller relative");
 
 (function main(sequence) {

@@ -229,7 +229,7 @@ UnlinkedCodeBlock::~UnlinkedCodeBlock()
     JITCache::unlinkedCodeBlockWillBeDestroyed(*this);
 #if ENABLE(JITCACHE_TWINS)
     // The body's event counts join its VM's retired totals, which the body-event dump adds to the live UCBs' counts
-    // (SPEC-integrator.harness.md section 10.3). Retiring reads no registry entry, so it is independent of the hook above.
+    // when it walks the heap. Retiring reads no registry entry, so it is independent of the hook above.
     JITCache::retireBodyEventCounts(*this);
 #endif
     if (Options::returnEarlyFromInfiniteLoopsForFuzzing()) [[unlikely]] {

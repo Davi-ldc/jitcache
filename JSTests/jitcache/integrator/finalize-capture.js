@@ -1,9 +1,9 @@
 // jitcache-runs: Producer; Consumer
 
-// SPEC-integrator.md section 15.2, finalize-capture.js. The Producer runs no delta, so every body it commits is the
-// capture at the end of its baseline compilation (section 8.5). It drives the corpus of resources/corpus.js, whose bodies
-// each compile once, and then finds a committed body at every body's key, with no delta run. The Consumer imports each
-// body and installs it at the body's first call, so its event counts (harness sub-SPEC section 10.2) show no LLInt
+// The capture at the end of each baseline compilation. The Producer runs no delta, so every body it commits is the
+// capture at the end of its baseline compilation. It drives the corpus of resources/corpus.js, whose bodies each compile
+// once, and then finds a committed body at every body's key, with no delta run. The Consumer imports each body and
+// installs it at the body's first call, so its event counts show no LLInt
 // instruction and no baseline compile, where the JITCache-off run, like the Producer, shows both. The runner compares
 // every output with the JITCache-off run's.
 load("./resources/integrator.js", "caller relative");

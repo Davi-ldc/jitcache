@@ -39,7 +39,7 @@ namespace LLInt {
 
 #if ENABLE(JIT)
 // The gate the LLInt's tier-up applies before baseline code: bytecodeRangeToJITCompile, the jitAllowlist and
-// useBaselineJIT. JITCache's install function applies it too (SPEC-integrator.md section 7.1).
+// useBaselineJIT. JITCache's install function applies it too.
 bool shouldJIT(CodeBlock*);
 #endif
 

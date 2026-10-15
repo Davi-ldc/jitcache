@@ -1,13 +1,14 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T16 (sections 3.7 and 10.3, I15). Inline switch_string trees of 1 to 64 keys, each a Function-constructor
-// body. The producer parses each body before anything else interns its keys, so their atoms are allocated in the order
-// the source names them; every other role first uses each key as a property key, last key first, so the same atoms are
-// allocated in the reverse order before the bodies are parsed or imported. The trees keep the producer's shape, and the
+// String switch ranks: an imported inline switch_string tree takes the consumer's own atoms, rank by rank. Inline
+// switch_string trees of 1 to 64 keys, each a Function-constructor body. The producer parses each body before anything
+// else interns its keys, so their atoms are allocated in the order the source names them; every other role first uses
+// each key as a property key, last key first, so the same atoms are allocated in the reverse order before the bodies
+// are parsed or imported. The trees keep the producer's shape, and the
 // consumer writes its own atom at each rank, ordered by its own addresses, and points each rank's case jump at that key's
-// case, which T2's twin check compares and the output proves. The switches run with atoms, which take the inline tree,
+// case, which the twin check compares and the output proves. The switches run with atoms, which take the inline tree,
 // with equal strings built at run time, which take operationSwitchStringWithUnknownKeyType, and with strings no case
-// names. The consumer checks that the images carry the ranked atoms and case jumps (A16, C13; T1).
+// names. The consumer checks that the images carry the ranked atoms and case jumps.
 (function main(role, scratch, artifact, sequence) {
     const sizes = [1, 2, 3, 4, 7, 8, 9, 16, 31, 32, 33, 48, 63, 64];
     const keyLists = sizes.map(size => {

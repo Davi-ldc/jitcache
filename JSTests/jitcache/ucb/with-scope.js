@@ -2,10 +2,10 @@
 // jitcache-runs: Producer; ConsumerProducer; Consumer
 // jitcache-expect-no-install: 1
 
-// SPEC-ucb.md section 13.3, with-scope.js: THREAD Identity's with-scope bit. The jsc shell can set no global scope
-// extension, so the extension comes from vm.compileFunction, which installs one on its context's global object and never
-// removes it (F11). A program or indirect eval evaluated after it carries the with-scope bit only when the code that
-// creates the executable making its request reads that extension (F18): globalFuncEval does for an indirect eval, and
+// The with-scope bit of a body's identity. The jsc shell can set no global scope extension, so the extension comes from
+// vm.compileFunction, which installs one on its context's global object and never removes it. A program or indirect
+// eval evaluated after it carries the with-scope bit only when the code that creates the executable making its request
+// reads that extension: globalFuncEval does for an indirect eval, and
 // Interpreter::executeProgram for a program JSC::evaluate runs without a precompiled block, as Bun runs a CommonJS
 // wrapper. vm.runInThisContext keeps the clear bit: NodeVMScript::unlinkedCodeBlockFor requests its UCB on a
 // ProgramExecutable of its own, which nothing marks, and executeProgram runs that precompiled UCB without a request.

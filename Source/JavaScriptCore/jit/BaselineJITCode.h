@@ -139,7 +139,7 @@ private:
 public:
     bool m_isShareable { true };
     // JITCache: what this code and its MathIC snippets embed, as fixups, and the facts its compilation baked from its
-    // CodeBlock (SPEC-image.md section 5). JIT::link attaches it in a recording compilation, and an import rebuilds it in
+    // CodeBlock. JIT::link attaches it in a recording compilation, and an import rebuilds it in
     // a ConsumerProducer VM; null otherwise. It dies with the code it describes. Only the thread holding the VM's API lock
     // reads or writes it once JIT::link returns; the constructor and destructor, out of line, see the complete type.
     std::unique_ptr<JITCache::ImageRecord> m_jitCacheImageRecord;

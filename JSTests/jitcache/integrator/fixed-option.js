@@ -1,11 +1,11 @@
 // jitcache-runs: Producer --useLOLJIT=true
 // jitcache-check: 0 resources/rejected-fixed-option.ts
 
-// SPEC-integrator.md section 15.2, fixed-option.js. useLOLJIT is a fixed option whose required value is false
-// (options.md): with it on, a baseline plan would compile with the LOL JIT. start checks the fixed options before it
-// touches the artifact and rejects the Producer at start.fixed-option, with a detail naming useLOLJIT, which the checker
-// reads in the start line. The VM stays unconfigured, and the runner compares the output with the JITCache-off run's,
-// which runs with the same option. Nothing here runs often enough to compile.
+// start rejects a run whose fixed option has another value than JITCache requires. useLOLJIT is a fixed option whose
+// required value is false (options.md): with it on, a baseline plan would compile with the LOL JIT. start checks the
+// fixed options before it touches the artifact and rejects the Producer at start.fixed-option, with a detail naming
+// useLOLJIT, which the checker reads in the start line. The VM stays unconfigured, and the runner compares the output
+// with the JITCache-off run's, which runs with the same option. Nothing here runs often enough to compile.
 load("./resources/integrator.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

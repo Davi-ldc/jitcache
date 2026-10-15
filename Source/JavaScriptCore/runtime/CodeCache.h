@@ -246,7 +246,7 @@ public:
 private:
     template <class UnlinkedCodeBlockType, class ExecutableType>
     UnlinkedCodeBlockType* getUnlinkedGlobalCodeBlock(VM&, ExecutableType*, const SourceCode&, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType);
-    // What follows a generation, and an import in its place (SPEC-ucb.md section 7.2.1): when useCodeCache is on, the
+    // What follows a generation, and an import in its place: when useCodeCache is on, the
     // map entry and the provider's two cache hooks. Does nothing for null.
     void publishGeneratedCodeBlock(VM&, const SourceCodeKey&, UnlinkedCodeBlock*);
 

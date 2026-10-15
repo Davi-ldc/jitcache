@@ -2,8 +2,8 @@
 // jitcache-runs: Off --diskCachePath=.; Producer --jitcache-delta-at-exit; Consumer --diskCachePath=.
 // jitcache-pin: off the second sequence's runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
-// SPEC-ucb.md section 13.3, array-literals.js, F23 and section 7.3.1 step 8: the constant butterflies an array literal's
-// generation builds. Each function below holds one literal and searches it with Array.prototype.includes and indexOf:
+// The constant butterflies an array literal's generation builds, which an import rebuilds in the same form. Each
+// function below holds one literal and searches it with Array.prototype.includes and indexOf:
 // - an all-string literal, which generation builds in the atom form (cellButterflyOnlyAtomStringsStructure, each element
 //   the VM's canonical JSString for its atom), which the identity section's butterfly map marks and an import rebuilds;
 // - strings before a spread with no elision, which builds no butterfly;
@@ -11,8 +11,8 @@
 // - a literal with an elision, whose elements before it form a plain butterfly;
 // - strings mixed with numbers, a plain butterfly.
 // Each is searched for its own strings, for a string no literal holds and for strings built at run time.
-// - Sequence 0: generated in the Producer and imported in the Consumer (statistics, imports), where T6 checks every
-//   constant's form against the twin's (section 13.2).
+// - Sequence 0: generated in the Producer and imported in the Consumer (statistics, imports), where the twin check
+//   compares every constant's form with the twin's.
 // - Sequence 1: the first run, with JITCache off, writes the jsc shell's bytecode cache (--diskCachePath; every run works
 //   in its sequence's scratch directory), the Producer generates and captures, and the Consumer decodes the functions
 //   from that cache and seeds them (statistics, seededDecodes). Seeding never rebuilds a butterfly, so the decoded ones

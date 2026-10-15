@@ -1,7 +1,7 @@
 // jitcache-runs: Producer --useConcurrentGC=false; Consumer
 // jitcache-requires: twins
 
-// SPEC-ics.md T4: what an imported site does at its first consumer visit. The producer folds a get, a put, an in and an
+// What an imported site does at its first consumer visit. The producer folds a get, a put, an in and an
 // instanceof site, gives one site up with no case listed, makes a get_by_id of name, a name the megamorphic fold
 // refuses, give up on its eighth case, leaves one site unreached, links a call site and sends a construct site virtual,
 // each body holding an anchor (its first property IC, with one case). After a skip call the consumer visits each site

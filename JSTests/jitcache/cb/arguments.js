@@ -1,6 +1,6 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
 
-// SPEC-cb.md section 11.3, argument profiles (P2) in functions and constructors. A function called with several types,
+// Argument profiles in functions and constructors. A function called with several types,
 // a function used both as a constructor and through Function.prototype.call, whose two specializations are two bodies,
 // and a class constructor each learn argument predictions in the Producer. In twins builds the Producer checks that its
 // committed sections predict every declared argument after a delta that follows a full collection, whose finalization

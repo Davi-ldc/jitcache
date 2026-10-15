@@ -5,18 +5,19 @@
 // jitcache-expect-twin: 0:1 coincidence structure-reservation
 // jitcache-expect-twin: 0:1 coincidence heap
 
-// SPEC-image.md T3. The image test hook makes the twin check of each import take, as the producer value of the first
-// fixup it compares in each relocation domain, that target's resolution in the restored context (section 11.4). In the
-// first sequence, RelocationPairs makes the clause report exactly those fixups, one in each domain probe's fixups reach:
-// the executable pool (its thunks), the structure reservation (the structure decode of typeof) and the heap (the VM's
-// fields), so a domain that did not move cannot pass unnoticed. The engine image, where every Operation target lies, sits
-// at its link-time address and is skipped. In the second, OperationPair forces the first Operation fixup, which the clause
-// skips, so it reports nothing, and the runner fails any report it finds. probe is the one body these runs compile and
-// import; the consumer checks that probe ran its import, with no LLInt instruction and no baseline compile, that its
-// image carries a target in each domain named above (T1): op_ret's jump to ReturnFromBaseline (E1), the structure ID
-// base (C27, A6), the soft stack limit (B1) and the far calls' operations (B9); and then reads its own twin report,
-// run1.twins, which probe's install wrote. Its jitcache functions run only in that role, so the pin comparison runs the
-// script's off path.
+// Relocation pairs: a fixup whose target resolves to the same address in the capturing and the importing process cannot
+// show a missed patch, so the twin check reports it as a coincidence. The image test hook makes the twin check of each
+// import take, as the producer value of the first fixup it compares in each relocation domain, that target's resolution
+// in the restored context. In the first sequence, RelocationPairs makes the clause report exactly those fixups, one in
+// each domain probe's fixups reach: the executable pool (its thunks), the structure reservation (the structure decode of
+// typeof) and the heap (the VM's fields), so a domain that did not move cannot pass unnoticed. The engine image, where
+// every Operation target lies, sits at its link-time address and is skipped. In the second, OperationPair forces the
+// first Operation fixup, which the clause skips, so it reports nothing, and the runner fails any report it finds. probe
+// is the one body these runs compile and import; the consumer checks that probe ran its import, with no LLInt
+// instruction and no baseline compile, that its image carries a target in each domain named above: op_ret's jump to
+// ReturnFromBaseline, the structure ID base, the soft stack limit and the far calls' operations; and then reads its own
+// twin report, run1.twins, which probe's install wrote. Its jitcache functions run only in that role, so the pin
+// comparison runs the script's off path.
 (function main(role, scratch, artifact, sequence) {
     function probe(object) {
         if (typeof object.missing === "undefined")

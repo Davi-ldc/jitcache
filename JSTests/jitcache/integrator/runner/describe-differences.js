@@ -8,7 +8,7 @@
 // jitcache-runs: Producer
 // jitcache-runs: Producer
 
-// Harness sub-SPEC H5: sequence k makes its Producer run and the oracle's Off run, otherwise equal, differ in one thing
+// Sequence k makes its Producer run and the oracle's Off run, otherwise equal, differ in one thing
 // JavaScript can reach at the end of the run, and each such difference must change the end-of-run description. The
 // runner's self-test therefore expects every sequence to fail on its heap description and on nothing else, while
 // describe-alike.js, which runs the same two runs with differences JavaScript cannot see, is the control that passes.

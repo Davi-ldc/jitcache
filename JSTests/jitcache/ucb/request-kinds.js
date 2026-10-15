@@ -4,16 +4,15 @@
 // delta capture all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js
 // covers it).
 
-// SPEC-ucb.md section 13.3, request-kinds.js: a body of each kind of request point imports in the Consumer (statistics,
-// imports) and passes its twins (SPEC-ucb.md section 13.2, which the engine runs at each import of a twins run): a
-// program, an indirect eval, a direct eval nested in a function, a Function-constructor body, a JSC builtin, a class's
-// field initializer, base and derived default constructors, generator, async and async-generator bodies, and one function
-// both called and constructed. The modules' request point is request-kinds.mjs.
+// A body of each kind of request point imports in the Consumer (statistics, imports) and passes its twins, which the
+// engine checks at each import of a twins run: a program, an indirect eval, a direct eval nested in a function, a
+// Function-constructor body, a JSC builtin, a class's field initializer, base and derived default constructors,
+// generator, async and async-generator bodies, and one function both called and constructed. The modules' request point
+// is request-kinds.mjs.
 //
-// The runs use the lane's default sequence, Producer --jitcache-delta-at-exit; Consumer (SPEC-integrator.harness.md
-// section 7.4). Every run performs the same requests and prints the same results; the Producer makes each body hot
-// enough to reach the baseline, where it is captured, and the Consumer checks that the first request of each kind
-// imported.
+// The runs use the lane's default sequence, Producer --jitcache-delta-at-exit; Consumer. Every run performs the same
+// requests and prints the same results; the Producer makes each body hot enough to reach the baseline, where it is
+// captured, and the Consumer checks that the first request of each kind imported.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {
@@ -43,8 +42,8 @@ load("./resources/ucb.js", "caller relative");
         return eval(text);
     }
 
-    // The field names are CommonIdentifiers, which the VM allocates when it is created (SPEC-integrator.harness.md
-    // section 7.5). The twin check parses the imported field initializer again, which leaks its field names as the
+    // The field names are CommonIdentifiers, which the VM allocates when it is created, so the runner's leak check never
+    // sees them. The twin check parses the imported field initializer again, which leaks its field names as the
     // native parse does, and main is imported too, so any other name would first be allocated by the decode of main's
     // core: a leak whose stack the Off run never reports.
     class FieldHolder {

@@ -1,4 +1,4 @@
-// The checker of events-dead-body.js (harness sub-SPEC H6). It requires the function made from h6Dying's text after the
+// The checker of events-dead-body.js. It requires the function made from h6Dying's text after the
 // collections to show fewer LLInt instructions than h6Dying, so that its UnlinkedCodeBlock is new and h6Dying's died: a
 // reused one would hold h6Dying's counts plus that function's call. It then requires the dump's total to exceed the
 // printed counts of the bodies still alive by at least h6Dying's counts. The total is the live UnlinkedCodeBlocks'

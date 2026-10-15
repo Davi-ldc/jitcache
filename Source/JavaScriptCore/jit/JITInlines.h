@@ -38,8 +38,8 @@
 
 namespace JSC {
 
-// JITCache: the support keys the baseline emitters link through the helpers of ImageEmission.h (SPEC-image.md sections
-// 3.3 and 3.4), with every field their kind does not use zero.
+// JITCache: the support keys the baseline emitters link through the helpers of ImageEmission.h, with every field their
+// kind does not use zero.
 namespace JITCacheSupportKey {
 
 constexpr JITCache::ImageTarget baselineThunk(JITCache::BaselineThunk thunk)
@@ -393,7 +393,7 @@ ALWAYS_INLINE void JIT::emitGetVirtualRegister(VirtualRegister src, GPRReg dst)
     ASSERT(m_bytecodeIndex); // This method should only be called during hot/cold path generation, so that m_bytecodeIndex is set.
     if (src.isConstant()) {
         if (m_profiledCodeBlock->isConstantOwnedByUnlinkedCodeBlock(src)) {
-            // JITCache: a cell the UCB owns is a reference; any other constant is a literal (census B6).
+            // JITCache: a cell the UCB owns is a reference; any other constant is a literal.
             JSValue value = m_unlinkedCodeBlock->getConstant(src);
             if (value && value.isCell())
                 JITCache::moveReferenceValue(*this, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, src), dst);

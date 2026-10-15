@@ -1,6 +1,6 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
 
-// SPEC-cb.md section 11.3: CB state travels for every kind of body, not only for functions nested in a script. Each kind
+// CB state travels for every kind of body, not only for functions nested in a script. Each kind
 // below runs hot enough to compile to baseline in the Producer and carries its profiles and counter to the Consumer:
 // - program bodies: one source evaluated again and again through loadString, whose UCB the CodeCache serves to every
 //   evaluation, so the UCB's LLInt counter crosses and a program CB compiles;

@@ -1098,7 +1098,7 @@ macro restoreStackPointerAfterCall()
 end
 
 # JITCache twins builds: the frame's body begins one more LLInt instruction. It adds at offset 0 of
-# UnlinkedCodeBlock::m_jitCacheEventCounts, which is llintInstructions (SPEC-integrator.harness.md section 10.1). Its
+# UnlinkedCodeBlock::m_jitCacheEventCounts, which is llintInstructions. Its
 # callers are the points where the native tracer, or the slow path call_direct_eval calls next, makes a C call, so no
 # caller-saved register is live there and t0 is free.
 macro countJITCacheInstruction()

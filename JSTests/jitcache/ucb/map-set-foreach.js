@@ -1,12 +1,11 @@
-// SPEC-ucb.md section 13.3, map-set-foreach.js, F27 and SPEC-ucb.codec.md E16: Map.prototype.forEach and
-// Set.prototype.forEach hold the VM's ordered-hash-table sentinel as a constant and end their loop when the table
-// iteration returns it, comparing pointers. The Producer runs both until they reach the baseline, where they are
-// captured; in the Consumer each body imports at its first call (statistics, imports), which is made over an empty
-// collection, whose storage is the sentinel itself, and then both run over non-empty ones and over a map and a set that
-// the callbacks shrink while they iterate. T6 checks at each import that the constant is this VM's sentinel (section
-// 13.2); an import that held a copy would never leave the loop.
+// Map.prototype.forEach and Set.prototype.forEach hold the VM's ordered-hash-table sentinel as a constant and end their
+// loop when the table iteration returns it, comparing pointers. The Producer runs both until they reach the baseline,
+// where they are captured; in the Consumer each body imports at its first call (statistics, imports), which is made
+// over an empty collection, whose storage is the sentinel itself, and then both run over non-empty ones and over a map
+// and a set that the callbacks shrink while they iterate. The twin check of each import checks that the constant is
+// this VM's sentinel; an import that held a copy would never leave the loop.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
+// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

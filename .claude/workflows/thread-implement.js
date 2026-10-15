@@ -1028,7 +1028,7 @@ V6  ARM64: natively on the Ampere A1, reached and laid out as ${A1_NOTES} says. 
     exported header copies (JavaScriptCore/PrivateHeaders) are symlinks into this machine's source
     tree, which a C++ test reads. Copy the aarch64 twins build, the aarch64 pin
     build (\`bun build.ts pin --arch=aarch64\` in the snapshot, once: the pin does not change), and
-    the runner's files (Tools/Scripts/run-jitcache-tests, Tools/Scripts/jitcache-pin-compare.ts,
+    the runner's files (Tools/Scripts/run-jitcache-tests, Tools/Scripts/jitcache/,
     JSTests/jitcache/), and Source/JavaScriptCore/jitcache/. A C++ test reads the source tree through
     the build's CMake cache (imageExportedHeadersIncludeOnlyExportedJITCacheHeaders reads
     CMAKE_HOME_DIRECTORY), so after each copy set CMAKE_HOME_DIRECTORY in the VM's copy of the twins

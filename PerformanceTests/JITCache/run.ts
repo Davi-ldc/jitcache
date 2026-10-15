@@ -7,7 +7,7 @@
 // variant 1; in the varied branch call n sends variant n, starting over at variant 1 after the last. N may be 0, and the
 // process then ends right after its ready line.
 //
-// Standard output carries JSON lines for Tools/Scripts/jitcache-macro-bench.ts: a ready line, one line per call and an
+// Standard output carries JSON lines for bench.ts, the driver beside it: a ready line, one line per call and an
 // end line. The ready and end lines carry Bun.nanoseconds(), Bun's clock since its VirtualMachine was created, so the
 // driver can tell startup and the exit from the wall time it measures. Each line goes out through a synchronous write to
 // fd 1, so a process that ends or kills itself right after a line has written all of it. --mark-calls writes `call <n>`

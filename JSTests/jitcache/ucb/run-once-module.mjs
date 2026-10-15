@@ -2,7 +2,7 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-delta-capture=compiled; Consumer
 // jitcache-expect-no-install: 1
 
-// SPEC-ucb.md section 13.3, run-once-module.mjs: a module's top level runs once and never compiles, and so does a
+// A module's top level runs once and never compiles, and so does a
 // function it calls twice. With the delta capture all, delta captures both without an image, and the Consumer imports
 // the module at its request point, before its code runs, and the function at its first call, with no install: their
 // CodeBlocks start in the LLInt. With the delta capture compiled neither has a body, and the Consumer generates both.

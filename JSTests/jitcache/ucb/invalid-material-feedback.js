@@ -31,21 +31,21 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; Consumer
 
-// SPEC-ucb.md section 13.3, invalid-material.js, for the rules of section 5.2: with strict on, a body whose ucb.feedback
-// breaks one is invalid material at ucb.feedback, cache activity turns off, and the run goes on as the JITCache-off run
+// invalid-material.js for the rules of ucb.feedback's layout: with strict on, a body whose ucb.feedback breaks one is
+// invalid material at ucb.feedback, cache activity turns off, and the run goes on as the JITCache-off run
 // does. resources/invalid-material-cases.js runs each case as invalid-material.js does, which holds the other sections'
 // cases; the runner reads directives only in a script's first 50 lines, which the two tables would not fit together.
 //
-// Each sequence above is one case of the table below, which the sequence index picks: every rule of section 5.2 that a
+// Each sequence above is one case of the table below, which the sequence index picks: every rule of the layout that a
 // rewrite of the same size can break. In order, the header (the magic, the layout version, the reserved bytes, a count of
 // 1 << 28), each profile (a prediction carrying SpecInt52Any, array modes outside ALL_ARRAY_MODES, an array flag past the
 // eight, the pruning flag, binary and unary bits out of range), the gap before the exit sites, each exit site field (an
 // unset kind and one past the last, a JIT type and an inline kind out of range, a nonzero padding byte, two equal sites),
 // the tier-up bytes (the three TriStates and byte 39), the LLInt counter (a negative threshold, a total that is not finite,
 // a progress below 0 and one of 2^31), a child bit of 2, a constant bit at C, a nonzero byte of final padding, and a
-// constant count other than the identity section's. A threshold of INT32_MAX with a progress in range obeys section 5.2,
-// which accepts any threshold of at least 0 that way. No same-size rewrite can give the section the wrong size; SPEC-ucb.md
-// U5 checks that rule.
+// constant count other than the identity section's. A threshold of INT32_MAX with a progress in range obeys the
+// layout's rules, which accept any threshold of at least 0 that way. No same-size rewrite can give the section the
+// wrong size; the UCB lane's section tests in testjitcache check that rule.
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
 load("./resources/invalid-material-cases.js", "caller relative");

@@ -1,4 +1,4 @@
-// Reads what a run wrote to standard error for the counter checks of floor.js and polymorphic.js (SPEC-cb.md section 11.3).
+// Reads what a run wrote to standard error for the counter checks of floor.js and polymorphic.js.
 // The script writes "<tag> invocation <k>" with printErr right before its k-th call of the body, and under verboseOSR
 // operationOptimize writes, on entry,
 //   <CodeBlock>: Entered optimize with bytecodeIndex = <index>, executeCounter = <count>/<threshold>, <m_counter>, ...

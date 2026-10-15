@@ -1,9 +1,9 @@
 // jitcache-runs: Producer; Consumer
 
-// SPEC-integrator.md section 15.2, delta-scoring.js. dsBody compiles at its 34th call, and the Producer commits it at
-// that compilation with the LLInt phase's feedback and cold ICs. More warm-up then passes doubles, which give its value
-// profiles new categories, and fills its property ICs; a full collection folds the pending samples into the predictions,
-// which capture reads (THREAD Capture). The first jitcacheDelta() therefore commits a richer body for dsBody's key: its
+// delta commits a capture only when it beats the saved body. dsBody compiles at its 34th call, and the Producer commits
+// it at that compilation with the LLInt phase's feedback and cold ICs. More warm-up then passes doubles, which give its
+// value profiles new categories, and fills its property ICs; a full collection folds the pending samples into the
+// predictions, which capture reads. The first jitcacheDelta() therefore commits a richer body for dsBody's key: its
 // committedBodies counts it, and the key's cb.summary changes. A second jitcacheDelta() right after it, with no
 // JavaScript run in between and main still in the LLInt, finds nothing that beats the kept summaries and commits nothing,
 // and dsBody's file stays as the first delta left it. The Consumer imports that last commit, whose cb.summary the

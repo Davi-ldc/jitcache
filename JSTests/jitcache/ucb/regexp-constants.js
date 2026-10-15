@@ -1,16 +1,16 @@
-// SPEC-ucb.md section 13.3, regexp-constants.js, F22 and SPEC-ucb.codec.md E11: a RegExp constant is the cell the VM's
-// RegExpCache holds for its pattern and flags, shared with every live RegExp object of that pattern and flags, and code
-// deletion clears that cell's compiled state. The script keeps live RegExp objects whose patterns and flags the
-// functions below also write as literals, runs them, and asks for all code to be deleted once the VM is idle
-// ($vm.deleteAllCodeWhenIdle(), which runs when the script's evaluation returns). The functions' bodies are generated,
-// or imported in the Consumer, only afterwards, in a timer: so in the Producer generation takes cells whose code was
-// cleared and the capture encodes them, and in the Consumer the import's decode returns those cells in the same state.
-// With strict on no import is invalid material (C5 holds of a cleared cell), T1 and T6 hold at every import (section
-// 13.2), and the results equal the JITCache-off run. The Bun variant, which clears the cells with Bun.shrink(), is
-// regexp-constants-bun.js.
+// A RegExp constant is the cell the VM's RegExpCache holds for its pattern and flags, shared with every live RegExp
+// object of that pattern and flags, and code deletion clears that cell's compiled state. The script keeps live RegExp
+// objects whose patterns and flags the functions below also write as literals, runs them, and asks for all code to be
+// deleted once the VM is idle ($vm.deleteAllCodeWhenIdle(), which runs when the script's evaluation returns). The
+// functions' bodies are generated, or imported in the Consumer, only afterwards, in a timer: so in the Producer
+// generation takes cells whose code was cleared and the capture encodes them, and in the Consumer the import's decode
+// returns those cells in the same state.
+// With strict on no import is invalid material, since a cleared cell passes the check on constants; at every import
+// the twin check finds the core encoding and the constant cells' forms equal to the twin's; and the results equal the
+// JITCache-off run. The Bun variant, which clears the cells with Bun.shrink(), is regexp-constants-bun.js.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4). A plain build has no $vm, so there
-// nothing is deleted and every run still behaves alike.
+// The runs use the lane's default sequence. A plain build has no $vm, so there nothing is deleted and every run still
+// behaves alike.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {
@@ -70,7 +70,7 @@ load("./resources/ucb.js", "caller relative");
             }
             lines.push(`${fn.name}: ${results.join(" ")}`);
         }
-        t.check(t.status() === null || t.status() === undefined, () => `cache activity turned off at ${t.status()}`);
+        t.check(t.status() === null, () => `cache activity turned off at ${t.status()}`);
         for (const line of lines)
             print(line);
         live.length = 0;

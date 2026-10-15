@@ -725,8 +725,7 @@ void JIT::emitConsistencyCheck()
 #if ENABLE(JITCACHE_TWINS)
 void JIT::setJITCacheTwin(Ref<JITCache::ProducerBudget>&& budget, const JITCache::TwinSeeds& seeds, const JITCache::TwinCompileInputs& compileInputs)
 {
-    // Before the compilation, which then attaches this recorder instead of creating one, in any VM (SPEC-image.md
-    // section 4.1).
+    // Before the compilation, which then attaches this recorder instead of creating one, in any VM.
     ASSERT(!m_imageRecorder);
     m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, WTF::move(budget), seeds, compileInputs);
 }
@@ -751,9 +750,9 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     }
 
     // JITCache: the compilation records its image when its plan says the UCB has a record and the VM still produces, or
-    // when setJITCacheTwin already gave it a twin recorder (SPEC-image.md section 4.1). The recorder is attached before
+    // when setJITCacheTwin already gave it a twin recorder. The recorder is attached before
     // anything is emitted, and takes the facts the code bakes from this CodeBlock without a guard: the capability class
-    // read above and the taint (section 7).
+    // read above and the taint.
     if (!m_imageRecorder && m_plan.jitCacheRecordsImage()) {
         if (auto* context = JITCache::producerContext(vm()))
             m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, context->budget());
@@ -763,7 +762,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
         m_imageRecorder->bakedFacts().setCodeBlockFacts(level, m_profiledCodeBlock->couldBeTainted());
 #if ENABLE(JITCACHE_TWINS)
         // Twins builds also record, before the main pass reads them, the values emission reads from mutable state, and
-        // whether this thread holds the API lock, which makes them what emission reads (section 11.1).
+        // whether this thread holds the API lock, which makes them what emission reads.
         if (m_imageRecorder->isRecording())
             m_imageRecorder->recordCompileInputs(JITCache::snapshotCompileInputs(*m_profiledCodeBlock));
 #endif
@@ -894,8 +893,8 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     stackOverflow.link(this);
     JITCache::jumpSupport(*this, vm(), JITCacheSupportKey::commonThunk(CommonJITThunkID::ThrowStackOverflowAtPrologue));
 
-    // JITCache: on ARM64, one veneer per target of the conditional jumps that leave the image, after all other code
-    // (SPEC-image.md section 4.5). Nothing on x86_64.
+    // JITCache: on ARM64, one veneer per target of the conditional jumps that leave the image, after all other code.
+    // Nothing on x86_64.
     if (m_imageRecorder)
         m_imageRecorder->emitVeneers(*this);
 
@@ -912,7 +911,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
 RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
 {
     if (patchBuffer.didFailToAllocate()) {
-        // JITCache: the recorder goes with the failed compilation and releases its charges (SPEC-image.md section 4.7).
+        // JITCache: the recorder goes with the failed compilation and releases its charges.
         if (m_imageRecorder) {
             setJITCacheRecorder(nullptr);
             m_imageRecorder = nullptr;
@@ -1062,7 +1061,7 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
     jitCode->m_pcToCodeOriginMap = WTF::move(pcToCodeOriginMap);
 
     // JITCache: the record describes the linked code, after the link tasks have set the MathICs' locations, and lives
-    // exactly as long as the code (SPEC-image.md sections 4.7 and 5).
+    // exactly as long as the code.
     if (m_imageRecorder)
         jitCode->m_jitCacheImageRecord = m_imageRecorder->finishBaselineCompile(patchBuffer, jitCode.get(), m_farCalls.span());
 

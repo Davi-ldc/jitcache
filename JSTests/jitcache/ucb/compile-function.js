@@ -3,13 +3,13 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-expect-no-install: 1:1
 
-// SPEC-ucb.md section 13.3, compile-function.js, F11 and section 7.2.5: Bun's vm.compileFunction.
+// Bun's vm.compileFunction, a path with no request point of its own.
 // - Without cachedData, constructAnonymousFunction asks CodeCache::getUnlinkedProgramCodeBlock for the wrapper program,
 //   so the wrapper comes through the program request point and is recorded there; it never runs, so no body holds it.
 //   The user function and its construct body import at their first call and first `new` in the Consumer (statistics).
 // - With cachedData, Bun decodes the wrapper itself, outside the CodeCache: the wrapper and the user function get no
 //   record, nothing in them imports or is captured, and cachedDataRejected is the same in every run. The user function's
-//   body is decoded from the cachedData span, which Bun has freed by then (F11), so the case calls it only in release
+//   body is decoded from the cachedData span, which Bun has freed by then, so the case calls it only in release
 //   builds, which AddressSanitizer does not instrument.
 // Sequence 0 runs both cases; sequence 1 runs the cachedData case alone, so its Consumer has nothing to install.
 // The cachedData comes from one compile with produceCachedData, made by the first run that needs it and kept in the

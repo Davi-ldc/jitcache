@@ -3,16 +3,18 @@
 // the sequence index, which runApp passes on, picks the case: 0 and 1, built with --bytecode, with strict on and then off
 // in the Consumer; 2, built without it; 3, built without it and with the digest record removed; 4 and 5, built as
 // CommonJS without it, with the module wrapper overridden in the Producer or in the Consumer before the module loads. The
-// checks are SPEC-ucb.md section 13.3's, listed in supplied-digests.js.
+// checks are listed in supplied-digests.js.
 //
 // Bun creates some of its own JS builtins while it creates the global object, after JITCache's start, and their roots are
 // hashed from their text: each builtin's source is a range of one provider that holds them all, so none spans its
-// provider (section 3.5, form 3). The counts of computed and supplied digests at the app's first statement therefore do
-// not single out the entry module, and those checks are made over the windows below, around the loads they name.
+// provider, and no provider supplies its digest. The counts of computed and supplied digests at the app's first
+// statement therefore do not single out the entry module, and those checks are made over the windows below, around the
+// loads they name.
 
 // The statistics at the entry module's first statement, read before the app loads any other module. A Consumer that
-// imports a function of an internal module verifies that module's own supplied digest with strict on (section 3.5,
-// form 2), so after the requires below the verification count would no longer single out the entry module's import.
+// imports a function of an internal module verifies that module's own supplied digest with strict on, since its
+// provider supplies it, so after the requires below the verification count would no longer single out the entry
+// module's import.
 // bun:jsc is native, so loading it runs no internal module's code.
 const atFirstStatement = require("bun:jsc").jitcacheUCBStatistics?.();
 const path = require("node:path");
@@ -86,7 +88,7 @@ function sdEval(n)
     return eval("{ let sdEvalTotal = n; for (let i = 0; i < 300; ++i) sdEvalTotal = (sdEvalTotal + i) | 0; sdEvalTotal; }");
 }
 
-// An ES5 constructor: the bytecode generated ahead of time holds only its call body (F2), so `new` requests its
+// An ES5 constructor: the bytecode generated ahead of time holds only its call body, so `new` requests its
 // construct body, which imports after verifying the module's supplied digest once, with strict on.
 function SdPoint(x)
 {
@@ -104,7 +106,7 @@ for (let i = 0; i < 400; ++i)
 lines.push(`sdHot ${total}`);
 
 // With --bytecode and strict on, nothing has imported yet a body whose key rests on the entry module's digest, so the
-// direct eval's import is the first that could, and verifies nothing (section 3.5): its key ends in its own text's digest.
+// direct eval's import is the first that could, and verifies nothing: its key ends in its own text's digest.
 total = t.window("sdEval's first call", () => sdEval(1), t.imports ? { suppliedDigestVerifications: 0, imports: [">=", 1] } : { });
 for (let i = 0; i < 40; ++i)
     total = (total + sdEval(i)) | 0;

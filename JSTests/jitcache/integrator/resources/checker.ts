@@ -1,9 +1,8 @@
 // What this directory's checkers share. The runner calls a checker as bun <checker> <stdout file> <stderr file> <scratch>
-// after the run a jitcache-check directive names, and fails that run when the checker exits nonzero (harness sub-SPEC
-// section 7.2). A jsc run with JITCache writes, with --jitcache-log, its start result and its final status to standard
-// error as toJSON lines (SPEC-integrator.md sections 3.1 and 11.1); a Maintenance run writes its summary line to standard
-// output (maintenance sub-SPEC section 5). Each sequence's directory holds artifact/ beside scratch/ (harness sub-SPEC
-// section 7.3).
+// after the run a jitcache-check directive names, and fails that run when the checker exits nonzero. A jsc run with
+// JITCache writes, with --jitcache-log, its start result and its final status to standard error as toJSON lines; a
+// Maintenance run writes its summary line to standard output. Each sequence's directory holds artifact/ beside
+// scratch/.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 

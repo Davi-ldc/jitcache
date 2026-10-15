@@ -88,9 +88,8 @@ public:
     void setFinalizer(std::unique_ptr<Finalizer>&& finalizer) { m_finalizer = WTF::move(finalizer); }
 
     // JITCache: the compiling thread calls it, before it installs the FailedFinalizer, when the plan could not allocate
-    // executable memory, and finalize raises the executable-allocation fault before the failure's effects
-    // (SPEC-integrator.md section 9). The worklist's lock, which hands the plan to the finalizing thread, orders this write
-    // before that read.
+    // executable memory, and finalize raises the executable-allocation fault before the failure's effects. The
+    // worklist's lock, which hands the plan to the finalizing thread, orders this write before that read.
     void noteExecutableAllocationFailure() { m_failedForLackOfExecutableMemory = true; }
 
     RefPtr<InlineCallFrameSet> inlineCallFrames() const { return m_inlineCallFrames; }

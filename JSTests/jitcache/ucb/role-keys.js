@@ -2,9 +2,9 @@
 // jitcache-runs: Producer; ConsumerProducer --jitcache-delta-at-exit; Consumer
 // jitcache-expect-no-install: 1:1
 
-// SPEC-ucb.md section 13.3, role-keys.js: a "use strict" program, an indirect eval of "use strict" text and a sloppy
-// function's direct eval of "use strict" text. A request keys its body from the features its request object snapshots
-// before the parse sets the directive's strict bit (section 7.1, F18), so a body one role captured imports in every
+// A "use strict" program, an indirect eval of "use strict" text and a sloppy function's direct eval of "use strict"
+// text. A request keys its body from the features its request object snapshots before the parse sets the directive's
+// strict bit, which the request's native steps overwrite, so a body one role captured imports in every
 // other role, whether the capturing run generated the body or the importing run will:
 // - sequence 0: a Producer captures them, and they import in a Consumer and in a ConsumerProducer (statistics);
 // - sequence 1: a Producer only creates the artifact, a ConsumerProducer generates the bodies, which miss, and commits

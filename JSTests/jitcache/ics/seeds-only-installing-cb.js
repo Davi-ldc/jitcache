@@ -1,12 +1,12 @@
 // jitcache-runs: Producer --useConcurrentGC=false; Consumer
 // jitcache-requires: twins
 
-// SPEC-ics.md T8: the seeds land only in the CodeBlock that installs the import. The bodies live in a source string that
+// The seeds land only in the CodeBlock that installs the import. The bodies live in a source string that
 // runString evaluates in a new realm each time; the same text hits the same CodeCache entry, so the realms share the
 // bodies' UnlinkedCodeBlocks. The producer runs the string once, drives the bodies' sites, each body holding an anchor
 // (its first property IC, with one case), saves their snapshots and passes them to delta(). The consumer runs the string
-// twice. The first realm's CodeBlock of each body installs the import and restores what section 6.1 derives from the
-// saved snapshot; the second realm's, created next, takes the parked image natively, with every IC never considered and
+// twice. The first realm's CodeBlock of each body installs the import and restores the state derived from the saved
+// snapshot; the second realm's, created next, takes the parked image natively, with every IC never considered and
 // every call-link site as linking leaves it.
 load("./resources/ics.js", "caller relative");
 

@@ -7,12 +7,12 @@
 // covers it).
 // jitcache-pin: off its runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
-// SPEC-ucb.md section 13.3, context-miss.js: what matches a UCB the native path decoded from its provider's bytecode
-// cache (sections 7.3.2 and 7.3.3). The jsc shell decodes a program from the cache --diskCachePath names, which every run
-// of a sequence shares (the runs' working directory is the sequence's scratch directory), and writes it when the program's
-// source provider dies. Two programs run in realms of their own, so their global vars stay out of the heap the oracle
-// compares: one with four declarations, whose declaration maps stay inline, and one with sixty, whose hashed var map a
-// decode rebuilds in another layout wherever re-adding its entries in bucket order places them elsewhere (F10).
+// What matches a UCB the native path decoded from its provider's bytecode cache, and what seeds it before publication.
+// The jsc shell decodes a program from the cache --diskCachePath names, which every run of a sequence shares (the runs'
+// working directory is the sequence's scratch directory), and writes it when the program's source provider dies. Two
+// programs run in realms of their own, so their global vars stay out of the heap the oracle compares: one with four
+// declarations, whose declaration maps stay inline, and one with sixty, whose hashed var map a decode rebuilds in
+// another layout wherever re-adding its entries in bucket order places them elsewhere (CachedInlineMap::decode).
 // - Sequence 0: generated in the Producer and decoded in the Consumer. The decoded functions are seeded; the small
 //   program is seeded, and the large one misses CoreDigest where its decoded declaration layout differs, which the
 //   Consumer tells by comparing its global var order with the one the Producer saw.
@@ -20,11 +20,11 @@
 //   misses Provenance and nothing attaches, so that Consumer installs nothing.
 // - Sequence 2: generated in the Producer, decoded and seeded in a ConsumerProducer, which runs the functions further
 //   and recaptures them with jitcacheDelta, then generated in a Consumer, where each recaptured function imports. In
-//   twins runs each recaptured function's ucb.identity holds provenance Generated (section 8.2). A delta captures a
-//   function only while its baseline CodeBlock is its executable's replacement (THREAD Capture), and the 400 calls every
-//   run makes take the functions into the DFG, so the ConsumerProducer recaptures them before those calls. The Producer
-//   runs no delta, so each function's saved body is the capture its baseline compile made, whose counter has no progress,
-//   and the import leaves the function about seventy calls short of its first DFG compile (SPEC-cb.md section 5.3).
+//   twins runs each recaptured function's ucb.identity holds provenance Generated. A delta captures a function only
+//   while its baseline CodeBlock is its executable's replacement, and the 400 calls every run makes take the functions
+//   into the DFG, so the ConsumerProducer recaptures them before those calls. The Producer runs no delta, so each
+//   function's saved body is the capture its baseline compile made, whose counter has no progress, and the import leaves
+//   the function about seventy calls short of its first DFG compile, at the floor the CB lane gives its counter.
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
 
@@ -132,10 +132,9 @@ load("./resources/sections.js", "caller relative");
     }
 
     // Sequence 1: a second evaluation's CodeCache hit meets the generated program, whose attach never reaches the
-    // provenance comparison: the program reached the baseline, so its parked code stops the attach first (section 7.3.4
-    // step 2), and once a collection has released that code, the stamp its import's Provenance miss left at the current
-    // index token does (step 3). Either way nothing attaches and nothing is digested
-    // (SPEC-ucb.md section 13.3, this script's row).
+    // provenance comparison: the program reached the baseline, so its parked code stops the attach first, and once a
+    // collection has released that code, the stamp its import's Provenance miss left at the current index token does.
+    // Either way nothing attaches and nothing is digested.
     if (t.sequence === 1)
         measured("evaluating the small program again", () => runString(program(programs[0].prefix, programs[0].vars)), t.imports ? {
             attaches: 0, imports: 0, "misses.Provenance": 0, contextDigests: 0, sourceDigests: 0,

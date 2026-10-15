@@ -40,7 +40,16 @@ set(JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES
     "${JAVASCRIPTCORE_DIR}/inspector/remote"
     "${JAVASCRIPTCORE_DIR}/interpreter"
     "${JAVASCRIPTCORE_DIR}/jit"
-    "${JAVASCRIPTCORE_DIR}/jitcache"
+    "${JAVASCRIPTCORE_DIR}/jitcache/base"
+    "${JAVASCRIPTCORE_DIR}/jitcache/cb"
+    "${JAVASCRIPTCORE_DIR}/jitcache/glue"
+    "${JAVASCRIPTCORE_DIR}/jitcache/harness"
+    "${JAVASCRIPTCORE_DIR}/jitcache/ics"
+    "${JAVASCRIPTCORE_DIR}/jitcache/image"
+    "${JAVASCRIPTCORE_DIR}/jitcache/maintenance"
+    "${JAVASCRIPTCORE_DIR}/jitcache/session"
+    "${JAVASCRIPTCORE_DIR}/jitcache/store"
+    "${JAVASCRIPTCORE_DIR}/jitcache/ucb"
     "${JAVASCRIPTCORE_DIR}/llint"
     "${JAVASCRIPTCORE_DIR}/lol"
     "${JAVASCRIPTCORE_DIR}/parser"
@@ -1081,9 +1090,9 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     jit/ThunkGenerator.h
     jit/Width.h
 
-    jitcache/JITCacheAPI.h
-    jitcache/JITCacheMaintenance.h
-    jitcache/JITCacheTwinsHost.h
+    jitcache/harness/JITCacheTwinsHost.h
+    jitcache/maintenance/JITCacheMaintenance.h
+    jitcache/session/JITCacheAPI.h
 
     llint/LLIntOpcode.h
     llint/LLIntThunks.h

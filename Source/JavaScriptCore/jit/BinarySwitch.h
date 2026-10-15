@@ -86,8 +86,8 @@ public:
     BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type);
 #if ENABLE(JITCACHE_TWINS)
     // The baseline JIT's switches in JITCache twins builds: the constructor draws as it builds the tree, so a recorder
-    // records the seed this switch draws, and a twin recorder gives it the producer's instead (SPEC-image.md section
-    // 11.1). A null recorder draws as the constructor above does.
+    // records the seed this switch draws, and a twin recorder gives it the producer's instead. A null recorder draws as
+    // the constructor above does.
     BinarySwitch(GPRReg value, std::span<const int64_t> cases, Type, JITCache::ImageRecorder*);
 #endif
     // Contiguous unsigned key runs: each entry is (firstKey, length). firstKey of run 0 must be 0,

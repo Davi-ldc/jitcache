@@ -1,7 +1,7 @@
 // jitcache-runs: Off --jitcache-body-events=dead-body-events.jsonl --useUnlinkedCodeBlockJettisoning=true
 // jitcache-check: 0 resources/dead-body.ts
 
-// Harness sub-SPEC H6: with --useUnlinkedCodeBlockJettisoning=true, a function that ran and was then made unreachable
+// Body events of a dead body: with --useUnlinkedCodeBlockJettisoning=true, a function that ran and was then made unreachable
 // keeps its counts in the body-event dump's total after more fullGC() calls than UnlinkedCodeBlock::maxAge (7), which
 // age its UnlinkedCodeBlock until its unlinked executable stops marking it. The run leaves sweepSynchronously off, so
 // the UnlinkedCodeBlock's destruction can wait for the dump's own sweep. No oracle compares an Off-only sequence, so

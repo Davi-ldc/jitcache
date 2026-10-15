@@ -1,0 +1,31 @@
+#pragma once
+
+#include <wtf/Platform.h>
+
+#if ENABLE(JITCACHE_TWINS)
+
+#include <optional>
+#include <stdint.h>
+
+// Maintenance's test hooks, a private header that only twins builds fill: JITCacheMaintenance.h is exported to Bun and
+// declares nothing twins-only.
+
+namespace JSC::JITCache::Maintenance::Testing {
+
+// The hooks are process-wide, and tests set them while no maintenance call runs. The two that take a count count from 1
+// within one call of compact; nullopt or false turns a hook off.
+
+// Each apply's n-th body unlink fails with EIO, as if unlinkat had returned it.
+void setFailingBodyUnlink(std::optional<uint64_t> n);
+
+// Each apply stops right after its n-th unlink of a body or of header, whether or not that unlink succeeded. A stopped
+// apply removes nothing more, bumps no epoch and returns Failed; returning releases the lock, so the artifact is left as a
+// process that died at that point would leave it.
+void setStopAfterUnlink(std::optional<uint64_t> n);
+
+// Each apply's rewrite of the pack fails at its first write with EIO, as a full disk would make it fail.
+void setFailingCompaction(bool);
+
+} // namespace JSC::JITCache::Maintenance::Testing
+
+#endif // ENABLE(JITCACHE_TWINS)

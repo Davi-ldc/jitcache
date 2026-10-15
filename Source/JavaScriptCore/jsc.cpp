@@ -120,7 +120,6 @@
 #include <wtf/threads/Signals.h>
 
 #if ENABLE(JITCACHE_TWINS)
-#include "ICTwins.h"
 #include "JITCacheTwinsHarness.h"
 #endif
 
@@ -529,7 +528,7 @@ public:
     bool m_canBlockIsFalse { false };
     bool m_reprl { false }; // Set to true to use Fuzzilli.
 
-    // JITCache (SPEC-integrator.md section 11.1). The path is set when --jitcache configures the main VM.
+    // JITCache's flags. The path is set when --jitcache configures the main VM.
     std::optional<String> m_jitCachePath;
     JITCache::Role m_jitCacheRole { JITCache::Role::Consumer };
     size_t m_jitCacheMaxMemory { SIZE_MAX };
@@ -540,8 +539,8 @@ public:
     bool m_jitCacheMaintenance { false };
     String m_jitCacheBenchReport;
 #if ENABLE(JITCACHE_TWINS)
-    // The test builds' flags that runJSC, jscmain and GlobalObject::finishCreation read (harness sub-SPEC section 5.1);
-    // the flags that set process-wide hooks hand them to JITCacheTwinsHarness while they are parsed.
+    // The twins builds' flags that runJSC, jscmain and GlobalObject::finishCreation read; the flags that set process-wide
+    // hooks hand their values to the twins harness while they are parsed.
     String m_jitCacheTwinsReport;
     String m_jitCacheRecordLayout;
     Vector<String> m_jitCacheAvoidLayouts;
@@ -918,14 +917,13 @@ private:
 #endif
 
 #if ENABLE(JITCACHE_TWINS)
-        // JITCache's shell functions (harness sub-SPEC section 5.2), with bun:jsc's jitcacheUCBStatistics under the
-        // name both hosts give it (section 5.3). Plain builds register none of them (SPEC-integrator.md R-ALL-4), and
-        // neither does any realm of a shell given --jitcache-test-no-shell-functions, so that the pin comparison's runs
-        // of a twins build have the pin shell's global properties (section 11.2). Every realm reads mainCommandLine,
+        // JITCache's shell functions, jitcacheUCBStatistics under the name bun:jsc gives it too. Plain builds register
+        // none of them, and neither does any realm of a shell given --jitcache-test-no-shell-functions, so that the pin
+        // comparison's runs of a twins build have the pin shell's global properties. Every realm reads mainCommandLine,
         // which jscmain constructs before the first GlobalObject; workers' command lines parse no arguments.
         if (!mainCommandLine->m_jitCacheNoShellFunctions) {
 #if ENABLE(JIT)
-            addFunction(vm, "jitcacheICsSnapshot"_s, JITCache::ICs::functionSnapshotBaselineICs, 2);
+            addFunction(vm, "jitcacheICsSnapshot"_s, JITCache::functionJITCacheICsSnapshot, 2);
 #endif
             addFunction(vm, "jitcacheDelta"_s, JITCache::functionJITCacheDelta, 0);
             addFunction(vm, "jitcacheStatus"_s, JITCache::functionJITCacheStatus, 0);
@@ -4616,7 +4614,7 @@ bool CommandLine::parseJITCacheArgument(const char* arg, bool& malformed)
     if (strncmp(arg, "--jitcache", strlen("--jitcache")))
         return false;
 
-    // SPEC-integrator.md section 11.1. The last occurrence of a flag wins.
+    // The last occurrence of a flag wins.
     if (auto flag = jitCacheFlagValue(arg, "--jitcache")) {
         m_jitCachePath = flag->bare || !*flag->value ? String { JITCache::defaultArtifactPath } : String::fromUTF8WithLatin1Fallback(unsafeSpan(flag->value));
         return true;
@@ -4685,7 +4683,7 @@ bool CommandLine::parseJITCacheArgument(const char* arg, bool& malformed)
     }
 
 #if ENABLE(JITCACHE_TWINS)
-    // Harness sub-SPEC section 5.1. Parsing runs in jscmain before JSC::initialize, which is where the forced blinding and
+    // The twins builds' test flags. Parsing runs in jscmain before JSC::initialize, which is where the forced blinding and
     // the image hook must be set.
     auto pathFlag = [&](const char* name, String& field) -> bool {
         auto flag = jitCacheFlagValue(arg, name);
@@ -5056,13 +5054,13 @@ static void printJITCacheLine(const String& line)
     SAFE_FPRINTF(stderr, "%s\n", line.utf8());
 }
 
-// SPEC-integrator.md section 11.1: the main VM's JITCache, right after VM::create and before the first GlobalObject;
-// the $262.agent workers' VMs are not configured.
+// The main VM's JITCache, started right after VM::create and before the first GlobalObject; the $262.agent workers'
+// VMs are not configured.
 static void startJITCache(VM& vm, const CommandLine& options)
 {
     JSLockHolder locker(vm);
 #if ENABLE(JITCACHE_TWINS)
-    // Harness sub-SPEC section 4, with or without --jitcache.
+    // The heap probes of the run's layout file, recorded with or without --jitcache.
     if (!options.m_jitCacheRecordLayout.isNull())
         JITCache::recordVMLayout(vm, options.m_jitCacheRecordLayout, options.m_jitCacheFixedHeapProbes ? JITCache::HeapProbes::Fixed : JITCache::HeapProbes::Live);
 #endif
@@ -5087,33 +5085,33 @@ static void startJITCache(VM& vm, const CommandLine& options)
 #endif
 }
 
-// SPEC-integrator.md section 11.1: the end of the main VM's iteration, once its run loop has returned or it ended on a
-// termination, while its GlobalObject is in hand. A script that calls quit() exits before this.
+// The end of the main VM's iteration, once its run loop has returned or it ended on a termination, while its
+// GlobalObject is in hand. A script that calls quit() exits before this.
 static void finishJITCacheRun(VM& vm, GlobalObject* globalObject, const CommandLine& options)
 {
-    JSLockHolder locker(vm);
-    if (options.m_jitCacheDeltaAtExit) {
-        JITCache::DeltaResult result = JITCache::delta(vm);
-        if (options.m_jitCacheLog)
-            printJITCacheLine(JITCache::toJSON(result));
-    }
-#if ENABLE(JITCACHE_TWINS)
-    if (!options.m_jitCacheBodyEvents.isNull())
-        JITCache::writeBodyEvents(vm, options.m_jitCacheBodyEvents);
-    // After delta, so its full collection changes no capture, and after the body-event dump, whose live UCBs it would
-    // retire.
-    if (!options.m_jitCacheDescribeHeap.isNull())
-        JITCache::writeReachableHeapDescription(*globalObject, options.m_jitCacheDescribeHeap);
-#else
+#if !ENABLE(JITCACHE_TWINS)
     UNUSED_PARAM(globalObject);
 #endif
-    if (options.m_jitCacheLog)
-        printJITCacheLine(JITCache::toJSON(JITCache::status(vm)));
-    // So that a run without --destroy-vm keeps its bench events.
-    JITCache::flushBenchReport(vm);
+    JSLockHolder locker(vm);
+    // finishHostRun calls delta under --jitcache-delta-at-exit while the VM's production is active, runs the work below,
+    // and then flushes the bench report, so that a run without --destroy-vm keeps its bench events.
+    JITCache::finishHostRun(vm, options.m_jitCacheDeltaAtExit, [&](const std::optional<JITCache::DeltaResult>& deltaResult) {
+        if (deltaResult && options.m_jitCacheLog)
+            printJITCacheLine(JITCache::toJSON(*deltaResult));
+#if ENABLE(JITCACHE_TWINS)
+        if (!options.m_jitCacheBodyEvents.isNull())
+            JITCache::writeBodyEvents(vm, options.m_jitCacheBodyEvents);
+        // After delta, so its full collection changes no capture, and after the body-event dump, whose live UCBs it would
+        // retire.
+        if (!options.m_jitCacheDescribeHeap.isNull())
+            JITCache::writeReachableHeapDescription(*globalObject, options.m_jitCacheDescribeHeap);
+#endif
+        if (options.m_jitCacheLog)
+            printJITCacheLine(JITCache::toJSON(JITCache::status(vm)));
+    });
 }
 
-// SPEC-integrator.md section 11.1 and maintenance sub-SPEC section 5: the command line after --.
+// JITCache maintenance on the command line after --.
 static int runJITCacheMaintenance(const Vector<String>& arguments)
 {
     // The shell keeps argv's bytes as Latin-1 strings (CommandLine::parseArguments), which latin1() gives back unchanged.
@@ -5295,8 +5293,7 @@ int jscmain(int argc, char** argv)
     // comes first.
     mainCommandLine.construct(argc, argv);
 
-    // JITCache maintenance needs no VM: it runs before JSC::initialize and exits with its code (SPEC-integrator.md
-    // section 11.1).
+    // JITCache maintenance needs no VM: it runs before JSC::initialize and exits with its code.
     if (mainCommandLine->m_jitCacheMaintenance)
         return runJITCacheMaintenance(mainCommandLine->m_arguments);
 
@@ -5312,8 +5309,8 @@ int jscmain(int argc, char** argv)
     }
 
 #if ENABLE(JITCACHE_TWINS)
-    // Harness sub-SPEC section 4: placeholders over the earlier processes' recorded ranges keep this process's executable
-    // pool and structure reservation out of them.
+    // Placeholders over the earlier processes' recorded ranges keep this process's executable pool and structure
+    // reservation out of them.
     JITCache::placeholdersBeforeInitialize(mainCommandLine->m_jitCacheAvoidLayouts);
 #endif
     JSC::initialize();

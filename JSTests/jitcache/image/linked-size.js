@@ -1,13 +1,13 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T17 (section 3.1, N20), the corpus run. An image or a snippet is the linked size its LinkBuffer wrote,
-// and the handle around it can be larger: on ARM64 whenever compaction leaves the linked size off the allocator's
-// granule, on x86_64 under the libpas JIT heap whenever the size class exceeds it. The slack keeps whatever the pool
-// held, so capture writes only the linked bytes and the twin check compares only those (T2). These Function-constructor
-// bodies grow one statement at a time, so their linked sizes fall at every offset from a granule boundary, and each
-// regenerates its MathICs, whose snippets' sizes depend on their kinds and operands; the consumer checks that the images
-// carry the snippets' jumps back into the image (G) and the rewritten inline starts' jumps to them (T1). A script cannot
-// see a handle or what lies past a linked size, so ImageRecordingTests.cpp's imageSlackStaysOutsideCaptureAndTwinCheck
+// Images and snippets at their linked size. An image or a snippet is the linked size its LinkBuffer wrote, and the
+// handle around it can be larger: on ARM64 whenever compaction leaves the linked size off the allocator's granule, on
+// x86_64 under the libpas JIT heap whenever the size class exceeds it. The slack keeps whatever the pool held, so
+// capture writes only the linked bytes and the twin check compares only those. These Function-constructor bodies grow
+// one statement at a time, so their linked sizes fall at every offset from a granule boundary, and each regenerates its
+// MathICs, whose snippets' sizes depend on their kinds and operands; the consumer checks that the images carry the
+// snippets' jumps back into the image and the rewritten inline starts' jumps to them. A script cannot
+// see a handle or what lies past a linked size, so ImageInstallTests.cpp's imageSlackStaysOutsideCaptureAndTwinCheck
 // finds bodies and snippets whose handles exceed their linked sizes and makes the producer's, the restored image's and
 // the twin's slack differ.
 (function main(role, scratch, artifact, sequence) {

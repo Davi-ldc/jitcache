@@ -1,6 +1,6 @@
 // The app of builtin-roots.js, built with `bun build --compile --bytecode`: a standalone executable decodes Bun's
 // internal modules with decodeBuiltinFunction from the bytecode it embeds (generateInternalModule), and each decoded
-// module is a builtin root whose digest comes from its provider (SPEC-ucb.md sections 7.2.4 and 7.2.6). The app loads
+// module is a builtin root whose digest comes from its provider. The app loads
 // node:querystring, whose root gets one identity and takes its source digest from its provider (statistics: a root, a
 // supplied digest, no digest computed from text), and runs its functions until they are captured. As a Consumer each
 // of them imports or is seeded at its first call: from the app's own captures over the app's artifact, and from the

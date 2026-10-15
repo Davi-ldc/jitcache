@@ -1,8 +1,7 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; ConsumerProducer
 
-// SPEC-ucb.md section 13.3, context-on-demand.js: a context or holder digest is computed only where something reads it
-// (section 3.4; THREAD's "no work ahead of demand").
+// A context or holder digest is computed only where something reads it, so no request does work ahead of demand.
 // - Each root body the Producer captured, a Function-constructor body and a JSC builtin, computes its holder digest once,
 //   at its import (statistics holderDigests), and nothing more at later calls.
 // - A part only the second run executes holds a program, a new Function body, the first call of a JSC builtin and

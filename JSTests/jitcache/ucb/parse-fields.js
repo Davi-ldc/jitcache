@@ -1,10 +1,10 @@
-// SPEC-ucb.md section 13.3, parse-fields.js, F3: an imported function body restores its UFE's parse fields (section 7.4)
-// before newCodeBlockFor copies them to the FunctionExecutable. A sloppy function with a non-simple parameter list gets an
+// An imported function body restores its UFE's parse fields before newCodeBlockFor copies them to the
+// FunctionExecutable. A sloppy function with a non-simple parameter list gets an
 // unmapped arguments object whose callee accessor throws, which it does only when the executable has the
 // non-simple-parameter feature; f.caller and the arguments object behave as in the JITCache-off run for strict and
 // sloppy imported functions. Every body below imports in the Consumer (statistics, imports).
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
+// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

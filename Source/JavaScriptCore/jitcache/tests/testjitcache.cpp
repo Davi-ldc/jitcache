@@ -17,10 +17,9 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringView.h>
 
-// The C++ test runner (SPEC-integrator.harness.md section 8.2). The runner of section 7.8 calls `testjitcache --list`,
-// which prints one "name<TAB>options" line per test, and then `testjitcache --group=<options>` once per distinct
-// options string. A group process applies its options while JSC initializes and runs each of its tests in turn, each
-// test that needs a VM on a fresh one.
+// The C++ test runner. run-jitcache-tests calls `testjitcache --list`, which prints one "name<TAB>options" line per
+// test, and then `testjitcache --group=<options>` once per distinct options string. A group process applies its options
+// while JSC initializes and runs each of its tests in turn, each test that needs a VM on a fresh one.
 
 namespace JSC::JITCache::Tests {
 
@@ -50,9 +49,9 @@ static void printUsage()
 }
 
 // The VM is the test's only one, created after JSC::initialize with the group's options, without a JITCache::start
-// call and with its API lock held (SPEC-ics.md R-INT-9). This function drops its own reference right after locking, so
-// the holder's reference is the last: ~JSLockHolder drops it before unlocking, and VM::~VM, which asserts that the
-// thread holds the API lock, runs under the lock, as in runJSC under --destroy-vm.
+// call and with its API lock held. This function drops its own reference right after locking, so the holder's reference
+// is the last: ~JSLockHolder drops it before unlocking, and VM::~VM, which asserts that the thread holds the API lock,
+// runs under the lock, as in runJSC under --destroy-vm.
 static Vector<String> runTest(const RegisteredTest& test)
 {
     if (test.needsVM == NeedsVM::No) {

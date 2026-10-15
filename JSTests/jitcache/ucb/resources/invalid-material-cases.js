@@ -1,16 +1,14 @@
-// What invalid-material.js and invalid-material-feedback.js share (SPEC-ucb.md section 13.3, invalid-material.js): the
-// bodies under test, the Producer's captures and rewrite, the Consumer's check, and the helpers each script's case table
-// is built with. Loaded after resources/ucb.js and resources/sections.js with
-// load("./resources/invalid-material-cases.js", "caller relative"); it defines one global, invalidMaterialCases, the same
-// in every role.
+// What invalid-material.js and invalid-material-feedback.js share: the bodies under test, the Producer's captures and
+// rewrite, the Consumer's check, and the helpers each script's case table is built with. Loaded after resources/ucb.js
+// and resources/sections.js with load("./resources/invalid-material-cases.js", "caller relative"); it defines one
+// global, invalidMaterialCases, the same in every role.
 //
 // A script calls invalidMaterialCases.run(t, sequenceCount, makeCases) from its main function. makeCases receives the
 // helpers below and returns the table, which holds one case per sequence of the script; the sequence index picks the
 // run's case. The Producer runs every function until it is captured, captures again with jitcacheDelta, and then
-// rewrites one section of one body through jitcacheRewriteSection, which reseals the container
-// (SPEC-integrator.harness.md section 5.2), so only the lane's own checks can find the damage. The Consumer, run 1,
-// calls every function once, so the damaged body is imported at its first call, and checks that cache activity is off
-// at the case's step (jitcacheStatus).
+// rewrites one section of one body through jitcacheRewriteSection, which reseals the container, so only the lane's own
+// checks can find the damage. The Consumer, run 1, calls every function once, so the damaged body is imported at its
+// first call, and checks that cache activity is off at the case's step (jitcacheStatus).
 var invalidMaterialCases = (function () {
     function float32Bytes(value)
     {
@@ -109,7 +107,7 @@ var invalidMaterialCases = (function () {
         function int32Constant(core, value)
         {
             for (let i = 0; i < core.constantCount; ++i) {
-                if (core.kind(i) === S.constantKind.Int32 && S.u32(core.bytes, core.slot(i)) === value)
+                if (core.kind(i) === S.constantKind.Int32 && core.read.u32(core.slot(i)) === value)
                     return i;
             }
             throw new Error(`no Int32 constant ${value}`);
@@ -118,11 +116,11 @@ var invalidMaterialCases = (function () {
         {
             for (let i = 0; i < core.constantCount; ++i) {
                 const slot = core.slot(i);
-                const raw = S.u32(core.bytes, slot);
+                const raw = core.read.u32(slot);
                 if (core.kind(i) !== S.constantKind.String || (raw & 3) || !raw)
                     continue;
-                const record = slot + S.i32(core.bytes, slot);
-                if ((S.u32(core.bytes, record) & 0x7ffffff) === length)
+                const record = slot + core.read.i32(slot);
+                if ((core.read.u32(record) & 0x7ffffff) === length)
                     return { index: i, record };
             }
             throw new Error(`no string constant record of length ${length}`);

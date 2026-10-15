@@ -1,6 +1,6 @@
 // jitcache-runs: Off
 
-// Harness sub-SPEC H6, with the baseline JIT on: a function called until it compiles shows baselineCompiles 1, and its
+// Body events with the baseline JIT on: a function called until it compiles shows baselineCompiles 1, and its
 // later calls add no LLInt instruction. The integrator directory's default turns concurrent JIT off, so the compilation
 // installs within the call that requests it. Any other outcome throws.
 (function main() {

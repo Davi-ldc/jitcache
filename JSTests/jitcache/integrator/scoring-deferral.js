@@ -1,15 +1,15 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; ConsumerProducer --jitcache-test-store-fault=scoring:EMFILE; Consumer
 
-// SPEC-integrator.md section 15.2, scoring-deferral.js. The Producer commits sdFirst and sdSecond. In the
-// ConsumerProducer the store's fault hook fails every scoring read at its openat with EMFILE, an error that says nothing
-// about the artifact (section 8.3), so every key it scores is deferred, with no fault and no commit, whether or not the
-// key has a body. sdFirst and sdSecond import and install at their first calls. sdFresh, which only the ConsumerProducer
-// runs, compiles there and gets no body; its compilation's capture is already deferred. The ConsumerProducer then warms
-// the imported bodies further, with doubles, and folds the samples in with a full collection, so their candidates would
-// beat the saved bodies, and calls jitcacheDelta(): every eligible key is deferred (the result's deferredKeys, and as
-// many more capturesDeferred), nothing is committed, no fault is raised, and the cb.summary bytes of both imported keys
-// are what they were before the call. The Consumer imports the Producer's bodies. The runner compares every output with
-// the JITCache-off run's.
+// A scoring read that fails for a reason outside the artifact defers the capture. The Producer commits sdFirst and
+// sdSecond. In the ConsumerProducer the store's fault hook fails every scoring read at its openat with EMFILE, an error
+// that says nothing about the artifact, so every key it scores is deferred, with no fault and no commit, whether or
+// not the key has a body. sdFirst and sdSecond import and install at their first calls. sdFresh, which only the
+// ConsumerProducer runs, compiles there and gets no body; its compilation's capture is already deferred. The
+// ConsumerProducer then warms the imported bodies further, with doubles, and folds the samples in with a full
+// collection, so their candidates would beat the saved bodies, and calls jitcacheDelta(): every eligible key is
+// deferred (the result's deferredKeys, and as many more capturesDeferred), nothing is committed, no fault is raised,
+// and the cb.summary bytes of both imported keys are what they were before the call. The Consumer imports the
+// Producer's bodies. The runner compares every output with the JITCache-off run's.
 load("./resources/integrator.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

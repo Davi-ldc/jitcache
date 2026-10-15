@@ -1,9 +1,9 @@
 // jitcache-runs: Off --printEachOSRExit=true --dumpDisassembly=true --verboseOSR=true
 // jitcache-check: 0 resources/optimizing-counts.ts
 
-// Harness sub-SPEC H6: a function driven through optimizing compiles, speculation exits, a jettison and a
-// reoptimization prints counts that the checker finds equal to what the engine printed for its body, each line printed
-// where section 10.1 counts. h6Driven adds, so integers train it, doubles and then strings fail its speculations until
+// A function driven through optimizing compiles, speculation exits, a jettison and a reoptimization prints counts
+// that the checker finds equal to what the engine printed for its body, each line printed where the engine counts the
+// event. h6Driven adds, so integers train it, doubles and then strings fail its speculations until
 // its optimized code is jettisoned and recompiled; noInline keeps every exit and compile of its body under its own name.
 // The integrator directory's default turns concurrent JIT off, which fixes every count.
 (function main() {

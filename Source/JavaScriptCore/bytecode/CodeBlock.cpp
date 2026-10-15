@@ -897,8 +897,7 @@ CodeBlock::~CodeBlock()
 {
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
     // JITCache twins builds: a twin of the image check leaves the registry before anything else, so that no later CB at
-    // its address answers as one, and writes no didOptimize, since natively no such CB exists (SPEC-image.md section
-    // 11.3, step 2).
+    // its address answers as one, and writes no didOptimize, since natively no such CB exists.
     bool isImageTwin = JITCache::forgetImageTwin(*this);
 #endif
 
@@ -2563,7 +2562,7 @@ void CodeBlock::jettison(Profiler::JettisonReason reason, ReoptimizationMode mod
     }
 #if ENABLE(JITCACHE_TWINS)
     // JITCache twins builds: past the early returns for a block already invalidated, the jettison counts against the
-    // body (SPEC-integrator.harness.md section 10.1). The UCB is still allocated in a collection's End phase, which
+    // body's event counts. The UCB is still allocated in a collection's End phase, which
     // sweeps nothing.
     ++unlinkedCodeBlock()->jitCacheEventCounts().jettisons;
 #endif

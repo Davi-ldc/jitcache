@@ -2,10 +2,10 @@
 // jitcache-requires: twins
 // jitcache-pin: off its Off run calls jitcacheICsSnapshot, which only twins builds have, and E1 changes its baseline super_construct code
 
-// SPEC-ics.md T2, second script: a CodeBlock that tiers up from the LLInt keeps updating its super_construct cache in
-// baseline code. The LLInt stores new.target A; skip constructions, which return before super, bring the CodeBlock to
-// baseline without touching the cache; construction with B in baseline code then leaves the marker for several callees.
-// Before E1 the baseline template stored back the A it loaded.
+// The second of the two super_construct scripts: a CodeBlock that tiers up from the LLInt keeps updating its
+// super_construct cache in baseline code. The LLInt stores new.target A; skip constructions, which return before super,
+// bring the CodeBlock to baseline without touching the cache; construction with B in baseline code then leaves the marker
+// for several callees. Before JITCache fixed the baseline super_construct store, the template stored back the A it loaded.
 load("./resources/ics.js", "caller relative");
 
 (function main() {

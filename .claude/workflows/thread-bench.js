@@ -296,7 +296,7 @@ ${runsBlock(commit)}
      installationBoundFraction or installationBoundSmallestBody: the corpus cases keep THREAD's rule
      and set aside every body whose sample generated per-VM support, so their bound table reports
      what joined and no more, and the two values come from the bound's own warmed bench
-     (Tools/Scripts/jitcache-bound-bench.ts), which runs outside this workflow.
+     (PerformanceTests/JITCache/bound.ts), which runs outside this workflow.
 Return the previous milestone, every alert with its outcome and, for a todo alert, its entry's
 first line, the number of todo.md entries, and the proposals.`
 

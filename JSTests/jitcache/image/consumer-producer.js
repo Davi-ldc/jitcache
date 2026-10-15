@@ -1,14 +1,15 @@
 // jitcache-runs: Producer --useConcurrentJIT=false; ConsumerProducer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T15. pair's add and mul compile from int32 profiles, and every role then gives the add three doubles and
-// the mul three doubles, in that order, and checks what pair returns. The producer's add regenerates at its first double,
-// and the producer commits pair with a delta between the two runs of doubles, so the body it leaves holds that one
-// regeneration; it takes no delta at exit, and its mul's regeneration stays in its process. The ConsumerProducer imports
-// that body, whose record it rebuilds with the twin data and regeneration log of the producer's (section 10.3, step 14):
-// its add already has its full snippet and regenerates no more, its mul regenerates, which its record logs too, and it
-// commits the richer body at its delta at exit. The fresh consumer imports that body, and its twin check replays both
-// processes' regenerations on a twin compiled from the original compilation's inputs (section 11.3), so the restored
-// image, both snippets included, must equal its twin, and the output the JITCache-off run's. The producer compiles pair
+// A ConsumerProducer's recapture of an image whose MathICs regenerate in two processes. pair's add and mul compile from
+// int32 profiles, and every role then gives the add three doubles and the mul three doubles, in that order, and checks
+// what pair returns. The producer's add regenerates at its first double, and the producer commits pair with a delta
+// between the two runs of doubles, so the body it leaves holds that one regeneration; it takes no delta at exit, and its
+// mul's regeneration stays in its process. The ConsumerProducer imports that body, whose record it rebuilds at install
+// with the twin data and regeneration log of the producer's: its add already has its full snippet and regenerates no
+// more, its mul regenerates, which its record logs too, and it commits the richer body at its delta at exit. The fresh
+// consumer imports that body, and its twin check replays both processes' regenerations on a twin compiled from the
+// original compilation's inputs, so the restored image, both snippets included, must equal its twin, and the output the
+// JITCache-off run's. The producer compiles pair
 // at its 34th call, so its doubles reach baseline code, and the two capturing roles keep pair below its tier-up to the
 // DFG, so each capture finds it in baseline code.
 // In twins builds the ConsumerProducer and the consumer then check that this case happened: pair ran an import in each,

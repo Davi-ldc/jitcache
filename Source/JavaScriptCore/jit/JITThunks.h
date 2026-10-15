@@ -243,7 +243,7 @@ public:
 
     void initialize(VM&);
 
-    // JITCache: each generation of per-VM support, counted for the bench (harness sub-SPEC section 9.3). A reader compares
+    // JITCache: each generation of per-VM support, counted for the bench. A reader compares
     // two reads on its own thread to learn whether support was generated in between, so relaxed order is enough.
     // InlineCacheCompiler::generateSlowPathHandler counts from outside the class.
     void noteSupportGeneration() { m_supportGenerations.fetch_add(1, std::memory_order_relaxed); }

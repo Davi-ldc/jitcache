@@ -2,7 +2,8 @@
 // jitcache-runs: Off; Producer; Consumer; Consumer
 // jitcache-runs: Off; Producer; Consumer
 
-// SPEC-ucb.md section 13.3, atom-constants.js, F19, sections 4.2 and 7.3.3 and SPEC-ucb.codec.md E10: string constants
+// The atom map of ucb.identity, which records which string constants were atoms, and the seeding that makes them atoms
+// again before publication. A string constant's atom-ness only grows. The constants here are string constants
 // longer than an inline string, compared with === and !== (whose baseline fast path needs an atom) and some also used as
 // property names, in bodies captured from a generated UCB and from one Bun decoded from bytecode. Two CommonJS modules in
 // resources/ hold the functions: atom-constants-a.js, which the Producer loads without Node's compile cache, so its
@@ -10,19 +11,20 @@
 // Bun decodes it and its bodies are captured from decoded UCBs, provenance EmbedderDecoded. The Producer makes one
 // decoded constant, acbDelta's, an atom through a property-key use of its own value, only after acbDelta compiled, so
 // that function's image compiled the comparison against a plain string while a later capture's atom map marks the
-// constant (SPEC-image.md T18). That later capture is the delta Bun makes at exit: the call that uses the constant as a
-// key also gives two of acbDelta's profiles a type they never saw (an object argument and the property's int32), a
-// full collection right after drains them, and the richer capture replaces the one acbDelta's compile made (THREAD
-// Capture). acbDelta is still its executable's baseline CodeBlock then, so the delta can capture it: its property read
-// never runs before that call, so the read's value profile, its only one, stays empty, and each baseline-to-DFG check
-// it reaches by then defers (CodeBlock::shouldOptimizeNowFromBaseline, which compiles regardless only after five).
+// constant, as image/atom-constants.js does for the jsc shell. That later capture is the delta Bun makes at exit: the
+// call that uses the constant as a key also gives two of acbDelta's profiles a type they never saw (an object argument
+// and the property's int32), a full collection right after drains them, and the richer capture replaces the one
+// acbDelta's compile made. acbDelta is still its executable's baseline CodeBlock then, so the delta can capture it:
+// its property read never runs before that call, so the read's value profile, its only one, stays empty, and each
+// baseline-to-DFG check it reaches by then defers (CodeBlock::shouldOptimizeNowFromBaseline, which compiles regardless
+// only after five).
 // - The first run of each sequence, with JITCache off, writes the compile cache for both modules.
 // - Sequence 0: two Consumers load both modules with the compile cache and first call the functions in opposite orders;
 //   in both, each decoded function is seeded at its first call (statistics, seededDecodes), whichever provenance its
-//   body has, with each constant the atom map marks made an atom before publication (verifyMatched, section 13.2).
+//   body has, with each constant the atom map marks made an atom before publication (the twin check's verifyMatched).
 // - Sequence 1: the Consumer loads both modules without the compile cache, so it generates where it can import: module
-//   a's functions import, with every string constant register an atom (T1), and module b's never import (misses
-//   Provenance, section 7.3.1 step 4b).
+//   a's functions import, with every string constant register an atom, as the twin check's core comparison shows, and
+//   module b's never import, since a body captured from a decoded UCB fits no generated one (misses Provenance).
 // Every install passes the Image lane's twin check without a skip. The results are printed in one order in every run,
 // and equal the JITCache-off run.
 const fs = require("node:fs");

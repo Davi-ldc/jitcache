@@ -44,20 +44,21 @@
 // jitcache-require-fault: 15:0 budget.limit
 // jitcache-expect-no-install: 0:1
 
-// SPEC-image.md T12 (sections 4.5 and 4.8, I14, I19). Each sequence starts with a Producer whose limit is one more
-// kRecordChargeStep (4 KiB) than the last, from 4 KiB to 160 KiB, and the last sequence's is 256 KiB, so run 0 may report
-// budget.limit. guarded is the run's only baseline compilation. Each of its 48 statements loads a property, multiplies
-// and adds it, stores it behind a write barrier and concatenates a constant string, a site with no inline code (N17).
+// The recorder's charges under every producer limit: whatever the budget refuses, each charge is released and every
+// branch stays linked. Each sequence starts with a Producer whose limit is one more kRecordChargeStep (4 KiB) than the
+// last, from 4 KiB to 160 KiB, and the last sequence's is 256 KiB, so run 0 may report budget.limit. guarded is the
+// run's only baseline compilation. Each of its 48 statements loads a property, multiplies and adds it, stores it behind
+// a write barrier and concatenates a constant string, a site with no inline code.
 // So the concatenations' operation calls and exception checks sit in the main pass, the MathICs' slow calls and theirs
 // in the slow paths, and the record grows through many steps. Up to 160 KiB the steps meet every charge the producer
 // makes, in order: those of guarded's compilation; those of its finalize capture and commit, which charges the writer's
-// 64 KiB staging buffer and keeps it (container sub-SPEC section 8.1), so that every limit up to 64 KiB is refused by
+// 64 KiB staging buffer and keeps it, so that every limit up to 64 KiB is refused by
 // then; those of the MathIC regenerations that the doubles and the throwing valueOf trigger after that commit; and those
 // of the delta at exit. Whatever the budget refuses, every branch the compilation and the regenerations emit stays
 // linked, so each producer's output equals the JITCache-off run's. guarded throws and catches, and the last two calls
 // make an operation throw in the main pass and in a slow path, so each takes its exception check's jump to
 // HandleException. Which charge a given limit refuses depends on the architecture and the build, and a script cannot see
-// it, so ImageRecordingTests.cpp forces each phase: imageBudgetSweepLinksEveryExceptionCheck the main pass and the slow
+// it, so ImageBudgetTests.cpp forces each phase: imageBudgetSweepLinksEveryExceptionCheck the main pass and the slow
 // paths, imageRefusalInsideEmitVeneersLinksEveryVeneer emitVeneers and imageRefusedRegenerationLinksItsSnippet a MathIC
 // snippet, while imageTinyBudgetLeavesRecordsIncompleteAndReleasesEverything checks the records and the balance after the
 // VM's destruction. The first sequence's limit admits only the first step of guarded's record, so its producer must

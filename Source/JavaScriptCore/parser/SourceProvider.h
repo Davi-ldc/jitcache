@@ -87,7 +87,8 @@ public:
     JS_EXPORT_PRIVATE virtual size_t memoryCost() const { return 0; }
     JS_EXPORT_PRIVATE virtual void didGenerateUnlinkedCodeBlock(VM&, const SourceCodeKey&, UnlinkedCodeBlock*) const { }
 #endif
-    // JITCache: SHA-256 of source() in the encoding SPEC-ucb.md section 3.5 defines, recorded where the text was produced,
+    // JITCache: SHA-256 of source() in the encoding every JITCache source digest uses (the byte 1 then Latin-1 when every
+    // code unit fits a byte, the byte 2 then UTF-16LE otherwise), recorded where the text was produced,
     // or nullopt. A provider that returns one vouches for it as it vouches for hash().
     virtual std::optional<std::array<uint8_t, 32>> jitCacheSourceDigest() const { return std::nullopt; }
 

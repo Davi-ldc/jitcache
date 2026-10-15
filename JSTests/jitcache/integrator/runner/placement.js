@@ -49,11 +49,10 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
 
-// Harness sub-SPEC H2, the 50 sequences above, which fill the directive lines: in the environment the runner's
+// Address-space placement, in the 50 sequences above, which fill the directive lines: in the environment the runner's
 // calibration chose, every Consumer's executable pool lies outside its Producer's, its structure reservation has another
 // base, and each of its three heap probes differs from its Producer's. Each process writes its layout file before its
-// script runs (harness sub-SPEC section 4), so the Consumer reads both files and throws on a placement that did not
-// move, which fails the run. The Off runs of the oracle record no layout and check nothing.
+// script runs, so the Consumer reads both files and throws on a placement that did not move, which fails the run. The Off runs of the oracle record no layout and check nothing.
 load("./resources/warm-up.js", "caller relative");
 (function main(role, scratch) {
     print(warmUp());

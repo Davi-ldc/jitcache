@@ -1,34 +1,35 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: arithmetic. Each MathIC of add, sub, mul and negate goes through each regeneration path of
-// JITMathIC::generateOutOfLine (section 6.2). A site that never ran in the LLInt compiles with an empty profile to a
-// patchable jump. When its first operands are int32s, that first execution builds a fast-path snippet and the first
+// Arithmetic in imported images, each import twin-checked. Each MathIC of add, sub, mul and negate goes through each
+// regeneration path of JITMathIC::generateOutOfLine. A site that never ran in the LLInt compiles with an empty profile
+// to a patchable jump. When its first operands are int32s, that first execution builds a fast-path snippet and the first
 // double then the full snippet. When they are non-numbers on both sides (strings, objects, BigInts), the fast-path attempt
 // finds nothing to generate, so the same regeneration repoints the slow call and builds the full snippet with a second
-// assembler, two attaches in one entry of the twins section's regeneration log (section 11.2). An add or a
-// multiplication of a constant string refuses both attempts (N17), so its regeneration repoints the slow call and builds
-// no snippet. A site compiled from int32 profiles builds the full snippet at its first double. The snippets jump back
-// into the image (ImageOffset) and the rewritten inline start jumps to them (SnippetEntry). A body that never optimizes
-// (noDFG, CannotCompile) compiles a full inline snippet with profile writes and regenerates at its first string. A body
-// that can optimize, and whose operands mixed int32s and doubles before its compile, gets a full inline snippet at each
-// of its four MathICs, whose slow path then calls the profiled operation with the arithmetic profile (census F4) instead
-// of the repatching one with the MathIC, and never regenerates; strings then take each of those calls, negate's to the
-// operationArithNegateProfiled that section 6.4 keeps for profiles. The sites without inline code (N17, census F2) are a
-// + that only saw strings, "x" + y, a * that only saw BigInts and - on a BigInt. div, to_number and to_numeric write
-// their profiles in place (census A14, C26, F5), and the bitwise and increment operators, whose baseline code writes
-// none, reach their slow paths through slow-path thunks (A1). Every body runs 40 times, enough to compile, then at most
-// six more, so it is still baseline code when the producer's delta at exit captures its snippets. Every function is
-// noInline, so no optimizing compile of main reads a profile the negate fix changes (section 6.4).
-// The consumer checks that its images carry (T1): the far calls' Operation pointers (B9); each MathIC's address passed
-// to its slow operation (F3); the slow-path thunks of div and the bitwise and increment operators (F5, A1); the
-// ValueIsTruthy thunk of each if (!run) (C4); the snippets' ImageOffset jumps back into the image (G); the SnippetEntry
-// jumps of rewritten inline starts; and the arithmetic profiles each site writes or passes. A profile has one target
-// whether A14 writes it, F2 passes it or F4 does, so each profile claim reads only where its site alone puts one:
-// quotient's image, whose one arithmetic instruction is div, for the binary write of div's generator (A14), and
-// conversions', where to_number and to_numeric write the only unary profiles baseline code references, for theirs (A14,
-// C26); the images of onlyStrings, prefixed, bigProduct and bigNegation, whose one MathIC has no inline code, for F2's
-// operand; and the slow calls of MathICs with inline code, between the slow path's start and the call's return point,
-// for F4's.
+// assembler, two attaches in one entry of the twins section's regeneration log. An add or a multiplication of a
+// constant string refuses both attempts, since its operand types rule out a number, so its regeneration repoints the
+// slow call and builds no snippet. A site compiled from int32 profiles builds the full snippet at its first
+// double. The snippets jump back into the image (ImageOffset) and the rewritten inline start jumps to them
+// (SnippetEntry). A body that never optimizes (noDFG, CannotCompile) compiles a full inline snippet with profile writes
+// and regenerates at its first string. A body that can optimize, and whose operands mixed int32s and doubles before its
+// compile, gets a full inline snippet at each of its four MathICs, whose slow path then calls the profiled operation
+// with the arithmetic profile instead of the repatching one with the MathIC, and never regenerates; strings then take
+// each of those calls, negate's to the operationArithNegateProfiled that JITCache keeps for the calls that pass a
+// profile. The sites without inline code, which call their operation directly, are a + that only saw strings, "x" + y,
+// a * that only saw BigInts and - on a BigInt. div, to_number and to_numeric write their profiles in place, and the
+// bitwise and increment operators, whose baseline code writes none, reach their slow paths through slow-path thunks.
+// Every body runs 40 times, enough to compile, then at most six more, so it is still baseline code when the producer's
+// delta at exit captures its snippets. Every function is noInline, so no optimizing compile of main reads a profile
+// JITCache's negate fix changes.
+// The consumer checks that its images carry: the far calls' Operation pointers; each MathIC's address passed to its
+// slow operation; the slow-path thunks of div and the bitwise and increment operators; the ValueIsTruthy thunk of each
+// if (!run); the snippets' ImageOffset jumps back into the image; the SnippetEntry jumps of rewritten inline starts;
+// and the arithmetic profiles each site writes or passes. A profile has one target whether a profile write, a site
+// without inline code or a profiled slow call references it, so each profile claim reads only where its site alone
+// puts one: quotient's image, whose one arithmetic instruction is div, for the binary write of div's generator, and
+// conversions', where to_number and to_numeric write the only unary profiles baseline code references, for theirs; the
+// images of onlyStrings, prefixed, bigProduct and bigNegation, whose one MathIC has no inline code, for the operand of
+// a site without inline code; and the slow calls of MathICs with inline code, between the slow path's start and the
+// call's return point, for the profiled slow call's.
 (function main(role, scratch, artifact, sequence) {
     const lines = [];
     const warm = 40;

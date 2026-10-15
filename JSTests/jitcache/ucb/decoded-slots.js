@@ -4,21 +4,20 @@
 // covers it).
 // jitcache-pin: off its runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
-// SPEC-ucb.md section 13.3, decoded-slots.js: a program whose provider carries cached bytecode with nested function
-// bodies, decoded in the Producer and in the Consumer from the jsc shell's bytecode cache (--diskCachePath; the Bun
-// variant is decoded-slots-bun.js). The first run, with JITCache off, writes the cache: it calls DsF and DsG and constructs
-// them, so both their slots are cached, and only calls DsH, so DsH's construct slot is not. In the Consumer:
+// A program whose provider carries cached bytecode with nested function bodies, decoded in the Producer and in the
+// Consumer from the jsc shell's bytecode cache (--diskCachePath; the Bun variant is decoded-slots-bun.js). The first
+// run, with JITCache off, writes the cache: it calls DsF and DsG and constructs them, so both their slots are cached,
+// and only calls DsH, so DsH's construct slot is not. In the Consumer:
 // - the requested slot of each lazily decoded function is seeded at its first call, and DsF's child, which keeps its
-//   lazily cached slot, is seeded at its own (statistics, section 7.3.3); the slot the call did not ask for is recorded
-//   as decoded (section 7.3.5);
-// - DsF's construct slot, whose only string constant is an inline string and so decodes as an atom (SPEC-ucb.codec.md,
-//   E10), attaches at its own first request (section 7.3.4);
+//   lazily cached slot, is seeded at its own (statistics); the slot the call did not ask for is recorded as decoded;
+// - DsF's construct slot, whose only string constant is an inline string and so decodes as an atom, attaches at its
+//   own first request;
 // - DsG's construct slot holds a longer string constant, which its body uses as a property key: at its first request
 //   it misses AtomMap without a stamp, its native run makes the constant an atom, and in a second realm, at a later
-//   request, it attaches without computing a digest (I21);
+//   request, it attaches without computing a digest, since its UCB matched the file in every check but the atom map;
 // - `new DsH()` first records DsH's decoded call slot without settling the request, and its empty construct slot
 //   imports;
-// - T4 holds at every seeding (section 13.2).
+// - the twin check of every seeding finds the feedback it restored equal to the capture's.
 // The first run tells itself from the oracle's Off runs by a file it leaves in the scratch directory.
 load("./resources/ucb.js", "caller relative");
 

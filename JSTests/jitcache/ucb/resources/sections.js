@@ -1,14 +1,17 @@
 // The UCB lane's three sections, read in JavaScript so that twins-only tests can find the bytes they rewrite with
-// jitcacheRewriteSection (SPEC-integrator.harness.md section 5.2). Loaded with load("./resources/sections.js",
-// "caller relative"); it defines one global, ucbSections, the same in every role.
+// jitcacheRewriteSection. Loaded with load("./resources/sections.js", "caller relative"); it defines one global,
+// ucbSections, the same in every role.
 //
-// ucb.identity and ucb.feedback follow SPEC-ucb.md sections 4.2 and 5.2. A function's ucb.core is read as
-// runtime/CachedTypes.cpp lays it out (SPEC-ucb.codec.md section 3): the 16-byte header, the CachedFunctionCodeBlock
-// record, whose one member is the 4-byte CachedPtr of its expression info, and the record's tail of varints (packLayout),
-// which locates the instruction stream and the constant pool. Every reader checks what it relies on and throws with the
-// bytes it found otherwise, so a layout change shows up as a clear failure rather than as a rewrite of the wrong bytes.
+// ucb.identity and ucb.feedback are read as the lane writes them. A function's ucb.core is read as
+// runtime/CachedTypes.cpp lays it out: the 16-byte header, the CachedFunctionCodeBlock record, whose one member is the
+// 4-byte CachedPtr of its expression info, and the record's tail of varints (packLayout), which locates the instruction
+// stream and the constant pool. Every reader checks what it relies on and throws with the bytes it found otherwise, so a
+// layout change shows up as a clear failure rather than as a rewrite of the wrong bytes.
 var ucbSections = (function () {
     "use strict";
+
+    // The shared byte reader. Its file defines no global, so ucbSections stays the one global this file adds.
+    const { byteReader } = load("../../resources/jitcache.js", "caller relative");
 
     const roundConstants = new Uint32Array([
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -97,8 +100,8 @@ var ucbSections = (function () {
         return bytes;
     }
 
-    // SPEC-ucb.md section 3.5: one encoding byte, 1 for Latin-1 when every unit is at most 0xFF and 2 for UTF-16LE
-    // otherwise, then the code units.
+    // The source digest of text the provider supplies no digest for: SHA-256 over one encoding byte, 1 for Latin-1 when
+    // every unit is at most 0xFF and 2 for UTF-16LE otherwise, then the code units.
     function sourceDigest(text)
     {
         let latin1 = true;
@@ -124,9 +127,9 @@ var ucbSections = (function () {
     }
 
     // The key of a program body whose source is the whole of `text`, as the jsc shell's loadString evaluates it: kind
-    // Program, call, the empty code-generation mode, and the root identity record of SPEC-ucb.md section 3.2 with the
-    // snapshot's strict and with-scope bits clear (a ProgramExecutable starts with no features, F18). The shell's
-    // providers supply no digest, so the root's source digest is computed from the text (section 3.5, form 3).
+    // Program, call, the empty code-generation mode, and a root identity record whose snapshot has the strict and
+    // with-scope bits clear, since a ProgramExecutable starts with no features. The shell's providers supply no digest,
+    // so the root's source digest is the one sourceDigest computes from the text.
     function programKeyHex(text)
     {
         const record = new Uint8Array(56);
@@ -138,21 +141,6 @@ var ucbSections = (function () {
         key[1] = 1; // IdentityKind::Program
         key.set(sha256(record), 8);
         return hex(key);
-    }
-
-    function u16(bytes, offset)
-    {
-        return bytes[offset] | (bytes[offset + 1] << 8);
-    }
-
-    function u32(bytes, offset)
-    {
-        return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
-    }
-
-    function i32(bytes, offset)
-    {
-        return u32(bytes, offset) | 0;
     }
 
     function le16(value)
@@ -192,20 +180,21 @@ var ucbSections = (function () {
         return new Error(`${what}; ${bytes.length} bytes: ${hex(bytes.subarray(0, Math.min(bytes.length, 256)))}`);
     }
 
-    // SPEC-ucb.md section 4.2.
+    // ucb.identity.
     function identity(bytes)
     {
-        const constantCount = u32(bytes, 148);
+        const read = byteReader(bytes);
+        const constantCount = read.u32(148);
         const mapBytes = Math.ceil(constantCount / 8);
         const section = {
             bytes,
-            magic: u32(bytes, 0),
-            version: u16(bytes, 4),
+            magic: read.u32(0),
+            version: read.u16(4),
             coreKind: bytes[6],
             provenance: bytes[7],
             key: hex(bytes.subarray(8, 48)),
             holderDigest: hex(bytes.subarray(112, 144)),
-            features: u16(bytes, 144),
+            features: read.u16(144),
             lexicallyScopedFeatures: bytes[146],
             hasCapturedVariables: bytes[147],
             constantCount,
@@ -220,22 +209,24 @@ var ucbSections = (function () {
         section.childHolderDigestCount = (bytes.length - section.childHolderDigests) / 32;
         section.childHolderDigest = index => hex(bytes.subarray(section.childHolderDigests + 32 * index, section.childHolderDigests + 32 * (index + 1)));
         if (section.magic !== 0x49424355 || section.version !== 1 || !Number.isInteger(section.childHolderDigestCount) || section.childHolderDigestCount < 0)
-            throw failure("ucb.identity does not have the layout of SPEC-ucb.md section 4.2", bytes);
+            throw failure("ucb.identity does not have the lane's identity layout", bytes);
         return section;
     }
 
-    // SPEC-ucb.md section 5.2.
+    // ucb.feedback, with the LLInt counter its header carries: the active threshold, and the progress, the float total
+    // count plus the int32 counter, as FeedbackSection::llintProgress adds them.
     function feedback(bytes)
     {
+        const read = byteReader(bytes);
         const counts = {
-            valueProfiles: u32(bytes, 8),
-            arrayProfiles: u32(bytes, 12),
-            binaryArithProfiles: u32(bytes, 16),
-            unaryArithProfiles: u32(bytes, 20),
-            exitSites: u32(bytes, 24),
-            functionDecls: u32(bytes, 28),
-            functionExprs: u32(bytes, 32),
-            constants: u32(bytes, 52),
+            valueProfiles: read.u32(8),
+            arrayProfiles: read.u32(12),
+            binaryArithProfiles: read.u32(16),
+            unaryArithProfiles: read.u32(20),
+            exitSites: read.u32(24),
+            functionDecls: read.u32(28),
+            functionExprs: read.u32(32),
+            constants: read.u32(52),
         };
         const predictions = 56;
         const arrays = predictions + 8 * counts.valueProfiles;
@@ -246,8 +237,10 @@ var ucbSections = (function () {
         const constants = children + counts.functionDecls + counts.functionExprs;
         const end = constants + Math.ceil(counts.constants / 8);
         const section = { bytes, counts, predictions, arrays, binary, unary, exits, children, constants, end };
-        if (u32(bytes, 0) !== 0x46424355 || u16(bytes, 4) !== 1 || align(end, 8) !== bytes.length)
-            throw failure("ucb.feedback does not have the layout of SPEC-ucb.md section 5.2", bytes);
+        if (read.u32(0) !== 0x46424355 || read.u16(4) !== 1 || align(end, 8) !== bytes.length)
+            throw failure("ucb.feedback does not have the lane's feedback layout", bytes);
+        section.llintActiveThreshold = read.i32(40);
+        section.llintProgress = read.f32(44) + read.i32(48);
         return section;
     }
 
@@ -286,12 +279,14 @@ var ucbSections = (function () {
     const kindCount = 14;
     const linkTimeConstantRepresentation = 3;
 
-    // A function's ucb.core (SPEC-ucb.codec.md section 3; CachedCodeBlock::packLayout in runtime/CachedTypes.cpp).
+    // A function's ucb.core (CachedCodeBlock::packLayout in runtime/CachedTypes.cpp). The parsed core keeps its byte
+    // reader as `read`, which a test uses to read a constant's slot.
     function functionCore(bytes)
     {
-        if (u32(bytes, 0) !== 0x43424355 || bytes[4] !== 3)
+        const read = byteReader(bytes);
+        if (read.u32(0) !== 0x43424355 || bytes[4] !== 3)
             throw failure("ucb.core is no function core", bytes);
-        const rootOffset = u32(bytes, 8);
+        const rootOffset = read.u32(8);
         // The record holds only the CachedPtr of its expression info; its tail of varints follows it.
         const recordSize = 4;
         const cursor = { at: rootOffset + recordSize };
@@ -310,7 +305,7 @@ var ucbSections = (function () {
         const representations = array();
         const regionBegin = rootOffset - recordOffsetInRegion.value;
 
-        const core = { bytes, rootOffset, flags, regionBegin, steps, instructions, constants, representations };
+        const core = { bytes, read, rootOffset, flags, regionBegin, steps, instructions, constants, representations };
         core.instructionsStart = regionBegin + instructions.at;
         core.poolStart = regionBegin + constants.at;
         core.constantCount = constants.count.value;
@@ -328,7 +323,7 @@ var ucbSections = (function () {
         for (let i = 0; consistent && i < core.constantCount; ++i)
             consistent = core.kind(i) < kindCount;
         // The expression info is reached through the record's CachedPtr: a 4-aligned offset from the slot itself.
-        const expressionInfo = i32(bytes, rootOffset);
+        const expressionInfo = read.i32(rootOffset);
         consistent = consistent && !(expressionInfo & 3) && inside(rootOffset + expressionInfo, 4);
         if (!consistent)
             throw failure(`ucb.core does not have the layout this test reads: ${JSON.stringify({ rootOffset, flags, regionBegin, instructions: instructions.count.value, constants: core.constantCount, expressionInfo })}`, bytes);
@@ -337,7 +332,7 @@ var ucbSections = (function () {
 
     return {
         sha256, hex, ascii, sourceDigest, programKeyHex,
-        u16, u32, i32, le16, le32, align, bit, find, varintBytes,
+        le16, le32, align, bit, find, varintBytes,
         identity, feedback, functionCore, constantKind, linkTimeConstantRepresentation,
     };
 })();

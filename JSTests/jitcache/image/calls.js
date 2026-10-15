@@ -1,16 +1,15 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: calls. Every call's fast path loads LLInt::defaultCall() (census A15, ProcessThunk); a callee
-// called with fewer arguments than it declares enters through its arity check, which pads the frame (A8, B4) and calls
-// the arity fixup (B2); varargs calls and constructs spread, apply and forward arguments; strict functions tail-call,
+// Calls in imported images, each import twin-checked. Every call's fast path loads LLInt::defaultCall() (ProcessThunk);
+// a callee called with fewer arguments than it declares enters through its arity check, which pads the frame and calls
+// the arity fixup; varargs calls and constructs spread, apply and forward arguments; strict functions tail-call,
 // directly and with varargs; a site that meets many callees goes polymorphic and then virtual; a constructor reaches its
 // base through super. slowThenString runs typeof, an opcode whose template only calls its slow path (DEFINE_SLOW_OP),
 // and stores a string constant at once, so on ARM64, outside the debug builds' consistency checks, the slow path's bl and
-// the store's movz put a Call and a Pointer fixup at one site (section 3.2).
-// The consumer checks that its images carry (T1): the default call target LLInt::defaultCall() as a Pointer (A15); the
-// arity fixup's Call (B2) and the soft stack limit the arity check compares (A8, B4); typeof's slow-path call (A1); the
-// string constant moved as a cell (C1, B6); op_ret's jump to ReturnFromBaseline (E1); and op_enter's slow-path call to
-// its handler (C17).
+// the store's movz put a Call and a Pointer fixup at one site.
+// The consumer checks that its images carry: the default call target LLInt::defaultCall() as a Pointer; the arity
+// fixup's Call and the soft stack limit the arity check compares; typeof's slow-path call; the string constant moved as
+// a cell; op_ret's jump to ReturnFromBaseline; and op_enter's slow-path call to its handler.
 (function main(role, scratch, artifact, sequence) {
     function sum3(a, b, c) {
         return (a ?? 0) + (b ?? 0) + (c ?? 0);

@@ -1,18 +1,17 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: property accesses. Their slow paths near-call the IC slow-path thunk of each access type
-// (census D1): get, put, in and delete by id and by value, get_length, get_by_id_with_this and get_by_val_with_this
+// Property accesses in imported images, each import twin-checked. Their slow paths near-call the IC slow-path thunk of
+// each access type: get, put, in and delete by id and by value, get_length, get_by_id_with_this and get_by_val_with_this
 // through super, private names, accessors and brands, and instanceof. Object literals with accessors pass their names'
-// impls to put_getter_by_id, put_setter_by_id and put_getter_setter_by_id (D2, UCBIdentifier); regexp literals pass
-// their RegExp cells (C21, UCBConstantCell); stores of cells go through the write barrier (A4, D7); object literals and
-// constructors fence on ARM64 (A5, C2, C22); typeof, == null and != null as values and as branches, and super's
-// get_prototype_of decode structure IDs (A6, C27). Gets and puts on a proxy cache cases that call the ProxyHelpers
-// builtins, which run often enough to compile, so their @mustValidateResultOfProxyGetAndSetTraps emits
-// has_structure_with_flags, the one opcode of row C27 only builtins reach.
-// The consumer checks that the images of the functions it names carry (T1): an IC slow-path call for each access type
-// their caches use (D1); the accessors' identifiers (D2); the regexp cells (C21); the barrier threshold and the VM the
-// write barriers and new_object's slow path pass (A4, D5, D7, C3); on ARM64 the mutator fence flag (A5, C2, C22); and
-// the structure ID base (A6, C27).
+// impls to put_getter_by_id, put_setter_by_id and put_getter_setter_by_id (UCBIdentifier); regexp literals pass their
+// RegExp cells (UCBConstantCell); stores of cells go through the write barrier; object literals and constructors fence
+// on ARM64; typeof, == null and != null as values and as branches, and super's get_prototype_of decode structure IDs.
+// Gets and puts on a proxy cache cases that call the ProxyHelpers builtins, which run often enough to compile, so their
+// @mustValidateResultOfProxyGetAndSetTraps emits has_structure_with_flags, the one opcode decoding structure IDs that
+// only builtins reach.
+// The consumer checks that the images of the functions it names carry: an IC slow-path call for each access type their
+// caches use; the accessors' identifiers; the regexp cells; the barrier threshold and the VM the write barriers and
+// new_object's slow path pass; on ARM64 the mutator fence flag; and the structure ID base.
 (function main(role, scratch, artifact, sequence) {
     class Point {
         #secret;

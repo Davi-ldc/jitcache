@@ -1,6 +1,6 @@
 // The module of decoded-slots-bun-app.js, built beside it with `bun build --compile --bytecode`. The app requires it
-// twice at run time, and the second evaluation gives dbC's decoded call slot the later request that SPEC-ucb.md
-// section 13.3 asks of it (see the app).
+// twice at run time, and the second evaluation gives dbC's decoded call slot the later request it attaches at (see the
+// app).
 //
 // dbC's call body holds the one string constant of the executable with these characters. A `--compile --bytecode` build
 // keeps every string of four or more characters in one table that all its chunks share, and decodes an identifier's

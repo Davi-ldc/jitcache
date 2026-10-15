@@ -3,7 +3,7 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer --jitCacheImportLLIntProgress=false
 // jitcache-runs: Producer --jitcache-delta-at-exit; ConsumerProducer --jitcache-delta-at-exit; Consumer
 
-// SPEC-ucb.md section 13.3, run-once-capture.js: the bodies that run without compiling (THREAD Capture). In the
+// The bodies that run without compiling, which delta captures without an image. In the
 // Producer, roSmall runs three times and roArrow twice, neither compiles, and roDead runs twice and loses its CodeBlock to
 // a full collection before the capture (sequence 0, which jettisons every CodeBlock old enough at each collection).
 // roHot compiles, so its body has an image.
@@ -17,7 +17,7 @@
 // - Sequence 3: the ConsumerProducer imports roSmall without an image, runs it until it compiles natively, and that
 //   compile's capture replaces the body with one that has an image, which the last Consumer installs. roHot keeps its
 //   image across both deltas.
-// T4 checks every import's counter against the progress it restores (section 13.2). The oracle compares every run with a
+// The twin check compares every import's counter with the progress it restores. The oracle compares every run with a
 // JITCache-off run, so every role prints the same lines.
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
@@ -109,9 +109,8 @@ load("./resources/sections.js", "caller relative");
 
     if (startingFeedback) {
         const feedback = ucbSections.feedback(startingFeedback);
-        const threshold = ucbSections.i32(feedback.bytes, 40);
-        const totalCount = new Float32Array(new Uint32Array([ucbSections.u32(feedback.bytes, 44)]).buffer)[0];
-        const progress = totalCount + ucbSections.i32(feedback.bytes, 48);
+        const threshold = feedback.llintActiveThreshold;
+        const progress = feedback.llintProgress;
         if (roSmallHasImage) {
             // The ConsumerProducer's compile replaced the body, which the last Consumer installs.
             t.check(t.readSection(keys.roSmall, "image.baseline") !== null, "the native compile's capture did not replace roSmall's body");

@@ -1,9 +1,9 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-cb.md section 11.3, the realm step of section 5.2. A body whose for-of saw only maps and sets in the Producer
+// The realm step of seedLinkedState. A body whose for-of saw only maps and sets in the Producer
 // carries FastMap and FastSet at its iterator_open. The Consumer imports it and DFG-compiles it before its realm creates
 // any Map or Set, so the DFG's FastMap and FastSet cases find mapProtoEntriesFunction and setProtoValuesFunction only
-// because seedLinkedState materialized them (N10); in debug-local the DFG asserts that they exist. One body lives in the
+// because seedLinkedState materialized them; in debug-local the DFG asserts that they exist. One body lives in the
 // shell's realm and one in a realm made by createGlobalObject, whose functions are fresh. Only after both compile does
 // either realm create a map or a set, which the compiled code then iterates. Concurrent JIT is off in plain mode too, so
 // each compilation installs within the call that requests it.

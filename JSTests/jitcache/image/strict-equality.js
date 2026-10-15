@@ -1,11 +1,11 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: strict equality against atom constants. stricteq and nstricteq as values, and jstricteq and
-// jnstricteq as branch conditions, compare a string constant the UCB owns, on the left at some sites and on the right at
-// others, by its atom's address (census C6 and C7, UCBConstantAtom); generation makes every string constant an atom
-// (N25). Equalities against null and a boolean compare bitwise and never reach the atom test, and one between two
-// variables compares generically. The inputs are those atoms, equal strings built at run time, which are no atoms,
-// other strings and other types. The consumer checks that its images carry the UCBConstantAtom pointers (T1).
+// Strict equality against atom constants in imported images, each import twin-checked. stricteq and nstricteq as
+// values, and jstricteq and jnstricteq as branch conditions, compare a string constant the UCB owns, on the left at
+// some sites and on the right at others, by its atom's address (UCBConstantAtom); generation makes every string
+// constant an atom. Equalities against null and a boolean compare bitwise and never reach the atom test, and one
+// between two variables compares generically. The inputs are those atoms, equal strings built at run time, which are no
+// atoms, other strings and other types. The consumer checks that its images carry the UCBConstantAtom pointers.
 (function main(role, scratch, artifact, sequence) {
     function valueRight(x) {
         return x === "jitcache-right-constant";

@@ -1,10 +1,10 @@
 // jitcache-requires: twins
 // jitcache-runs: Producer --useConcurrentJIT=false
 
-// SPEC-image.md T5 (I8). In one producer, the finalize capture and a later delta capture one compilation of scaled, and
-// their sections are equal. One double then regenerates scaled's add, which a * 3 leaves an int32 for its mul, and the
-// next delta's image.baseline differs from the earlier one only in that MathIC's entry, its new snippet, the bytes and
-// fixup of its rewritten inline start (a SnippetEntry jump, section 6.2), its slow-call fixup, which now names the
+// Captures are deterministic: in one producer, the finalize capture and a later delta capture one compilation of
+// scaled, and their sections are equal. One double then regenerates scaled's add, which a * 3 leaves an int32 for its
+// mul, and the next delta's image.baseline differs from the earlier one only in that MathIC's entry, its new snippet,
+// the bytes and fixup of its rewritten inline start (a SnippetEntry jump), its slow-call fixup, which now names the
 // operation that no longer regenerates, and the coverage rates. sum never optimizes (noDFG), so its add compiled from
 // int32s and doubles is a full inline snippet with profile writes whose slow call stays the repatching operation; after
 // its first strings regenerate it, the profile-write fixups of the inline snippet, now dead behind the rewritten start,

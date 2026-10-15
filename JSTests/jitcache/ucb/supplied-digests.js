@@ -6,15 +6,16 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; Consumer
 
-// SPEC-ucb.md section 13.3, supplied-digests.js, sections 3.5, 7.2.6 and S2: a `bun build --compile` executable whose
-// modules carry the source digests the build recorded (Flags::HAS_JITCACHE_SOURCE_DIGESTS), run as a JITCache VM of its
-// own with this run's role (resources/ucb-bun.js, runApp). The app, resources/supplied-digests-app.js with
+// Source digests a provider supplies, which strict verifies against the text once per provider before an import relies
+// on one: a `bun build --compile` executable whose modules carry the source digests the build recorded
+// (Flags::HAS_JITCACHE_SOURCE_DIGESTS), run as a JITCache VM of its own with this run's role (resources/ucb-bun.js,
+// runApp). The app, resources/supplied-digests-app.js with
 // resources/supplied-digests-module.js embedded beside it, makes the checks; the sequence index picks the case:
 // 0. Built with --bytecode, strict on: no source digest is computed while its modules and the internal modules it loads
 //    are decoded (over the load of the embedded module and node:querystring, sourceDigests unchanged and
 //    suppliedSourceDigests counting both), its decoded functions are seeded, a direct eval in a decoded function imports
 //    with no verification although nothing has verified its module yet, and `new` on an ES5 constructor then imports its
-//    construct body, which the ahead-of-time bytecode lacks (F2), after one verification of its module
+//    construct body, which the ahead-of-time bytecode lacks, after one verification of its module
 //    (suppliedDigestVerifications).
 // 1. The same with strict off in the Consumer: nothing is verified.
 // 2. Built without --bytecode: its roots import, and each module is verified once, at the first import that rests on it.
@@ -22,13 +23,15 @@
 //    written it: its modules' digests are computed from their text, and they import as before, verifying nothing.
 // 4. and 5. Built as CommonJS without --bytecode, so that the embedded module is CommonJS and require evaluates it through
 //    JSCommonJSModule::evaluate; a build without --format=cjs makes it an ES module, which no module wrapper touches. The
-//    app overrides the module wrapper (Module.wrapper; SPEC-ucb.md section 13.3, this script's row) before it loads
-//    that module, in the Producer (4) or in the Consumer (5). The overridden text no longer has the recorded digest, which
-//    JSCommonJSModule::evaluate clears, so the overriding run computes the module's digest from its text and keys its bodies
-//    by it: neither run imports a body the other captured, and strict raises no invalid material.
-// T7 holds in twins runs (section 13.2), and every run, the app's output included, equals the JITCache-off run.
+//    app overrides the module wrapper (Module.wrapper) before it loads that module, in the Producer (4) or in the
+//    Consumer (5). The overridden text no longer has the recorded digest, which JSCommonJSModule::evaluate clears, so
+//    the overriding run computes the module's digest from its text and keys its bodies by it: neither run imports a body
+//    the other captured, and strict raises no invalid material.
+// In twins runs every supplied root digest equals the digest of the root's text, whatever strict says, and every run,
+// the app's output included, equals the JITCache-off run.
 //
-// Bun calls delta at exit for every producing VM, the app's included.
+// The runs use the lane's default sequence, so the test's own VM calls delta at exit in the Producer; the app calls none
+// (resources/ucb-bun.js).
 const fs = require("node:fs");
 const path = require("node:path");
 const { context } = require("./resources/ucb-bun.js");

@@ -1,17 +1,17 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: iteration. for-of over arrays, maps, sets, strings and generators runs iterator_open and
-// iterator_next, whose done test branches on truthiness against the empty string (census A7, E6, VMCell::EmptyString)
-// and whose generic paths call through JITSlowPathCall (E5) and the IC slow-path thunk (E4); spread runs a slow op; for
-// await over an async generator runs async_iterator_next, which passes the VM's syncResumeCallCache (E7), in the body
-// asyncSums resumes, which an async generator keeps where a builtin can read it, unlike an async function; for-in runs the
-// enumerator opcodes, which decode structure IDs (D10). JIT::emit_op_enumerator_next emits the own-structure fast path,
-// whose end of the names stores the small strings' sentinel (D9), only when the LLInt saw that mode alone, so ownKeysOf
+// Iteration in imported images, each import twin-checked. for-of over arrays, maps, sets, strings and generators runs
+// iterator_open and iterator_next, whose done test branches on truthiness against the empty string
+// (VMCell::EmptyString) and whose generic paths call through JITSlowPathCall and the IC slow-path thunk; spread runs a
+// slow op; for await over an async generator runs async_iterator_next, which passes the VM's syncResumeCallCache, in the
+// body asyncSums resumes, which an async generator keeps where a builtin can read it, unlike an async function; for-in
+// runs the enumerator opcodes, which decode structure IDs. JIT::emit_op_enumerator_next emits the own-structure fast
+// path, whose end of the names stores the small strings' sentinel, only when the LLInt saw that mode alone, so ownKeysOf
 // sees only plain objects whose enumerable properties are their own and none an index, while keysOf also meets an
-// array, an inherited property and a null prototype. Every loop tests the VM's trap bits (C14), calls the check-traps
-// handler on its slow path (C15), and on its loop hint's slow path passes topEntryFrame and the VM (C18, A10, C19).
-// The consumer checks that its images carry these targets (T1), and an IC slow-path call for each access type their
-// caches use (E4, D1).
+// array, an inherited property and a null prototype. Every loop tests the VM's trap bits, calls the check-traps handler
+// on its slow path, and on its loop hint's slow path passes topEntryFrame and the VM.
+// The consumer checks that its images carry these targets, and an IC slow-path call for each access type their caches
+// use.
 (function main(role, scratch, artifact, sequence) {
     function sumOf(iterable) {
         let total = 0;

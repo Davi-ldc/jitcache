@@ -1,10 +1,10 @@
-// SPEC-ucb.md section 13.3, request-kinds.mjs: a module body imports in the Consumer at its request point (statistics,
-// imports) and passes its twins, and so does a function the module declares. The module's top-level loop makes its body
+// A module body imports in the Consumer at its request point (statistics, imports) and passes its twins, and so does a
+// function the module declares. The module's top-level loop makes its body
 // reach the baseline in the Producer. The module's own request runs while the module is instantiated, before this code,
 // so the Consumer finds the import already counted when main runs.
 //
-// The runs use the lane's default sequence, Producer --jitcache-delta-at-exit; Consumer (SPEC-integrator.harness.md
-// section 7.4). Everything the module leaves in its environment is the same in every role.
+// The runs use the lane's default sequence, Producer --jitcache-delta-at-exit; Consumer. Everything the module leaves
+// in its environment is the same in every role.
 load("./resources/ucb.js", "caller relative");
 
 function scaled(value)

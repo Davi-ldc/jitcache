@@ -145,7 +145,6 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 #if ENABLE(JITCACHE_TWINS)
 #include "JITCacheTwinsHost.h"
-#include "UCBSelfTest.h"
 #endif
 
 using namespace JSC;
@@ -2326,7 +2325,6 @@ static JSC_DECLARE_HOST_FUNCTION(functionFFIArenaDepth);
 static JSC_DECLARE_HOST_FUNCTION(functionFFICompileCounts);
 #endif
 #if ENABLE(JITCACHE_TWINS)
-static JSC_DECLARE_HOST_FUNCTION(functionJITCacheUCBSelfTest);
 static JSC_DECLARE_HOST_FUNCTION(functionJITCacheUCBStatistics);
 #endif
 
@@ -5500,29 +5498,8 @@ JSC_DEFINE_HOST_FUNCTION(functionCreateBufferAccessors, (JSGlobalObject* globalO
 #endif // USE(BUN_JSC_ADDITIONS)
 
 #if ENABLE(JITCACHE_TWINS)
-// Usage: $vm.jitCacheUCBSelfTest(options)
-// SPEC-ucb.md M4: runs the UCB lane's self-test of section 13.1 in this VM, the InvalidMaterial scope when
-// options.invalidMaterial is true and the Configured one otherwise, and throws an Error carrying the first failure.
-JSC_DEFINE_HOST_FUNCTION(functionJITCacheUCBSelfTest, (JSGlobalObject* globalObject, CallFrame* callFrame))
-{
-    DollarVMAssertScope assertScope;
-    VM& vm = globalObject->vm();
-    auto scope = DECLARE_THROW_SCOPE(vm);
-
-    bool invalidMaterial = false;
-    if (JSValue options = callFrame->argument(0); options.isObject()) {
-        JSValue value = asObject(options)->get(globalObject, Identifier::fromString(vm, "invalidMaterial"_s));
-        RETURN_IF_EXCEPTION(scope, { });
-        invalidMaterial = value.isTrue();
-    }
-    String failure;
-    if (!JITCache::runUCBSelfTest(vm, invalidMaterial ? JITCache::UCBSelfTestScope::InvalidMaterial : JITCache::UCBSelfTestScope::Configured, failure))
-        return throwVMError(globalObject, scope, failure);
-    return JSValue::encode(jsUndefined());
-}
-
 // Usage: $vm.jitCacheUCBStatistics(options)
-// SPEC-ucb.md M4: the UCB statistics, the registry's counts and, for { verifyRegistry: true }, registryViolations. The
+// The UCB statistics, the registry's counts and, for { verifyRegistry: true }, registryViolations. The
 // object is the one bun:jsc's jitcacheUCBStatistics returns, so both hosts build it in one place.
 JSC_DEFINE_HOST_FUNCTION(functionJITCacheUCBStatistics, (JSGlobalObject* globalObject, CallFrame* callFrame))
 {
@@ -5779,7 +5756,6 @@ void JSDollarVM::finishCreation(VM& vm)
 #endif
 
 #if ENABLE(JITCACHE_TWINS)
-    addFunction(vm, allowIfNotFuzz, "jitCacheUCBSelfTest"_s, functionJITCacheUCBSelfTest, 1);
     addFunction(vm, allowIfNotFuzz, "jitCacheUCBStatistics"_s, functionJITCacheUCBStatistics, 1);
 #endif
 

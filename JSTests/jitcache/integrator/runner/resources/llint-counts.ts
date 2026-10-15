@@ -1,4 +1,4 @@
-// The checker of events-llint.js (harness sub-SPEC H6): each call of h6Straight and h6DirectEval gained as many
+// The checker of events-llint.js: each call of h6Straight and h6DirectEval gained as many
 // llintInstructions as the instructions $vm.dumpBytecodeFor lists for its body, h6Loop's gains over n = 0, 1 and 2 form
 // an arithmetic progression with a positive step, and each function's other counts are 0.
 //   bun llint-counts.ts <stdout> <stderr> <scratch>

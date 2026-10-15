@@ -1,6 +1,6 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-cb.md section 11.3, profile deferrals (P10) and reoptimization counts (P11).
+// Profile deferrals and reoptimization counts.
 // - lowCoverage keeps most of its value profiles in a branch it never takes, so each time its counter crosses,
 //   shouldOptimizeNowFromBaseline finds the profiles too sparse, counts a deferral and re-arms the counter, until
 //   maximumOptimizationDelay deferrals let it compile. A probe with the same text, called until it compiles, gives the

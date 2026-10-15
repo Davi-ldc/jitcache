@@ -52,7 +52,7 @@ void handleExitCounts(VM& vm, CCallHelpers& jit, const OSRExitBase& exit)
     jit.add32(AssemblyHelpers::TrustedImm32(1), AssemblyHelpers::AbsoluteAddress(&exit.m_count));
 #if ENABLE(JITCACHE_TWINS)
     // JITCache twins builds: each execution of this exit counts once against the body whose optimized code it leaves,
-    // whose CB keeps that UCB alive as long as this code exists (SPEC-integrator.harness.md section 10.1).
+    // whose CB keeps that UCB alive as long as this code exists.
     jit.add64(AssemblyHelpers::TrustedImm32(1), AssemblyHelpers::AbsoluteAddress(&jit.codeBlock()->unlinkedCodeBlock()->jitCacheEventCounts().osrExits));
 #endif
 

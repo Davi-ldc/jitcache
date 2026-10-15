@@ -114,7 +114,7 @@
 #define OFFLINE_ASM_JIT_CAGE 0
 #endif
 
-// JITCache twins builds count the instructions the LLInt begins per body (SPEC-integrator.harness.md section 10.1).
+// JITCache twins builds count the instructions the LLInt begins per body.
 #if ENABLE(JITCACHE_TWINS)
 #define OFFLINE_ASM_JITCACHE_TWINS 1
 #else

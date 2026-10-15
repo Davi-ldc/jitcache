@@ -1,7 +1,7 @@
 // jitcache-runs: Producer --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-cb.md section 11.3: hot bodies without a metadata table (N1, I15), one with a property IC and one without, are
+// Hot bodies without a metadata table, one with a property IC and one without, are
 // captured at both capture points and installed with strict on. In the first sequence the Producer commits only the
 // capture its baseline compilation makes; in the second, delta's capture replaces it. Each body must still run baseline
 // code when delta runs, so the Producer first calls a probe with the same text until the probe's DFG compilation and then
@@ -42,7 +42,7 @@
         }
     }
 
-    // One structure reaches `has`, so its in_by_id IC holds one case and its counter travels (section 5.3).
+    // One structure reaches `has`, so its in_by_id IC holds one case and its counter travels.
     let total = 0;
     for (let i = 0; i < 8; ++i)
         total += `${id(idArgument(i))}`.length + (has(hasArgument(i)) ? i : 0);

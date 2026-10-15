@@ -1,5 +1,5 @@
-// The checker of polymorphic.js's Consumer run (SPEC-cb.md section 11.3, a polymorphic body). Its counter did not travel,
-// so it starts from setup's arming, with at most one point of progress (N4, I7): the body first enters operationOptimize
+// The checker of polymorphic.js's Consumer run. Its counter did not travel, so it starts from setup's arming, with at
+// most one point of progress: the body first enters operationOptimize
 // after the native warm-up, at an invocation k past the second, the one where a carried counter at its threshold would
 // cross, and its counter then reads the k entries' increments and that fraction alone. The fraction is what truncating the
 // slice into m_counter leaves against its float copy in m_totalCount, which float rounding can carry up to a whole point.

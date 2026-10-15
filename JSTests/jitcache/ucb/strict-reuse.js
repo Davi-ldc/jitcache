@@ -9,14 +9,15 @@
 // jitcache-expect-no-install: 3:2
 // jitcache-pin: off sequences 2 and 3 decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
-// SPEC-ucb.md section 13.3, strict-reuse.js, sections 7.3.2 and 10.2: a body whose coreDigest differs from the encoding
-// of a live UCB it is matched against, rewritten through jitcacheRewriteSection (SPEC-integrator.harness.md section 5.2).
+// A body whose coreDigest differs from the encoding of a live UCB it is matched against, rewritten through
+// jitcacheRewriteSection.
 // - Sequences 0 and 1, a live generated UCB. The Producer captures srF, declared by a program evaluated in realms of its
 //   own (runString), and rewrites its body's context digest, so that the ConsumerProducer's import misses Context and
 //   generates a UCB that stays in the LLInt, stamped at that index token. The ConsumerProducer then rewrites the body
 //   once more, restoring the context digest and changing the first byte of coreDigest, which commits it under a new
 //   token, so the next realm's request attaches to the generated UCB and matches it by its generation inputs. With strict
-//   on, S1 compares the UCB's core encoding with coreDigest and finds invalid material at ucb.strict-core (sequence 0);
+//   on, the strict check compares the UCB's core encoding with coreDigest and finds invalid material at
+//   ucb.strict-core (sequence 0);
 //   with strict off nothing compares them, and the request attaches and its newborn CodeBlock installs the body
 //   (sequence 1).
 // - Sequences 2 and 3, a live decoded UCB. The first run, with JITCache off, calls and constructs srG, so the jsc shell's

@@ -69,6 +69,7 @@
 #include "JSLock.h"
 #include "ParserError.h"
 #include "StrongInlines.h"
+#include "UCBTwinGeneration.h"
 #include <wtf/text/MakeString.h>
 #endif
 
@@ -94,7 +95,7 @@ namespace JSC {
 
 bool Decoder::canBorrowPayload() const
 {
-    // JITCache: nothing decoded from a core points into the body file (SPEC-ucb.codec.md, E7).
+    // JITCache: nothing decoded from a core points into the body file.
     if (m_purpose == Purpose::JITCacheCore)
         return false;
 #if USE(BUN_JSC_ADDITIONS)
@@ -120,7 +121,7 @@ public:
     void u8(uint8_t v) { m_bytes.append(v); }
     size_t size() const { return m_bytes.size(); }
     void copyTo(uint8_t* out) const { memcpy(out, m_bytes.span().data(), m_bytes.size()); }
-    // JITCache: the buffer a long tail spills out of its inline capacity, which an encode charges (SPEC-ucb.codec.md, E8).
+    // JITCache: the buffer a long tail spills out of its inline capacity, which an encode charges.
     size_t heapBytes() const { return m_bytes.capacity() > 128 ? m_bytes.capacity() : 0; }
 
 private:
@@ -591,7 +592,7 @@ using SourceType = typename SourceTypeImpl<T>::type;
 static constexpr size_t encoderMaxAlignment = 8;
 static constexpr size_t encoderMinPageSize = 4 * KB;
 
-// JITCache: the bytes a vector holds on the heap, which a JITCacheCore encode charges (SPEC-ucb.codec.md, E8).
+// JITCache: the bytes a vector holds on the heap, which a JITCacheCore encode charges.
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 static size_t encoderHeapBytes(const Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>& vector)
 {
@@ -624,12 +625,12 @@ public:
     // A payload that gets appended to another one (CachedBytecode::addFunctionUpdate) is read by the same Decoder as its
     // base, so it leaves its strings unnumbered rather than collide with numbers the base already handed out.
     enum class NumberStrings : bool { No, Yes };
-    // JITCache: the bytecode cache's own payloads, or a JITCache core (SPEC-ucb.codec.md, section 4).
+    // JITCache: the bytecode cache's own payloads, or a JITCache core.
     using Purpose = Decoder::Purpose;
 
     // A JITCacheCore encoder writes no external string, no checksum and no updatable field, and numbers its strings within
-    // its own payload. `budget` is charged for everything the encode allocates (E8); `startChain` is the TDZ chain that a
-    // start record stands for (E14).
+    // its own payload. `budget` is charged for everything the encode allocates; `startChain` is the TDZ chain that a
+    // start record stands for.
     Encoder(VM& vm, FileSystem::FileHandle& fileHandle, NumberStrings numberStrings = NumberStrings::Yes, EncoderStringTable* externalStrings = nullptr, BytecodeCacheChecksums checksums = BytecodeCacheChecksums::Yes, BytecodeCacheUpdatable updatable = BytecodeCacheUpdatable::Yes, Purpose purpose = Purpose::BytecodeCache, CoreEncodingBudget* budget = nullptr, const TDZEnvironmentLink* startChain = nullptr)
         : m_vm(vm)
         , m_fileHandle(fileHandle)
@@ -652,7 +653,7 @@ public:
     bool isCore() const { return m_purpose == Purpose::JITCacheCore; }
     const TDZEnvironmentLink* startChain() const { return m_startChain; }
 
-    // Charges (SPEC-ucb.codec.md, E8). Without a budget both calls do nothing. A refused charge makes the refusal sticky
+    // Charges. Without a budget both calls do nothing. A refused charge makes the refusal sticky
     // and the allocation happens anyway, since an encode cannot unwind inside a record; every later charge counts as
     // refused, so nothing more is charged, and the owner releases chargedBytes() once the encoder is gone.
     bool budgetRefused() const { return m_budgetRefused; }
@@ -965,7 +966,7 @@ public:
     }
 
     // JITCache: each page's used span in payload order, the current page's end aligned as release() aligns it, so that the
-    // spans concatenate to the payload release() would assemble (SPEC-ucb.codec.md, E13).
+    // spans concatenate to the payload release() would assemble.
     void forEachPage(const ScopedLambda<void(std::span<const uint8_t>)>& functor)
     {
         m_currentPage->alignEnd();
@@ -975,7 +976,7 @@ public:
 
 private:
     // Deque::expandCapacity takes a deque from no buffer to 16 entries and then doubles it whenever an append finds it
-    // full, which a ring buffer is at one entry short of its capacity; the encoder follows it by counting entries (E8).
+    // full, which a ring buffer is at one entry short of its capacity; the encoder follows it by counting entries.
     template<typename Callable>
     void defer(Deque<Function<void()>>& deferred, size_t& capacity, Callable&& callable)
     {
@@ -1081,7 +1082,7 @@ private:
         }
         // Grow geometrically so offsetOf()/bytesAt(), which walk the page list, stay cheap on large payloads. A JITCache core
         // starts at one minimum page, since most cores are small and every encode zeroes its first page; the policy is part
-        // of the payload format, because a page boundary moves padding (SPEC-ucb.codec.md, E12).
+        // of the payload format, because a page boundary moves padding.
         size_t pageShift = m_pages.size() + (isCore() ? 0 : 4);
         size_t preferred = minPageSize << std::min<size_t>(pageShift, 14);
         if (size < preferred)
@@ -1126,7 +1127,7 @@ private:
     UncheckedKeyHashMap<unsigned, Vector<std::pair<ptrdiff_t, size_t>, 1>, IntHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> m_arraysByHash;
 };
 
-// JITCache: the scratch an encode builds and frees within one record (SPEC-ucb.codec.md, E8), charged from when it is
+// JITCache: the scratch an encode builds and frees within one record, charged from when it is
 // allocated until the scope that frees it ends.
 class EncoderScratchCharge {
     WTF_MAKE_NONCOPYABLE(EncoderScratchCharge);
@@ -1154,7 +1155,7 @@ Decoder::Decoder(VM& vm, Ref<CachedBytecode> cachedBytecode, RefPtr<SourceProvid
     , m_startChain(WTF::move(startChain))
     , m_validates(validate)
 {
-    // Only a JITCache core is decoded fallibly, and only a fallible decode validates (SPEC-ucb.codec.md, section 4).
+    // Only a JITCache core is decoded fallibly, and only a fallible decode validates.
     ASSERT(!m_validates || m_purpose == Purpose::JITCacheCore);
     ASSERT(!m_startChain || m_purpose == Purpose::JITCacheCore);
 }
@@ -1253,7 +1254,7 @@ void Decoder::setHandleForTDZEnvironment(CompactTDZEnvironment* environment, con
 
 void Decoder::addLeafExecutable(const UnlinkedFunctionExecutable* executable, ptrdiff_t offset)
 {
-    // JITCache: a core's CachedBytecode dies with its decode, so no update ever appends to it (SPEC-ucb.codec.md, E7).
+    // JITCache: a core's CachedBytecode dies with its decode, so no update ever appends to it.
     if (m_purpose == Purpose::JITCacheCore)
         return;
 #if USE(BUN_JSC_ADDITIONS)
@@ -1275,7 +1276,7 @@ RefPtr<SourceProvider> Decoder::provider() const
     return m_provider;
 }
 
-// JITCache: the validating decode of a core (SPEC-ucb.codec.md, E15). A check that fails records Malformed, and the decode
+// JITCache: the validating decode of a core. A check that fails records Malformed, and the decode
 // takes the record as the empty value of its type and goes on, so that it finishes without reading outside the payload,
 // asserting or crashing; decodeUnlinkedCodeBlockCore then discards the UCB.
 
@@ -1318,14 +1319,14 @@ static bool coreCodecIsEmptyOrDeletedKey(const Key& key)
     return WTF::isHashTraitsEmptyValue<KeyTraits>(key) || KeyTraits::isDeletedValue(key);
 }
 
-// JITCache: the pieces of the digests of SPEC-ucb.md section 3.4 that this file computes. Integers are little-endian.
+// JITCache: the pieces of the holder digests that this file computes. Integers are little-endian.
 static void coreCodecHashU32(JITCache::SHA256& hasher, uint32_t value)
 {
     std::array<uint8_t, 4> bytes { static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value >> 16), static_cast<uint8_t>(value >> 24) };
     hasher.update(bytes);
 }
 
-// A canonical string (SPEC-ucb.md section 3.3): u8 encoding, u32 length, then the code units, one byte each (encoding 1)
+// A canonical string: u8 encoding, u32 length, then the code units, one byte each (encoding 1)
 // exactly when every unit is at most 0xFF and UTF-16LE (encoding 2) otherwise; a null string is encoding 0 with length 0.
 static void coreCodecHashCanonicalString(JITCache::SHA256& hasher, const StringImpl* string)
 {
@@ -1458,7 +1459,7 @@ public:
 
     // JITCache: what this slot points at when it is not empty and `count` elements of T there, a size computed with overflow
     // checks, lie wholly inside the payload and are aligned for T; null otherwise. The validating decode reaches every
-    // record and array through it (SPEC-ucb.codec.md, E15).
+    // record and array through it.
     template<typename T>
     const T* placedTarget(Decoder& decoder, size_t count = 1) const
     {
@@ -1603,7 +1604,7 @@ class CachedUniquedStringImpl;
 class CachedStringImpl;
 class CachedTDZEnvironmentLink;
 
-// JITCache: the validating decode's record cache, kept in the decoder's offset cache (SPEC-ucb.codec.md, E15). For each
+// JITCache: the validating decode's record cache, kept in the decoder's offset cache. For each
 // record a slot reaches, it holds the type the record is decoded as, from the moment its decode starts, and the object the
 // decode gave, once it returns. The two keys, 2 * offset + 1 and 2 * offset + 2, are never 0 or -1, the empty and deleted
 // keys of the cache's table. Only a validating decode reaches these helpers, and it never takes the native path that
@@ -1744,7 +1745,7 @@ public:
                 return static_cast<Source*>(&this->inlineString(decoder).leakRef());
             }
             if (this->hasExternalString()) {
-                // A JITCacheCore encoder never writes an external-string ordinal (SPEC-ucb.codec.md, E15).
+                // A JITCacheCore encoder never writes an external-string ordinal.
                 if (decoder.validates() && !coreCodecCheck(decoder, false)) {
                     isNewAllocation = false;
                     return nullptr;
@@ -1785,7 +1786,7 @@ public:
         return decode(decoder, unusedIsNewAllocation, std::forward<Args>(args)...);
     }
 
-    // JITCache: the validating decode (SPEC-ucb.codec.md, E15). The record must lie inside the payload, aligned, and be well
+    // JITCache: the validating decode. The record must lie inside the payload, aligned, and be well
     // formed for its type, and it is checked and decoded once, through the record cache: a later slot naming it as the
     // same type shares the object its decode gave, as the native decode shares, and fails when another type named it first,
     // when its decode has not returned yet, which is a loop, or when the encoder writes the record once per owner, since
@@ -1868,7 +1869,7 @@ public:
     {
 #if USE(BUN_JSC_ADDITIONS)
         if constexpr (isCanonicalCachedType<T>) {
-            // The validating decode checks the record CachedPtr::decode reaches (SPEC-ucb.codec.md, E15).
+            // The validating decode checks the record CachedPtr::decode reaches.
             if (Options::useLeanBytecodeCacheDecoder() && !decoder.validates()) {
                 if (m_ptr.isEmpty())
                     return nullptr;
@@ -1969,7 +1970,7 @@ public:
     {
         if (!m_size)
             return;
-        // A count past the payload decodes as an empty container (SPEC-ucb.codec.md, E15).
+        // A count past the payload decodes as an empty container.
         const T* buffer = decoder.validates() ? this->template placedTarget<T>(decoder, m_size) : this->template buffer<T>();
         if (!coreCodecCheck(decoder, !!buffer))
             return;
@@ -2151,7 +2152,7 @@ public:
             return;
         map.reserveInitialCapacity(decodedEntries.size());
         for (auto& pair : decodedEntries) {
-            // A malformed key decodes as the empty value, which the map cannot hold (SPEC-ucb.codec.md, E15).
+            // A malformed key decodes as the empty value, which the map cannot hold.
             if (decoder.validates() && !coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<KeyTraitsArg>(pair.first)))
                 continue;
             map.add(WTF::move(pair.first), WTF::move(pair.second));
@@ -2184,7 +2185,7 @@ public:
         m_entries.encode(encoder, entriesVector); // in the map's order (declaration order while inline): it is the order global vars are created in
 
         // JITCache: a hashed map iterates in bucket order, which re-adding its entries does not reproduce, so a core also
-        // writes the layout (SPEC-ucb.codec.md, E4). The native cache writes none and keeps re-adding.
+        // writes the layout. The native cache writes none and keeps re-adding.
         m_hashedCapacity = 0;
         Vector<uint32_t> slots;
         if (encoder.isCore() && map.usesHashedStorage()) {
@@ -2209,7 +2210,7 @@ public:
         }
         map.reserveInitialCapacity(decodedEntries.size());
         for (const auto& pair : decodedEntries) {
-            // A malformed key decodes as the empty value, which the map cannot hold (SPEC-ucb.codec.md, E15).
+            // A malformed key decodes as the empty value, which the map cannot hold.
             if (decoder.validates() && !coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<KeyTraitsArg>(pair.first)))
                 continue;
             map.add(pair.first, pair.second);
@@ -2219,7 +2220,7 @@ public:
 private:
     friend struct CoreCodecSelfTestAccess;
 
-    // The checked restore of section 5 of SPEC-ucb.codec.md. A deleted bucket is refused before it is restored: the one map
+    // The checked restore of a hashed layout. A deleted bucket is refused before it is restored: the one map
     // the codec transports, VariableEnvironment::Map, never removes an entry, and its PackedRefPtr key cannot hold the
     // deleted value (T*)-1 its key traits give. Any failure records InconsistentMapLayout and leaves the map empty.
     void decodeHashedLayout(Decoder& decoder, Map& map, SourceType<CachedVector<CachedPair<Key, Value>>>&& decodedEntries) const
@@ -2320,7 +2321,7 @@ public:
                     symbol = vm.propertyNames->builtinNames().lookUpPrivateName(buffer);
                 if (!symbol && decoder.isFallible()) {
                     // JITCache: a core naming a symbol this VM lacks fails its decode instead of the process. The null
-                    // symbol is distinct per call, so no table built from it has duplicate keys (SPEC-ucb.codec.md, E5).
+                    // symbol is distinct per call, so no table built from it has duplicate keys.
                     decoder.noteFailure(CoreDecodeFailure::UnresolvedSymbol);
                     return &SymbolImpl::createNullSymbol().leakRef();
                 }
@@ -2340,8 +2341,7 @@ public:
         return m_is8Bit ? create(span8()) : create(span16());
     }
 
-    // JITCache: the checks of the validating decode, on a record whose 12-byte header lies inside the payload
-    // (SPEC-ucb.codec.md, E15).
+    // JITCache: the checks of the validating decode, on a record whose 12-byte header lies inside the payload.
     bool isWellFormed(Decoder& decoder) const
     {
         // The characters end inside the payload.
@@ -2423,7 +2423,7 @@ private:
                 characters = StringImpl::create8BitIfPossible(characters->span16());
         }
         size_t byteLength() const { return characters->length() * (characters->is8Bit() ? 1 : 2); }
-        // JITCache: what the shape allocated for a string it does not store as given, which an encode charges (E8).
+        // JITCache: what the shape allocated for a string it does not store as given, which an encode charges.
         size_t copyBytes() const { return characters.get() == original ? 0 : sizeof(StringImpl) + byteLength(); }
         RefPtr<StringImpl> characters;
         const StringImpl* original { characters.get() };
@@ -2545,7 +2545,7 @@ public:
     SourceType<T>* decodeAsPtr(Decoder& decoder) const
     {
         if (decoder.validates()) {
-            // The slot must be filled (SPEC-ucb.codec.md, E15).
+            // The slot must be filled.
             const T* record = this->template placedTarget<T>(decoder);
             if (!coreCodecCheck(decoder, record && coreCodecIsWellFormed(decoder, *record)))
                 return nullptr;
@@ -2653,7 +2653,7 @@ public:
         SourceType<decltype(m_entries)> entriesVector;
         m_entries.decode(decoder, entriesVector);
         for (const auto& item : entriesVector) {
-            // A malformed key decodes as the empty value, which the set cannot hold (SPEC-ucb.codec.md, E15).
+            // A malformed key decodes as the empty value, which the set cannot hold.
             if (decoder.validates() && !coreCodecCheck(decoder, !coreCodecIsEmptyOrDeletedKey<HashTraits<SourceType<T>>>(item)))
                 continue;
             set.add(item);
@@ -2677,7 +2677,7 @@ public:
 
     void decode(Decoder& decoder, UnlinkedHandlerInfo& handlerInfo) const
     {
-        // The type is cast to HandlerType (SPEC-ucb.codec.md, E15); a malformed one leaves the default handler.
+        // The type is cast to HandlerType; a malformed one leaves the default handler.
         if (decoder.validates() && !coreCodecCheck(decoder, m_type <= static_cast<uint32_t>(HandlerType::SynthesizedFinally)))
             return;
         handlerInfo = UnlinkedHandlerInfo(m_start, m_end, m_target, static_cast<HandlerType>(m_type));
@@ -2770,7 +2770,7 @@ public:
     }
 
     // A damaged one decodes as "no expression info" (stack traces lose line/column for that function) rather than failing the function.
-    // A validating decode records the damage too (SPEC-ucb.codec.md, E15), and a JITCacheCore encoder sets no flag.
+    // A validating decode records the damage too, and a JITCacheCore encoder sets no flag.
     std::unique_ptr<ExpressionInfo> decode(Decoder& decoder) const
     {
         const uint8_t* base = std::bit_cast<const uint8_t*>(this);
@@ -2920,7 +2920,7 @@ public:
     {
         if (decoder.validates()) {
             // A malformed name decodes as null, which CompactTDZEnvironment cannot hold, and the VM interns an environment
-            // by the hash it is given, the exclusive-or of its names' hashes (SPEC-ucb.codec.md, E15).
+            // by the hash it is given, the exclusive-or of its names' hashes.
             CompactTDZEnvironment::Compact compact;
             m_variables.decode(decoder, compact);
             unsigned hash = 0;
@@ -2942,7 +2942,7 @@ public:
         return env;
     }
 
-    // JITCache: the environment digest of SPEC-ucb.md section 3.4, computed on the VM thread when a holder digest first
+    // JITCache: the environment's digest, part of a holder digest, computed on the VM thread when a holder digest first
     // reaches the environment and kept in it until it frees its names. The budget is charged for the sort buffer while it
     // lives; on a refusal the digest is empty and the environment keeps none.
     static std::optional<std::array<uint8_t, 32>> contentDigest(const CompactTDZEnvironment& environment, CoreEncodingBudget* budget, unsigned& environmentsDigested)
@@ -3031,7 +3031,7 @@ public:
         handle = decode(decoder);
     }
 
-    // JITCache: the start record of a core has an empty handle, which no native link has (SPEC-ucb.codec.md, E14).
+    // JITCache: the start record of a core has an empty handle, which no native link has.
     bool isEmpty() const { return m_environment.isEmpty(); }
 
     // The interned environment a live handle holds; null for an empty handle.
@@ -3057,7 +3057,7 @@ public:
 
     ScopedArgumentsTable* decode(Decoder& decoder) const
     {
-        // ScopedArgumentsTable::tryCreate needs a length whose offsets the payload holds (SPEC-ucb.codec.md, E15).
+        // ScopedArgumentsTable::tryCreate needs a length whose offsets the payload holds.
         if (decoder.validates() && m_length && !coreCodecCheck(decoder, !!m_arguments.placedTarget<ScopeOffset>(decoder, m_length)))
             return nullptr;
         ScopedArgumentsTable* scopedArgumentsTable = ScopedArgumentsTable::tryCreate(decoder.vm(), m_length);
@@ -3085,7 +3085,7 @@ public:
 
     void decode(Decoder& decoder, SymbolTableEntry& symbolTableEntry) const
     {
-        // A fat entry's bits are a pointer, which a payload cannot hold (SPEC-ucb.codec.md, E15); a malformed entry keeps the
+        // A fat entry's bits are a pointer, which a payload cannot hold; a malformed entry keeps the
         // default slim entry.
         if (decoder.validates() && !coreCodecCheck(decoder, !!(unpack() & SymbolTableEntry::SlimFlag)))
             return;
@@ -3146,7 +3146,7 @@ public:
         symbolTable->m_maxScopeOffset = m_maxScopeOffset;
         symbolTable->m_usesSloppyEval = m_usesSloppyEval;
         symbolTable->m_nestedLexicalScope = m_nestedLexicalScope;
-        // The scope type is read back as SymbolTable::ScopeType (SPEC-ucb.codec.md, E15).
+        // The scope type is read back as SymbolTable::ScopeType.
         if (!decoder.validates() || coreCodecCheck(decoder, m_scopeType <= SymbolTable::FunctionNameScope))
             symbolTable->m_scopeType = m_scopeType;
         ScopedArgumentsTable* scopedArgumentsTable = m_arguments.decode(decoder);
@@ -3184,7 +3184,7 @@ class CachedJSValuePoolRef : public VariableLengthObject<WriteBarrier<Unknown>*>
 public:
     void encode(Encoder&, std::span<const WriteBarrier<Unknown>>);
     void decode(Decoder&, WriteBarrier<Unknown>* out, unsigned count, const JSCell* owner) const;
-    // JITCache: whether the pool of `count` constants lies inside the payload (SPEC-ucb.codec.md, E15).
+    // JITCache: whether the pool of `count` constants lies inside the payload.
     bool isPlaced(Decoder&, unsigned count) const;
     // JITCache: the kind bytes of a placed pool of `count` constants.
     std::span<const uint8_t> kinds(unsigned count) const
@@ -3236,7 +3236,7 @@ public:
         m_patternString.encode(encoder, regExp.m_patternString);
         m_flags = regExp.m_flags;
         // JITCache: a core writes the pattern and the flags only, so that decoding takes RegExp::create, the call generation
-        // makes. The rest is compilation state of a cell the VM shares, which code deletion clears (SPEC-ucb.codec.md, E11).
+        // makes. The rest is compilation state of a cell the VM shares, which code deletion clears.
         if (encoder.isCore())
             return;
         m_atom.encode(encoder, regExp.m_atom);
@@ -3250,7 +3250,7 @@ public:
     RegExp* decode(Decoder& decoder) const
     {
         if (decoder.validates()) {
-            // The record E11 writes, a pattern, and flags within Yarr::Flags (SPEC-ucb.codec.md, E15).
+            // The record a core writes, a pattern, and flags within Yarr::Flags.
             bool isCoreRecord = !m_parsed && !m_numSubpatterns && m_atom.isNull() && m_specificPattern == Yarr::SpecificPattern::None;
             bool hasKnownFlags = m_flags.toRaw() < (1u << Yarr::numberOfFlags);
             if (!coreCodecCheck(decoder, isCoreRecord && hasKnownFlags && !m_patternString.isNull()))
@@ -3292,7 +3292,7 @@ public:
         m_rawStrings.decode(decoder, decodedRawStrings);
         m_cookedStrings.decode(decoder, decodedCookedStrings);
         if (decoder.validates()) {
-            // TemplateObjectDescriptor hashes every raw string, and its cooked strings pair with them (SPEC-ucb.codec.md, E15).
+            // TemplateObjectDescriptor hashes every raw string, and its cooked strings pair with them.
             bool hasEveryRawString = std::ranges::none_of(decodedRawStrings, [](const String& string) { return string.isNull(); });
             if (!coreCodecCheck(decoder, hasEveryRawString && decodedRawStrings.size() == decodedCookedStrings.size()))
                 return nullptr;
@@ -3328,8 +3328,7 @@ public:
         if (!m_length)
             return decoder.vm().heapBigIntConstantZero.get();
 
-        // JSBigInt::tryCreateWithLength needs a length of at most maxLength, and the digits lie inside the payload
-        // (SPEC-ucb.codec.md, E15).
+        // JSBigInt::tryCreateWithLength needs a length of at most maxLength, and the digits lie inside the payload.
         if (decoder.validates() && !coreCodecCheck(decoder, m_length <= JSBigInt::maxLength && this->placedTarget<JSBigInt::Digit>(decoder, m_length)))
             return nullptr;
         JSBigInt* bigInt = JSBigInt::tryCreateWithLength(decoder.vm(), m_length);
@@ -3369,8 +3368,7 @@ public:
         RegExp,
         TemplateObjectDescriptor,
         BigInt,
-        // JITCache: the VM's ordered-hash-table sentinel, which builtins compare by identity; no payload
-        // (SPEC-ucb.codec.md, E16).
+        // JITCache: the VM's ordered-hash-table sentinel, which builtins compare by identity; no payload.
         OrderedHashTableSentinel,
     };
 
@@ -3421,7 +3419,7 @@ public:
             return Kind::String;
         }
 
-        // JITCache: a core writes the sentinel by identity, before the butterfly it also is (SPEC-ucb.codec.md, E16).
+        // JITCache: a core writes the sentinel by identity, before the butterfly it also is.
         if (encoder.isCore() && cell == encoder.vm().orderedHashTableSentinel())
             return Kind::OrderedHashTableSentinel;
 
@@ -3450,7 +3448,7 @@ public:
 
     JSValue decode(Decoder& decoder, Kind kind, CachedJSValuePoolOwner poolOwner) const
     {
-        // A failed check of the validating decode leaves undefined (SPEC-ucb.codec.md, E15).
+        // A failed check of the validating decode leaves undefined.
         if (decoder.validates() && !coreCodecCheck(decoder, isWellFormedKind(kind, poolOwner)))
             return jsUndefined();
         switch (kind) {
@@ -3493,11 +3491,11 @@ public:
             auto* string = checkedRecord<CachedUniquedStringImpl>(decoder);
             if (!string)
                 return jsUndefined();
-            // A JSString's value is never a symbol, so the encoder never writes one here (SPEC-ucb.codec.md, E15).
+            // A JSString's value is never a symbol, so the encoder never writes one here.
             if (decoder.validates() && !coreCodecCheck(decoder, !string->isSymbol()))
                 return jsUndefined();
             // JITCache: a core's own string constant registers decode as the atoms generation makes them, and jsString gives
-            // the VM's own empty and one-character strings (SPEC-ucb.codec.md, E10). Constants inside cells keep their
+            // the VM's own empty and one-character strings. Constants inside cells keep their
             // native decode.
             if (decoder.purpose() == Decoder::Purpose::JITCacheCore && poolOwner == CachedJSValuePoolOwner::CodeBlock)
                 return jsString(decoder.vm(), String { adoptRef(*static_cast<StringImpl*>(string->decode(decoder))) });
@@ -3513,7 +3511,7 @@ public:
         case Kind::BigInt:
             return decodeCell<CachedBigInt>(decoder);
         case Kind::OrderedHashTableSentinel:
-            // A generated or imported UCB holds its own VM's sentinel (SPEC-ucb.codec.md, E16).
+            // A generated or imported UCB holds its own VM's sentinel.
             return decoder.vm().orderedHashTableSentinel();
         }
         RELEASE_ASSERT_NOT_REACHED();
@@ -3569,7 +3567,7 @@ private:
     // must be no impure NaN either, since the baseline's negate fast path flips bit 63 of the boxed value and so turns such a
     // double into bits that name a cell, whether code reads it from a constant register or from a butterfly element. Every
     // NaN generation writes passes: a constant register holds jsNaN(), and an element holds the NaN the parser folded, with
-    // the CPU's bits and possibly its sign flipped (SPEC-ucb.codec.md, E15).
+    // the CPU's bits and possibly its sign flipped.
     static bool isWellFormedDouble(EncodedJSValue bits)
     {
         JSValue value = JSValue::decode(bits);
@@ -3626,7 +3624,7 @@ inline void CachedJSValuePoolRef::decode(Decoder& decoder, WriteBarrier<Unknown>
 }
 
 // The elements lie inside the payload and hold only what ArrayNode::emitBytecode stores under the indexing type, which the
-// tiers read without checking (SPEC-ucb.codec.md, E15). An Int32 butterfly holds only int32 values, which the DFG reads as
+// tiers read without checking. An Int32 butterfly holds only int32 values, which the DFG reads as
 // boxed int32s. A Double butterfly holds no NaN: indexingTypeForValue gives a NaN element ContiguousShape, double storage
 // reads any NaN as a hole, and JSCellButterfly::get asserts against one and boxes each element with jsDoubleNumber, which
 // turns an impure NaN into bits that are no double and can name a cell.
@@ -3653,7 +3651,7 @@ inline JSCellButterfly* CachedImmutableButterfly::decode(Decoder& decoder) const
 {
     if (decoder.validates()) {
         // VM::cellButterflyStructure indexes its table with the indexing type, which must be one of the three copy-on-write
-        // array types (SPEC-ucb.codec.md, E15).
+        // array types.
         bool isCopyOnWriteArray = m_indexingType == CopyOnWriteArrayWithInt32 || m_indexingType == CopyOnWriteArrayWithDouble || m_indexingType == CopyOnWriteArrayWithContiguous;
         if (!coreCodecCheck(decoder, isCopyOnWriteArray && m_length <= IndexingHeader::maximumLength && hasWellFormedElements(decoder)))
             return nullptr;
@@ -3706,7 +3704,7 @@ struct CachedMetadataSteps {
     }
 
     // JITCache: what UnlinkedMetadataTable::expandSteps asserts: strictly increasing opcodes below s_offsetTableEntries - 1
-    // that lay out a table whose offsets fit 32 bits (SPEC-ucb.codec.md, E15).
+    // that lay out a table whose offsets fit 32 bits.
     static bool stepsAreWellFormed(std::span<const uint32_t> steps)
     {
         uint64_t offset = UnlinkedMetadataTable::s_offset16TableSize;
@@ -4058,7 +4056,7 @@ public:
     void encode(Encoder& encoder, const TDZEnvironmentLink& environment)
     {
         // JITCache: the encoder's start chain is written as the start record, an empty handle and an empty parent, which no
-        // native link has, since each holds an environment from CompactTDZEnvironmentMap::get (SPEC-ucb.codec.md, E14).
+        // native link has, since each holds an environment from CompactTDZEnvironmentMap::get.
         if (&environment == encoder.startChain())
             return;
         m_handle.encode(encoder, environment.m_handle);
@@ -4068,7 +4066,7 @@ public:
     // JITCache: writes a TDZ chain, a UFE's or a link's parent. A chain equal to the encoder's start chain, as many links
     // and, link by link, the same environment object, is written as the start chain's own record; any other chain link by
     // link until what remains equals it. The VM interns environments by content, so comparing environments rather than
-    // links cuts a natively decoded UCB's chains, whose links are fresh, where a generated UCB's are cut (E14).
+    // links cuts a natively decoded UCB's chains, whose links are fresh, where a generated UCB's are cut.
     static void encodeChain(Encoder& encoder, CachedRefPtr<CachedTDZEnvironmentLink>& slot, const TDZEnvironmentLink* chain)
     {
         const TDZEnvironmentLink* startChain = encoder.startChain();
@@ -4090,10 +4088,10 @@ public:
         return new TDZEnvironmentLink(WTF::move(handle), WTF::move(parent));
     }
 
-    // JITCache: the TDZ chain digest of SPEC-ucb.md section 3.4. A link's digest hashes its environment's digest and its
+    // JITCache: the digest of a TDZ chain. A link's digest hashes its environment's digest and its
     // parent's digest, 32 zero bytes after the last link, so the links are listed and digested from the chain's end. A
     // chain longer than the links the list keeps inline moves the list to the heap, which the budget is charged for before
-    // the list is allocated and while it lives (SPEC-ucb.codec.md, section 2).
+    // the list is allocated and while it lives.
     static std::optional<std::array<uint8_t, 32>> chainDigest(const TDZEnvironmentLink* chain, CoreEncodingBudget* budget, unsigned& environmentsDigested)
     {
         std::array<uint8_t, 32> digest { };
@@ -4148,7 +4146,7 @@ private:
         return !chain && !other;
     }
 
-    // The start record stands for the decoder's start chain and has an empty parent (E14). The decoder's finalizer releases
+    // The start record stands for the decoder's start chain and has an empty parent. The decoder's finalizer releases
     // one reference to the chain, as it releases one for each link the decode allocates.
     TDZEnvironmentLink* decodeStartRecord(Decoder& decoder) const
     {
@@ -4162,7 +4160,7 @@ private:
     }
 
     // The validating decode walks the chain instead of recursing into each parent, so that a chain as long as the payload
-    // allows decodes without exhausting the stack (E15). It follows parents, each placed and marked in the record cache, until
+    // allows decodes without exhausting the stack. It follows parents, each placed and marked in the record cache, until
     // an empty one, a start record or a link the decoder already decoded. A parent whose decode has not returned, this record
     // included, which CachedPtr::decodeValidated marked, closes a loop, and one of another type fails as well. The walk then
     // decodes from the deepest record up, recording each ancestor's link and handing its allocation's reference to the
@@ -4259,7 +4257,7 @@ public:
         definition.ident = m_ident.decode(decoder);
         definition.position = m_position.decode(decoder);
         definition.initializerPosition = m_initializerPosition.decode(decoder);
-        // The kind is cast to its enum (SPEC-ucb.codec.md, E15); a malformed one keeps the default.
+        // The kind is cast to its enum; a malformed one keeps the default.
         using Kind = UnlinkedFunctionExecutable::ClassElementDefinition::Kind;
         if (decoder.validates() && !coreCodecCheck(decoder, m_kind <= static_cast<uint8_t>(Kind::StaticInitializationBlock)))
             return;
@@ -4343,7 +4341,7 @@ public:
     }
 
     // JITCache: the checks of the validating decode, on a record whose header word lies inside the payload: only the
-    // members the encoder writes, each inside the payload, and the class source's varints ending there (SPEC-ucb.codec.md, E15).
+    // members the encoder writes, each inside the payload, and the class source's varints ending there.
     bool isWellFormed(Decoder& decoder) const
     {
         if (m_header & ~(HasClassSource | HasWrapperParameterNames | HasClassElementDefinitions | HasParentPrivateNameEnvironment))
@@ -4516,13 +4514,13 @@ public:
         return decoder.regionChecksumMatches(this, *v.extent, v.checksum);
     }
 
-    // JITCache: the validating decode reaches a child's record through its slot (SPEC-ucb.codec.md, E15).
+    // JITCache: the validating decode reaches a child's record through its slot.
     bool isWellFormed(Decoder& decoder) const { return isIntact(decoder); }
 
 private:
     friend struct CoreCodecSelfTestAccess;
 
-    // JITCache: the header and tags a JITCacheCore encoder writes (SPEC-ucb.codec.md, E15).
+    // JITCache: the header and tags a JITCacheCore encoder writes.
     bool hasCoreTags(Decoder&, const View&) const;
 
     static uint32_t headerFor(const UnlinkedFunctionExecutable&, const Encoder*);
@@ -4626,7 +4624,7 @@ struct CachedCodeBlockExtras {
     CachedHashMap<JSInstructionStream::Offset, int> outOfLineJumpTargets;
 };
 
-// JITCache: an instruction stream the validating decode accepts (SPEC-ucb.codec.md, E15). Walked from offset 0, each
+// JITCache: an instruction stream the validating decode accepts. Walked from offset 0, each
 // instruction starts with an opcode below NUMBER_OF_BYTECODE_IDS, after at most one op_wide16 or op_wide32 prefix, and is
 // not itself a prefix; its whole BaseInstruction::size() lies inside the stream; and the walk ends exactly at the end.
 static bool coreCodecIsWholeInstructionStream(std::span<const uint8_t> bytes)
@@ -4753,7 +4751,7 @@ public:
         const Layout& layout = tail(decoder, storage).layout;
         std::span<const uint8_t> bytes { at<uint8_t>(layout, layout.instructions), layout.instructions.count };
         // JITCache: the validating decode hands back a stream made of whole instructions, or an empty one after recording
-        // the failure, so that every later walk over the stream stays inside it (SPEC-ucb.codec.md, E15).
+        // the failure, so that every later walk over the stream stays inside it.
         if (decoder.validates() && !coreCodecCheck(decoder, coreCodecIsWholeInstructionStream(bytes)))
             bytes = { };
         if (decoder.canBorrowPayload())
@@ -4770,7 +4768,7 @@ public:
         if (!(layout.flags & LayoutHasMetadata))
             return UnlinkedMetadataTable::empty();
         std::span<const uint32_t> steps { at<uint32_t>(layout, layout.steps), layout.steps.count };
-        // JITCache: UnlinkedMetadataTable::expandSteps asserts what the validating decode checks first (SPEC-ucb.codec.md, E15).
+        // JITCache: UnlinkedMetadataTable::expandSteps asserts what the validating decode checks first.
         if (decoder.validates() && !coreCodecCheck(decoder, CachedMetadataSteps::stepsAreWellFormed(steps)))
             return UnlinkedMetadataTable::empty();
         if (decoder.canBorrowPayload())
@@ -4855,7 +4853,7 @@ public:
         for (const Array* children : { &layout.functionDecls, &layout.functionExprs }) {
             auto* slots = at<CachedWriteBarrier<CachedFunctionExecutable>>(layout, *children);
             for (unsigned i = 0; i < children->count; ++i) {
-                // JITCache: the validating decode also places the child's record at its alignment (SPEC-ucb.codec.md, E15).
+                // JITCache: the validating decode also places the child's record at its alignment.
                 const CachedFunctionExecutable* record = decoder.validates() ? slots[i].ptr().template placedTarget<CachedFunctionExecutable>(decoder) : slots[i].ptr().getIfInPayload(decoder);
                 if (!record || !record->isIntact(decoder))
                     return false;
@@ -4872,7 +4870,7 @@ protected:
 private:
     friend struct CoreCodecSelfTestAccess;
 
-    // JITCache: what the validating decode adds to the region's checks (SPEC-ucb.codec.md, E15).
+    // JITCache: what the validating decode adds to the region's checks.
     bool hasCoreLayout(Decoder&, const Tail&) const;
 
     static void packScalars(const UnlinkedCodeBlock&, VarintWriter&);
@@ -5106,7 +5104,7 @@ ALWAYS_INLINE void CachedCodeBlock<CodeBlockType>::decode(Decoder& decoder, Unli
     }
     decodeArrayFromTail<SourceCodeRepresentation>(decoder, at<SourceCodeRepresentation>(layout, layout.constantsSourceCodeRepresentation), layout.constantsSourceCodeRepresentation.count, codeBlock.m_constantsSourceCodeRepresentation);
     if (decoder.validates()) {
-        // Linking switches on each representation (SPEC-ucb.codec.md, E15).
+        // Linking switches on each representation.
         for (auto& representation : codeBlock.m_constantsSourceCodeRepresentation) {
             if (!coreCodecCheck(decoder, representation <= SourceCodeRepresentation::LinkTimeConstant))
                 representation = SourceCodeRepresentation::Other;
@@ -5226,7 +5224,7 @@ void CachedFunctionExecutable::packScalars(const UnlinkedFunctionExecutable& exe
         | static_cast<uint32_t>(executable.m_isBuiltinDefaultClassConstructor) << ExecutableIsBuiltinDefaultClassConstructorShift;
     writer.u32(flags);
     // JITCache: a core writes its children unparsed, as the parent's generation creates them. The lexically scoped features
-    // come from that generation, which has read the child's directive prologue (SPEC-ucb.codec.md, E2).
+    // come from that generation, which has read the child's directive prologue.
     writer.u32(purpose == Encoder::Purpose::JITCacheCore ? 0 : executable.m_features);
     writer.u8(static_cast<uint8_t>(executable.m_lexicallyScopedFeatures));
     // Source positions cluster around the function's start, so all but the first are deltas.
@@ -5269,8 +5267,7 @@ uint32_t CachedFunctionExecutable::headerFor(const UnlinkedFunctionExecutable& e
     if (executable.m_rareData)
         header |= HasRareData;
     // JITCache: a core writes no child body and none of the fields the child's own parse sets, and never reads the UFE's
-    // slots, which share storage with a decoder while a natively decoded parent's child is lazily cached (SPEC-ucb.codec.md,
-    // E1 and E2; SPEC-ucb.md F1).
+    // slots, which share storage with a decoder while a natively decoded parent's child is lazily cached.
     if (encoder->isCore())
         return header;
     if (executable.m_hasCapturedVariables)
@@ -5288,7 +5285,7 @@ uint32_t CachedFunctionExecutable::headerFor(const UnlinkedFunctionExecutable& e
 
 bool CachedFunctionExecutable::hasCoreTags(Decoder& decoder, const View& v) const
 {
-    // No code block slot, checksum or updatable field (E1 and section 4), unparsed parse fields (E2), and every packed field,
+    // No code block slot, checksum or updatable field, unparsed parse fields, and every packed field,
     // the parse mode and the lexically scoped features within the values their encoder writes.
     static constexpr uint32_t coreHeaderBits = HasName | HasTDZ | HasRareData | HasLines | (0xffu << ParseModeShift);
     static constexpr uint32_t knownFlags = (1u << (ExecutableIsBuiltinDefaultClassConstructorShift + 1)) - 1;
@@ -5443,7 +5440,7 @@ ALWAYS_INLINE void CachedFunctionExecutable::encode(Encoder& encoder, const Unli
     if (tdz)
         CachedTDZEnvironmentLink::encodeChain(encoder, *tdz, executable.m_parentScopeTDZVariables.get());
 
-    // JITCache: a core neither reads the UFE's slots nor defers a body (SPEC-ucb.codec.md, E1).
+    // JITCache: a core neither reads the UFE's slots nor defers a body.
     if (encoder.isCore())
         return;
 
@@ -5473,7 +5470,7 @@ ALWAYS_INLINE UnlinkedFunctionExecutable* CachedFunctionExecutable::decode(Decod
 
 ALWAYS_INLINE UnlinkedFunctionExecutable::UnlinkedFunctionExecutable(Decoder& decoder, const CachedFunctionExecutable& cachedExecutable)
     : Base(decoder.vm(), decoder.vm().unlinkedFunctionExecutableStructure.get())
-    // JITCache: a child decoded from a core keeps weak UCB edges where a generated one would (SPEC-ucb.codec.md, E6).
+    // JITCache: a child decoded from a core keeps weak UCB edges where a generated one would.
     , m_isGeneratedFromCache(decoder.purpose() != Decoder::Purpose::JITCacheCore)
     , m_hasCapturedVariables(false)
     , m_isCached(false)
@@ -5695,7 +5692,7 @@ bool CachedCodeBlock<CodeBlockType>::hasCoreLayout(Decoder& decoder, const Tail&
     if ((layout.flags & LayoutHasExtras) && ((begin + static_cast<intptr_t>(layout.extrasAt)) % alignof(CachedCodeBlockExtras)))
         return false;
 
-    // The layout flags and packed scalars a JITCacheCore encoder writes: no checksum (section 4), and every packed field
+    // The layout flags and packed scalars a JITCacheCore encoder writes: no checksum, and every packed field
     // within its enum's values. The code type and the constructor kind take every value their two bits hold.
     static constexpr uint32_t knownFlags = (1u << (CodeBlockIsBuiltinDefaultClassConstructorShift + 1)) - 1;
     static constexpr uint8_t knownCodeGenerationModes = static_cast<uint8_t>(CodeGenerationMode::Debugger) | static_cast<uint8_t>(CodeGenerationMode::TypeProfiler) | static_cast<uint8_t>(CodeGenerationMode::ControlFlowProfiler);
@@ -5736,7 +5733,7 @@ auto CachedCodeBlock<CodeBlockType>::create(Encoder& encoder, const CodeBlockTyp
             place(layout.steps, steps.size(), [&] { return encodeArrayForTail<uint32_t>(encoder, steps); });
         }
         // The stream's span, valid for an owned and for a borrowed stream: a UCB that Bun decoded from a persistent payload
-        // encodes like any other, its bytes copied (SPEC-ucb.codec.md, E3).
+        // encodes like any other, its bytes copied.
         const JSInstructionStream& instructions = *codeBlock.m_instructions;
         place(layout.instructions, instructions.m_bytes.size(), [&] { return encodeArrayForTail<uint8_t>(encoder, instructions.m_bytes); });
         place(layout.constantsSourceCodeRepresentation, codeBlock.m_constantsSourceCodeRepresentation.size(), [&] { return encodeArrayForTail<SourceCodeRepresentation>(encoder, codeBlock.m_constantsSourceCodeRepresentation); });
@@ -6057,8 +6054,7 @@ UnlinkedFunctionExecutable* decodeBuiltinFunction(VM& vm, Ref<CachedBytecode> ca
     Ref decoder = Decoder::create(vm, WTF::move(cachedBytecode), &provider);
     DeferGC deferGC(vm);
     UnlinkedFunctionExecutable* executable = entry->decode(decoder.get(), sourceLength, embedderStamp);
-    // JITCache: the decoded builtin is a root, whose identity is recorded before link reads it (SPEC-ucb.codec.md, E9;
-    // SPEC-ucb.md section 7.2.4).
+    // JITCache: the decoded builtin is a root, whose identity is recorded before link reads it.
     if (executable)
         JITCache::didDecodeBuiltinExecutable(vm, *executable, provider);
     return executable;
@@ -6180,7 +6176,7 @@ static_assert(sizeof(CachedImmutableButterfly) == 12);
 static_assert(sizeof(CachedJSTextPosition) == 12);
 static_assert(sizeof(CachedJSValue) == 4);
 static_assert(sizeof(CachedJSValuePoolRef) == 4);
-// JITCache: a declaration map also holds its hashed layout (SPEC-ucb.codec.md, E4).
+// JITCache: a declaration map also holds its hashed layout.
 static_assert(sizeof(CachedInlineMap<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>, CachedEntryBits<VariableEnvironmentEntry>, VariableEnvironment::inlineMapCapacity, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>, VariableEnvironmentEntryHashTraits>) == 20);
 static_assert(sizeof(CachedModuleCodeBlock) == 56);
 static_assert(sizeof(CachedProgramCodeBlock) == 80);
@@ -6214,7 +6210,7 @@ void decodeFunctionCodeBlock(Decoder& decoder, int32_t cachedFunctionCodeBlockOf
     cachedCodeBlock->decode(decoder, codeBlock, owner);
 }
 
-// JITCache: the core codec's entry points (SPEC-ucb.codec.md, section 2). A core and a descriptor start with a 16-byte
+// JITCache: the core codec's entry points. A core and a descriptor start with a 16-byte
 // header: a magic at offset 0, a core's kind at offset 4 (a descriptor's is 0), rootOffset at offset 8, the offset of the
 // root record from the payload's start, and zero bytes elsewhere.
 static constexpr uint32_t coreCodecPayloadMagic = 0x43424355;
@@ -6234,7 +6230,7 @@ static UnlinkedCodeBlockCoreKind coreCodecKindOf(const UnlinkedCodeBlock& codeBl
     return UnlinkedCodeBlockCoreKind::Function;
 }
 
-// The start chain of E14: for a function core, the TDZ chain of the UFE whose slot holds the UCB; none otherwise.
+// The start chain: for a function core, the TDZ chain of the UFE whose slot holds the UCB; none otherwise.
 static RefPtr<TDZEnvironmentLink> coreCodecStartChain(UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder)
 {
     ASSERT(!holder || kind == UnlinkedCodeBlockCoreKind::Function);
@@ -6253,7 +6249,7 @@ static void coreCodecWriteHeader(Encoder::Allocation header, uint32_t magic, uin
     memcpy(header.buffer() + 8, &root, sizeof(root));
 }
 
-// Section 3: the header, the root record of the UCB's class, its rootOffset, then the deferred work.
+// A core: the header, the root record of the UCB's class, its rootOffset, then the deferred work.
 static void coreCodecEncodeCore(Encoder& encoder, const UnlinkedCodeBlock& codeBlock, UnlinkedCodeBlockCoreKind kind)
 {
     // The pages are zeroed, so the header's other bytes are.
@@ -6277,7 +6273,7 @@ static void coreCodecEncodeCore(Encoder& encoder, const UnlinkedCodeBlock& codeB
     encoder.encodeDeferred();
 }
 
-// Section 2: the UFE's record as a core writes a child, alone, with its own chain as the start chain, so that the chain is
+// A descriptor: the UFE's record as a core writes a child, alone, with its own chain as the start chain, so that the chain is
 // one start record.
 static void coreCodecEncodeDescriptor(Encoder& encoder, const UnlinkedFunctionExecutable& executable)
 {
@@ -6288,7 +6284,7 @@ static void coreCodecEncodeDescriptor(Encoder& encoder, const UnlinkedFunctionEx
     encoder.encodeDeferred();
 }
 
-// One JITCacheCore encode and its charges (E8). The encoder is freed before every charge it made is released; a payload
+// One JITCacheCore encode and its charges. The encoder is freed before every charge it made is released; a payload
 // it releases stays charged for its caller.
 class CoreCodecEncode {
     WTF_MAKE_NONCOPYABLE(CoreCodecEncode);
@@ -6323,7 +6319,7 @@ public:
         return payload;
     }
 
-    // E13: the payload's pages in order, unless anything was refused, in which case the sink sees nothing.
+    // The payload's pages in order, unless anything was refused, in which case the sink sees nothing.
     void forEachPage(const ScopedLambda<void(std::span<const uint8_t>)>& sink)
     {
         if (!m_encoder.budgetRefused())
@@ -6392,7 +6388,7 @@ CoreEncodeFailure forEachUnlinkedFunctionExecutableDescriptorChunk(VM& vm, const
     return encode.failure();
 }
 
-// Section 3: the root record of the requested kind, placed and aligned, decoded; null for a damaged region.
+// The root record of the requested kind, placed and aligned, decoded; null for a damaged region.
 template<typename Record>
 static UnlinkedCodeBlock* coreCodecDecodeRoot(Decoder& decoder, std::span<const uint8_t> payload, uint32_t rootOffset)
 {
@@ -6426,7 +6422,7 @@ UnlinkedCodeBlock* decodeUnlinkedCodeBlockCore(VM& vm, Ref<CachedBytecode> cache
         return nullptr;
     }
 
-    // The payload stays alive in the decoder; no UFE keeps the decoder, since a core writes no child body (E1, E7).
+    // The payload stays alive in the decoder; no UFE keeps the decoder, since a core writes no child body.
     Ref decoder = Decoder::create(vm, WTF::move(cachedBytecode), &provider, Decoder::Purpose::JITCacheCore, coreCodecStartChain(kind, holder), validate);
     UnlinkedCodeBlock* codeBlock = nullptr;
     {
@@ -6463,7 +6459,7 @@ std::optional<std::array<uint8_t, 32>> tdzChainDigest(const TDZEnvironmentLink* 
 
 #if ENABLE(JITCACHE_TWINS)
 
-// JITCache: the cases of U7 that alter a core's records (SPEC-ucb.codec.md, section 7). Each encodes a core, changes one
+// JITCache: the core codec's self-test cases that alter a core's records. Each encodes a core, changes one
 // record of a copy through the record's type, and decodes the copy, which must fail as the rule names and not crash.
 struct CoreCodecSelfTestAccess {
     // A program whose core holds each record a case alters: more than nine global vars, so the var declarations take
@@ -6494,7 +6490,7 @@ struct CoreCodecSelfTestAccess {
 
     // A method created while its class's binding is under TDZ, so that its UFE holds a TDZ chain, and an arrow created
     // while the method's own bindings are under TDZ, whose chain is a link naming them over the method's chain: the
-    // method's core holds that link, its environment and a start record (E14).
+    // method's core holds that link, its environment and a start record.
     static constexpr ASCIILiteral functionText =
         "class CoreCodecFixture {\n"
         "    method()\n"
@@ -6753,14 +6749,14 @@ struct CoreCodecSelfTestAccess {
         auto copy = MallocSpan<uint8_t, VMMalloc>::malloc(core.size());
         memcpySpan(copy.mutableSpan(), core.span());
         if (!alter(copy.mutableSpan())) {
-            failure = makeString("U7: the codec fixture has no record for the case "_s, name);
+            failure = makeString("the codec fixture has no record for the case "_s, name);
             return false;
         }
         CoreDecodeFailure result = CoreDecodeFailure::None;
         UnlinkedCodeBlock* decoded = decodeUnlinkedCodeBlockCore(vm, CachedBytecode::create(WTF::move(copy), { }), provider, kind, holder, validate, result);
         if (result == expected && (expected == CoreDecodeFailure::None) == !!decoded)
             return true;
-        failure = makeString("U7: "_s, name, validate ? " with validate"_s : " without validate"_s, " decoded to "_s, failureName(result), " instead of "_s, failureName(expected));
+        failure = makeString(name, validate ? " with validate"_s : " without validate"_s, " decoded to "_s, failureName(result), " instead of "_s, failureName(expected));
         return false;
     }
 
@@ -6794,7 +6790,7 @@ struct CoreCodecSelfTestAccess {
         if (!expectBothModes(vm, failure, "the unaltered program core"_s, core, provider, kind, nullptr, CoreDecodeFailure::None, unaltered))
             return false;
 
-        // E4.
+        // Hashed map layouts.
         if (!expectBothModes(vm, failure, "a hashed declaration map with a deleted bucket"_s, core, provider, kind, nullptr, CoreDecodeFailure::InconsistentMapLayout, [&](std::span<uint8_t> payload) {
             auto& map = hashedMap(root<Program>(payload));
             auto slots = elements(map.m_slots);
@@ -6813,7 +6809,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E5: a private name this VM lacks, without and with validation.
+        // Unresolved symbols: a private name this VM lacks, without and with validation.
         if (!expectBothModes(vm, failure, "a payload naming an absent private name"_s, core, provider, kind, nullptr, CoreDecodeFailure::UnresolvedSymbol, [&](std::span<uint8_t> payload) {
             auto* record = identifierRecord(root<Program>(payload), "capturedReader"_s);
             if (!record)
@@ -6827,7 +6823,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: placement.
+        // The validating decode: placement.
         if (!malformed("a nested offset past the payload"_s, [&](std::span<uint8_t> payload) {
             for (auto& identifier : identifiers(root<Program>(payload))) {
                 auto& slot = identifier.m_string.m_impl.ptr();
@@ -6880,7 +6876,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: strings.
+        // The validating decode: strings.
         if (!malformed("a wrong stored hash"_s, [&](std::span<uint8_t> payload) {
             auto* record = identifierRecord(root<Program>(payload));
             if (!record)
@@ -6927,7 +6923,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: tags.
+        // The validating decode: tags.
         if (!malformed("an unknown constant kind"_s, [&](std::span<uint8_t> payload) {
             auto kinds = constantKinds(root<Program>(payload));
             if (kinds.empty())
@@ -6999,7 +6995,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: native assertions.
+        // The validating decode: native assertions.
         if (!malformed("metadata steps out of order"_s, [&](std::span<uint8_t> payload) {
             auto steps = array<uint32_t>(root<Program>(payload), [](const auto& layout) -> const auto& { return layout.steps; });
             if (steps.size() < 2)
@@ -7017,7 +7013,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: records.
+        // The validating decode: records.
         if (!malformed("a butterfly element that is a butterfly"_s, [&](std::span<uint8_t> payload) {
             auto kinds = butterflyElementKinds(root<Program>(payload), CopyOnWriteArrayWithContiguous);
             if (kinds.empty())
@@ -7106,7 +7102,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: instructions.
+        // The validating decode: instructions.
         if (!malformed("an unknown opcode"_s, [&](std::span<uint8_t> payload) {
             auto bytes = instructions(root<Program>(payload));
             if (bytes.empty())
@@ -7158,7 +7154,7 @@ struct CoreCodecSelfTestAccess {
         if (!expectBothModes(vm, failure, "the unaltered function core"_s, core, provider, kind, &holder, CoreDecodeFailure::None, unaltered))
             return false;
 
-        // E14.
+        // Start records.
         if (!expectBothModes(vm, failure, "a start record decoded without a start chain"_s, core, provider, kind, nullptr, CoreDecodeFailure::Malformed, [&](std::span<uint8_t> payload) {
             return !!startRecord(payload);
         }))
@@ -7173,7 +7169,7 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: records. A decode without validate would recurse along this loop without end.
+        // The validating decode: records. A decode without validate would recurse along this loop without end.
         if (!malformed("a TDZ link whose parent is itself"_s, [&](std::span<uint8_t> payload) {
             auto* link = ownLink(payload);
             if (!link)
@@ -7202,8 +7198,8 @@ struct CoreCodecSelfTestAccess {
         }))
             return false;
 
-        // E15: placement. The function's name decodes before its chain, as a string; the record cache refuses it as an
-        // environment, which a decoder caching objects by offset alone would take for one and assert on.
+        // The validating decode: placement. The function's name decodes before its chain, as a string; the record cache
+        // refuses it as an environment, which a decoder caching objects by offset alone would take for one and assert on.
         return malformed("a TDZ environment slot naming a string record"_s, [&](std::span<uint8_t> payload) {
             auto* link = ownLink(payload);
             auto* executable = firstFunctionExpression(payload);
@@ -7226,13 +7222,13 @@ struct CoreCodecSelfTestAccess {
         ParserError error;
         Strong<UnlinkedProgramCodeBlock> program { vm, recursivelyGenerateUnlinkedCodeBlockForProgram(vm, programSource, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None, 0) };
         if (!program.get() || error.isValid()) {
-            failure = "U7: the codec fixture program failed to generate"_s;
+            failure = "the codec fixture program failed to generate"_s;
             return false;
         }
         CoreEncodeFailure encodeFailure = CoreEncodeFailure::None;
         RefPtr<CachedBytecode> programCore = encodeUnlinkedCodeBlockCore(vm, *program.get(), nullptr, nullptr, encodeFailure);
         if (!programCore) {
-            failure = "U7: the codec fixture program's core failed to encode"_s;
+            failure = "the codec fixture program's core failed to encode"_s;
             return false;
         }
         if (!runProgramCases(vm, failure, *programCore, *programSource.provider()))
@@ -7241,7 +7237,7 @@ struct CoreCodecSelfTestAccess {
         SourceCode functionSource = makeSource(String { functionText }, SourceOrigin { }, SourceTaintedOrigin::Untainted);
         Strong<UnlinkedProgramCodeBlock> classProgram { vm, recursivelyGenerateUnlinkedCodeBlockForProgram(vm, functionSource, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None, 0) };
         if (!classProgram.get() || error.isValid()) {
-            failure = "U7: the codec fixture class failed to generate"_s;
+            failure = "the codec fixture class failed to generate"_s;
             return false;
         }
         UnlinkedFunctionExecutable* method = nullptr;
@@ -7250,17 +7246,17 @@ struct CoreCodecSelfTestAccess {
                 method = classProgram->functionExpr(i);
         }
         if (!method || !method->parentScopeTDZVariables()) {
-            failure = "U7: the codec fixture's method has no TDZ chain"_s;
+            failure = "the codec fixture's method has no TDZ chain"_s;
             return false;
         }
         Strong<UnlinkedFunctionCodeBlock> methodBody { vm, method->unlinkedCodeBlockFor(vm, method->linkedSourceCode(functionSource), CodeSpecializationKind::CodeForCall, { }, error, method->parseMode()) };
         if (!methodBody.get() || error.isValid()) {
-            failure = "U7: the codec fixture's method failed to generate"_s;
+            failure = "the codec fixture's method failed to generate"_s;
             return false;
         }
         RefPtr<CachedBytecode> methodCore = encodeUnlinkedCodeBlockCore(vm, *methodBody.get(), method, nullptr, encodeFailure);
         if (!methodCore) {
-            failure = "U7: the codec fixture method's core failed to encode"_s;
+            failure = "the codec fixture method's core failed to encode"_s;
             return false;
         }
         return runFunctionCases(vm, failure, *methodCore, *functionSource.provider(), *method);
@@ -7269,8 +7265,7 @@ struct CoreCodecSelfTestAccess {
 
 namespace JITCache {
 
-// The part of U7 that alters a core's records (SPEC-ucb.codec.md, section 7), which runUCBSelfTest runs: it reports the
-// first case that fails in `failure` and returns false.
+// UCBTwinGeneration.h declares it for testjitcache.
 bool runCoreCodecSelfTest(VM& vm, String& failure)
 {
     return CoreCodecSelfTestAccess::run(vm, failure);

@@ -1,13 +1,13 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
-// SPEC-image.md T1 and T2: stack overflow. Unbounded recursion reaches the soft stack limit, which every image's
-// prologue compares against (census B1), and jumps to the ThrowStackOverflowAtPrologue thunk (B3); the second function
+// Stack overflow in imported images, each import twin-checked. Unbounded recursion reaches the soft stack limit, which
+// every image's prologue compares against, and jumps to the ThrowStackOverflowAtPrologue thunk; the second function
 // declares more parameters than its recursive call passes, so the overflow is found in its arity check, which runs a
 // second prologue first. The depth reached depends on how close each run's frames are to the limit, which a skipped
-// parse or an earlier tier-up changes, so the script prints only that the stack-overflow RangeError happened (THREAD
-// Verification). The consumer checks that its images carry (T1): the soft stack limit (B1); the jump to
-// ThrowStackOverflowAtPrologue (B3); the arity fixup's Call (B2); and, in debug builds, which every twins build is, the
-// consistency-check routine's tail call to its thunk (B5).
+// parse or an earlier tier-up changes, and the oracle compares output, so the script prints only that the
+// stack-overflow RangeError happened. The consumer checks that its images carry: the soft stack limit; the jump to
+// ThrowStackOverflowAtPrologue; the arity fixup's Call; and, in debug builds, which every twins build is, the
+// consistency-check routine's tail call to its thunk.
 (function main(role, scratch, artifact, sequence) {
     function recurse(depth) {
         return recurse(depth + 1) + 1;

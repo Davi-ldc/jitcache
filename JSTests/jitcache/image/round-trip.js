@@ -1,8 +1,9 @@
 // jitcache-requires: twins
 // jitcache-runs: Producer --useConcurrentJIT=false; ConsumerProducer --useConcurrentJIT=false
 
-// SPEC-image.md T4 (I9). The producer commits body at its finalize capture, with cold ICs and no counter progress. The
-// ConsumerProducer imports it, rebuilding its image record from the sections (section 10.3, step 14), runs it with the
+// An imported image recaptured before anything changes it comes back byte for byte. The producer commits body at its
+// finalize capture, with cold ICs and no counter progress. The ConsumerProducer imports it, rebuilding its image record
+// from the sections at install, runs it with the
 // same int32s, so no MathIC regenerates and no tier-up check rewrites the coverage rates, and recaptures it with delta,
 // which commits because the ICs now hold cases and the counter has progressed. The recapture's image.baseline and
 // baked-facts.baseline equal the imported ones byte for byte, and its image-twins.baseline equals the imported one except

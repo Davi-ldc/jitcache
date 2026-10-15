@@ -1,6 +1,6 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false --maximumFunctionForCallInlineCandidateBytecodeCostForDFG=170; Consumer --useConcurrentJIT=false --maximumFunctionForCallInlineCandidateBytecodeCostForDFG=170
 
-// SPEC-cb.md section 11.3, lazy-operand profiles (P3), which only DFG OSR exits create (N7), forced before delta runs.
+// Lazy-operand profiles, which only DFG OSR exits create, forced before delta runs.
 // An exit on a type check whose operand is a GetLocal records a lazy-operand profile in the baseline CB of the exiting
 // node's inline frame, keyed by that GetLocal's bytecode index and the operand it reads
 // (Graph::methodOfGettingAValueProfileFor). A structure check records none, because SpeculativeJIT::emitStructureCheck
@@ -17,7 +17,7 @@
 //   executable's replacement. A for-of body costs more bytecode than the DFG inlines at a call
 //   (maximumFunctionForCallInlineCandidateBytecodeCostForDFG, 80), so both runs raise that cap to the FTL's default
 //   of 170, which lazyCallee, at 145, fits. Only the DFG's inlining decisions read the option, so it is free.
-// No native exit records a tmp key (N7), so the unit tests U2 and U3 cover tmp keys.
+// No native exit records a tmp key, so testjitcache's validation and strict tests of the CB lane cover tmp keys.
 // The Producer commits both CBs with strict on, and in twins builds checks their lazy-operand records; the Consumer
 // installs them, passes their twins, and in twins builds checks that they were imported.
 (function main(role) {

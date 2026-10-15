@@ -214,7 +214,7 @@ Ref<InlineCacheHandler> InlineCacheCompiler::generateSlowPathHandler(VM& vm, Acc
     ASSERT(!isCompilationThread());
     if (auto handler = vm.m_sharedJITStubs->getSlowPathHandler(accessType))
         return handler.releaseNonNull();
-    // JITCache: a handler the VM lacked is per-VM support generated now (harness sub-SPEC section 9.3).
+    // JITCache: a handler the VM lacked is per-VM support generated now, which the bench counts.
     vm.jitStubs->noteSupportGeneration();
     auto handler = InlineCacheHandler::createSlowPath(vm, accessType);
     vm.m_sharedJITStubs->setSlowPathHandler(accessType, handler);

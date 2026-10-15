@@ -2,8 +2,8 @@
 // jitcache-expect-no-install: 1
 // jitcache-check: 1 resources/rejected-must-match.ts
 
-// SPEC-integrator.md section 15.2, must-match.js. The Producer runs with evalMode, a must-match option (options.md), on,
-// so the header it writes records it (container sub-SPEC section 3.1), and commits mmBody. The Consumer runs with the
+// A must-match option that differs between producer and consumer. The Producer runs with evalMode, a must-match option
+// (options.md), on, so the artifact header it writes records it, and commits mmBody. The Consumer runs with the
 // option at its default, off, so its start finds the header incompatible: Rejected at start.incompatible, with a detail
 // naming evalMode, which the checker reads in the start line. The Consumer's VM stays unconfigured and imports nothing,
 // and the runner compares both outputs with the JITCache-off run's.

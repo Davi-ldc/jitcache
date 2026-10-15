@@ -1,4 +1,4 @@
-// The corpus finalize-capture.js and default-mode.js share (SPEC-integrator.md section 15.2): bodies of the shapes
+// The corpus finalize-capture.js and default-mode.js share: bodies of the shapes
 // baseline code takes, arithmetic with its MathICs, property and call sites, a closure and the arrow it returns, a string
 // switch, a constructor and a handler that catches. integratorCorpus drives each body 60 times in one loop, so each
 // compiles at its 34th call, as the LLInt's warm-up threshold of 500 points at 15 points a call gives, and stays far

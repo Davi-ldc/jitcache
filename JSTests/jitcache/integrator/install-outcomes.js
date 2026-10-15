@@ -1,19 +1,19 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; Consumer --jitAllowlist=ioAllowed
 
-// SPEC-integrator.md section 15.2, install-outcomes.js: two outcomes of the install function (section 7.3).
+// Two outcomes of the install function.
 // - Sequence 0, a baked-fact mismatch. Every run evaluates one program text twice with loadString. The second evaluation
 //   takes the program's UCB from the CodeCache, so the function each evaluation returns, first and second, has an
 //   executable of its own over one UCB of ioBody. noDFG(first), before first's first call, makes the CodeBlock first
 //   gets CannotCompile, while second's, which compiles in the Producer and is committed then, could compile in the DFG:
-//   the capability class is a baked fact (SPEC-image.md section 7). In the Consumer, first's first call imports ioBody,
-//   and its newborn CodeBlock meets the mismatch, which counts and keeps the import (step 5); first runs in the LLInt.
+//   the capability class is a baked fact. In the Consumer, first's first call imports ioBody, and its newborn CodeBlock
+//   meets the mismatch, which counts and keeps the import; first runs in the LLInt.
 //   second's newborn CodeBlock then finds the import kept and installs it, so second's calls add no LLInt instruction to
 //   the UCB both share, and nothing compiles ioBody. first's two calls leave the UCB's LLInt counter, which jitSoon
 //   armed at the Producer's compilation, short of its threshold of at least 100 points.
 // - Sequence 1, the gate. The Consumer's --jitAllowlist names no file, so it is the list of the functions the JIT may
 //   compile (FunctionAllowlist): ioAllowed, and not ioGated. ioAllowed installs; ioGated's import fails shouldJIT, the
-//   gate the LLInt's tier-up applies, which drops the import (step 6), and ioGated runs in the LLInt, as natively.
+//   gate the LLInt's tier-up applies, which drops the import, and ioGated runs in the LLInt, as natively.
 // The runner compares every output with the JITCache-off run's.
 load("./resources/integrator.js", "caller relative");
 

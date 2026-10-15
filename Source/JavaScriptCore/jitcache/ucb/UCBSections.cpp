@@ -1,0 +1,395 @@
+#include "config.h"
+#include "UCBSections.h"
+
+#include "ByteFields.h"
+#include "JITCacheSHA256.h"
+#include "JSCInlines.h"
+#include "JSCellButterfly.h"
+#include "UnlinkedCodeBlock.h"
+#include "VM.h"
+#include <bit>
+#include <wtf/MathExtras.h>
+#include <wtf/ScopedLambda.h>
+#include <wtf/StdLibExtras.h>
+
+namespace JSC::JITCache {
+
+namespace UCBSectionsInternal {
+
+// The fixed part of ucb.identity. The atom map and then the butterfly map follow it, each
+// ceil(N / 8) bytes, and the section ends at the butterfly map rounded up to 8 bytes.
+static constexpr uint32_t sectionMagic = 0x49424355;
+static constexpr uint16_t layoutVersion = 1;
+static constexpr size_t magicOffset = 0;
+static constexpr size_t versionOffset = 4;
+static constexpr size_t coreKindOffset = 6;
+static constexpr size_t provenanceOffset = 7;
+static constexpr size_t keyOffset = 8;
+static constexpr size_t contextDigestOffset = 48;
+static constexpr size_t coreDigestOffset = 80;
+static constexpr size_t holderDigestOffset = 112;
+static constexpr size_t featuresOffset = 144;
+static constexpr size_t lexicallyScopedFeaturesOffset = 146;
+static constexpr size_t hasCapturedVariablesOffset = 147;
+static constexpr size_t constantCountOffset = 148;
+static constexpr size_t mapsOffset = 152;
+static constexpr uint32_t constantCountLimit = 1u << 28;
+static_assert(keyOffset + BodyKey::byteSize == contextDigestOffset);
+static_assert(contextDigestOffset + sizeof(Digest256) == coreDigestOffset);
+static_assert(coreDigestOffset + sizeof(Digest256) == holderDigestOffset);
+static_assert(holderDigestOffset + sizeof(Digest256) == featuresOffset);
+
+// The key exactly as stored: BodyKey holds its 40 canonical bytes. With strict on, BodyKey::fromBytes has accepted them;
+// with strict off they are trusted, and the engine compares them with the body's key in both modes.
+static BodyKey storedKey(std::span<const uint8_t> bytes)
+{
+    std::array<uint8_t, BodyKey::byteSize> copy;
+    memcpySpan(std::span { copy }, bytes.subspan<keyOffset, BodyKey::byteSize>());
+    return std::bit_cast<BodyKey>(copy);
+}
+
+static size_t mapSize(uint32_t constantCount)
+{
+    return (static_cast<size_t>(constantCount) + 7) / 8;
+}
+
+static void mark(std::span<uint8_t> map, uint32_t index)
+{
+    map[index / 8] |= 1u << (index % 8);
+}
+
+// Only the last byte of a map of ceil(count / 8) bytes can hold a bit at or above count.
+static bool marksAtOrAbove(std::span<const uint8_t> map, uint32_t count)
+{
+    uint32_t usedBits = count % 8;
+    return usedBits && (map.back() >> usedBits);
+}
+
+// True when predicate(index) holds for every index below count that the map marks, visited in increasing order; stops at
+// the first index for which it does not.
+template<typename Predicate>
+static bool allMarkedSatisfy(std::span<const uint8_t> map, uint32_t count, const Predicate& predicate)
+{
+    size_t byteCount = mapSize(count);
+    for (size_t byteIndex = 0; byteIndex < byteCount; ++byteIndex) {
+        for (unsigned bits = map[byteIndex]; bits; bits &= bits - 1) {
+            uint32_t index = static_cast<uint32_t>(byteIndex * 8 + std::countr_zero(bits));
+            if (index >= count)
+                return true;
+            if (!predicate(index))
+                return false;
+        }
+    }
+    return true;
+}
+
+template<typename Functor>
+static void forEachMarked(std::span<const uint8_t> map, uint32_t count, const Functor& functor)
+{
+    allMarkedSatisfy(map, count, [&](uint32_t index) {
+        functor(index);
+        return true;
+    });
+}
+
+// A constant register as a cell of class T, or null. An empty constant, which generation emits for TDZ checks, is no cell.
+template<typename T>
+static T* constantAs(UnlinkedCodeBlock& ucb, uint32_t index)
+{
+    JSValue value = ucb.constantRegisters()[index].get();
+    if (!value)
+        return nullptr;
+    return dynamicDowncast<T>(value);
+}
+
+static bool isResolvedString(const JSString* string)
+{
+    return string && !string->isRope();
+}
+
+static bool isResolvedStringValue(JSValue value)
+{
+    return value && isResolvedString(dynamicDowncast<JSString>(value));
+}
+
+// The layout's rules, which strict checks before anything reads the section.
+static bool obeysIdentityRules(std::span<const uint8_t> bytes)
+{
+    if (bytes.size() < mapsOffset)
+        return false;
+    if (readField<uint32_t>(bytes, magicOffset) != sectionMagic || readField<uint16_t>(bytes, versionOffset) != layoutVersion)
+        return false;
+    uint8_t coreKindByte = bytes[coreKindOffset];
+    if (coreKindByte > static_cast<uint8_t>(UnlinkedCodeBlockCoreKind::Function) || bytes[provenanceOffset] > static_cast<uint8_t>(CoreProvenance::EmbedderDecoded))
+        return false;
+    auto constantCount = readField<uint32_t>(bytes, constantCountOffset);
+    if (constantCount >= constantCountLimit)
+        return false;
+    // The child holder digests fill whatever follows the maps' padding, 32 bytes each.
+    size_t baseSize = identitySectionSize(constantCount);
+    if (bytes.size() < baseSize || (bytes.size() - baseSize) % sizeof(Digest256))
+        return false;
+    auto coreKind = static_cast<UnlinkedCodeBlockCoreKind>(coreKindByte);
+    auto key = BodyKey::fromBytes(bytes.subspan<keyOffset, BodyKey::byteSize>());
+    if (!key || coreKindFor(key->identityKind()) != coreKind)
+        return false;
+
+    auto features = readField<CodeFeatures>(bytes, featuresOffset);
+    uint8_t lexicallyScopedFeatures = bytes[lexicallyScopedFeaturesOffset];
+    uint8_t hasCapturedVariables = bytes[hasCapturedVariablesOffset];
+    if (coreKind == UnlinkedCodeBlockCoreKind::Function) {
+        if (features >= (1u << bitWidthOfCodeFeatures) || lexicallyScopedFeatures > AllLexicallyScopedFeatures || hasCapturedVariables > 1)
+            return false;
+    } else {
+        // Only a function core has a holder digest and parse fields.
+        if (!isAllZero(bytes.subspan(holderDigestOffset, sizeof(Digest256))) || features || lexicallyScopedFeatures || hasCapturedVariables)
+            return false;
+    }
+
+    size_t mapBytes = mapSize(constantCount);
+    auto atomMap = bytes.subspan(mapsOffset, mapBytes);
+    auto butterflyMap = bytes.subspan(mapsOffset + mapBytes, mapBytes);
+    if (marksAtOrAbove(atomMap, constantCount) || marksAtOrAbove(butterflyMap, constantCount))
+        return false;
+    for (size_t i = 0; i < mapBytes; ++i) {
+        if (atomMap[i] & butterflyMap[i])
+            return false;
+    }
+    return isAllZero(bytes.subspan(mapsOffset + 2 * mapBytes, baseSize - (mapsOffset + 2 * mapBytes)));
+}
+
+} // namespace UCBSectionsInternal
+
+std::optional<IdentitySection> parseIdentitySection(std::span<const uint8_t> bytes, bool strict)
+{
+    using namespace UCBSectionsInternal;
+
+    if (strict && !obeysIdentityRules(bytes))
+        return std::nullopt;
+
+    auto coreKind = static_cast<UnlinkedCodeBlockCoreKind>(bytes[coreKindOffset]);
+    auto constantCount = readField<uint32_t>(bytes, constantCountOffset);
+    std::optional<Digest256> holderDigest;
+    std::optional<FunctionParseFields> functionParseFields;
+    if (coreKind == UnlinkedCodeBlockCoreKind::Function) {
+        holderDigest = readField<Digest256>(bytes, holderDigestOffset);
+        functionParseFields = FunctionParseFields {
+            .features = readField<CodeFeatures>(bytes, featuresOffset),
+            .lexicallyScopedFeatures = bytes[lexicallyScopedFeaturesOffset],
+            .hasCapturedVariables = !!bytes[hasCapturedVariablesOffset],
+        };
+    }
+
+    size_t mapBytes = mapSize(constantCount);
+    size_t baseSize = identitySectionSize(constantCount);
+    // Normal mode trusts the section's size to leave whole digests after the maps.
+    std::span<const uint8_t> childHolderDigests = bytes.subspan(baseSize);
+    childHolderDigests = childHolderDigests.first(childHolderDigests.size() - childHolderDigests.size() % sizeof(Digest256));
+    return IdentitySection {
+        .coreKind = coreKind,
+        .provenance = static_cast<CoreProvenance>(bytes[provenanceOffset]),
+        .key = storedKey(bytes),
+        .contextDigest = readField<Digest256>(bytes, contextDigestOffset),
+        .coreDigest = readField<Digest256>(bytes, coreDigestOffset),
+        .holderDigest = holderDigest,
+        .functionParseFields = functionParseFields,
+        .constantCount = constantCount,
+        .atomMap = bytes.subspan(mapsOffset, mapBytes),
+        .butterflyMap = bytes.subspan(mapsOffset + mapBytes, mapBytes),
+        .childHolderDigests = childHolderDigests,
+    };
+}
+
+UnlinkedCodeBlockCoreKind coreKindFor(IdentityKind kind)
+{
+    switch (kind) {
+    case IdentityKind::Program:
+        return UnlinkedCodeBlockCoreKind::Program;
+    case IdentityKind::Module:
+        return UnlinkedCodeBlockCoreKind::Module;
+    case IdentityKind::IndirectEval:
+    case IdentityKind::DirectEval:
+        return UnlinkedCodeBlockCoreKind::Eval;
+    case IdentityKind::FunctionConstructor:
+    case IdentityKind::Builtin:
+    case IdentityKind::Child:
+        return UnlinkedCodeBlockCoreKind::Function;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+bool constantMapsFit(UnlinkedCodeBlock& ucb, const IdentitySection& identity)
+{
+    using namespace UCBSectionsInternal;
+
+    if (ucb.constantRegisters().size() != identity.constantCount)
+        return false;
+
+    bool atomsAreResolvedStrings = allMarkedSatisfy(identity.atomMap, identity.constantCount, [&](uint32_t index) {
+        return isResolvedString(constantAs<JSString>(ucb, index));
+    });
+    if (!atomsAreResolvedStrings)
+        return false;
+
+    return allMarkedSatisfy(identity.butterflyMap, identity.constantCount, [&](uint32_t index) {
+        auto* butterfly = constantAs<JSCellButterfly>(ucb, index);
+        if (!butterfly || butterfly->indexingMode() != CopyOnWriteArrayWithContiguous)
+            return false;
+        for (unsigned i = 0; i < butterfly->length(); ++i) {
+            if (!isResolvedStringValue(butterfly->get(i)))
+                return false;
+        }
+        return true;
+    });
+}
+
+bool markedConstantsAreAtoms(UnlinkedCodeBlock& ucb, const IdentitySection& identity)
+{
+    using namespace UCBSectionsInternal;
+
+    size_t constantCount = ucb.constantRegisters().size();
+    return allMarkedSatisfy(identity.atomMap, identity.constantCount, [&](uint32_t index) {
+        if (index >= constantCount)
+            return false;
+        auto* string = constantAs<JSString>(ucb, index);
+        StringImpl* impl = string ? string->tryGetValueImpl() : nullptr;
+        return impl && impl->isAtom();
+    });
+}
+
+Digest256 coreDigestOf(VM& vm, const UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder)
+{
+    SHA256 hasher;
+    auto hashChunk = [&](std::span<const uint8_t> chunk) {
+        hasher.update(chunk);
+    };
+    CoreEncodeFailure failure = forEachUnlinkedCodeBlockCoreChunk(vm, ucb, holder, nullptr, hashChunk);
+    // Without a budget no charge can be refused.
+    ASSERT_UNUSED(failure, failure == CoreEncodeFailure::None);
+    return hasher.finalize();
+}
+
+void atomizeMarkedConstants(VM& vm, UnlinkedCodeBlock& ucb, const IdentitySection& identity)
+{
+    using namespace UCBSectionsInternal;
+
+    forEachMarked(identity.atomMap, identity.constantCount, [&](uint32_t index) {
+        // constantMapsFit holds with strict on; with strict off the body is trusted, since its core matched this UCB's.
+        auto* string = constantAs<JSString>(ucb, index);
+        ASSERT(isResolvedString(string));
+        atomizeStringConstant(vm, *string);
+    });
+}
+
+void atomizeStringConstant(VM& vm, const JSString& string)
+{
+    ASSERT(!string.isRope());
+    if (string.existingAtomOrNull())
+        return;
+    // As JSString::toAtomString: the swap runs even when the add made the StringImpl itself the atom, since it is what
+    // sets the cell's isDefinitelyAtom bit.
+    string.swapToAtomString(vm, AtomStringImpl::add(string.valueInternal().impl()));
+}
+
+void rebuildAtomStringButterflies(VM& vm, UnlinkedCodeBlock& ucb, const IdentitySection& identity)
+{
+    using namespace UCBSectionsInternal;
+
+    ASSERT(vm.heap.isDeferred());
+    Structure* atomStringsStructure = vm.cellButterflyOnlyAtomStringsStructure.get();
+    forEachMarked(identity.butterflyMap, identity.constantCount, [&](uint32_t index) {
+        // constantMapsFit holds with strict on; with strict off the body is trusted to mark only butterflies of strings.
+        auto* decoded = constantAs<JSCellButterfly>(ucb, index);
+        ASSERT(decoded && decoded->indexingMode() == CopyOnWriteArrayWithContiguous);
+        unsigned length = decoded->length();
+        auto* rebuilt = JSCellButterfly::tryCreate(vm, atomStringsStructure, length);
+        RELEASE_ASSERT(rebuilt);
+        for (unsigned i = 0; i < length; ++i) {
+            JSString* element = asString(decoded->get(i));
+            atomizeStringConstant(vm, *element);
+            StringImpl* atom = element->getValueImpl();
+            rebuilt->setIndex(vm, i, vm.atomStringToJSStringMap.ensureValue(atom, [&] {
+                return element;
+            }));
+        }
+        ucb.constantRegister(VirtualRegister(VirtualRegister::firstConstantRegisterIndex + static_cast<int>(index))).set(vm, &ucb, rebuilt);
+    });
+}
+
+size_t identitySectionSize(uint32_t constantCount, size_t childHolderDigestCount)
+{
+    using namespace UCBSectionsInternal;
+
+    return roundUpToMultipleOf<8>(mapsOffset + 2 * mapSize(constantCount)) + childHolderDigestCount * sizeof(Digest256);
+}
+
+bool childHolderDigestsFit(UnlinkedCodeBlock& ucb, const IdentitySection& identity)
+{
+    size_t count = identity.childHolderDigestCount();
+    return !count || count == static_cast<size_t>(ucb.numberOfFunctionDecls()) + ucb.numberOfFunctionExprs();
+}
+
+void writeIdentitySection(std::span<uint8_t> out, VM& vm, const BodyKey& key, const Digest256& contextDigest, CoreProvenance provenance, const Digest256& coreDigest,
+    const std::optional<Digest256>& holderDigest, UnlinkedCodeBlockCoreKind coreKind, const std::optional<FunctionParseFields>& functionParseFields, UnlinkedCodeBlock& ucb,
+    std::optional<std::span<const uint8_t>> keptButterflyMap, std::span<const Digest256> childHolderDigests)
+{
+    using namespace UCBSectionsInternal;
+
+    const auto& constants = ucb.constantRegisters();
+    auto constantCount = static_cast<uint32_t>(constants.size());
+    RELEASE_ASSERT(out.size() == identitySectionSize(constantCount, childHolderDigests.size()));
+    ASSERT(childHolderDigests.empty() || childHolderDigests.size() == static_cast<size_t>(ucb.numberOfFunctionDecls()) + ucb.numberOfFunctionExprs());
+    ASSERT(coreKind == UnlinkedCodeBlockCoreKind::Function || (!holderDigest && !functionParseFields));
+
+    zeroSpan(out);
+    writeField<uint32_t>(out, magicOffset, sectionMagic);
+    writeField<uint16_t>(out, versionOffset, layoutVersion);
+    out[coreKindOffset] = static_cast<uint8_t>(coreKind);
+    out[provenanceOffset] = static_cast<uint8_t>(provenance);
+    memcpySpan(out.subspan(keyOffset, BodyKey::byteSize), key.bytes());
+    writeField<Digest256>(out, contextDigestOffset, contextDigest);
+    writeField<Digest256>(out, coreDigestOffset, coreDigest);
+    if (coreKind == UnlinkedCodeBlockCoreKind::Function) {
+        if (holderDigest)
+            writeField<Digest256>(out, holderDigestOffset, *holderDigest);
+        if (functionParseFields) {
+            writeField<CodeFeatures>(out, featuresOffset, functionParseFields->features);
+            out[lexicallyScopedFeaturesOffset] = functionParseFields->lexicallyScopedFeatures;
+            out[hasCapturedVariablesOffset] = functionParseFields->hasCapturedVariables;
+        }
+    }
+    writeField<uint32_t>(out, constantCountOffset, constantCount);
+
+    size_t mapBytes = mapSize(constantCount);
+    auto atomMap = out.subspan(mapsOffset, mapBytes);
+    auto butterflyMap = out.subspan(mapsOffset + mapBytes, mapBytes);
+    if (keptButterflyMap) {
+        // A decoded UCB seeded or attached from a body of provenance Generated keeps that body's map, since its own
+        // butterflies keep the decoder's plain structure.
+        RELEASE_ASSERT(keptButterflyMap->size() == mapBytes);
+        memcpySpan(butterflyMap, *keptButterflyMap);
+    }
+
+    // Each read is a load on the VM thread: string constants are resolved, and a structure read decodes an ID.
+    Structure* atomStringsStructure = vm.cellButterflyOnlyAtomStringsStructure.get();
+    for (uint32_t index = 0; index < constantCount; ++index) {
+        JSValue value = constants[index].get();
+        if (!value)
+            continue;
+        if (auto* string = dynamicDowncast<JSString>(value)) {
+            if (StringImpl* impl = string->tryGetValueImpl(); impl && impl->isAtom())
+                mark(atomMap, index);
+            continue;
+        }
+        if (keptButterflyMap)
+            continue;
+        if (auto* butterfly = dynamicDowncast<JSCellButterfly>(value); butterfly && butterfly->structure() == atomStringsStructure)
+            mark(butterflyMap, index);
+    }
+
+    size_t digestsAt = identitySectionSize(constantCount);
+    for (size_t i = 0; i < childHolderDigests.size(); ++i)
+        writeField<Digest256>(out, digestsAt + i * sizeof(Digest256), childHolderDigests[i]);
+}
+
+} // namespace JSC::JITCache

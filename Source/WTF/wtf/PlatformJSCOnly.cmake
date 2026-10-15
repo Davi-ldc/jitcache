@@ -70,6 +70,10 @@ else ()
         unix/UniStdExtrasUnix.cpp
     )
 
+    list(APPEND WTF_PUBLIC_HEADERS
+        unix/UnixFileDescriptor.h
+    )
+
     if (ANDROID)
         list(REMOVE_ITEM WTF_SOURCES unix/LoggingUnix.cpp)
         list(APPEND WTF_SOURCES

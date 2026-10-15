@@ -1,5 +1,5 @@
-// The checker of events-optimizing.js (harness sub-SPEC H6): the counts the script printed for its body equal the lines
-// the engine printed for it (harness sub-SPEC N24 and N25), each counted where section 10.1 counts:
+// The checker of events-optimizing.js: the counts the script printed for its body equal the lines the engine printed
+// for it, each line counted only where the body-event counters count the same event:
 // - osrExits: "Speculation failure in <CB> @ exit #<n> (<bytecode index>, <kind>)", for every kind that may jettison,
 //   which excludes ExceptionCheck and GenericUnwind;
 // - dfgCompiles and ftlCompiles: "Optimizing compilation of <CB> ... result: CompilationSuccessful", an FTL compile when

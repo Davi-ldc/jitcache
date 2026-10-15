@@ -55,7 +55,7 @@ DirectEvalExecutable* DirectEvalExecutable::create(JSGlobalObject* globalObject,
 
     // We don't bother with CodeCache here because direct eval uses a specialized DirectEvalCodeCache.
     // JITCache: constructed before generation, so the request's snapshot is the call site's features this function
-    // received (SPEC-ucb.md section 7.2.3); without a site, or without JITCache state, it does nothing.
+    // received; without a site, or without JITCache state, it does nothing.
     JITCache::DirectEvalRequest jitCacheRequest(vm, *executable, executable->source(), site, codeGenerationMode, evalContextType, variablesUnderTDZ, privateNameEnvironment);
     UnlinkedEvalCodeBlock* unlinkedEvalCode = jitCacheRequest.tryImport();
     if (!unlinkedEvalCode) {

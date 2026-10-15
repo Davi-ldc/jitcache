@@ -1,6 +1,6 @@
-// The checker of floor.js's Consumer runs (SPEC-cb.md section 11.3, the floor). The body never entered operationOptimize
-// during its first invocation and entered it during its second, whose entry increment ended the slice finishCounter
-// armed: the floor of two entry increments (section 5.3, I7), so m_counter read 0 there. In twins builds the Producer
+// The checker of floor.js's Consumer runs. The body never entered operationOptimize during its first invocation and
+// entered it during its second, whose entry increment ended the slice finishCounter armed: the floor of two entry
+// increments, so m_counter read 0 there. In twins builds the Producer
 // also wrote what it committed to <scratch>/cb-floor.json, and the counter then read that progress plus the two entries'
 // increments, past its threshold in the sequence whose Producer rewrote the progress. Plain builds write no such file,
 // and the check ends with the invocations and the slice.

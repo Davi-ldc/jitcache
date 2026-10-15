@@ -3,9 +3,10 @@
 // delta capture all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js
 // covers it).
 
-// SPEC-ucb.md section 13.3, root-holder.js, F15 and section 5.1: a root UFE's own singleton bit,
-// m_singletonHasBeenInvalidated, stays local, so in the Consumer it is false until a second function of one executable
-// exists, as in the JITCache-off run. The Producer creates each root's functions and runs them into the optimizing tiers.
+// A root UFE's own singleton bit, m_singletonHasBeenInvalidated, stays local, so in the Consumer it is false until a
+// second function of one executable exists, as in the JITCache-off run. A root UFE is linked before any of its bodies
+// is requested, so no import could set the bit in time anyway. The Producer creates each root's functions and runs them
+// into the optimizing tiers.
 // In the Consumer each root's body imports at the root's first call (statistics: an import, and the holder digest the
 // root's context covers), and the results equal the JITCache-off run.
 //
@@ -20,14 +21,13 @@
 //   (ByteCodeParser::get, handleCreateInternalFieldObject). Once that compile exists, creating the second function
 //   jettisons it exactly once, which happens only while the bit is still false. Had the bit travelled from the Producer,
 //   which set it, link would have started the executable invalidated and nothing would be jettisoned. The jettison is
-//   native behavior, so every role of a twins build asserts it through the body's event counts
-//   (SPEC-integrator.harness.md section 10.2).
+//   native behavior, so every role of a twins build asserts it through the body's event counts.
 //
 // A builtin root. Array.prototype.findLast is created in this realm and in a second one, from the one UFE
 // BuiltinExecutables keeps per VM. Each realm links a FunctionExecutable of its own and creates one function from it, so
-// no run creates a second function of one executable for a builtin (SPEC-ucb.md section 13.3, this script's row).
+// no run creates a second function of one executable for a builtin.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
+// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

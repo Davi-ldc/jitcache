@@ -1,6 +1,6 @@
 // jitcache-host: bun
 
-// SPEC-ucb.md section 13.3, vm-script-cached-data.js, F11 and section 7.2.5: vm.Script with cachedData.
+// vm.Script with cachedData, whose decode has no request point of its own.
 // - new vm.Script(text, { cachedData }): Bun's constructScript first asks NodeVMScript::unlinkedCodeBlockFor for the
 //   program's UCB, so that a SyntaxError throws at construction as it does in Node. That call goes through
 //   CodeCache::getUnlinkedProgramCodeBlock, the program request point, where the Consumer imports the program's body.
@@ -16,8 +16,7 @@
 // the same in every run. That first run is the Producer, whose producing Script requests the program before the
 // window, so there the construction is a CodeCache hit that records nothing.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4); Bun calls delta at exit for the
-// Producer.
+// The runs use the lane's default sequence; Bun calls delta at exit for the Producer.
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { context } = require("./resources/ucb-bun.js");

@@ -1,12 +1,12 @@
 // jitcache-runs: Producer; Consumer --useLLInt=false
 
-// SPEC-integrator.md section 15.2, llint-off.js. The Producer commits loBody and loPoint at their compilations. The
-// Consumer runs with the LLInt off, where every newborn CodeBlock reaches JIT::compileSync through setupJIT, so the two
-// imports install there (section 7.1) and nothing compiles either body. main, which ran once in the Producer and never
+// Imports install with the LLInt off. The Producer commits loBody and loPoint at their compilations. The Consumer runs
+// with the LLInt off, where every newborn CodeBlock reaches JIT::compileSync through setupJIT, so the two imports
+// install there and nothing compiles either body. main, which ran once in the Producer and never
 // compiled there, compiles in the Consumer natively, at its one call: its single baseline compile shows that the count
 // expectInstalled reads as zero for loBody and loPoint counts compileSync's compilations. The runner compares every
-// output with the JITCache-off run's, and the pin comparison compares the code of the Off runs of both option sets
-// (harness sub-SPEC section 11.2). With the LLInt off a function compiles at its first call, so the Off path makes no
+// output with the JITCache-off run's, and the pin comparison compares the code of the Off runs of both option sets.
+// With the LLInt off a function compiles at its first call, so the Off path makes no
 // call that only this build makes, and its checks run only in the roles that configure JITCache.
 load("./resources/integrator.js", "caller relative");
 

@@ -1,10 +1,10 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
 
-// SPEC-cb.md section 11.3: every family of section 3.1 is captured with what the workload taught it, travels, and passes
-// its twins in the Consumer. Each function's comment names the families it holds. The workload runs in rounds that each
-// end with a full collection, whose finalization drains the array profiles and allocation hints of every LLInt and
-// baseline CB, so a function captured at either capture point carries them drained (capture reads only drained state,
-// section 4.2). In twins builds the Producer also runs delta after each round and, once the rounds are done, reads back
+// Every family of the cb.state format is captured with what the workload taught it, travels, and passes its twins in
+// the Consumer. Each function's comment names the families it holds. The workload runs in rounds that each end with a
+// full collection, whose finalization drains the array profiles and allocation hints of every LLInt and baseline CB, so
+// a function captured at either capture point carries them drained, since capture reads only drained state. In twins
+// builds the Producer also runs delta after each round and, once the rounds are done, reads back
 // every committed cb.state, and the Consumer checks that the bodies it names were imported at their first call.
 (function main(role) {
     const rounds = 12;
@@ -45,7 +45,7 @@
 
     // A14 iterator_open, A15 iterator_next, F20 and F21. A site keeps at most two fast modes
     // (maxNumberOfFastIterationModes), so six copies of one loop take two kinds of iterable each, and the first two also a
-    // user-defined iterable, which records Generic. Together they record every bit V9 allows at both opcodes.
+    // user-defined iterable, which records Generic. Together they record every bit validation allows at both opcodes.
     function iterateArraysAndMaps(iterable) {
         let total = 0;
         for (const item of iterable)
@@ -120,7 +120,7 @@
 
     // F19 new_array_buffer, one literal of each copy-on-write type. Storing a double into the Int32 literal's arrays and
     // a string or an object into the Double one's and the second Int32 one's raises their hints past the literal's own
-    // type (N8); the string literal's arrays keep theirs.
+    // type; the string literal's arrays keep theirs.
     function literals(index) {
         const ints = [1, 2, 3];
         const doubles = [1.5, 2.5, 3.5];
@@ -177,7 +177,7 @@
             return args[0] + 2;
         },
     };
-    // A hot get_by_val_with_this: `super[key]` in a method. Its array profile is no family and stays native (section 1).
+    // A hot get_by_val_with_this: `super[key]` in a method. Its array profile is no family, so it never travels.
     const base = { alpha: 1, beta: 2 };
     const derived = {
         __proto__: base,
@@ -274,7 +274,7 @@
     if (openModes !== 0x1fff || nextModes !== 0x1ff1)
         throw new Error(`the six sites record 0x${openModes.toString(16)} at iterator_open and 0x${nextModes.toString(16)} at iterator_next, not every native bit`);
 
-    // The for await's entries, in asyncTotal's body: every bit V9 allows at each opcode.
+    // The for await's entries, in asyncTotal's body: every bit validation allows at each opcode.
     const asyncBody = sections.asyncGeneratorBody(asyncTotal([]));
     if (asyncBody) {
         const asyncOpen = Mode.FastAsyncGenerator | Mode.AsyncFromSync | Mode.Generic;

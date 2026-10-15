@@ -5,11 +5,12 @@
 // jitcache-expect-fault: 1:1 image.s5
 // jitcache-expect-no-install: 1
 
-// SPEC-image.md T7. Each image test hook acts in the run whose options set it. In the first sequence, ChangeRecordedTarget
-// changes the target of the first fixup of the record the producer's first capture reads before S1 runs, so S1's decode
-// finds the producer's code holding another target, a recording fault at image.s1 that ends production before anything
-// is committed; the consumer has nothing to install. In the second, SkipPatch makes the consumer's prepareImage skip its
-// first patch, so S5's read-back finds that footprint still canonical, invalid material at image.s5 that turns cache
+// The image lane's strict checks, each failed on purpose by a test hook. Each image test hook acts in the run whose
+// options set it. In the first sequence, ChangeRecordedTarget changes the target of the first fixup of the record the
+// producer's first capture reads before the capture decodes every fixup, so that decode finds the producer's code
+// holding another target, a recording fault at image.s1 that ends production before anything is committed; the
+// consumer has nothing to install. In the second, SkipPatch makes the consumer's prepareImage skip its first patch, so
+// the read-back after patching finds that footprint still canonical, invalid material at image.s5 that turns cache
 // activity off before the install, and the body runs natively. The run each hook acts on also checks that its fault is
 // the first one status names; every output equals the JITCache-off run.
 (function main(role, scratch, artifact, sequence) {

@@ -1,43 +1,35 @@
 #!/usr/bin/env bun
-// The runner's self-tests (SPEC-integrator.harness.md section 13: H1 to H8). A fixture case runs
-// Tools/Scripts/run-jitcache-tests on one fixture of this directory and compares the outcome the runner records in its
-// results with the fixture's claim: a fixture that must pass passes, and one that must fail fails with exactly the
-// failures listed, by sequence, attempt, run and check, and with no other. Other cases drive processes of their own: the
-// runner's calibration with heap probes that never move (H1), testjitcache's command line (H3, and H4's C++ half), the
-// determinism of the end-of-run description (H5), and the pin comparison of a build with itself (H7), with the crafted
-// output pairs of pin-compare-tests.ts. Every fixture of this directory has a case.
+// The runner's self-tests. A fixture case runs Tools/Scripts/run-jitcache-tests on one fixture of this directory and
+// compares the outcome the runner records in its results with the fixture's claim: a fixture that must pass passes, and
+// one that must fail fails with exactly the failures listed, by sequence, attempt, run and check, and with no other.
+// Other cases drive processes of their own: the runner's calibration with heap probes that never move, testjitcache's
+// command line and its twin-report lines, the determinism of the end-of-run description, and the pin comparison of a
+// build with itself, with the crafted output pairs of pin-compare-tests.ts. Every fixture of this directory has a case.
 //
 //   bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins WebKit build directory>
 //       [--plain-build=<plain WebKit build directory>] [--jobs=<n>] [--timeout=<seconds>] [--qemu-cpu=<model>]
 //       [--filter=<regex over case names>]
 //
-// H2 and H7 run on each architecture by naming that architecture's builds, such as those bun build.ts twins
-// --arch=aarch64 and bun build.ts --arch=aarch64 made, whose processes run under QEMU. H7's plain half needs
-// --plain-build and is skipped without it.
+// The placement case and the pin cases run on each architecture by naming that architecture's builds, such as those
+// bun build.ts twins --arch=aarch64 and bun build.ts --arch=aarch64 made, whose processes run under QEMU. The pin
+// comparison's plain half needs --plain-build and is skipped without it.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Build,
-  type CommandContext,
   Launcher,
-  MalformedScript,
-  type PinSetup,
   type ProcessEnd,
-  type Script,
   StackSizes,
-  comparePinOptionSet,
-  corpusRoot,
   describeEnd,
-  jscArguments,
   loadBuild,
-  oracleOptionSets,
-  parseScript,
   readText,
   repositoryRoot,
   runProcess,
-} from "../../../../Tools/Scripts/run-jitcache-tests";
+} from "../../../../Tools/Scripts/jitcache/build.ts";
+import { type PinSetup, comparePinOptionSet, oracleOptionSets } from "../../../../Tools/Scripts/jitcache/oracle.ts";
+import { type CommandContext, MalformedScript, type Script, corpusRoot, jscArguments, parseScript } from "../../../../Tools/Scripts/jitcache/scripts.ts";
 import { runCraftedPinTests } from "./pin-compare-tests.ts";
 
 const fixtures = import.meta.dirname;
@@ -63,7 +55,8 @@ interface FixtureCase {
 const fail = (sequence: number, run: number, check: string, attempt = 1): Expected => ({ sequence, run, check, attempt });
 // A failure of a sequence as a whole, which the pin comparison reports.
 const sequenceFail = (sequence: number, check: string): Expected => ({ sequence, run: null, check, attempt: 1 });
-// H7: this build stands for the pin, and the options given reach this build's side of the comparison alone.
+// For the pin cases: this build stands for the pin, and the options given reach this build's side of the comparison
+// alone.
 const againstItself = (...pinOptions: string[]) => (context: Context) => [`--pin=${context.build.directory}`, ...(pinOptions.length ? [`--pin-options=${pinOptions.join(" ")}`] : [])];
 
 const fixtureCases: FixtureCase[] = [
@@ -213,8 +206,8 @@ function fixtureCase(spec: FixtureCase): Case {
   };
 }
 
-// H1: with heap probes that never move, the runner calibrates twice, the second time with WebKitMallocForceEnabled=1,
-// and stops before any sequence with an error naming the heap domain.
+// With heap probes that never move, the runner calibrates twice, the second time with WebKitMallocForceEnabled=1, and
+// stops before any sequence with an error naming the heap domain.
 const calibrationCase: Case = {
   name: "calibration-fixed-heap-probes",
   claim: "H1: heap probes that never move stop the runner before any sequence, after a second calibration with WebKitMallocForceEnabled=1",
@@ -235,7 +228,7 @@ const calibrationCase: Case = {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
-// H3 and H4's C++ half: testjitcache's command line
+// testjitcache's command line and its twin-report lines
 
 const testjitcacheCase: Case = {
   name: "testjitcache",
@@ -285,7 +278,7 @@ const testjitcacheCase: Case = {
     // A failing check prints FAIL, then its file, line and message, and the process exits with 1.
     const failing = await testjitcache(["--filter=integratorHarnessReportsAFailingCheck"], { ...process.env, JITCACHE_TEST_FAIL_ON_PURPOSE: "integratorHarnessReportsAFailingCheck" });
     if (failing.end.code !== 1) problems.push(`a failing check left testjitcache ${describeEnd(failing.end)}, expected 1`);
-    if (!/^FAIL integratorHarnessReportsAFailingCheck\n {4}\S*IntegratorTests\.cpp:\d+: check failed: !failsOnPurpose$/m.test(failing.stdout)) {
+    if (!/^FAIL integratorHarnessReportsAFailingCheck\n {4}\S*HarnessTests\.cpp:\d+: check failed: !failsOnPurpose$/m.test(failing.stdout)) {
       problems.push(`a failing check did not print its file, line and message:\n${failing.stdout}`);
     }
 
@@ -300,7 +293,7 @@ const testjitcacheCase: Case = {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
-// H5: two Off runs of each integrator JS test, and of each description fixture here, write identical end-of-run
+// Two Off runs of each integrator JS test, and of each description fixture here, write identical end-of-run
 // descriptions. Each sequence's Off runs are the ones its oracle starts: one per distinct option set of its runs,
 // without the JITCache options.
 
@@ -326,7 +319,7 @@ const determinismCase: Case = {
         problems.push(`${path} is malformed: ${error.message}`);
         continue;
       }
-      // A Bun-hosted script's oracle compares its output alone, and it describes roots of its own (section 7.7).
+      // A Bun-hosted script's oracle compares its output alone, and it describes roots of its own.
       if (script.host !== "jsc") continue;
       script.sequences.forEach((runs, k) => {
         const optionSets = new Map<string, string[]>();
@@ -363,10 +356,11 @@ const determinismCase: Case = {
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
-// H7: a build compared with itself finds no difference on the runner's fixtures, the integrator corpus and cb/.
+// The pin comparison: a build compared with itself finds no difference on the runner's fixtures, the integrator corpus
+// and cb/.
 
-// The directories H7 compares. cb/'s Off runs cache ICs, so they print the access stubs' headers, which span lines
-// (harness sub-SPEC section 11.3); no fixture and no integrator script caches one.
+// The directories the pin cases compare. cb/'s Off runs cache ICs, so they print the access stubs' headers, which span
+// lines; no fixture and no integrator script caches one.
 const comparedDirectories = [fixtures, join(corpusRoot, "integrator"), join(corpusRoot, "cb")];
 
 // Their scripts: each directory's own .js and .mjs files, as the runner collects them.
@@ -393,8 +387,8 @@ function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
   };
 }
 
-// In a plain build the runner skips every script of integrator/, which requires twins (harness sub-SPEC section 7.4), so
-// this half drives the runner's own comparison of each Off option set directly (harness sub-SPEC section 13, H7).
+// In a plain build the runner skips every script of integrator/, which requires twins, so this half drives the runner's
+// own comparison of each Off option set directly.
 const pinSelfPlainCase: Case = {
   name: "pin-self-plain",
   claim: "H7: a plain build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference",
@@ -438,7 +432,7 @@ const pinSelfPlainCase: Case = {
 
 const pinCraftedCase: Case = {
   name: "pin-compare-crafted",
-  claim: "H7: jitcache-pin-compare.ts reports the crafted pairs that differ and finds the same code in those that differ only in what canonical code removes",
+  claim: "H7: pin-compare.ts reports the crafted pairs that differ and finds the same code in those that differ only in what canonical code removes",
   run: async () => runCraftedPinTests(),
 };
 

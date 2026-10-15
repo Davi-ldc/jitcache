@@ -41,18 +41,18 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; Consumer
 
-// SPEC-ucb.md section 13.3, invalid-material.js, sections 4.2, 4.4 and 10, and SPEC-ucb.codec.md sections 3 and E15: with
-// strict on, a body whose lane sections are malformed is invalid material at the step that finds it, cache activity turns
-// off, and the run goes on as the JITCache-off run does. resources/invalid-material-cases.js runs each case: the Producer
+// With strict on, a body whose lane sections are malformed, in ucb.identity, against the UCB or in the core's decode, is
+// invalid material at the step that finds it, cache activity turns off, and the run goes on as the JITCache-off run
+// does. resources/invalid-material-cases.js runs each case: the Producer
 // captures every body and rewrites one section of one, and the Consumer, run 1, imports it and checks the step. Run 1 may
 // therefore report each of the three steps these cases reach, and installs nothing it has to.
 //
 // Each sequence above is one case of the table below, which the sequence index picks. The runner reads directives only in
 // a script's first 50 lines, so the rules of ucb.feedback have a script of their own, invalid-material-feedback.js. Here:
-// - ucb.identity, every rule of section 4.2 that a rewrite of the same size can break: the magic, the layout version, a
+// - ucb.identity, every rule of its layout that a rewrite of the same size can break: the magic, the layout version, a
 //   core kind past the last and one other than the key's, a provenance above 1, each field of the key that
 //   BodyKey::fromBytes checks (its version, identity kind, specialization, code-generation mode and reserved bytes), a
-//   stored key other than the body's, which step 4a compares in both modes, a holder digest and each function field on a
+//   stored key other than the body's, which the import compares in both modes, a holder digest and each function field on a
 //   program body, each function field out of its range, a constant count of 1 << 28 or more, a bit at N in either map, a
 //   constant marked in both maps and a nonzero padding byte;
 // - ucb.closure: profile counts that no longer match the UCB (the declaration and expression counts swapped), a
@@ -62,9 +62,9 @@
 //   symbol that does not exist), a truncated payload (a root record offset at its end), a nested offset outside the
 //   payload, a string length past its record, an unknown constant kind, an unknown opcode and an instruction that runs
 //   past the stream (the stream's count shortened by one).
-// No same-size rewrite can give a section the wrong size; SPEC-ucb.md U5 checks that rule. jitcacheRewriteSection never
-// changes a section's size, so a truncation is written as a root record offset that leaves no room for the record, which
-// the decode reads as the payload ending there (SPEC-ucb.md section 13.3, this script's row).
+// No same-size rewrite can give a section the wrong size; the UCB lane's section tests in testjitcache check that rule.
+// jitcacheRewriteSection never changes a section's size, so a truncation is written as a root record offset that leaves
+// no room for the record, which the decode reads as the payload ending there.
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
 load("./resources/invalid-material-cases.js", "caller relative");
@@ -116,8 +116,8 @@ load("./resources/invalid-material-cases.js", "caller relative");
                 if (core.kind(i) !== c.S.constantKind.RegExp)
                     continue;
                 // CachedRegExp: pattern, atom, u16 subpattern count, then the u16 flags. /\-/ is valid until the u flag.
-                const flags = core.slot(i) + c.S.i32(core.bytes, core.slot(i)) + 10;
-                return [flags, c.S.le16(c.S.u16(core.bytes, flags) | 0x20)];
+                const flags = core.slot(i) + core.read.i32(core.slot(i)) + 10;
+                return [flags, c.S.le16(core.read.u16(flags) | 0x20)];
             }
             throw new Error("imRegExp has no RegExp constant");
         }),
@@ -134,7 +134,7 @@ load("./resources/invalid-material-cases.js", "caller relative");
 
         c.coreCase("a private name this VM lacks", "ucb.decode", "imPrivate", core => {
             // The record of @privateBrand: 12 Latin-1 characters, a private and unregistered symbol, no ordinal. Marking it
-            // well-known keeps its characters and hash, and lookUpWellKnownSymbol finds no such symbol (codec E5).
+            // well-known keeps its characters and hash, and lookUpWellKnownSymbol finds no such symbol.
             const at = c.S.find(core.bytes, [0x0c, 0, 0, 0x98, null, null, null, null, 0xff, 0xff, 0xff, 0xff, ...c.S.ascii("privateBrand")]);
             c.t.check(at >= 0, "imPrivate's core holds no @privateBrand record");
             return [at, [0x0c, 0, 0, 0x38]];
@@ -143,7 +143,7 @@ load("./resources/invalid-material-cases.js", "caller relative");
         c.coreCase("a nested offset outside the payload", "ucb.decode", "imPlain", core => [core.rootOffset, c.S.le32(0x3ffffff0)]),
         c.coreCase("a string length past its record", "ucb.decode", "imPlain", core => {
             const { record } = c.stringRecord(core, 37);
-            return [record, c.S.le32(((c.S.u32(core.bytes, record) & 0xf8000000) | 0x7ffffff) >>> 0)];
+            return [record, c.S.le32(((core.read.u32(record) & 0xf8000000) | 0x7ffffff) >>> 0)];
         }),
         c.coreCase("an unknown constant kind", "ucb.decode", "imPlain", core => [core.poolStart + c.int32Constant(core, 1000), [200]]),
         c.coreCase("an unknown opcode", "ucb.decode", "imPlain", core => [core.instructionsStart, [0xff]]),

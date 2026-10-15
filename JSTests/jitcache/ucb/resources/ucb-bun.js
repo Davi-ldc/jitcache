@@ -1,16 +1,19 @@
-// Shared by the UCB lane's Bun-hosted tests (SPEC-ucb.md section 13.3): require("./resources/ucb-bun.js").
+// Shared by the UCB lane's Bun-hosted tests: require("./resources/ucb-bun.js"). It keeps wrappers of its own, since a
+// Bun-hosted run reads its arguments from process.argv and its shell functions from bun:jsc, where the jsc-hosted tests'
+// ../../resources/jitcache.js reads the shell's.
 //
-// A Bun-hosted run gets its role, scratch path, artifact path and sequence index as process.argv[2] to [5]
-// (SPEC-integrator.harness.md section 7.7). The context reads JITCache's state only in a run that configures JITCache
-// and only through the bun:jsc exports a twins build adds (harness section 5.3); elsewhere every reader returns null.
+// A Bun-hosted run gets its role, scratch path, artifact path and sequence index as process.argv[2] to [5]. The context
+// reads JITCache's state only in a run that configures JITCache and only through the bun:jsc exports a twins build
+// adds; elsewhere every reader returns null.
 //
 // Some tests run a `bun build --compile` executable, the "app", in a child process. The app is a JITCache VM of its
-// own: it gets the run's role, strictness and twin-report path through BUN_OPTIONS, which standalone executables read,
-// with an artifact of its own beside the run's, since the test's own VM holds the producer lock of the run's artifact.
+// own: it gets the run's role, strictness, delta capture and twin-report path through BUN_OPTIONS, which standalone
+// executables read, with an artifact of its own beside the run's, since the test's own VM holds the producer lock of the
+// run's artifact. It calls no delta at exit, so a producing app commits only what its baseline compilations captured.
 // A test can also start it as a Consumer of the run's artifact, which needs no lock (runApp, overRunArtifact). Its twin
 // report is the run's, appended to, its final status lines go to the run's standard error, and it avoids the layouts of
 // the processes whose captures it can import, so the runner's checks and placement cover it as they cover the test's
-// own VM (harness sections 4, 7.5 and 7.7). Its standard output is printed by the test, so the oracle compares it.
+// own VM. Its standard output is printed by the test, so the oracle compares it.
 "use strict";
 
 const fs = require("node:fs");
@@ -107,8 +110,8 @@ class Context {
     }
 
     // Every test, and every app a test runs, ends here: after a full collection, the registry holds no entry for a dead
-    // cell and every child UFE of a recorded UCB has its identity (verifyRegistry, SPEC-ucb.md section 13.2), which
-    // section 13.3 asks of each test's stress runs too.
+    // cell and every child UFE of a recorded UCB has its identity (verifyRegistry), in the stress runs that rerun a
+    // directory as much as in its own runs.
     finish()
     {
         const violations = this.verifyRegistry();
@@ -189,16 +192,16 @@ class Context {
         return outfile;
     }
 
-    // The JITCache flags an app gets from this run, as the runner passed them (harness section 7.7). An app over an
+    // The JITCache flags an app gets from this run, as the runner passed them. An app over an
     // artifact of its own runs this run's role, records its layout beside the run's and avoids the layouts the apps of
     // earlier runs recorded. An app over the run's artifact runs as a Consumer, records no layout, since it captures
     // nothing, and avoids the layouts of this run's process and of every earlier run, the processes whose captures it can
-    // import (harness sections 4 and 7.3).
+    // import.
     appFlags(appArtifact, overRunArtifact)
     {
         if (!this.configured)
             return [];
-        const flags = [`--jitcache=${appArtifact}`];
+        const flags = [`--jitcache=${appArtifact}`, "--jitcache-delta-at-exit=0"];
         let sawArtifact = false;
         let recordedLayout = null;
         let avoidedLayouts = null;

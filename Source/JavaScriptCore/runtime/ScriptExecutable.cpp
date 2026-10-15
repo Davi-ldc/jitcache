@@ -213,8 +213,8 @@ void ScriptExecutable::installCode(VM& vm, CodeBlock* genericCodeBlock, CodeType
     }
 
     if (oldCodeBlock) {
-        // JITCache: the native cost leaves out relinking incoming calls, so the bench times it apart (harness sub-SPEC
-        // section 9.3). The timer measures only on the VM thread outside GC work.
+        // JITCache: the native cost leaves out relinking incoming calls, so the bench times it apart. The timer measures
+        // only on the VM thread outside GC work.
         JITCache::RelinkTimer relinkTimer(vm);
         oldCodeBlock->unlinkOrUpgradeIncomingCalls(vm, genericCodeBlock);
     }
@@ -424,8 +424,8 @@ void ScriptExecutable::prepareForExecutionImpl(VM& vm, JSFunction* function, JSS
     if (!installedUnlinkedBaselineCode) {
         if (Options::useLLInt()) {
 #if ENABLE(JIT)
-            // JITCache: an imported body's first CB installs here. The install function calls installCode itself,
-            // last in THREAD Restoration's order.
+            // JITCache: an imported body's first CB installs here. The install function calls installCode itself, as
+            // its last step.
             installedByJITCache = JITCache::installAtNewbornCodeBlock(vm, *codeBlock, JITCache::InstallPoint::BeforeSetupLLInt)
                 == JITCache::InstallOutcome::Installed;
 #endif
@@ -438,7 +438,7 @@ void ScriptExecutable::prepareForExecutionImpl(VM& vm, JSFunction* function, JSS
     if (!installedByJITCache)
         installCode(vm, codeBlock, codeBlock->codeType(), codeBlock->specializationKind(), Profiler::JettisonReason::NotJettisoned);
 #if ENABLE(JITCACHE_TWINS)
-    JITCache::didFinishPrepareForExecution(vm, *codeBlock, scope); // harness sub-SPEC section 3
+    JITCache::didFinishPrepareForExecution(vm, *codeBlock, scope); // runs the image twin check this CB left pending
 #endif
 }
 

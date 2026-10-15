@@ -1,7 +1,7 @@
 // jitcache-runs: Producer --useConcurrentGC=false; ConsumerProducer; Consumer
 // jitcache-requires: twins
 
-// SPEC-ics.md T10: a ConsumerProducer's recapture of imported bodies, and two of the criteria it wins on. Body F has a
+// A ConsumerProducer's recapture of imported bodies, and two of the criteria it wins on. Body F has a
 // get_by_id and an instanceof site the producer folds, an add the producer runs on int32 only and a witness get_by_id
 // the producer never reaches; an argument picks which group a call runs. Body G holds a put_by_id and a get_by_id, and
 // the producer only brings it to baseline. The ConsumerProducer runs F's add on doubles, which the add MathIC's

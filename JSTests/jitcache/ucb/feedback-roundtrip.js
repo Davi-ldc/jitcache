@@ -1,6 +1,6 @@
-// SPEC-ucb.md section 13.3, feedback-roundtrip.js, sections 5.1 to 5.5: the UCB feedback a body carries comes back as
-// the producer left it, which T4 checks at every import (section 13.2), and the singleton state a body learned keeps
-// the consumer's optimizing compiles from folding what the producer saw created twice (F14, F15).
+// The UCB feedback a body carries comes back as the producer left it, which the twin check compares at every import,
+// and the singleton state a body learned keeps the consumer's optimizing compiles from folding what the producer saw
+// created twice.
 //
 // The functions live in a program evaluated in realms of its own (runString), so that one UCB has several CodeBlocks,
 // one per realm, while the CodeCache shares the program's UCB:
@@ -24,7 +24,7 @@
 // imported singleton bits kept the DFG from folding the callee and the scope, where the JITCache-off run folds and then
 // jettisons. Every role prints the same results.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4).
+// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 load("./resources/sections.js", "caller relative");
 

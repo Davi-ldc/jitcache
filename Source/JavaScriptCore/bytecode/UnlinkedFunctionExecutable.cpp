@@ -56,8 +56,8 @@ static_assert(sizeof(UnlinkedFunctionExecutable) <= 128, "UnlinkedFunctionExecut
 
 const ClassInfo UnlinkedFunctionExecutable::s_info = { "UnlinkedFunctionExecutable"_s, nullptr, nullptr, nullptr, CREATE_METHOD_TABLE(UnlinkedFunctionExecutable) };
 
-// JITCache: a twin generation (SPEC-ucb.md section 13.2) passes twinParseResults, which receives what
-// executable->recordParse would have; it leaves the UFE alone and skips CodeCache::updateCache.
+// JITCache: a twin generation, the native generation an import is checked against, passes twinParseResults, which
+// receives what executable->recordParse would have; it leaves the UFE alone and skips CodeCache::updateCache.
 static UnlinkedFunctionCodeBlock* generateUnlinkedFunctionCodeBlock(
     VM& vm, UnlinkedFunctionExecutable* executable, const SourceCode& source,
     CodeSpecializationKind kind, OptionSet<CodeGenerationMode> codeGenerationMode,
@@ -264,7 +264,8 @@ UnlinkedFunctionCodeBlock* UnlinkedFunctionExecutable::unlinkedCodeBlockFor(
     VM& vm, const SourceCode& source, CodeSpecializationKind specializationKind, 
     OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, SourceParseMode parseMode)
 {
-    // JITCache: the body request of SPEC-ucb.md section 7.2.2; without JITCache state it does nothing.
+    // JITCache: the request for this body, which can import it in place of generation; without JITCache state it does
+    // nothing.
     JITCache::FunctionBodyRequest jitCacheRequest(vm, *this, source, specializationKind, codeGenerationMode);
     if (m_isCached)
         decodeCachedCodeBlocks(vm, jitCacheRequest);
@@ -321,7 +322,7 @@ void UnlinkedFunctionExecutable::decodeCachedCodeBlocks(VM& vm, JITCache::Functi
         decodeFunctionCodeBlock(*decoder, cachedCodeBlockForConstructOffset, m_unlinkedCodeBlockForConstruct, this);
 
     // JITCache: both slots hold their decoded blocks, or null, and neither is published until m_isCached clears. The
-    // request seeds the requested slot's block and records the other (SPEC-ucb.md section 7.2.2).
+    // request seeds the requested slot's block and records the other.
     jitCacheRequest.didDecodeCachedSlots(m_unlinkedCodeBlockForCall.get(), m_unlinkedCodeBlockForConstruct.get());
 
     WTF::storeStoreFence();
@@ -362,7 +363,7 @@ void UnlinkedFunctionExecutable::reconcileWeakReferencesAtGCEnd(VM& vm, Collecti
 #if ENABLE(JITCACHE_TWINS)
 namespace JITCache {
 
-// SPEC-ucb.md section 13.2: what the request's native generation makes, with its parse results written only into
+// The twin of a UFE body: what the request's native generation makes, with its parse results written only into
 // `results`, so the UFE, its slots and the provider's cache hook stay as the import left them.
 UnlinkedFunctionCodeBlock* generateFunctionBodyTwin(const RequestState& state, TwinParseResults& results, ParserError& error)
 {

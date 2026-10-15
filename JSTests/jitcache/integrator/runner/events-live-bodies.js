@@ -1,7 +1,7 @@
 // jitcache-runs: Producer --jitcache-body-events=live-body-events.jsonl
 // jitcache-check: 0 resources/live-bodies.ts
 
-// Harness sub-SPEC H6: a Producer run's body-event dump has a line for each keyed body still alive, with the counts
+// A Producer run's body-event dump has a line for each keyed body still alive, with the counts
 // jitcacheBodyEvents gave for it at the end. h6Hot compiles and h6Cold stays in the LLInt; a global keeps both alive
 // through the dump, in every run alike. The Producer writes each function's key and final counts to its scratch
 // directory for the checker; the oracle's Off run, which has no keys, writes nothing, so both print the same.

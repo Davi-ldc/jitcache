@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
-// Harness sub-SPEC H7: jitcache-pin-compare.ts's own tests, on crafted output pairs for both architectures. Each case
-// writes two runs as the engine prints them (logJIT headers, baseline dumps, listings, JIT dump records) and checks that
-// compareRuns reports pairs that differ in an operation's symbol, an allocation's identity, an h number, an immediate, a
-// displacement, a register, a mnemonic, the order of finalized allocations or a breakpoint inside a listing's code, and
-// finds the same code in pairs that differ only in the addresses of the same objects, in nops, in the breakpoints that
-// pad a listing, in blinded forms, in ARM64 materialization lengths and temporary reuse, in the two forms of an ARM64
-// conditional branch to a thunk, or in a super_construct main path. Other
-// cases cover what the engine prints around the code: a header the JIT heap rounds up past the dump, the padding after a
-// body's last instruction, a MathIC inline rewrite, whose header prints an empty range, names that span lines, Yarr's
-// own dump header before its allocation's, names that print addresses as Structure ids and in decimal, and a header that
-// never reaches its range.
+// The pin comparison's own tests (Tools/Scripts/jitcache/pin-compare.ts), on crafted output pairs for both
+// architectures. Each case writes two runs as the engine prints them (logJIT headers, baseline dumps, listings, JIT dump
+// records) and checks that compareRuns reports pairs that differ in an operation's symbol, an allocation's identity, an
+// h number, an immediate, a displacement, a register, a mnemonic, the order of finalized allocations or a breakpoint
+// inside a listing's code, and finds the same code in pairs that differ only in the addresses of the same objects, in
+// nops, in the breakpoints that pad a listing, in blinded forms, in ARM64 materialization lengths and temporary reuse,
+// in the two forms of an ARM64 conditional branch to a thunk, or in a super_construct main path. Other cases cover what
+// the engine prints around the code: a header the JIT heap rounds up past the dump, the padding after a body's last
+// instruction, a MathIC inline rewrite, whose header prints an empty range, names that span lines, Yarr's own dump
+// header before its allocation's, names that print addresses as Structure ids and in decimal, and a header that never
+// reaches its range.
 //
 //   bun JSTests/jitcache/integrator/runner/pin-compare-tests.ts
 // self-test.ts runs them too, as its pin-compare-crafted case.
@@ -23,7 +23,7 @@ import {
   type RunStatus,
   compareRuns,
   makeEngineImage,
-} from "../../../../Tools/Scripts/jitcache-pin-compare.ts";
+} from "../../../../Tools/Scripts/jitcache/pin-compare.ts";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Crafting a run
@@ -471,8 +471,9 @@ const cases: Case[] = [
   pair("branchAdd32 with another constant", "pin-code",
     same([line("mov %esi, %edx", 2), line("add $0x2710, %edx", 6), line("jo {@slow2}", 6, { rel32: "@slow2" })]),
     same([line("mov $0x3711, %edx", 5), line("xor $0x1000, %edx", 6), line("add %esi, %edx", 2), line("jo {@slow2}", 6, { rel32: "@slow2" })])),
-  // Rule 2 writes the set of a register other than a temporary before its reader, so a constant unfolded through one,
-  // as only recording may emit it, differs from the folded immediate even when the run overwrites the register later.
+  // Constant folding writes the set of a register other than a temporary before its reader, so a constant unfolded
+  // through one, as only recording may emit it, differs from the folded immediate even when the run overwrites the
+  // register later.
   pair("a constant unfolded through a register overwritten later in its run", "pin-code",
     same([line("mov $0x2710, %edx", 5), line("add %edx, %eax", 2), line("mov %esi, %edx", 2)]),
     same([line("add $0x2710, %eax", 5), line("mov %esi, %edx", 2)])),
@@ -504,7 +505,7 @@ const cases: Case[] = [
     pin: x86Run({ main: [line("jmp {@slow2}", 5, { rel32: "@ret7" }), line("movq %rax, -0x38(%rbp)", 4)] }, "pin"),
   },
   {
-    // Section 11.3: another field shows a different number at the next use of either field.
+    // A body that uses another VM field shows a different h number at the next use of either field.
     name: "ARM64 reuse that reaches another field",
     expect: "pin-code",
     current: arm64Run([...materialize("x17", arm64Layouts.this.heapA), { text: "ldr\tx0, [x17, xzr]" }, { text: "ldur\tx1, [x17, #0x8]" }, { text: "ldur\tx2, [x17, #0x8]" }], "this"),

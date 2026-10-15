@@ -1,14 +1,13 @@
 // jitcache-host: bun
 
-// SPEC-ucb.md section 13.3, regexp-constants.js, the Bun variant: the same as regexp-constants.js, with the RegExp cells'
-// compiled state cleared by Bun.shrink(), which asks the VM to delete all code once it is idle
-// (VM::shrinkFootprintWhenIdle, F22): live RegExp objects hold the patterns and flags of the literals below, they run,
-// Bun.shrink() clears their cells when the module's evaluation returns, and the functions' bodies are generated, or
-// imported in the Consumer, only afterwards, in a timer. With strict on no import is invalid material, T1 and T6 hold at
-// every import (section 13.2), and the output equals the JITCache-off run.
+// regexp-constants.js for Bun, with the RegExp cells' compiled state cleared by Bun.shrink(), which asks the VM to
+// delete all code once it is idle (VM::shrinkFootprintWhenIdle): live RegExp objects hold the patterns and flags of the
+// literals below, they run, Bun.shrink() clears their cells when the module's evaluation returns, and the functions'
+// bodies are generated, or imported in the Consumer, only afterwards, in a timer. With strict on no import is invalid
+// material; at every import the twin check finds the core encoding and the constant cells' forms equal to the twin's;
+// and the output equals the JITCache-off run.
 //
-// The runs use the lane's default sequence (SPEC-integrator.harness.md section 7.4); Bun calls delta at exit for the
-// Producer.
+// The runs use the lane's default sequence; Bun calls delta at exit for the Producer.
 const { context } = require("./resources/ucb-bun.js");
 
 const t = context();

@@ -639,12 +639,12 @@ CompilationResult Plan::finalize()
     m_vm->writeBarrier(m_codeBlock);
 
     // JITCache: the callback writes the failure's effects (the baseline counter's deferral and the quick tier-up bit), so
-    // the executable-allocation fault comes first (SPEC-integrator.md section 9). A plan that failed for any other reason
+    // the executable-allocation fault comes first. A plan that failed for any other reason
     // records nothing.
     if (result == CompilationResult::CompilationFailed && m_failedForLackOfExecutableMemory)
         JITCache::didFailExecutableAllocation(*m_vm, isFTL() ? JITCache::ExecutableAllocationSite::FTLPlan : JITCache::ExecutableAllocationSite::DFGPlan);
 #if ENABLE(JITCACHE_TWINS)
-    // Twins builds: one optimizing compile of the plan's tier for the body (SPEC-integrator.harness.md section 10.1).
+    // Twins builds: one optimizing compile of the plan's tier for the body.
     if (result == CompilationResult::CompilationSuccessful) {
         JITCache::BodyEventCounts& counts = m_codeBlock->unlinkedCodeBlock()->jitCacheEventCounts();
         if (isFTL())

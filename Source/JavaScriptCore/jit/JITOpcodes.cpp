@@ -58,7 +58,7 @@ void JIT::emit_op_mov(const JSInstruction* currentInstruction)
 
     if (src.isConstant()) {
         if (m_profiledCodeBlock->isConstantOwnedByUnlinkedCodeBlock(src)) {
-            // JITCache: a cell the UCB owns is a reference; any other constant is a literal (census C1).
+            // JITCache: a cell the UCB owns is a reference; any other constant is a literal.
             JSValue value = m_unlinkedCodeBlock->getConstant(src);
             if (value && value.isCell())
                 JITCache::storeReferenceValue(*this, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, src), addressFor(dst), JITCache::StoreValueKind::Value);
@@ -740,7 +740,7 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         return string;
     };
 
-    // JITCache: atomConstant is the operand tryGetAtomStringConstant chose, and its atom is a reference (census C6).
+    // JITCache: atomConstant is the operand tryGetAtomStringConstant chose, and its atom is a reference.
     auto emitStringConstantFastPath = [&](GPRReg stringGPR, GPRReg knownStringGPR, VirtualRegister atomConstant) {
         JumpList fallThrough;
         JumpList equals;
@@ -761,8 +761,8 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         emitPutVirtualRegister(dst, regT2);
     };
 
-    // JITCache: the choice of the operand compared by its atom, made once, here (SPEC-image.md N25). In twins builds it
-    // passes through the recorder, which records it, or in a twin compile answers with the producer's (section 11.1).
+    // JITCache: the choice of the operand compared by its atom, made once, here. In twins builds it passes through the
+    // recorder, which records it, or in a twin compile answers with the producer's.
     bool lhsIsAtom = !!tryGetAtomStringConstant(src1);
     bool rhsIsAtom = !lhsIsAtom && tryGetAtomStringConstant(src2);
 #if ENABLE(JITCACHE_TWINS)
@@ -931,7 +931,7 @@ void JIT::compileOpStrictEqJump(const JSInstruction* currentInstruction)
         return string;
     };
 
-    // JITCache: atomConstant is the operand tryGetAtomStringConstant chose, and its atom is a reference (census C7).
+    // JITCache: atomConstant is the operand tryGetAtomStringConstant chose, and its atom is a reference.
     auto emitStringConstantFastPath = [&](GPRReg stringGPR, GPRReg knownStringGPR, VirtualRegister atomConstant) {
         JumpList fallThrough;
         auto atom = JITCache::ImageReference::ucbConstantAtom(vm(), *m_unlinkedCodeBlock, atomConstant);
@@ -1270,7 +1270,7 @@ void JIT::emit_op_switch_imm(const JSInstruction* currentInstruction)
 
 #if ENABLE(JITCACHE_TWINS)
         // JITCache twins builds: a recorder records the seed the switch draws, and a twin recorder gives it the
-        // producer's (SPEC-image.md section 11.1).
+        // producer's.
         BinarySwitch binarySwitch(regT0, cases.span(), BinarySwitch::Int32, m_imageRecorder.get());
 #else
         BinarySwitch binarySwitch(regT0, cases.span(), BinarySwitch::Int32);
@@ -1399,8 +1399,8 @@ void JIT::emit_op_switch_string(const JSInstruction* currentInstruction)
         slowCases.append(loadCacheableIdentifierImpl(scrutineeGPR, scratch1GPR, /* propertyIsString */ true, /* propertyIsSymbol */ false));
 
         // JITCache: the consumer keeps this tree and writes its own atoms into it by rank, so under a recorder every
-        // comparison against a key and every case jump carry a fixup of the key's rank (census C13, SPEC-image.md
-        // section 3.7). The recording outlives the switch that emits through it.
+        // comparison against a key and every case jump carry a fixup of the key's rank. The recording outlives the
+        // switch that emits through it.
         std::optional<JITCache::StringSwitchRecording> recording;
         if (m_imageRecorder) [[unlikely]]
             recording.emplace(*m_imageRecorder, static_cast<unsigned>(tableIndex));
@@ -1824,8 +1824,7 @@ void JIT::emit_op_nop(const JSInstruction*)
 
 void JIT::emit_op_super_sampler_begin(const JSInstruction*)
 {
-    // JITCache: only builtin-mode parsing produces this opcode, and its counter is process data no target names
-    // (census C20).
+    // JITCache: only builtin-mode parsing produces this opcode, and its counter is process data no target names.
     if (m_imageRecorder) [[unlikely]]
         m_imageRecorder->markUnrecordable(JITCache::Unrecordable::SuperSamplerOpcode);
     add32(TrustedImm32(1), AbsoluteAddress(std::bit_cast<void*>(&g_superSamplerCount)));
@@ -1833,7 +1832,7 @@ void JIT::emit_op_super_sampler_begin(const JSInstruction*)
 
 void JIT::emit_op_super_sampler_end(const JSInstruction*)
 {
-    // JITCache: as in emit_op_super_sampler_begin (census C20).
+    // JITCache: as in emit_op_super_sampler_begin.
     if (m_imageRecorder) [[unlikely]]
         m_imageRecorder->markUnrecordable(JITCache::Unrecordable::SuperSamplerOpcode);
     sub32(TrustedImm32(1), AbsoluteAddress(std::bit_cast<void*>(&g_superSamplerCount)));
@@ -2070,7 +2069,7 @@ void JIT::emit_op_profile_type(const JSInstruction* currentInstruction)
     m_isShareable = false;
     // JITCache: code other CodeBlocks may not share is never captured, and NotShareable says why. The record takes that
     // reason here, before this template's pointer argument to operationProcessTypeProfilerLog meets the guard on pointer
-    // arguments and gives it another; the template itself stays native (census C24).
+    // arguments and gives it another; the template itself stays native.
     if (m_imageRecorder) [[unlikely]]
         m_imageRecorder->markUnrecordable(JITCache::Unrecordable::NotShareable);
 
@@ -2172,7 +2171,7 @@ void JIT::emit_op_log_shadow_chicken_tail(const JSInstruction* currentInstructio
 void JIT::emit_op_profile_control_flow(const JSInstruction* currentInstruction)
 {
     m_isShareable = false;
-    // JITCache: as in emit_op_profile_type (census C24).
+    // JITCache: as in emit_op_profile_type.
     if (m_imageRecorder) [[unlikely]]
         m_imageRecorder->markUnrecordable(JITCache::Unrecordable::NotShareable);
 

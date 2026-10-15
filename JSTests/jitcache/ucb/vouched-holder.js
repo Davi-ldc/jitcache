@@ -3,11 +3,11 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-expect-fault: 1:1 ucb.identity
 
-// C11 for a child UFE that an imported parent's decode made. A capture lists, in its ucb.identity, the holder digest of
-// each child UFE of the UCB it captures, computed from the producer's own UFE; a consumer that imports the parent keeps
-// the list, and a request for one of those children compares the listed digest with its body's holderDigest instead of
-// encoding the UFE. Strict, which every run here has, still computes the UFE's own digest, decides by it, and requires the
-// listed digest to equal it.
+// The holder check for a child UFE that an imported parent's decode made. A capture lists, in its ucb.identity, the
+// holder digest of each child UFE of the UCB it captures, computed from the producer's own UFE; a consumer that imports
+// the parent keeps the list, and a request for one of those children compares the listed digest with its body's
+// holderDigest instead of encoding the UFE. Strict, which every run here has, still computes the UFE's own digest,
+// decides by it, and requires the listed digest to equal it.
 // The Producer runs vhOuter and the vhInner closures it returns until both are captured.
 // - Sequence 0: the Consumer imports vhOuter, then vhInner, whose request has the digest vhOuter's body lists
 //   (vouchedHolderChecks) and computes its own (holderDigests), and the two agree, so vhInner imports.
@@ -81,7 +81,7 @@ load("./resources/sections.js", "caller relative");
             imports: 1, vouchedHolderChecks: 1, holderDigests: 1, "misses.Holder": 0,
         });
         t.check(value === expectedOf(5, 2), () => `vhInner(2) gave ${value}`);
-        t.check(t.status() === null || t.status() === undefined, () => `cache activity turned off at ${t.status()}`);
+        t.check(t.status() === null, () => `cache activity turned off at ${t.status()}`);
     } else {
         const value = inner(2);
         t.check(value === expectedOf(5, 2), () => `vhInner(2) gave ${value}`);

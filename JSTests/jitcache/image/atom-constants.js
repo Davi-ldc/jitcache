@@ -3,7 +3,8 @@
 // jitcache-runs: Off --diskCachePath=.; Producer --jitcache-delta-at-exit --useConcurrentJIT=false --diskCachePath=.; Consumer --useConcurrentJIT=false --diskCachePath=.
 // jitcache-pin: off its runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and compiles strict equalities against generated atoms where this build compiles them against decoded plain strings; and with the first consumer's options its Off run polls jitcacheBodyEvents, a function only this build has, until the plain functions' CodeBlocks age out, which the comparison's --useGC=false never lets them do
 
-// SPEC-image.md T18 (N25, section 11.1, I22). Every run works in its sequence's scratch directory, so --diskCachePath=.
+// Strict equalities against string constants whose atom-ness changes between the capture and the import, which the
+// twin data records operand by operand. Every run works in its sequence's scratch directory, so --diskCachePath=.
 // shares one bytecode cache per sequence: the first run generates this script and writes the cache, and the producer and
 // the consumer decode it. The shell caches each function as an update of its own, whose strings decode as fresh plain
 // strings, so every string constant longer than an inline string stays plain until a property-key use makes it an atom
@@ -18,7 +19,7 @@
 // - Each consumer installs every function at its first call. The UCB lane atomizes the marked constants first, so the
 //   late functions hold atoms where their images compare generically. The consumer checks the imports, the operand each
 //   image recorded at its strict equality (twin data, kind 8), that only the early functions' images carry a
-//   UCBConstantAtom pointer (C6, C7; T1), and that every constant the capture marked is an atom while the plain ones are
+//   UCBConstantAtom pointer, and that every constant the capture marked is an atom while the plain ones are
 //   not.
 // - A plain constant exists only once its function's UCB is decoded at that first call, which installs the image too, so
 //   the first sequence's consumer makes the plain constants atoms after their first install: it uses each as a property
@@ -26,7 +27,8 @@
 //   functions again. The UCB lane attaches the same body to each live UCB, and the newborn CodeBlock installs the image
 //   over atoms the capture never marked. The second consumer calls the functions in reverse order.
 // Every install passes the twin check, whose twin compile answers each strict equality from the producer's recorded
-// operand whatever atoms the consumer holds, and under strict W4 rejects a recorded atom operand that is no atom here.
+// operand whatever atoms the consumer holds, and under strict the twins section's validation rejects a recorded atom
+// operand that is no atom here.
 // The Off runs take the consumer's path and its native steps, the wait for the plain functions' code to age out included
 // where their options age code; only the consumer reads what JITCache imported, installed or attached.
 (function main(role, scratch, artifact, sequence) {

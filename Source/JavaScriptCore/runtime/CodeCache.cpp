@@ -83,8 +83,8 @@ static void generateUnlinkedCodeBlockForFunctions(VM& vm, UnlinkedCodeBlock* unl
         generate(unlinkedCodeBlock->functionExpr(i));
 }
 
-// JITCache: a twin generation (SPEC-ucb.md section 13.2) passes twinParseResults, which receives what
-// executable->recordParse would have, and leaves the executable alone.
+// JITCache: a twin generation, the native generation an import is checked against, passes twinParseResults, which
+// receives what executable->recordParse would have, and leaves the executable alone.
 template<class UnlinkedCodeBlockType, class ExecutableType = ScriptExecutable>
 UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, DerivedContextType derivedContextType, bool isArrowFunctionContext, const TDZEnvironment* variablesUnderTDZ = nullptr, const PrivateNameEnvironment* privateNameEnvironment = nullptr, ExecutableType* executable = nullptr, JITCache::TwinParseResults* twinParseResults = nullptr)
 {
@@ -202,7 +202,7 @@ UnlinkedCodeBlockType* CodeCache::getUnlinkedGlobalCodeBlock(VM& vm, ExecutableT
         derivedContextType, evalContextType, isArrowFunctionContext, codeGenerationMode,
         std::nullopt);
     // JITCache: snapshots executable->lexicallyScopedFeatures(), the features the key above was built from, before any
-    // step below overwrites them (SPEC-ucb.md section 7.2.1). Without JITCache state the request does nothing, and the
+    // step below overwrites them. Without JITCache state the request does nothing, and the
     // sequence is the native one: map, then the provider's cached bytecode, then generation.
     JITCache::GlobalRequest jitCacheRequest(vm, *executable, source, CacheTypes<UnlinkedCodeBlockType>::codeType, scriptMode, codeGenerationMode, evalContextType);
     UnlinkedCodeBlockType* unlinkedCodeBlock = m_sourceCode.findCacheAndUpdateAge<UnlinkedCodeBlockType>(vm, key);
@@ -327,7 +327,7 @@ UnlinkedFunctionExecutable* CodeCache::getUnlinkedGlobalFunctionExecutable(VM& v
     // We initially start with hasCapturedVariables = false.
     functionExecutable->recordParse(program->features(), metadata->lexicallyScopedFeatures(), /* hasCapturedVariables */ false);
 
-    // JITCache: the root's identity, before link reads the UFE and before the map publishes it (SPEC-ucb.md section 7.2.4).
+    // JITCache: the root's identity, before link reads the UFE and before the map publishes it.
     // A map hit returns a UFE that already has its identity.
     JITCache::didCreateFunctionConstructorExecutable(vm, *functionExecutable, source, lexicallyScopedFeatures, functionConstructorParametersEndPosition);
 
@@ -384,9 +384,9 @@ RefPtr<CachedBytecode> serializeBytecode(VM& vm, UnlinkedCodeBlock* codeBlock, c
 #if ENABLE(JITCACHE_TWINS)
 namespace JITCache {
 
-// SPEC-ucb.md section 13.2: what the request's native generation makes, with the request's snapshot of its features in
-// place of the executable's, which an import has overwritten with the parse's (F18). Every other input comes from the
-// executable, as native generation reads it, since no import changes those fields.
+// The twin of a program, module or eval body: what the request's native generation makes, with the request's
+// snapshot of its features in place of the executable's, which an import has overwritten with the parse's. Every
+// other input comes from the executable, as native generation reads it, since no import changes those fields.
 UnlinkedCodeBlock* generateGlobalTwin(const RequestState& state, TwinParseResults& results, ParserError& error)
 {
     VM& vm = state.vm;

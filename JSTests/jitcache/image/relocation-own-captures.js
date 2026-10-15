@@ -5,11 +5,11 @@
 // jitcache-expect-twin: 1 coincidence heap
 // jitcache-pin: off with the ConsumerProducer's options its Off run polls jitcacheBodyEvents, a function only this build has, until attached's CodeBlock ages out, and the comparison's --useGC=false lets no CodeBlock age, so a typeof guard would only trade the pin's ReferenceError for this build's failed wait
 
-// SPEC-image.md T3, its ConsumerProducer case (section 11.4, the clause's skip of every target of a body the importing
-// process captured itself). The ConsumerProducer imports fromProducer, which the producer captured, and the RelocationPairs
-// hook makes that import report its forced fixups in each domain they reach, which the directives declare; fromProducer's
-// image carries a target in each (T1): op_ret's jump to ReturnFromBaseline (E1), the structure ID base (C27, A6), the soft
-// stack limit (B1) and the far calls' operations (B9). It compiles attached and reimported itself, so its finalize
+// The relocation check's ConsumerProducer case: the twin check skips every target of a body the importing process
+// captured itself. The ConsumerProducer imports fromProducer, which the producer captured, and the RelocationPairs hook
+// makes that import report its forced fixups in each domain they reach, which the directives declare; fromProducer's
+// image carries a target in each: op_ret's jump to ReturnFromBaseline, the structure ID base, the soft stack limit and
+// the far calls' operations. It compiles attached and reimported itself, so its finalize
 // captures commit their bodies with its own capture-process token. Eager jettison timing then ages attached's code out,
 // which empties its UCB's sharing slot while the UCB lives, and attached's next call attaches its own body to that live
 // UCB and installs it. $vm.deleteAllCodeWhenIdle then cuts every UCB from its executable once the program returns, and

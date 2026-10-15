@@ -82,9 +82,9 @@ typedef Vector<PrintRecord> PrintRecordList;
 #if ENABLE(JITCACHE_TWINS)
 namespace JITCache {
 
-// SPEC-integrator.harness.md section 11.5: true while --jitcache-test-force-blinding is in effect, so that
-// shouldConsiderBlinding blinds every immediate the assembler considers for blinding. JITCacheTwinsHarness.cpp defines
-// it; the shell sets it before JSC::initialize, before any thread emits code, so the threads that emit read it unlocked.
+// True while --jitcache-test-force-blinding is in effect, so that shouldConsiderBlinding blinds every immediate the
+// assembler considers for blinding. JITCache's ShellFunctions.cpp defines it; the shell sets it before JSC::initialize,
+// before any thread emits code, so the threads that emit read it unlocked.
 JS_EXPORT_PRIVATE bool forcesBlindingForTesting();
 
 } // namespace JITCache

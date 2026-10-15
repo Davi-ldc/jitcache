@@ -4,8 +4,8 @@
 // delta capture all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js
 // covers it).
 
-// SPEC-ucb.md section 13.3, builtin-roots.js, sections 3.5, 7.2.4, 7.2.6 and 7.3.6: builtin roots, whose identity is
-// recorded at their creation and whose source digest is supplied rather than computed from their text.
+// Builtin roots, whose identity is recorded at their creation and whose source digest comes from their provider, never
+// from their text.
 // - JSC builtins. BuiltinExecutables keeps one UFE per builtin and VM, which the VM's first global object creates before
 //   any script runs, so a later global object creates no builtin root while that cache holds it. Bun.shrink() empties
 //   the cache (VM::deleteAllCode, which runs once the VM is idle), so the global object vm.createContext() creates next
@@ -15,8 +15,8 @@
 //   window, since it calls only native functions and intrinsics besides a callback whose own first call comes before
 //   the window.
 // - Bun internal modules created from their text, as a `bun` run creates them: loading node:querystring records its
-//   root once and takes its digest from its provider, the builtins section's table (form 2, statistics: a root, a
-//   supplied digest, no digest computed from text), and its functions import at their first call in the Consumer.
+//   root once and takes its digest from its provider, the builtins section's table (statistics: a root, a supplied
+//   digest, no digest computed from text), and its functions import at their first call in the Consumer.
 // - Bun internal modules decoded by decodeBuiltinFunction, as a standalone executable decodes them: the app
 //   resources/builtin-roots-app.js, built with `bun build --compile --bytecode`, makes the same checks of
 //   node:querystring there. It runs twice (resources/ucb-bun.js, runApp). First it runs with this run's role over an
@@ -28,7 +28,8 @@
 // which their Producers ran hot, imports or is seeded inside it: only the builtin's and the internal module's bodies
 // can. The output, this script's and the app's, equals the JITCache-off run.
 //
-// Bun calls delta at exit for every producing VM, the app's included, and the app gets the run's delta capture.
+// The runs use the lane's default sequence, so the test's own VM calls delta at exit in the Producer; the app calls none
+// (resources/ucb-bun.js).
 const path = require("node:path");
 const vm = require("node:vm");
 const { context } = require("./resources/ucb-bun.js");

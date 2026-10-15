@@ -1,7 +1,7 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false --verboseOSR=true
 // jitcache-check: 1 resources/polymorphic-check.ts
 
-// SPEC-cb.md section 11.3, a polymorphic body (section 5.3, I16). polyBody reads one property from objects of three
+// A polymorphic body, whose counter does not travel. polyBody reads one property from objects of three
 // structures, so its get_by_id IC lists three cases and the ICs lane reports a polymorphic site. Its Producer runs it to
 // the last call before its counter would cross, as floor.js does with a probe of the same text, and delta captures it
 // there. The capture carries no counter: cb.state and cb.summary say NotCarried, with zero counter fields and a zero

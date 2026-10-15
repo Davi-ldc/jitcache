@@ -50,7 +50,7 @@ namespace JSC {
 
 namespace JITPropertyAccessInternal {
 
-// The resolve_scope thunk the native emitters link for a resolve type (census D3). The slow path's chain names every
+// The resolve_scope thunk the native emitters link for a resolve type. The slow path's chain names every
 // global type, and the main pass's default branch selects the same thunk for every type it meets, since its switch
 // compiles GlobalProperty, GlobalVar and GlobalLexicalVar inline; both send every type they do not name to the GlobalVar
 // thunk.
@@ -82,7 +82,7 @@ static JITCache::BaselineThunk resolveScopeThunkFor(ResolveType resolveType)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-// The get_from_scope thunk the native emitters link for a resolve type (census D4), which follows their selection as
+// The get_from_scope thunk the native emitters link for a resolve type, which follows their selection as
 // written, never the type alone. The main pass's default branch selects with a chain that mixes if and else if, so only
 // GlobalLexicalVar, GlobalVarWithVarInjectionChecks and GlobalLexicalVarWithVarInjectionChecks keep their own thunk there,
 // and every other type it meets, ClosureVarWithVarInjectionChecks and GlobalPropertyWithVarInjectionChecks included,
@@ -115,7 +115,7 @@ static JITCache::BaselineThunk getFromScopeThunkFor(ResolveType resolveType)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-// Records a scope access the compilation bakes into its code without a guard (SPEC-image.md section 7).
+// Records a scope access the compilation bakes into its code without a guard.
 static void recordBakedScopeFact(JITCache::ImageRecorder* recorder, BytecodeIndex bytecodeIndex, JITCache::ScopeOpcode opcode, ResolveType resolveType, uint32_t localScopeDepth = 0)
 {
     if (!recorder) [[likely]]
@@ -2302,7 +2302,7 @@ void JIT::emitWriteBarrier(VirtualRegister owner, WriteBarrierMode mode)
 
 void JIT::emitWriteBarrier(JSCell* owner)
 {
-    // No baseline emitter calls this, and the owner's address is a reference the census does not cover (census D8).
+    // No baseline emitter calls this, and the owner's address is a reference no image target names.
     if (m_imageRecorder) [[unlikely]]
         m_imageRecorder->markUnrecordable(JITCache::Unrecordable::UnannotatedReference);
     Jump ownerIsRememberedOrInEden = barrierBranch(vm(), owner, regT0);
