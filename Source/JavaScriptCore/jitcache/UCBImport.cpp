@@ -374,6 +374,7 @@ static std::optional<BodyKey> computeRequestKey(VMState& vmState, RequestState& 
         return WTF::switchOn(*identity,
             [&](const ChildIdentity& child) {
                 state.suppliedDigestProvider = child.parent->suppliedDigestProvider();
+                state.vouchedHolderDigest = child.parent->childHolderDigest(child.table, child.index);
                 // Computed at the body's request rather than when its parent was recorded, since most children never run.
                 return BodyKey::make(IdentityKind::Child, state.specialization, keyMode, childIdentityDigest(child.parent->key(), child.table, child.index));
             },
@@ -560,12 +561,12 @@ static BodyImage imageOf(const ValidatedBody& body)
 
 // Recording stops for good when cache activity turns off; existing records stay (section 6.2). A record the registry
 // refuses stays in the caller's temporary and goes after the call, outside the registry's lock.
-static bool addRecord(VMState& vmState, UnlinkedCodeBlock& codeBlock, UCBRecord&& record)
+static bool addRecord(VMState& vmState, UnlinkedCodeBlock& codeBlock, UCBRecord&& record, std::span<const uint8_t> childHolderDigests = { })
 {
     if (!vmState.tracksKeys())
         return false;
     UCBOrigin origin = record.origin;
-    if (!vmState.registry().recordCodeBlock(codeBlock, WTF::move(record)))
+    if (!vmState.registry().recordCodeBlock(codeBlock, WTF::move(record), childHolderDigests))
         return false;
     ++statisticsOf(vmState).records[static_cast<size_t>(origin)];
     return true;
@@ -747,6 +748,8 @@ static ASCIILiteral importedClosureFailure(const RequestState& state, UnlinkedCo
         return "C8 fails"_s;
     if (!constantBitsFit(codeBlock, feedback))
         return "C9 fails"_s;
+    if (!childHolderDigestsFit(codeBlock, identity))
+        return "the child holder digests do not fit the child UFEs"_s;
     return { };
 }
 
@@ -762,11 +765,34 @@ static ASCIILiteral matchedClosureFailure(UnlinkedCodeBlock& codeBlock, const Un
     return { };
 }
 
+enum class HolderFit : uint8_t { Fits, Differs, Invalid };
+
 // C11: the requesting UFE's holder digest equals the identity section's. A section with none, whose core kind is not a
 // function's, differs as well.
-static bool holderFits(RequestState& state, const IdentitySection& identity, RequestTimer& timer)
+//
+// A UFE that an imported parent's decode made has the digest the parent's body lists for it, when the body lists one: the
+// parent's capture computed it from the producer's UFE that the core encodes, the decode reproduces that UFE's descriptor,
+// and its TDZ chain extends a start chain whose content the parent's own holder check or context matched. Normal mode
+// compares that listed digest and encodes nothing. Strict computes the UFE's own digest, decides by it, and holds the
+// listed one to it, so that every strict import checks the reasoning above; a listed digest that differs is invalid
+// material.
+static HolderFit holderFits(VMState& vmState, RequestState& state, const IdentitySection& identity, RequestTimer& timer, const BodyKey& key)
 {
-    return identity.holderDigest && *identity.holderDigest == requestHolderDigestMeasured(state, &timer, CostAccount::Counted);
+    if (!identity.holderDigest)
+        return HolderFit::Differs;
+    std::optional<Digest256> vouched = Options::jitCacheVouchedHolderDigests() ? state.vouchedHolderDigest : std::nullopt;
+    if (vouched)
+        ++statisticsOf(vmState).vouchedHolderChecks;
+    if (vouched && !vmState.strict()) {
+        PartScope scope(&timer, RequestPart::HolderDigest, CostAccount::Counted);
+        return *identity.holderDigest == *vouched ? HolderFit::Fits : HolderFit::Differs;
+    }
+    const Digest256& own = requestHolderDigestMeasured(state, &timer, CostAccount::Counted);
+    if (vouched && *vouched != own) {
+        reportInvalidMaterial(vmState, InvalidMaterialStep::Identity, "a parent's body lists a holder digest that differs from its child UFE's own"_s, key);
+        return HolderFit::Invalid;
+    }
+    return *identity.holderDigest == own ? HolderFit::Fits : HolderFit::Differs;
 }
 
 static BodyLookup openBodyMeasured(VMState& vmState, const BodyKey& key, RequestTimer& timer)
@@ -873,9 +899,14 @@ static MatchResult matchBody(VMState& vmState, RequestState& state, RequestTimer
             countMiss(vmState, MissReason::Provenance);
             return MatchResult::Missed;
         }
-        if (subject.holder && !holderFits(state, *identity, timer)) {
-            countMiss(vmState, MissReason::Holder);
-            return MatchResult::Missed;
+        if (subject.holder) {
+            HolderFit fit = holderFits(vmState, state, *identity, timer, key);
+            if (fit == HolderFit::Invalid)
+                return MatchResult::Stopped;
+            if (fit == HolderFit::Differs) {
+                countMiss(vmState, MissReason::Holder);
+                return MatchResult::Missed;
+            }
         }
     }
 
@@ -1032,8 +1063,13 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     if (identity->contextDigest != requestContextMeasured(state, &timer))
         return miss(MissReason::Context);
     // Step 4d: C11. A root body's context has already computed the holder digest.
-    if (state.kind == RequestKind::FunctionBody && !holderFits(state, *identity, timer))
-        return miss(MissReason::Holder);
+    if (state.kind == RequestKind::FunctionBody) {
+        HolderFit fit = holderFits(*vmState, state, *identity, timer, *key);
+        if (fit == HolderFit::Invalid)
+            return nullptr;
+        if (fit == HolderFit::Differs)
+            return miss(MissReason::Holder);
+    }
     // Step 4e.
     if (strict && !suppliedDigestHolds(*vmState, state, *key, timer))
         return nullptr;
@@ -1107,7 +1143,13 @@ UnlinkedCodeBlock* importBody(RequestState& state)
             .generatedButterflyMap = std::nullopt,
             .holder = recordedHolder(*vmState, state),
         };
-        bool recorded = addRecord(*vmState, *codeBlock, WTF::move(record));
+        // The children's holder digests the body lists, which the holder check then compares for the child UFEs this decode
+        // made. Strict's closure checks have matched the list to the UCB's children; normal mode keeps it only when it has
+        // one digest per child.
+        std::span<const uint8_t> childHolderDigests;
+        if (Options::jitCacheVouchedHolderDigests() && identity->childHolderDigestCount() == codeBlock->numberOfFunctionDecls() + codeBlock->numberOfFunctionExprs())
+            childHolderDigests = identity->childHolderDigests;
+        bool recorded = addRecord(*vmState, *codeBlock, WTF::move(record), childHolderDigests);
         // The UCB was just decoded, so nothing has recorded it, and nothing since step 1 has turned cache activity off.
         ASSERT_UNUSED(recorded, recorded);
     }

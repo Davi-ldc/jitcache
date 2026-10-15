@@ -33,11 +33,12 @@
 #include <unistd.h>
 #endif
 
-// The maintenance backend and its command line (SPEC-integrator.maintenance.md). clean and compact need no VM and no
-// JSC::initialize: they run on the calling thread, use the filesystem, SHA-256 and CRC32C, and hold the producer lock of
-// <parent> for all their work. They judge bodies by the pack's index, read no section to plan, and never compare the
-// header with the running process, since the command line may run under another binary than the one that produced the
-// artifact. compact applies a plan that keeps bodies as a compaction of the pack.
+// The maintenance backend and its command line (SPEC-integrator.maintenance.md). compact needs no VM and no
+// JSC::initialize: it runs on the calling thread, uses the filesystem, SHA-256 and CRC32C, and holds the producer lock of
+// <parent> for all its work. It first removes what interrupted writes left, then evicts by plan. It judges bodies by the
+// pack's index, reads no section to plan, and never compares the header with the running process, since the command line
+// may run under another binary than the one that produced the artifact. It applies a plan that keeps bodies as a
+// compaction of the pack.
 
 namespace JSC::JITCache::Maintenance {
 
@@ -69,9 +70,10 @@ static void fail(Report& report, ASCIILiteral code, String&& detail)
 }
 
 #if ENABLE(JITCACHE_TWINS)
-// Section 7's hooks; 0 leaves every apply alone.
+// The test hooks; 0 and false leave every apply alone.
 static std::atomic<uint64_t> failingBodyUnlinkForTesting { 0 };
 static std::atomic<uint64_t> stopAfterUnlinkForTesting { 0 };
+static std::atomic<bool> failingCompactionForTesting { false };
 #endif
 
 #if OS(LINUX)
@@ -267,7 +269,7 @@ static HeaderRead readHeader(int cacheFd)
     return result;
 }
 
-// The names of cache/ beside header and pack: the temporaries clean removes and the names it only reports.
+// The names of cache/ beside header and pack: the temporaries compact removes and the names it only reports.
 struct CacheListing {
     Vector<CString> temporaries;
     Vector<String> unknownNames;
@@ -314,7 +316,7 @@ static bool isEvictedBefore(const Eviction& a, const Eviction& b)
 
 struct PackRead {
     RefPtr<MappedPack> pack; // null without a pack, or for a damaged one
-    PackRoot root;
+    uint64_t validEnd { 0 }; // the root
     Vector<PackIndexEntry> entries; // the live entries, in strictly increasing key order
     uint64_t fileBytes { 0 }; // the file's size, the bytes past the valid end included
     uint64_t damagedBytes { 0 }; // a damaged pack's size
@@ -349,18 +351,18 @@ static std::expected<PackRead, String> readPack(int cacheFd, const HeaderDigest&
             return std::unexpected(makeString("reading cache/pack: "_s, errorText(mapped.error().error)));
         return damaged(mapped.error().packRejection);
     }
-    auto root = (*mapped)->currentRoot();
-    if (!root || root->validEnd > result.fileBytes)
-        return damaged("no root names a valid end inside the file"_s);
+    // The producer lock keeps the file as it was when its size was taken, which the root's valid end therefore stays in.
+    if (mapped->validEnd > result.fileBytes)
+        return damaged("the root's valid end passes the file"_s);
     PackIndex index;
     uint64_t liveBytes = packPrefixBytes;
-    auto read = readPackIndex(*root, std::nullopt, index, liveBytes, [&](uint64_t offset, uint64_t size) {
-        return (*mapped)->bytes(offset, size);
+    auto read = readPackIndex(mapped->validEnd, std::nullopt, index, liveBytes, [&](uint64_t offset, uint64_t size) {
+        return mapped->pack->bytes(offset, size);
     });
     if (!read)
         return damaged(read.error());
-    result.pack = mapped->ptr();
-    result.root = *root;
+    result.pack = mapped->pack.ptr();
+    result.validEnd = mapped->validEnd;
     for (auto& entry : index.values())
         result.entries.append(entry);
     std::ranges::sort(result.entries, keyPrecedes);
@@ -390,7 +392,7 @@ static Plan makePlan(const HeaderDigest& headerDigest, uint64_t headerBytes, uin
         plan.postCleanBytes += body.bytes;
     plan.targetBytes = targetBytesFor(ratio, plan.postCleanBytes);
 
-    // A damaged pack goes first, before any body, whenever the target is above zero; a ratio of 0 only cleans.
+    // A damaged pack goes first, before any body, whenever the target is above zero; a ratio of 0 evicts nothing.
     if (plan.targetBytes && damagedPackBytes) {
         plan.damagedPackBytes = damagedPackBytes;
         plan.evictedBytes = damagedPackBytes;
@@ -429,16 +431,8 @@ static bool stopsAfterUnlinkForTesting(uint64_t unlink)
 #endif
 }
 
-// What one call removed, and the unlinks the test hooks count within it.
-struct Removals {
-    bool removedAnything { false };
-    bool bodyStayed { false }; // an evicted body's unlink failed
-    uint64_t bodyUnlinks { 0 };
-    uint64_t unlinks { 0 }; // of a body or of header
-};
-
-// Clean's step 3: each temporary's size, taken with fstatat before its unlinkat, counts once it is gone.
-static void removeTemporaries(int cacheFd, const Vector<CString>& temporaries, Report& report, Removals& removals)
+// The cleanup's temporaries: each one's size, taken with fstatat before its unlinkat, counts once it is gone.
+static void removeTemporaries(int cacheFd, const Vector<CString>& temporaries, Report& report)
 {
     for (auto& name : temporaries) {
         struct stat status;
@@ -456,41 +450,58 @@ static void removeTemporaries(int cacheFd, const Vector<CString>& temporaries, R
         }
         ++report.temporariesRemoved;
         report.bytesReclaimed += static_cast<uint64_t>(status.st_size);
-        removals.removedAnything = true;
     }
 }
 
-// Clean's step 3 also removes a .cache.replaced that a ConsumerProducer's replacement left when it stopped midway
-// (container sub-SPEC section 1.4), counting its files' sizes; a name in it that is no artifact file stays, and with it
-// the directory.
-static void removeReplacedLeftover(int parentFd, Report& report, Removals& removals)
+// The cleanup also removes a .cache.replaced that a ConsumerProducer's replacement left when it stopped midway,
+// counting its files' sizes; a name in it that is no artifact file stays, and with it the directory.
+static void removeReplacedLeftover(int parentFd, Report& report)
 {
     uint64_t bytes = 0;
     int error = removeReplacedArtifact(parentFd, bytes);
     report.bytesReclaimed += bytes;
-    if (bytes)
-        removals.removedAnything = true;
     if (error)
         addDiagnostic(report, Codes::unlinkFailed, makeString(ArtifactNames::replacedCacheDirectory, "/: "_s, errorText(error)));
 }
 
-// Clean's step 5.
 static void reportUnknownFiles(Vector<String>&& names, Report& report)
 {
     for (auto& name : names)
         addDiagnostic(report, Codes::unknownFile, WTF::move(name));
 }
 
-// The last step of a whole-artifact deletion and of clean's bodiless remnant: cache/. A failure leaves a remnant without
-// a body, which the next Producer reuses or clean finishes.
-static void removeCacheDirectory(const Session& session, Report& report, Removals& removals)
+// The last step of a whole-artifact deletion and of a bodiless remnant's removal: cache/. A failure leaves a remnant
+// without a body, which the next Producer reuses or the next compact finishes.
+static void removeCacheDirectory(const Session& session, Report& report)
 {
     if (unlinkat(session.parent.get(), ArtifactNames::cacheDirectory.characters(), AT_REMOVEDIR)) {
         int error = errno;
         addDiagnostic(report, Codes::rmdirFailed, makeString("cache/: "_s, errorText(error)));
+    }
+}
+
+// A header-less cache/ is a remnant, which a creation or a whole-artifact deletion that stopped midway leaves. One whose
+// pack may hold a body keeps it, since compact never removes a committed body, and one that holds an unknown name stays
+// for the next Producer to reuse; any other goes, its pack first and then cache/.
+static void finishRemnant(const Session& session, const CacheListing& cache, Report& report)
+{
+    if (cache.hasPack && packHoldsBodies(session.cache.get())) {
+        addDiagnostic(report, Codes::remnantWithBodies, "cache/ has no header and its pack holds bodies"_s);
         return;
     }
-    removals.removedAnything = true;
+    if (!cache.unknownNames.isEmpty())
+        return;
+    if (cache.hasPack) {
+        struct stat status;
+        bool sized = !fstatat(session.cache.get(), ArtifactNames::pack.characters(), &status, AT_SYMLINK_NOFOLLOW);
+        if (unlinkat(session.cache.get(), ArtifactNames::pack.characters(), 0) && errno != ENOENT) {
+            addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: "_s, errorText(errno)));
+            return;
+        }
+        if (sized)
+            report.bytesReclaimed += static_cast<uint64_t>(status.st_size);
+    }
+    removeCacheDirectory(session, report);
 }
 
 // The key of an eviction the plan made from a body name or a pack index entry, whose bytes BodyKey::fromBytes accepted.
@@ -515,35 +526,33 @@ static OwnedDescriptor openPackForWriting(int cacheFd, const PackRead& pack, Rep
     return fd;
 }
 
-// Clean's pack step: the bytes past the valid end go, which commits that never published their root left, and a retired
-// mark the path's file carries, which only a compaction that died between its mark and its rename leaves, is cleared.
-static void cleanPack(int cacheFd, const PackRead& pack, Report& report, Removals& removals)
+// The pack's cleanup: the bytes past the valid end go, which commits that never stored their root left, and a retired
+// mark the path's file carries, which only a compaction that died between its mark and its rename leaves, is cleared. It
+// runs before a rewrite too, so a rewrite that fails, as on a full disk, still leaves the pack cleaned. Returns the file's
+// size after it.
+static uint64_t cleanUpPack(int cacheFd, const PackRead& pack, Report& report)
 {
-    if (!pack.pack)
-        return;
     OwnedDescriptor fd = openPackForWriting(cacheFd, pack, report);
     if (!fd)
-        return;
+        return pack.fileBytes;
     if (pack.pack->isRetired()) {
         uint64_t zero = 0;
         if (pwrite(fd.get(), &zero, sizeof(zero), static_cast<off_t>(packRetiredOffset)) != static_cast<ssize_t>(sizeof(zero)))
             addDiagnostic(report, Codes::io, makeString("cache/pack: clearing its retired mark: "_s, errorText(errno)));
-        else
-            removals.removedAnything = true;
     }
-    if (pack.fileBytes > pack.root.validEnd) {
-        if (ftruncate(fd.get(), static_cast<off_t>(pack.root.validEnd))) {
-            addDiagnostic(report, Codes::io, makeString("cache/pack: truncating it to its valid end: "_s, errorText(errno)));
-            return;
-        }
-        report.bytesReclaimed += pack.fileBytes - pack.root.validEnd;
-        removals.removedAnything = true;
+    if (pack.fileBytes <= pack.validEnd)
+        return pack.fileBytes;
+    if (ftruncate(fd.get(), static_cast<off_t>(pack.validEnd))) {
+        addDiagnostic(report, Codes::io, makeString("cache/pack: truncating it to its valid end: "_s, errorText(errno)));
+        return pack.fileBytes;
     }
+    report.bytesReclaimed += pack.fileBytes - pack.validEnd;
+    return pack.validEnd;
 }
 
 // A whole deletion's first step: an empty pack replaces the pack, which is retired first, so every reader that maps it
 // drops its bodies. An interruption after it leaves a valid artifact without bodies, and one after the header's unlink a
-// remnant whose pack holds no body, which clean finishes and the next Producer reuses.
+// remnant whose pack holds no body, which the next compact finishes and the next Producer reuses.
 static int emptyPack(int cacheFd, const PackRead& pack, const HeaderDigest& headerDigest, Report& report)
 {
     if (pack.pack) {
@@ -604,8 +613,6 @@ static int exitCodeOf(Outcome outcome)
 static constexpr ASCIILiteral confirmationPrompt = "This operation will delete the entire cache. Ok? (y/n)"_s;
 
 struct CommandLine {
-    enum class Command : uint8_t { Clean, Compact };
-    Command command { Command::Clean };
     String path;
     double ratio { 0 };
     Answer answer { Answer::Ask };
@@ -640,35 +647,27 @@ static std::optional<double> ratioArgument(const CString& argument)
     return ratio;
 }
 
-// "clean [<path>]" or "compact <ratio> [<path>] [--yes | --no]" (section 5), the path defaulting to defaultArtifactPath; a
-// usage error says why.
+// "compact <ratio> [<path>] [--yes | --no]" (section 5), the path defaulting to defaultArtifactPath; a usage error says
+// why.
 static std::expected<CommandLine, String> parseCommandLine(std::span<const CString> arguments)
 {
     if (arguments.empty())
         return std::unexpected(String { "no command"_s });
+    if (!equalSpans(arguments[0].span(), "compact"_span))
+        return std::unexpected(makeString("unknown command "_s, displayArgument(arguments[0])));
+    if (arguments.size() < 2)
+        return std::unexpected(String { "compact takes a ratio"_s });
 
     CommandLine commandLine;
-    auto command = arguments[0].span();
-    size_t trailing; // the index of the first argument that is a path or an option
-    if (equalSpans(command, "clean"_span)) {
-        commandLine.command = CommandLine::Command::Clean;
-        trailing = 1;
-    } else if (equalSpans(command, "compact"_span)) {
-        if (arguments.size() < 2)
-            return std::unexpected(String { "compact takes a ratio"_s });
-        commandLine.command = CommandLine::Command::Compact;
-        auto ratio = ratioArgument(arguments[1]);
-        if (!ratio)
-            return std::unexpected(makeString("the ratio "_s, displayArgument(arguments[1]), " is not a number"_s));
-        commandLine.ratio = *ratio;
-        trailing = 2;
-    } else
-        return std::unexpected(makeString("unknown command "_s, displayArgument(arguments[0])));
+    auto ratio = ratioArgument(arguments[1]);
+    if (!ratio)
+        return std::unexpected(makeString("the ratio "_s, displayArgument(arguments[1]), " is not a number"_s));
+    commandLine.ratio = *ratio;
 
     // Every argument that starts with "--" is an option, so a mistyped one is never taken for a path.
     std::optional<String> path;
     bool answered = false;
-    for (const CString& argument : arguments.subspan(trailing)) {
+    for (const CString& argument : arguments.subspan(2)) {
         auto text = argument.span();
         if (!spanHasPrefix(text, "--"_span)) {
             if (path)
@@ -679,7 +678,7 @@ static std::expected<CommandLine, String> parseCommandLine(std::span<const CStri
             continue;
         }
         bool yes = equalSpans(text, "--yes"_span);
-        if (commandLine.command != CommandLine::Command::Compact || (!yes && !equalSpans(text, "--no"_span)))
+        if (!yes && !equalSpans(text, "--no"_span))
             return std::unexpected(makeString("unknown option "_s, displayArgument(argument)));
         if (answered)
             return std::unexpected(String { "at most one of --yes and --no"_s });
@@ -714,12 +713,6 @@ static String planSummary(const Plan& plan)
 {
     return makeString("plan: evicts "_s, plan.evictions.size(), " bodies ("_s, plan.evictedBytes, " bytes; target "_s, plan.targetBytes,
         " of "_s, plan.postCleanBytes, " bytes)"_s, plan.deletesArtifact ? " and deletes the whole artifact"_s : ""_s);
-}
-
-static String cleanSummary(const Report& report)
-{
-    return makeString("clean: "_s, outcomeName(report.outcome), ", "_s, report.temporariesRemoved, " temporaries removed, "_s,
-        report.bytesReclaimed, " bytes reclaimed"_s);
 }
 
 static String compactSummary(const Report& report)
@@ -796,81 +789,67 @@ static int runCompact(const CommandLine& commandLine, FILE* in, FILE* out, FILE*
 
 } // namespace MaintenanceInternal
 
-Report clean(const String& parentPath)
-{
-    using namespace MaintenanceInternal;
-    Report report;
-#if OS(LINUX)
-    auto session = beginSession(parentPath, report); // steps 1 and 2
-    if (!session)
-        return report;
-
-    // A header that fails its checks does not stop clean, which needs only names.
-    HeaderRead header = readHeader(session->cache.get());
-    if (header.state == HeaderState::Bad)
-        addDiagnostic(report, Codes::badHeader, WTF::move(header.problem));
-
-    auto cache = listCache(session->cache.get());
-    if (!cache) {
-        fail(report, Codes::io, makeString("listing cache/: "_s, errorText(cache.error())));
-        return report;
-    }
-
-    Removals removals;
-    removeTemporaries(session->cache.get(), cache->temporaries, report, removals);
-    removeReplacedLeftover(session->parent.get(), report, removals);
-
-    // The pack keeps its committed bytes; the bytes past its valid end go.
-    if (header.state == HeaderState::Valid && cache->hasPack) {
-        auto pack = readPack(session->cache.get(), header.digest, report);
-        if (!pack) {
-            fail(report, Codes::io, WTF::move(pack.error()));
-            return report;
-        }
-        cleanPack(session->cache.get(), *pack, report, removals);
-    }
-
-    // A remnant whose pack lists no body, and without unknown names, goes; one with unknown names is what the next
-    // Producer reuses; one whose pack lists bodies keeps them, since clean never removes a committed body.
-    if (header.state == HeaderState::Absent) {
-        bool holdsBodies = cache->hasPack && packHoldsBodies(session->cache.get());
-        if (holdsBodies)
-            addDiagnostic(report, Codes::remnantWithBodies, "cache/ has no header and its pack holds bodies"_s);
-        else if (cache->unknownNames.isEmpty()) {
-            struct stat status;
-            bool sized = cache->hasPack && !fstatat(session->cache.get(), ArtifactNames::pack.characters(), &status, AT_SYMLINK_NOFOLLOW);
-            if (cache->hasPack && unlinkat(session->cache.get(), ArtifactNames::pack.characters(), 0) && errno != ENOENT)
-                addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: "_s, errorText(errno)));
-            else {
-                if (sized)
-                    report.bytesReclaimed += static_cast<uint64_t>(status.st_size);
-                removeCacheDirectory(*session, report, removals);
-            }
-        }
-    }
-
-    reportUnknownFiles(WTF::move(cache->unknownNames), report);
-    report.outcome = Outcome::Done;
-    return report;
-#else
-    UNUSED_PARAM(parentPath);
-    fail(report, Codes::platform, "maintenance runs only on Linux"_s);
-    return report;
-#endif
-}
-
 Report compact(const String& parentPath, double ratio, const CompactOptions& options)
 {
     using namespace MaintenanceInternal;
     Report report;
 #if OS(LINUX)
-    // Section 4.2. The plan is made on the artifact as the clean would leave it, temporaries left out of every count, and
-    // the clean itself runs only when the plan is applied, so a plan that is never applied changes nothing.
-    auto session = beginSession(parentPath, report); // step 1
+    // The plan is made on the artifact as the cleanup would leave it, temporaries left out of every count, and the cleanup
+    // itself runs only when the plan is applied, so a plan that is never applied changes nothing.
+    auto session = beginSession(parentPath, report);
     if (!session)
         return report;
 
-    HeaderRead header = readHeader(session->cache.get()); // step 2
+    // Before anything is removed; NaN fails both tests.
+    if (!(ratio >= 0 && ratio <= 1)) {
+        fail(report, Codes::badRatio, makeString("the ratio "_s, ratio, " is not in [0, 1]"_s));
+        return report;
+    }
+
+    // Without a header that passes its checks there is no plan, and the cleanup does only what names allow: the pack is
+    // read against the header's digest.
+    HeaderRead header = readHeader(session->cache.get());
+    std::optional<PackRead> pack;
+    if (header.state == HeaderState::Valid) {
+        auto read = readPack(session->cache.get(), header.digest, report);
+        if (!read) {
+            fail(report, Codes::io, WTF::move(read.error()));
+            return report;
+        }
+        pack = WTF::move(*read);
+        Vector<Eviction> everyBody;
+        appendPackedBodies(*pack, everyBody);
+        report.plan = makePlan(header.digest, header.bytes, pack->damagedBytes, ratio, WTF::move(everyBody));
+
+        // Section 4.4: a confirmed plan is applied only when planning again under this lock gives it back field for
+        // field, header digest included; a plan that deletes the artifact waits for an answer.
+        if (options.confirmedPlan && *options.confirmedPlan != *report.plan) {
+            report.outcome = Outcome::PlanChanged;
+            return report;
+        }
+        if (report.plan->deletesArtifact) {
+            if (options.answer == Answer::Ask) {
+                report.outcome = Outcome::NeedsConfirmation;
+                return report;
+            }
+            if (options.answer == Answer::No) {
+                report.outcome = Outcome::Declined;
+                return report;
+            }
+        }
+    }
+
+    // Under the lock the plan was made under: first the cleanup of what interrupted writes left, then the plan.
+    auto cache = listCache(session->cache.get());
+    if (!cache) {
+        fail(report, Codes::io, makeString("listing cache/: "_s, errorText(cache.error())));
+        return report;
+    }
+    removeTemporaries(session->cache.get(), cache->temporaries, report);
+    removeReplacedLeftover(session->parent.get(), report);
+    if (header.state == HeaderState::Absent)
+        finishRemnant(*session, *cache, report);
+    reportUnknownFiles(WTF::move(cache->unknownNames), report);
     if (header.state == HeaderState::Absent) {
         report.outcome = Outcome::NoArtifact;
         return report;
@@ -879,63 +858,18 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
         fail(report, Codes::badHeader, WTF::move(header.problem));
         return report;
     }
-
-    // Step 3; NaN fails both tests.
-    if (!(ratio >= 0 && ratio <= 1)) {
-        fail(report, Codes::badRatio, makeString("the ratio "_s, ratio, " is not in [0, 1]"_s));
-        return report;
-    }
-
-    auto pack = readPack(session->cache.get(), header.digest, report);
-    if (!pack) {
-        fail(report, Codes::io, WTF::move(pack.error()));
-        return report;
-    }
-    Vector<Eviction> everyBody;
-    appendPackedBodies(*pack, everyBody);
-    report.plan = makePlan(header.digest, header.bytes, pack->damagedBytes, ratio, WTF::move(everyBody));
     const Plan& plan = *report.plan;
-
-    // Section 4.4: a confirmed plan is applied only when planning again under this lock gives it back field for field,
-    // header digest included; a plan that deletes the artifact waits for an answer.
-    if (options.confirmedPlan && *options.confirmedPlan != plan) {
-        report.outcome = Outcome::PlanChanged;
-        return report;
-    }
-    if (plan.deletesArtifact) {
-        if (options.answer == Answer::Ask) {
-            report.outcome = Outcome::NeedsConfirmation;
-            return report;
-        }
-        if (options.answer == Answer::No) {
-            report.outcome = Outcome::Declined;
-            return report;
-        }
-    }
-
-    // Sections 4.3 and 4.5: under the lock the plan was made under, the clean of clean's steps 3 to 5, then the evictions.
-    // compact returned NoArtifact for a remnant, so clean's step 4 has nothing to do here.
-    auto cache = listCache(session->cache.get());
-    if (!cache) {
-        fail(report, Codes::io, makeString("listing cache/: "_s, errorText(cache.error())));
-        return report;
-    }
-    Removals removals;
-    removeTemporaries(session->cache.get(), cache->temporaries, report, removals);
-    removeReplacedLeftover(session->parent.get(), report, removals);
-    reportUnknownFiles(WTF::move(cache->unknownNames), report);
 
     // A plan that keeps bodies is applied as a compaction: a new pack of every body the plan keeps, without dead bytes,
     // replaces the old one in one rename. A survivor that fails its checks on the way is left out as a damaged body. A pack
-    // without dead bytes and evictions is only cleaned.
+    // without dead bytes and evictions only has its cleanup.
     if (!plan.deletesArtifact && pack->pack) {
+        uint64_t packBytes = cleanUpPack(session->cache.get(), *pack, report);
         uint64_t liveBytes = packPrefixBytes;
         for (auto& entry : pack->entries)
             liveBytes += *packRecordExtent(entry.size);
-        bool rewrites = !plan.evictions.isEmpty() || liveBytes + packIndexBlockHeaderBytes + pack->entries.size() * packIndexEntryBytes < pack->root.validEnd;
-        if (!rewrites)
-            cleanPack(session->cache.get(), *pack, report, removals);
-        else {
+        bool rewrites = !plan.evictions.isEmpty() || liveBytes + packIndexBlockBytes(static_cast<uint32_t>(pack->entries.size())) < pack->validEnd;
+        if (rewrites) {
             OwnedDescriptor fd = openPackForWriting(session->cache.get(), *pack, report);
             if (!fd) {
                 fail(report, Codes::io, "cache/pack cannot be opened for writing"_s);
@@ -946,41 +880,46 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
                 evicted.add(evictedKey(eviction));
             CompactionTarget target { session->cache.get(), std::span<const uint8_t, 16> { header.digest } };
             target.dropsDamagedBodies = true;
-            CompactionSource source { *pack->pack, pack->root, pack->entries.span(), fd.get() };
+#if ENABLE(JITCACHE_TWINS)
+            if (failingCompactionForTesting.load())
+                target.faultForTesting = CompactionChecks::write;
+#endif
+            CompactionSource source { *pack->pack, pack->validEnd, pack->entries.span(), fd.get() };
             auto compacted = ArtifactWriter::compactPack(target, source, [&](const BodyKey& key) { return evicted.contains(key); }, false);
             if (!compacted) {
                 fail(report, Codes::io, makeString(compacted.error().check, ": "_s, compacted.error().detail));
                 return report;
             }
-            removals.removedAnything = true;
             report.bodiesEvicted += plan.evictions.size();
             for (auto& [key, check] : compacted->droppedBodies) {
                 ++report.bodiesEvicted;
                 addDiagnostic(report, Codes::damagedBody, makeString("cache/pack: "_s, String { std::span<const char> { bodyKeyHexDigits(key) } }, ": "_s, check));
             }
-            if (pack->fileBytes > compacted->packBytes)
-                report.bytesReclaimed += pack->fileBytes - compacted->packBytes;
+            if (packBytes > compacted->packBytes)
+                report.bytesReclaimed += packBytes - compacted->packBytes;
         }
     }
     // A damaged pack leaves no body to keep, so any ratio above 0 deletes the artifact, and ratio 0 leaves the pack.
 
     // A whole-artifact deletion empties the pack, then removes the header, then the empty pack and cache/: until the
-    // header goes the artifact is valid, and after it a remnant whose pack holds no body.
+    // header goes the artifact is valid, and after it a remnant whose pack holds no body. The test hooks count its
+    // unlinks, of which the pack's emptying is the one body unlink.
     bool keptHeader = false;
     if (plan.deletesArtifact) {
-        int error = bodyUnlinkFailsForTesting(++removals.bodyUnlinks) ? EIO : emptyPack(session->cache.get(), *pack, header.digest, report);
-        ++removals.unlinks;
+        uint64_t bodyUnlinks = 0;
+        uint64_t unlinks = 0;
+        int error = bodyUnlinkFailsForTesting(++bodyUnlinks) ? EIO : emptyPack(session->cache.get(), *pack, header.digest, report);
+        ++unlinks;
         // The pack's bytes count once: what the empty pack does not hold now, the rest with the empty pack's unlink.
-        uint64_t emptyPackBytes = std::min<uint64_t>(packPrefixBytes + packIndexBlockHeaderBytes, pack->fileBytes);
+        uint64_t emptyPackBytes = std::min<uint64_t>(packPrefixBytes + packIndexBlockBytes(0), pack->fileBytes);
         if (!error) {
             report.bodiesEvicted += plan.evictions.size();
             report.bytesReclaimed += pack->fileBytes - emptyPackBytes;
-            removals.removedAnything = true;
         } else {
             keptHeader = true;
             addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: "_s, errorText(error)));
         }
-        if (stopsAfterUnlinkForTesting(removals.unlinks)) {
+        if (stopsAfterUnlinkForTesting(unlinks)) {
             report.outcome = Outcome::Failed;
             return report;
         }
@@ -990,8 +929,8 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
                 addDiagnostic(report, Codes::unlinkFailed, makeString("cache/header: "_s, errorText(errno)));
             } else
                 report.bytesReclaimed += header.bytes;
-            ++removals.unlinks;
-            if (stopsAfterUnlinkForTesting(removals.unlinks)) {
+            ++unlinks;
+            if (stopsAfterUnlinkForTesting(unlinks)) {
                 report.outcome = Outcome::Failed;
                 return report;
             }
@@ -1001,7 +940,7 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
                 addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: "_s, errorText(errno)));
             else {
                 report.bytesReclaimed += emptyPackBytes;
-                removeCacheDirectory(*session, report, removals);
+                removeCacheDirectory(*session, report);
             }
         }
     }
@@ -1024,14 +963,8 @@ int runCommandLine(std::span<const CString> arguments, FILE* in, FILE* out, FILE
     int exitCode;
     if (!commandLine) {
         printLine(err, makeString("jitcache maintenance: "_s, commandLine.error()));
-        printLine(err, "usage: clean [<path>]"_s);
-        printLine(err, "       compact <ratio> [<path>] [--yes | --no]"_s);
+        printLine(err, "usage: compact <ratio> [<path>] [--yes | --no]"_s);
         exitCode = usageExitCode;
-    } else if (commandLine->command == CommandLine::Command::Clean) {
-        Report report = clean(commandLine->path);
-        printDiagnostics(err, report);
-        printLine(out, cleanSummary(report));
-        exitCode = exitCodeOf(report.outcome);
     } else
         exitCode = runCompact(*commandLine, in, out, err);
 
@@ -1053,6 +986,11 @@ void setFailingBodyUnlink(std::optional<uint64_t> n)
 void setStopAfterUnlink(std::optional<uint64_t> n)
 {
     MaintenanceInternal::stopAfterUnlinkForTesting.store(n.value_or(0));
+}
+
+void setFailingCompaction(bool fails)
+{
+    MaintenanceInternal::failingCompactionForTesting.store(fails);
 }
 
 } // namespace Testing

@@ -1,6 +1,7 @@
-// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer
+// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-delta-capture=compiled; Consumer
 // The Producer captures compiled bodies only: the windows count the requests of the bodies under test, and with the
-// scope all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js covers it).
+// delta capture all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js
+// covers it).
 
 // SPEC-ucb.md section 13.3, root-holder.js, F15 and section 5.1: a root UFE's own singleton bit,
 // m_singletonHasBeenInvalidated, stays local, so in the Consumer it is false until a second function of one executable

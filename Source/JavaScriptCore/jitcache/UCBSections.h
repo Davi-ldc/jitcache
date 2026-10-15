@@ -37,6 +37,11 @@ struct IdentitySection { // a parsed ucb.identity section; the two maps borrow t
     uint32_t constantCount;
     std::span<const uint8_t> atomMap;
     std::span<const uint8_t> butterflyMap;
+    // The holder digest of each child UFE the core encodes, function declarations then expressions, 32 bytes each, as the
+    // producer computed it from its own UFE; all zero where it computed none. Empty when the body lists none.
+    std::span<const uint8_t> childHolderDigests;
+
+    size_t childHolderDigestCount() const { return childHolderDigests.size() / sizeof(Digest256); }
 };
 
 // With strict, empty when the section breaks a rule of section 4.2. Without, never empty: it reads each field where the
@@ -66,11 +71,14 @@ void atomizeStringConstant(VM&, const JSString&);
 // UnlinkedCodeBlock::constantRegister, with a write barrier on the UCB. VM thread; allocates one cell per marked constant,
 // and a failed tryCreate crashes, as it does in generation.
 void rebuildAtomStringButterflies(VM&, UnlinkedCodeBlock&, const IdentitySection&);
-size_t identitySectionSize(uint32_t constantCount);
-// Fills exactly identitySectionSize(constant count of the UCB) bytes: the atom map from the UCB's constants, and the
-// butterfly map from them too unless keptButterflyMap, a record's kept map of ceil(N / 8) bytes, replaces it (section 8.2).
+size_t identitySectionSize(uint32_t constantCount, size_t childHolderDigestCount = 0);
+// Whether the section's child holder digests fit the UCB decoded from its core: none, or one per child UFE.
+bool childHolderDigestsFit(UnlinkedCodeBlock&, const IdentitySection&);
+// Fills exactly identitySectionSize(constant count of the UCB, childHolderDigests.size()) bytes: the atom map from the
+// UCB's constants, the butterfly map from them too unless keptButterflyMap, a record's kept map of ceil(N / 8) bytes,
+// replaces it (section 8.2), then the child holder digests.
 void writeIdentitySection(std::span<uint8_t> out, VM&, const BodyKey&, const Digest256& contextDigest, CoreProvenance, const Digest256& coreDigest,
     const std::optional<Digest256>& holderDigest, UnlinkedCodeBlockCoreKind, const std::optional<FunctionParseFields>&, UnlinkedCodeBlock&,
-    std::optional<std::span<const uint8_t>> keptButterflyMap = std::nullopt);
+    std::optional<std::span<const uint8_t>> keptButterflyMap = std::nullopt, std::span<const Digest256> childHolderDigests = { });
 
 } // namespace JSC::JITCache

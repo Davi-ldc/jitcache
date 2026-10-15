@@ -16,7 +16,7 @@
 
 namespace JSC::JITCache::Maintenance {
 
-// The synchronous, VM-independent backend of clean and compact (SPEC-integrator.maintenance.md). It needs no VM and no
+// The synchronous, VM-independent backend of compact (SPEC-integrator.maintenance.md). It needs no VM and no
 // JSC::initialize, and runs on the calling thread.
 
 enum class Outcome : uint8_t { Done, NoArtifact, Busy, NeedsConfirmation, Declined, PlanChanged, Failed };
@@ -63,9 +63,8 @@ struct CompactOptions {
     std::optional<Plan> confirmedPlan; // set by the second call of section 4.4
 };
 
-JS_EXPORT_PRIVATE Report clean(const String& parentPath);
 JS_EXPORT_PRIVATE Report compact(const String& parentPath, double ratio, const CompactOptions&);
-// "clean [<path>]" or "compact <ratio> [<path>] [--yes | --no]" (section 5); returns the process exit code.
+// "compact <ratio> [<path>] [--yes | --no]" (section 5); returns the process exit code.
 JS_EXPORT_PRIVATE int runCommandLine(std::span<const CString> arguments, FILE* in, FILE* out, FILE* err);
 
 } // namespace JSC::JITCache::Maintenance

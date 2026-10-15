@@ -20,7 +20,7 @@ class VM;
 namespace JSC::JITCache {
 
 // The sections a capture writes (SPEC-ucb.md section 8). The integrator's capture glue calls these on the VM thread with JS
-// paused, for an eligible CodeBlock whose UCB has a record, or, at delta with the capture scope All, for a recorded UCB
+// paused, for an eligible CodeBlock whose UCB has a record, or, at delta under the delta capture All, for a recorded UCB
 // whose body ran without one (section 8.3). liveRichness and savedRichness come from UCBFeedback.h.
 
 class ProducerBudget;

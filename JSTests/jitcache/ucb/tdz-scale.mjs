@@ -64,7 +64,7 @@ await (async function main(role, scratch, artifact, sequence) {
     }
     const after = t.statistics();
     if (t.imports) {
-        // Each module's tdzWrapper runs once in every role, so under the default capture scope its body is captured
+        // Each module's tdzWrapper runs once in every role, so under the default delta capture its body is captured
         // without an image and imports too.
         const imported = 2 * 4 * functionCount + 2;
         t.expect("the first calls of both modules' functions and closures", t.delta(before, after), {

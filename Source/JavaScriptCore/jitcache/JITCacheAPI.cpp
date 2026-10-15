@@ -170,9 +170,9 @@ static bool isRole(Role role)
     return role == Role::Consumer || role == Role::Producer || role == Role::ConsumerProducer;
 }
 
-static bool isCaptureScope(CaptureScope scope)
+static bool isDeltaCapture(DeltaCapture capture)
 {
-    return scope == CaptureScope::All || scope == CaptureScope::Compiled;
+    return capture == DeltaCapture::All || capture == DeltaCapture::Compiled;
 }
 
 // A descriptor closed when it goes out of scope.
@@ -300,7 +300,7 @@ static std::optional<StartResult> writeHeader(int cacheFd, const String& path)
 
 // A Producer's creation, under the producer lock: cache/, or a remnant reset, then an empty pack, then the header, so a
 // Consumer that finds the header finds the pack. A failure leaves whatever the step created, which the next Producer or
-// clean finishes or removes. Returns cache/'s descriptor.
+// compact finishes or removes. Returns cache/'s descriptor.
 static std::expected<ScopedDescriptor, StartResult> createArtifact(int parentFd, const String& path)
 {
     ScopedDescriptor cache { openDirectoryAt(parentFd, ArtifactNames::cacheDirectory.characters()) };
@@ -381,7 +381,7 @@ static std::expected<ScopedDescriptor, StartResult> openCompatibleArtifact(int p
 
 // A ConsumerProducer's replacement of an incompatible artifact (container sub-SPEC section 1.4), under the producer lock:
 // cache/ moves aside to .cache.replaced, so a consumer that pinned it keeps a directory that only loses entries, a new
-// artifact is created as a Producer creates one, and the old directory is then removed; what of it stays, clean removes.
+// artifact is created as a Producer creates one, and the old directory is then removed; what of it stays, compact removes.
 // A .cache.replaced an earlier replacement left goes first, since the move needs its name. Returns the new cache/'s
 // descriptor.
 static std::expected<ScopedDescriptor, StartResult> replaceArtifact(int parentFd, const String& path)
@@ -499,12 +499,12 @@ ASCIILiteral name(Role role)
     return { };
 }
 
-ASCIILiteral name(CaptureScope scope)
+ASCIILiteral name(DeltaCapture capture)
 {
-    switch (scope) {
-    case CaptureScope::All:
+    switch (capture) {
+    case DeltaCapture::All:
         return "all"_s;
-    case CaptureScope::Compiled:
+    case DeltaCapture::Compiled:
         return "compiled"_s;
     }
     // As for a role: start rejects a value outside the enumeration at start.config.
@@ -538,11 +538,11 @@ std::optional<Role> parseRole(StringView text)
     return std::nullopt;
 }
 
-std::optional<CaptureScope> parseCaptureScope(StringView text)
+std::optional<DeltaCapture> parseDeltaCapture(StringView text)
 {
-    for (CaptureScope scope : { CaptureScope::All, CaptureScope::Compiled }) {
-        if (text == name(scope))
-            return scope;
+    for (DeltaCapture capture : { DeltaCapture::All, DeltaCapture::Compiled }) {
+        if (text == name(capture))
+            return capture;
     }
     return std::nullopt;
 }
@@ -586,8 +586,8 @@ StartResult start(VM& vm, const Config& config)
         return { StartOutcome::Rejected, "start.config"_s, "artifactPath is empty"_s };
     if (!isRole(config.role))
         return { StartOutcome::Rejected, "start.config"_s, makeString("role "_s, static_cast<unsigned>(config.role), " is none of Consumer, Producer and ConsumerProducer"_s) };
-    if (!isCaptureScope(config.captureScope))
-        return { StartOutcome::Rejected, "start.config"_s, makeString("captureScope "_s, static_cast<unsigned>(config.captureScope), " is neither All nor Compiled"_s) };
+    if (!isDeltaCapture(config.deltaCapture))
+        return { StartOutcome::Rejected, "start.config"_s, makeString("deltaCapture "_s, static_cast<unsigned>(config.deltaCapture), " is neither All nor Compiled"_s) };
     bool producing = config.role != Role::Consumer;
     std::optional<size_t> producerLimitBytes;
     if (producing) {

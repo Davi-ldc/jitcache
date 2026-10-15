@@ -2,8 +2,10 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
+#include "JITCacheParameters.h"
 #include "PackTestSupport.h"
 #include <atomic>
+#include <wtf/DataLog.h>
 #include <wtf/Threading.h>
 
 // The writer: commits appended to the pack and published by their root, faults that leave nothing published, tombstones,
@@ -56,14 +58,16 @@ JITCACHE_TEST(writerCommitPublishesTheSources, No)
     auto pack = PackArtifact::create(context);
     if (!pack)
         return;
-    auto before = pack->root();
+    auto before = pack->validEnd();
     auto committed = commitBody(pack->writer(), key(1), 3);
     JITCACHE_CHECK(!!committed);
     if (!committed || !before)
         return;
-    auto after = pack->root();
-    JITCACHE_CHECK(after && after->generation == before->generation + 1);
-    JITCACHE_CHECK(after && after->validEnd == pack->packFileSize());
+    // The record at the old valid end, then a delta of one entry whose trailer ends the new valid bytes.
+    auto after = pack->validEnd();
+    JITCACHE_CHECK(after == *before + *packRecordExtent(committed->fileSize) + packIndexBlockBytes(1));
+    JITCACHE_CHECK(after == pack->packFileSize());
+    JITCACHE_CHECK(after && pack->latestBlock() == *after - packIndexBlockBytes(1));
     JITCACHE_CHECK(pack->artifact().token(key(1)) == committed->version);
     BodyOpen opened = pack->artifact().open(key(1), ValidationMode::Full);
     JITCACHE_CHECK(opened.body && holdsSections(*opened.body, 3) && opened.body->version() == committed->version);
@@ -108,7 +112,8 @@ JITCACHE_TEST(writerRejectsMiscountedSections, No)
     JITCACHE_CHECK(!!commitBody(pack->writer(), key(1), 4));
 }
 
-// Each injectable step fails as its system call would, publishes nothing, and leaves the next commit to succeed.
+// Each injectable step fails as its system call would, publishes nothing, and leaves the next commit to succeed. The
+// root's store makes no system call, so nothing past the index block can fail before it.
 JITCACHE_TEST(writerFaultsPublishNothing, No)
 {
     HookScope hooks;
@@ -118,12 +123,12 @@ JITCACHE_TEST(writerFaultsPublishNothing, No)
     auto first = commitBody(pack->writer(), key(1), 1);
     JITCACHE_CHECK(!!first);
     uint64_t commits = 1;
-    for (ASCIILiteral check : { WriterChecks::openPack, WriterChecks::write, WriterChecks::reread, WriterChecks::publish }) {
-        auto before = pack->root();
+    for (ASCIILiteral check : { WriterChecks::openPack, WriterChecks::write, WriterChecks::reread }) {
+        auto before = pack->validEnd();
         pack->writer().setFaultForTesting(ArtifactWriter::FaultForTesting { check, ++commits });
         auto failed = commitBody(pack->writer(), key(1), 50);
         JITCACHE_CHECK(!failed && failed.error().check == check);
-        JITCACHE_CHECK(pack->root() == before);
+        JITCACHE_CHECK(pack->validEnd() == before);
         JITCACHE_CHECK(first && pack->artifact().token(key(1)) == first->version);
     }
     pack->writer().setFaultForTesting(std::nullopt);
@@ -137,10 +142,10 @@ JITCACHE_TEST(writerRefusedStagingChargeWritesNothing, No)
     auto pack = PackArtifact::create(context, 63, 64);
     if (!pack)
         return;
-    auto before = pack->root();
+    auto before = pack->validEnd();
     auto failed = commitBody(pack->writer(), key(1), 1);
     JITCACHE_CHECK(!failed && failed.error().check == WriterChecks::budgetLimit);
-    JITCACHE_CHECK(pack->root() == before);
+    JITCACHE_CHECK(pack->validEnd() == before);
 }
 
 JITCACHE_TEST(writerTombstoneRemovesTheKey, No)
@@ -163,36 +168,43 @@ JITCACHE_TEST(writerTombstoneRemovesTheKey, No)
     JITCACHE_CHECK(fresh && fresh->indexedBodies() == 1);
 }
 
-JITCACHE_TEST(writerCompactsOnceDeadBytesPassHalf, No)
+// Any byte past the live records and one full index compacts, so the index blocks that new keys' commits appended are
+// enough. The compacted pack is dense and the next call leaves it alone, until superseded versions make it compact again.
+JITCACHE_TEST(writerCompactsUnlessThePackIsDense, No)
 {
     HookScope hooks;
     auto pack = PackArtifact::create(context);
     if (!pack)
         return;
-    for (uint16_t seed = 1; seed <= 4; ++seed)
+    auto empty = pack->writer().compactIfNeeded(false);
+    JITCACHE_CHECK(empty && !*empty);
+    for (uint16_t seed = 1; seed <= 3; ++seed)
         JITCACHE_CHECK(!!commitBody(pack->writer(), key(seed), static_cast<uint8_t>(seed)));
-    auto notYet = pack->writer().compactIfNeeded(false);
-    JITCACHE_CHECK(notYet && !*notYet);
-    // Superseding every body leaves under half of the pack live.
-    for (uint16_t seed = 1; seed <= 4; ++seed)
-        JITCACHE_CHECK(!!commitBody(pack->writer(), key(seed), static_cast<uint8_t>(seed + 40)));
+    auto compacted = pack->writer().compactIfNeeded(false);
+    JITCACHE_CHECK(compacted && *compacted && (*compacted)->bodies == 3);
+    JITCACHE_CHECK(pack->artifact().token(key(1))); // follows the root to the compacted pack
     auto statistics = pack->artifact().statistics();
-    JITCACHE_CHECK(2 * (statistics.packBytes - statistics.liveBytes) > statistics.packBytes);
-    uint64_t tokens[4];
-    for (uint16_t seed = 1; seed <= 4; ++seed)
+    JITCACHE_CHECK(statistics.packBytes - statistics.liveBytes == packIndexBlockBytes(3));
+    auto dense = pack->writer().compactIfNeeded(false);
+    JITCACHE_CHECK(dense && !*dense);
+
+    for (uint16_t seed = 1; seed <= 3; ++seed)
+        JITCACHE_CHECK(!!commitBody(pack->writer(), key(seed), static_cast<uint8_t>(seed + 40)));
+    uint64_t tokens[3];
+    for (uint16_t seed = 1; seed <= 3; ++seed)
         tokens[seed - 1] = pack->artifact().token(key(seed));
-    auto compacted = pack->writer().compactIfNeeded(true);
-    JITCACHE_CHECK(compacted && *compacted && (*compacted)->bodies == 4 && (*compacted)->packBytes < (*compacted)->replacedPackBytes);
-    for (uint16_t seed = 1; seed <= 4; ++seed) {
+    auto recompacted = pack->writer().compactIfNeeded(true);
+    JITCACHE_CHECK(recompacted && *recompacted && (*recompacted)->bodies == 3 && (*recompacted)->packBytes < (*recompacted)->replacedPackBytes);
+    for (uint16_t seed = 1; seed <= 3; ++seed) {
         JITCACHE_CHECK(pack->artifact().token(key(seed)) == tokens[seed - 1]);
         BodyOpen opened = pack->artifact().open(key(seed), ValidationMode::Full);
         JITCACHE_CHECK(opened.body && holdsSections(*opened.body, static_cast<uint8_t>(seed + 40)));
     }
     // The next commit appends to the new pack.
-    auto after = commitBody(pack->writer(), key(5), 5);
-    JITCACHE_CHECK(after && pack->artifact().token(key(5)) == after->version);
+    auto after = commitBody(pack->writer(), key(4), 4);
+    JITCACHE_CHECK(after && pack->artifact().token(key(4)) == after->version);
     RefPtr<OpenedArtifact> fresh = pack->takeAnother(context);
-    JITCACHE_CHECK(fresh && fresh->indexedBodies() == 5);
+    JITCACHE_CHECK(fresh && fresh->indexedBodies() == 4);
 }
 
 JITCACHE_TEST(writerCompactionFaultsKeepTheOldPack, No)
@@ -203,14 +215,13 @@ JITCACHE_TEST(writerCompactionFaultsKeepTheOldPack, No)
         return;
     JITCACHE_CHECK(!!commitBody(pack->writer(), key(1), 1));
     JITCACHE_CHECK(!!commitBody(pack->writer(), key(1), 2));
-    pack->writer().setCompactsEagerlyForTesting(true);
     uint64_t compactions = 0;
     for (ASCIILiteral check : { CompactionChecks::create, CompactionChecks::write, CompactionChecks::reread, CompactionChecks::publish }) {
-        auto before = pack->root();
+        auto before = pack->validEnd();
         pack->writer().setFaultForTesting(ArtifactWriter::FaultForTesting { check, ++compactions });
         auto failed = pack->writer().compactIfNeeded(false);
         JITCACHE_CHECK(!failed && failed.error().check == check && failed.error().kind == CompactionFailure::Kind::Storage);
-        JITCACHE_CHECK(pack->root() == before);
+        JITCACHE_CHECK(pack->validEnd() == before);
         Vector<String> temporaries;
         listDirectory(pack->cacheFd(), [&](std::span<const char> name, uint64_t) {
             if (temporaryKindOfFileName(name))
@@ -225,8 +236,8 @@ JITCACHE_TEST(writerCompactionFaultsKeepTheOldPack, No)
     JITCACHE_CHECK(compacted && *compacted && (*compacted)->bodies == 2);
 }
 
-// A ConsumerProducer chain: each generation recaptures every key, the pack's dead bytes grow, and the end of each delta
-// compacts once they pass half, so the pack stays within about twice its live bytes.
+// A ConsumerProducer chain: each generation recaptures every key, and the end of each delta compacts the dead bytes
+// those commits left, so every generation ends with a dense pack.
 JITCACHE_TEST(writerChainGrowsDeadBytesAndCompacts, No)
 {
     HookScope hooks;
@@ -242,9 +253,9 @@ JITCACHE_TEST(writerChainGrowsDeadBytesAndCompacts, No)
         if (compacted && *compacted)
             ++compactions;
         auto statistics = pack->artifact().statistics();
-        JITCACHE_CHECK(statistics.packBytes <= 2 * statistics.liveBytes);
+        JITCACHE_CHECK(statistics.packBytes - statistics.liveBytes == packIndexBlockBytes(12));
     }
-    JITCACHE_CHECK(compactions >= 3);
+    JITCACHE_CHECK(compactions == 8);
     RefPtr<OpenedArtifact> fresh = pack->takeAnother(context);
     if (!fresh)
         return;
@@ -286,7 +297,6 @@ JITCACHE_TEST(writerConsumerReadsWhileProducerCommitsAndCompacts, No)
             }
         }
     });
-    pack->writer().setCompactsEagerlyForTesting(true);
     for (unsigned round = 0; round < 32; ++round) {
         for (uint16_t seed = 1; seed <= keys; ++seed)
             JITCACHE_CHECK(!!commitBody(pack->writer(), key(seed), static_cast<uint8_t>(seed + keys * round)));
@@ -303,6 +313,66 @@ JITCACHE_TEST(writerConsumerReadsWhileProducerCommitsAndCompacts, No)
         BodyOpen body = consumer->open(key(seed), ValidationMode::Full);
         JITCACHE_CHECK(body.body && holdsSections(*body.body, static_cast<uint8_t>(seed + keys * 31)));
     }
+}
+
+// A reader loads the root on another thread, through its own mapping, while the producer commits deltas and full
+// indexes: every valid end it loads ends with an index block whose trailer leads to it, the whole index that block heads
+// reads back, and each record it lists repeats its entry, so no valid end is ever seen before the bytes below it.
+JITCACHE_TEST(writerReaderNeverSeesARootBeforeItsBlock, No)
+{
+    HookScope hooks;
+    auto pack = PackArtifact::create(context);
+    if (!pack)
+        return;
+    auto mapped = MappedPack::map(pack->cacheFd(), std::span<const uint8_t, 16> { headerDigest() }, 64 << 20);
+    if (!mapped) {
+        JITCACHE_FAIL(makeString("the reader cannot map the pack: "_s, mapped.error().error ? errnoText(mapped.error().error) : String { mapped.error().packRejection }));
+        return;
+    }
+    Ref<MappedPack> view = mapped->pack.copyRef();
+    constexpr unsigned commits = 2 * packDeltaChainBound + 8;
+    std::atomic<bool> done { false };
+    std::atomic<uint64_t> loaded { 0 }; // distinct valid ends read
+    std::atomic<uint64_t> lastLoaded { 0 };
+    std::atomic<uint64_t> broken { 0 };
+    RefPtr<Thread> reader = Thread::create("jitcache root reader"_s, [&] {
+        uint64_t last = 0;
+        while (true) {
+            // done is loaded before the root, so the root loaded after the writer finished is its last one.
+            bool finished = done.load();
+            uint64_t validEnd = view->validEnd();
+            if (validEnd != last) {
+                PackIndex index;
+                uint64_t liveBytes = packPrefixBytes;
+                auto read = readPackIndex(validEnd, std::nullopt, index, liveBytes, [&](uint64_t offset, uint64_t size) {
+                    return view->bytes(offset, size);
+                });
+                bool sound = read && validEnd > last && read->reachedFull;
+                for (auto& entry : index.values()) {
+                    auto header = decodePackRecordHeader(view->bytes(entry.offset, packRecordHeaderBytes).first<packRecordHeaderBytes>());
+                    sound = sound && header && header->key == entry.key && header->size == entry.size && header->version == entry.version;
+                }
+                if (!sound)
+                    broken.fetch_add(1);
+                last = validEnd;
+                lastLoaded.store(validEnd);
+                loaded.fetch_add(1);
+            }
+            if (finished)
+                break;
+        }
+    });
+    // The reader has read the empty pack's root before the first commit.
+    while (!loaded.load())
+        Thread::yield();
+    for (unsigned n = 0; n < commits; ++n)
+        JITCACHE_CHECK(!!commitBody(pack->writer(), key(static_cast<uint16_t>(n % 8 + 1)), static_cast<uint8_t>(n)));
+    done.store(true);
+    reader->waitForCompletion();
+    JITCACHE_CHECK(!broken.load());
+    JITCACHE_CHECK(loaded.load() >= 2);
+    JITCACHE_CHECK(lastLoaded.load() == pack->validEnd());
+    dataLogLn("writerReaderNeverSeesARootBeforeItsBlock: the reader loaded ", loaded.load(), " valid ends over ", commits, " commits");
 }
 
 JITCACHE_TEST(writerRewriteSectionResealsTheBody, No)
@@ -332,6 +402,7 @@ JITCACHE_TEST(writerHookNames, No)
         JITCACHE_CHECK(ArtifactWriter::killPointNamed(StringView { ArtifactWriter::name(point) }) == point);
     JITCACHE_CHECK(ArtifactWriter::faultCheckNamed("compaction.reread"_s) == CompactionChecks::reread);
     JITCACHE_CHECK(!ArtifactWriter::faultCheckNamed("writer.create"_s));
+    JITCACHE_CHECK(!ArtifactWriter::faultCheckNamed("writer.publish"_s)); // the root's store cannot fail
 }
 
 } // namespace JSC::JITCache::Tests

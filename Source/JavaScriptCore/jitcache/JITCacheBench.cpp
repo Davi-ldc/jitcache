@@ -174,7 +174,6 @@ void BenchReport::flush()
         IndexStatistics statistics = m_artifact->statistics();
         JITCacheBenchInternal::appendLine(m_buffer, m_pid, m_vmOrdinal, "index"_s, {
             { "bodies"_s, statistics.bodies },
-            { "generation"_s, statistics.generation },
             { "pack.bytes"_s, statistics.packBytes },
             { "pack.liveBytes"_s, statistics.liveBytes },
             { "tableBytes"_s, statistics.tableBytes },

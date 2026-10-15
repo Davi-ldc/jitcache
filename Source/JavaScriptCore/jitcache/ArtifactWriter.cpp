@@ -22,6 +22,7 @@
 
 #if OS(LINUX)
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -30,7 +31,7 @@
 #include <signal.h>
 #endif
 
-// The writer: it appends records and index blocks to the pack, publishes roots, and compacts. Every section is opaque
+// The writer: it appends records and index blocks to the pack, stores the root, and compacts. Every section is opaque
 // bytes to it.
 //
 // Its file work sits behind OS(LINUX). Elsewhere start rejects at start.platform, so no producing VM, and no writer,
@@ -49,7 +50,7 @@ static constexpr std::array<ASCIILiteral, 9> killPointNames {
     "before-append"_s, "mid-stream"_s, "after-stream"_s, "after-envelope"_s, "after-reread"_s, "after-index"_s, "after-root"_s,
     "compaction-before-rename"_s, "compaction-after-rename"_s,
 };
-static constexpr std::array<ASCIILiteral, 4> injectableChecks { WriterChecks::openPack, WriterChecks::write, WriterChecks::reread, WriterChecks::publish };
+static constexpr std::array<ASCIILiteral, 3> injectableChecks { WriterChecks::openPack, WriterChecks::write, WriterChecks::reread };
 static constexpr std::array<ASCIILiteral, 4> injectableCompactionChecks { CompactionChecks::create, CompactionChecks::write, CompactionChecks::reread, CompactionChecks::publish };
 
 static bool isCompactionCheck(ASCIILiteral check)
@@ -160,7 +161,7 @@ static int readAll(int fd, std::span<uint8_t> buffer, uint64_t offset)
     return 0;
 }
 
-// The pack as one commit writes it: writes carry the step whose fault they inject, and the first write of the stream
+// The pack as one commit writes it: every write can carry the writer.write fault, and the first write of the stream
 // reaches the mid-stream kill point.
 class PackFile {
     WTF_MAKE_NONCOPYABLE(PackFile);
@@ -171,9 +172,9 @@ public:
     {
     }
 
-    int writeAt(std::span<const uint8_t> bytes, uint64_t offset, ASCIILiteral check = WriterChecks::write)
+    int writeAt(std::span<const uint8_t> bytes, uint64_t offset)
     {
-        if (injectsFault(m_hooks, check))
+        if (injectsFault(m_hooks, WriterChecks::write))
             return EIO;
         if (int error = writeAll(m_fd, bytes, offset))
             return error;
@@ -446,9 +447,17 @@ ArtifactWriter::ArtifactWriter(OpenedArtifact& artifact, ProducerLock& producerL
 ArtifactWriter::~ArtifactWriter()
 {
     releaseStagingBuffer();
+    closePack();
+}
+
+void ArtifactWriter::closePack()
+{
 #if OS(LINUX)
+    if (!m_writablePrefix.empty())
+        munmap(m_writablePrefix.data(), m_writablePrefix.size());
+    m_writablePrefix = { };
     if (m_packFd >= 0)
-        ::close(m_packFd);
+        ::close(std::exchange(m_packFd, -1));
 #endif
 }
 
@@ -482,10 +491,7 @@ int ArtifactWriter::ensurePackOpen()
         if (m_packFd >= 0 && m_artifact.m_pack && m_artifact.m_pack->inode() == m_packInode)
             return 0;
     }
-    if (m_packFd >= 0) {
-        ::close(m_packFd);
-        m_packFd = -1;
-    }
+    closePack();
     int fd;
     do {
         fd = ::openat(m_artifact.cacheFd(), ArtifactNames::pack.characters(), O_RDWR | O_CLOEXEC);
@@ -520,6 +526,15 @@ int ArtifactWriter::ensurePackOpen()
             return error;
         }
     }
+    // A pwrite need not store the root as one 8-byte word, so the root goes through a mapping, where an aligned store
+    // does. The mapping starts at offset 0, so the root's offset keeps it aligned.
+    void* prefix = mmap(nullptr, packPrefixBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (prefix == MAP_FAILED) {
+        int error = errno;
+        ::close(fd);
+        return error;
+    }
+    m_writablePrefix = unsafeMakeSpan(static_cast<uint8_t*>(prefix), packPrefixBytes);
     m_packFd = fd;
     m_packInode = inode;
     return 0;
@@ -574,7 +589,7 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitSt
     uint64_t recordOffset;
     {
         Locker locker { m_artifact.m_indexLock };
-        recordOffset = m_artifact.m_root.validEnd;
+        recordOffset = m_artifact.m_validEnd;
     }
     uint64_t limit = static_cast<uint64_t>(std::numeric_limits<off_t>::max()) / 2;
     if (*extent > limit || recordOffset > limit - *extent)
@@ -582,7 +597,7 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::commit(const CommitSt
     reach(hooks, KillPoint::BeforeAppend);
 
     // The body's bytes past the record header, then its directory and envelope, then the record header: a record that
-    // stops short of its envelope never validates, and none is published before its root anyway.
+    // stops short of its envelope never validates, and none is published before the root moves anyway.
     PackFile file(m_packFd, hooks);
     uint64_t bodyOffset = recordOffset + packRecordHeaderBytes;
     file.startStreaming();
@@ -652,7 +667,7 @@ std::optional<CommitFailure> ArtifactWriter::publish(const PackIndexEntry& entry
 #endif
     PackFile file(m_packFd, hooks);
 
-    PackRoot root;
+    uint64_t latestBlock;
     Vector<PackIndexEntry> fullIndex;
     size_t fullIndexCharge = 0;
     auto releaseFullIndexCharge = makeScopeExit([&] {
@@ -661,7 +676,7 @@ std::optional<CommitFailure> ArtifactWriter::publish(const PackIndexEntry& entry
     });
     {
         Locker locker { m_artifact.m_indexLock };
-        root = m_artifact.m_root;
+        latestBlock = m_artifact.m_latestBlock;
         // A full index once the chain is long, so a reader that opens the pack walks at most that many deltas.
         if (!entry.isTombstone() && m_artifact.m_deltasSinceFull + 1 >= packDeltaChainBound) {
             size_t count = m_artifact.m_index.size() + 1;
@@ -678,38 +693,30 @@ std::optional<CommitFailure> ArtifactWriter::publish(const PackIndexEntry& entry
         }
     }
 
+    std::ranges::sort(fullIndex, keyPrecedes);
+    bool isFull = !fullIndex.isEmpty();
+    std::span<const PackIndexEntry> listed = isFull ? fullIndex.span() : singleElementSpan(entry);
+    PackIndexBlock block { isFull ? PackIndexKind::Full : PackIndexKind::Delta, isFull ? 0 : latestBlock, static_cast<uint32_t>(listed.size()) };
     Vector<uint8_t> blockBytes;
-    PackIndexBlock block;
-    if (!fullIndex.isEmpty()) {
-        std::ranges::sort(fullIndex, keyPrecedes);
-        block = { PackIndexKind::Full, 0, static_cast<uint32_t>(fullIndex.size()) };
-        blockBytes.grow(packIndexBlockHeaderBytes + fullIndex.size() * packIndexEntryBytes);
-        for (size_t ordinal = 0; ordinal < fullIndex.size(); ++ordinal)
-            encodePackIndexEntry(fullIndex[ordinal], blockBytes.mutableSpan().subspan(packIndexBlockHeaderBytes + ordinal * packIndexEntryBytes, packIndexEntryBytes));
-    } else {
-        block = { PackIndexKind::Delta, root.indexOffset, 1 };
-        blockBytes.grow(packIndexBlockHeaderBytes + packIndexEntryBytes);
-        encodePackIndexEntry(entry, blockBytes.mutableSpan().subspan(packIndexBlockHeaderBytes, packIndexEntryBytes));
-    }
-    auto header = encodePackIndexBlockHeader(block, blockBytes.span().subspan(packIndexBlockHeaderBytes));
-    memcpySpan(blockBytes.mutableSpan().first(packIndexBlockHeaderBytes), std::span { header });
+    blockBytes.grow(packIndexBlockBytes(block.count));
+    for (size_t ordinal = 0; ordinal < listed.size(); ++ordinal)
+        encodePackIndexEntry(listed[ordinal], blockBytes.mutableSpan().subspan(packIndexBlockHeaderBytes + ordinal * packIndexEntryBytes, packIndexEntryBytes));
+    sealPackIndexBlock(block, end, blockBytes.mutableSpan());
     if (int error = file.writeAt(blockBytes.span(), end))
         return CommitFailure { WriterChecks::write, errorText(error) };
     reach(hooks, KillPoint::AfterIndex);
 
-    // Every byte the root names is in the file before the root: a reader that loads the root with acquire order sees
-    // them. The root's own bytes are checked by its CRC, so a reader that meets it half written keeps the other slot.
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    PackRoot next { root.generation + 1, end + blockBytes.size(), end };
-    if (int error = file.writeAt(encodePackRoot(next), packRootSlotOffset(next.generation), WriterChecks::publish))
-        return CommitFailure { WriterChecks::publish, errorText(error) };
+    // The commit point. Every byte below the new valid end is in the file before the store, and the release order makes
+    // a reader that loads the root with acquire see them.
+    uint64_t validEnd = end + blockBytes.size();
+    __atomic_store_n(reinterpret_cast<uint64_t*>(m_writablePrefix.subspan(packRootOffset, sizeof(uint64_t)).data()), validEnd, __ATOMIC_RELEASE);
     reach(hooks, KillPoint::AfterRoot);
 
     Locker locker { m_artifact.m_indexLock };
     if (auto damage = m_artifact.follow())
-        return CommitFailure { WriterChecks::publish, makeString("the published root fails "_s, damage->check, ": "_s, damage->packRejection) };
-    if (m_artifact.m_root != next)
-        return CommitFailure { WriterChecks::publish, "the opened artifact does not follow the published root"_s };
+        return CommitFailure { WriterChecks::publish, makeString("the stored root fails "_s, damage->check, ": "_s, damage->packRejection) };
+    if (m_artifact.m_validEnd != validEnd)
+        return CommitFailure { WriterChecks::publish, "the opened artifact does not follow the stored root"_s };
     return std::nullopt;
 #endif
 }
@@ -724,7 +731,7 @@ std::optional<CommitFailure> ArtifactWriter::remove(const BodyKey& key)
         Locker locker { m_artifact.m_indexLock };
         if (!m_artifact.m_index.contains(key))
             return std::nullopt;
-        end = m_artifact.m_root.validEnd;
+        end = m_artifact.m_validEnd;
     }
     PackIndexEntry tombstone;
     tombstone.key = key;
@@ -736,21 +743,19 @@ std::expected<std::optional<CompactionResult>, CompactionFailure> ArtifactWriter
     using namespace ArtifactWriterInternal;
     using Kind = CompactionFailure::Kind;
     RefPtr<MappedPack> pack;
-    PackRoot root;
+    uint64_t validEnd;
     Vector<PackIndexEntry> entries;
     size_t charge = 0;
     {
         Locker locker { m_artifact.m_indexLock };
         if (auto damage = m_artifact.follow())
             return std::unexpected(CompactionFailure { Kind::Damaged, damage->check, String { damage->packRejection } });
-        root = m_artifact.m_root;
-        uint64_t dead = root.validEnd - std::min(root.validEnd, m_artifact.m_liveBytes);
-        bool eager = false;
-#if ENABLE(JITCACHE_TWINS)
-        eager = m_compactsEagerlyForTesting;
-#endif
-        // Dead bytes past half of the pack: compaction keeps the pack within about twice its live bytes.
-        if (!(eager ? dead > packIndexBlockHeaderBytes : dead > root.validEnd / 2))
+        validEnd = m_artifact.m_validEnd;
+        // A compacted pack holds its live records and one full index. Any other byte (a superseded version, a tombstone, an
+        // index block appended since the last compaction) is dead, so a delta that committed anything compacts and one
+        // that committed nothing leaves a dense pack alone.
+        uint64_t denseBytes = m_artifact.m_liveBytes + packIndexBlockBytes(m_artifact.m_index.size());
+        if (validEnd <= denseBytes)
             return std::optional<CompactionResult> { };
         charge = m_artifact.m_index.size() * sizeof(PackIndexEntry);
         if (!m_budget.tryCharge(charge))
@@ -778,12 +783,12 @@ std::expected<std::optional<CompactionResult>, CompactionFailure> ArtifactWriter
 #endif
     if (int error = ensurePackOpen())
         return std::unexpected(CompactionFailure { Kind::Storage, CompactionChecks::create, makeString("opening cache/pack for writing: "_s, errorText(error)) });
-    CompactionSource source { *pack, root, entries.span(), m_packFd };
+    CompactionSource source { *pack, validEnd, entries.span(), m_packFd };
     auto result = compactPack(target, source, [](const BodyKey&) { return false; }, timed);
     pack = nullptr;
 
-    // The writer's descriptor names the retired file now; the next commit opens the new one.
-    ::close(std::exchange(m_packFd, -1));
+    // The writer's descriptor and mapping name the retired file now; the next commit opens the new one.
+    closePack();
     {
         Locker locker { m_artifact.m_indexLock };
         m_artifact.m_nextRetiredReopen = MonotonicTime { };
@@ -842,14 +847,8 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
         return writeAll(fd, bytes, offset);
     };
 
-    PackPrefix prefix;
-    memcpySpan(std::span { prefix.headerDigest }, target.headerDigest);
-    prefix.identifier = freshNonzeroValue();
-    if (int error = write(encodePackPrefix(prefix), 0))
-        return storage(CompactionChecks::write, errorText(error));
-
     // The new index's buffer is production memory of a producing VM.
-    size_t indexCharge = source.entries.size() * (sizeof(PackIndexEntry) + packIndexEntryBytes) + packIndexBlockHeaderBytes;
+    size_t indexCharge = source.entries.size() * sizeof(PackIndexEntry) + packIndexBlockBytes(static_cast<uint32_t>(source.entries.size()));
     if (target.budget && !target.budget->tryCharge(indexCharge))
         return std::unexpected(CompactionFailure { Kind::Budget, WriterChecks::budgetLimit, makeString("the compaction's index of "_s, source.entries.size(), " bodies"_s) });
     auto releaseIndexCharge = makeScopeExit([&] {
@@ -858,7 +857,7 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
     });
 
     CompactionResult result;
-    result.replacedPackBytes = source.root.validEnd;
+    result.replacedPackBytes = source.validEnd;
     Vector<PackIndexEntry> written;
     written.reserveInitialCapacity(source.entries.size());
     uint64_t offset = packPrefixBytes;
@@ -898,28 +897,32 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
         offset += extent;
     }
 
+    PackIndexBlock block { PackIndexKind::Full, 0, static_cast<uint32_t>(written.size()) };
     Vector<uint8_t> blockBytes;
-    blockBytes.grow(packIndexBlockHeaderBytes + written.size() * packIndexEntryBytes);
+    blockBytes.grow(packIndexBlockBytes(block.count));
     for (size_t ordinal = 0; ordinal < written.size(); ++ordinal)
         encodePackIndexEntry(written[ordinal], blockBytes.mutableSpan().subspan(packIndexBlockHeaderBytes + ordinal * packIndexEntryBytes, packIndexEntryBytes));
-    auto blockHeader = encodePackIndexBlockHeader({ PackIndexKind::Full, 0, static_cast<uint32_t>(written.size()) }, blockBytes.span().subspan(packIndexBlockHeaderBytes));
-    memcpySpan(blockBytes.mutableSpan().first(packIndexBlockHeaderBytes), std::span { blockHeader });
+    sealPackIndexBlock(block, offset, blockBytes.mutableSpan());
     if (int error = write(blockBytes.span(), offset))
         return storage(CompactionChecks::write, errorText(error));
-    PackRoot root { source.root.generation + 1, offset + blockBytes.size(), offset };
-    auto rootBytes = encodePackRoot(root);
-    if (int error = write(rootBytes, packRootSlotOffset(root.generation)))
+    // No reader sees the temporary before the rename, so its root goes in with the prefix, by pwrite.
+    uint64_t validEnd = offset + blockBytes.size();
+    PackPrefix prefix;
+    memcpySpan(std::span { prefix.headerDigest }, target.headerDigest);
+    prefix.identifier = freshNonzeroValue();
+    auto prefixBytes = encodePackPrefix(prefix, validEnd);
+    if (int error = write(prefixBytes, 0))
         return storage(CompactionChecks::write, errorText(error));
 
-    // The reread: the root and the index a reader of the new pack starts from.
+    // The reread: the prefix and the index a reader of the new pack starts from.
     {
         Vector<uint8_t> reread;
-        reread.grow(std::max<size_t>(blockBytes.size(), packRootSlotBytes));
-        int error = injects(CompactionChecks::reread) ? EIO : readAll(fd, reread.mutableSpan().first(packRootSlotBytes), packRootSlotOffset(root.generation));
+        reread.grow(std::max<size_t>(blockBytes.size(), packPrefixBytes));
+        int error = injects(CompactionChecks::reread) ? EIO : readAll(fd, reread.mutableSpan().first(packPrefixBytes), 0);
         if (error)
             return storage(CompactionChecks::reread, errorText(error));
-        if (!equalSpans(reread.span().first(packRootSlotBytes), std::span<const uint8_t> { rootBytes }))
-            return storage(CompactionChecks::reread, "the new pack's root reads back differently"_s);
+        if (!equalSpans(reread.span().first(packPrefixBytes), std::span<const uint8_t> { prefixBytes }))
+            return storage(CompactionChecks::reread, "the new pack's prefix reads back differently"_s);
         if (int error = readAll(fd, reread.mutableSpan().first(blockBytes.size()), offset))
             return storage(CompactionChecks::reread, errorText(error));
         if (!equalSpans(reread.span().first(blockBytes.size()), blockBytes.span()))
@@ -950,7 +953,7 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
 #endif
 
     result.bodies = written.size();
-    result.packBytes = root.validEnd;
+    result.packBytes = validEnd;
     if (timed)
         result.nanoseconds = benchThreadCPUNanoseconds() - start;
     return result;
@@ -982,11 +985,6 @@ void ArtifactWriter::setKillForTesting(std::optional<KillForTesting> kill)
 {
     ASSERT(!kill || kill->n);
     m_killForTesting = kill;
-}
-
-void ArtifactWriter::setCompactsEagerlyForTesting(bool eager)
-{
-    m_compactsEagerlyForTesting = eager;
 }
 
 ASCIILiteral ArtifactWriter::name(KillPoint point)

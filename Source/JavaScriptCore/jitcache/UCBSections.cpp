@@ -158,7 +158,11 @@ static bool obeysIdentityRules(std::span<const uint8_t> bytes)
     if (coreKindByte > static_cast<uint8_t>(UnlinkedCodeBlockCoreKind::Function) || bytes[provenanceOffset] > static_cast<uint8_t>(CoreProvenance::EmbedderDecoded))
         return false;
     auto constantCount = readField<uint32_t>(bytes, constantCountOffset);
-    if (constantCount >= constantCountLimit || bytes.size() != identitySectionSize(constantCount))
+    if (constantCount >= constantCountLimit)
+        return false;
+    // The child holder digests fill whatever follows the maps' padding, 32 bytes each.
+    size_t baseSize = identitySectionSize(constantCount);
+    if (bytes.size() < baseSize || (bytes.size() - baseSize) % sizeof(Digest256))
         return false;
     auto coreKind = static_cast<UnlinkedCodeBlockCoreKind>(coreKindByte);
     auto key = BodyKey::fromBytes(bytes.subspan<keyOffset, BodyKey::byteSize>());
@@ -186,7 +190,7 @@ static bool obeysIdentityRules(std::span<const uint8_t> bytes)
         if (atomMap[i] & butterflyMap[i])
             return false;
     }
-    return isZero(bytes.subspan(mapsOffset + 2 * mapBytes));
+    return isZero(bytes.subspan(mapsOffset + 2 * mapBytes, baseSize - (mapsOffset + 2 * mapBytes)));
 }
 
 } // namespace UCBSectionsInternal
@@ -212,6 +216,10 @@ std::optional<IdentitySection> parseIdentitySection(std::span<const uint8_t> byt
     }
 
     size_t mapBytes = mapSize(constantCount);
+    size_t baseSize = identitySectionSize(constantCount);
+    // Normal mode trusts the section's size to leave whole digests after the maps.
+    std::span<const uint8_t> childHolderDigests = bytes.subspan(baseSize);
+    childHolderDigests = childHolderDigests.first(childHolderDigests.size() - childHolderDigests.size() % sizeof(Digest256));
     return IdentitySection {
         .coreKind = coreKind,
         .provenance = static_cast<CoreProvenance>(bytes[provenanceOffset]),
@@ -223,6 +231,7 @@ std::optional<IdentitySection> parseIdentitySection(std::span<const uint8_t> byt
         .constantCount = constantCount,
         .atomMap = bytes.subspan(mapsOffset, mapBytes),
         .butterflyMap = bytes.subspan(mapsOffset + mapBytes, mapBytes),
+        .childHolderDigests = childHolderDigests,
     };
 }
 
@@ -342,22 +351,29 @@ void rebuildAtomStringButterflies(VM& vm, UnlinkedCodeBlock& ucb, const Identity
     });
 }
 
-size_t identitySectionSize(uint32_t constantCount)
+size_t identitySectionSize(uint32_t constantCount, size_t childHolderDigestCount)
 {
     using namespace UCBSectionsInternal;
 
-    return roundUpToMultipleOf<8>(mapsOffset + 2 * mapSize(constantCount));
+    return roundUpToMultipleOf<8>(mapsOffset + 2 * mapSize(constantCount)) + childHolderDigestCount * sizeof(Digest256);
+}
+
+bool childHolderDigestsFit(UnlinkedCodeBlock& ucb, const IdentitySection& identity)
+{
+    size_t count = identity.childHolderDigestCount();
+    return !count || count == static_cast<size_t>(ucb.numberOfFunctionDecls()) + ucb.numberOfFunctionExprs();
 }
 
 void writeIdentitySection(std::span<uint8_t> out, VM& vm, const BodyKey& key, const Digest256& contextDigest, CoreProvenance provenance, const Digest256& coreDigest,
     const std::optional<Digest256>& holderDigest, UnlinkedCodeBlockCoreKind coreKind, const std::optional<FunctionParseFields>& functionParseFields, UnlinkedCodeBlock& ucb,
-    std::optional<std::span<const uint8_t>> keptButterflyMap)
+    std::optional<std::span<const uint8_t>> keptButterflyMap, std::span<const Digest256> childHolderDigests)
 {
     using namespace UCBSectionsInternal;
 
     const auto& constants = ucb.constantRegisters();
     auto constantCount = static_cast<uint32_t>(constants.size());
-    RELEASE_ASSERT(out.size() == identitySectionSize(constantCount));
+    RELEASE_ASSERT(out.size() == identitySectionSize(constantCount, childHolderDigests.size()));
+    ASSERT(childHolderDigests.empty() || childHolderDigests.size() == static_cast<size_t>(ucb.numberOfFunctionDecls()) + ucb.numberOfFunctionExprs());
     ASSERT(coreKind == UnlinkedCodeBlockCoreKind::Function || (!holderDigest && !functionParseFields));
 
     zeroSpan(out);
@@ -405,6 +421,10 @@ void writeIdentitySection(std::span<uint8_t> out, VM& vm, const BodyKey& key, co
         if (auto* butterfly = dynamicDowncast<JSCellButterfly>(value); butterfly && butterfly->structure() == atomStringsStructure)
             mark(butterflyMap, index);
     }
+
+    size_t digestsAt = identitySectionSize(constantCount);
+    for (size_t i = 0; i < childHolderDigests.size(); ++i)
+        writeDigest(out, digestsAt + i * sizeof(Digest256), childHolderDigests[i]);
 }
 
 } // namespace JSC::JITCache

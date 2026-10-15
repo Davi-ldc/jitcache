@@ -53,14 +53,14 @@ bool VMState::strict() const
     return m_config.strict;
 }
 
-CaptureScope VMState::captureScope() const
+DeltaCapture VMState::deltaCapture() const
 {
-    return m_config.captureScope;
+    return m_config.deltaCapture;
 }
 
 bool VMState::capturesUncompiledBodies() const
 {
-    return captureScope() == CaptureScope::All && productionActive();
+    return deltaCapture() == DeltaCapture::All && productionActive();
 }
 
 UCBRegistry& VMState::registry()

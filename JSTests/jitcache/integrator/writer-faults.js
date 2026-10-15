@@ -1,14 +1,13 @@
 // jitcache-runs: Producer --jitcache-test-writer-fault=writer.open@2; Consumer
 // jitcache-runs: Producer --jitcache-test-writer-fault=writer.write@2; Consumer
 // jitcache-runs: Producer --jitcache-test-writer-fault=writer.reread@2; Consumer
-// jitcache-runs: Producer --jitcache-test-writer-fault=writer.publish@2; Consumer
 // jitcache-expect-fault: 0 writer.open
 // jitcache-expect-fault: 0 writer.write
 // jitcache-expect-fault: 0 writer.reread
-// jitcache-expect-fault: 0 writer.publish
 
 // SPEC-integrator.md section 15.2, writer-faults.js: one sequence per writer fault hook, set in the Producer for its
-// writer's second commit, every one before that commit's root. wfFirst compiles first and is that writer's first commit;
+// writer's second commit, every one before that commit's root. The root's store makes no system call and has no hook.
+// wfFirst compiles first and is that writer's first commit;
 // wfSecond compiles next, and its commit fails at the sequence's step. The recording fault ends production and leaves
 // activity on (section 4.2), so the Producer's status names the step, wfFirst's body stays readable, and wfSecond's key
 // holds no body. The Consumer installs wfFirst, which the fault left importable, and finds no body for wfSecond, which
@@ -16,7 +15,7 @@
 load("./resources/integrator.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {
-    const steps = ["writer.open", "writer.write", "writer.reread", "writer.publish"];
+    const steps = ["writer.open", "writer.write", "writer.reread"];
 
     function wfFirst(point) {
         return point.x * 2 + point.y;

@@ -992,7 +992,7 @@ static bool hasEligibleCodeBlock(const DeltaCandidates<CodeBlockCandidate>& comp
     return false;
 }
 
-// Phase 3 of section 8.6, with the capture scope All: the bodies that ran without an eligible CodeBlock, reached through
+// Phase 3 of section 8.6, with the delta capture All: the bodies that ran without an eligible CodeBlock, reached through
 // the UCB registry, so that bodies whose CodeBlocks died are reached too, and captured without an image (THREAD Capture).
 // The registry's copy and the candidate table live only inside this call.
 static void runImagelessPhase(VM& vm, VMState& state, ProducerBudget& budget, const DeltaCandidates<CodeBlockCandidate>& compiled,
@@ -1127,9 +1127,9 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
     }
     counts.phase2Nanoseconds = clock.now() - start;
 
-    // Phase 3, with the capture scope All, after every key of phase 2 has been decided, so that only a key whose every
+    // Phase 3, with the delta capture All, after every key of phase 2 has been decided, so that only a key whose every
     // CodeBlock turned out ineligible can still meet a body without an image.
-    if (!counts.faulted && state.captureScope() == CaptureScope::All)
+    if (!counts.faulted && state.deltaCapture() == DeltaCapture::All)
         runImagelessPhase(vm, state, budget, candidates, clock, counts);
     return counts;
 }
@@ -1291,9 +1291,9 @@ DeltaResult delta(VM& vm)
     // Steps 3 and 4, the three phases, free their candidate tables and release the charges before they return.
     DeltaCounts counts = runDeltaPhases(vm, *state, budget, CaptureClock(report));
 
-    // Step 5: after its commits, the delta compacts the pack once its dead bytes pass half of it. A body that fails its
-    // checks on the way is invalid material and any other failure a recording fault; the bodies committed above stay
-    // valid either way.
+    // Step 5: after its commits, the delta compacts the pack whenever it holds dead bytes. A body that fails its checks on
+    // the way is invalid material and any other failure a recording fault; the bodies committed above stay valid either
+    // way.
     if (!counts.faulted && state->productionActive()) {
         // The pack as the delta's commits left it, and what the compaction made of it, for the bench's pack event.
         IndexStatistics before = report && state->artifact() ? state->artifact()->statistics() : IndexStatistics { };

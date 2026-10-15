@@ -215,7 +215,11 @@ var ucbSections = (function () {
         };
         section.atom = index => bit(bytes, section.atomMap, index);
         section.butterfly = index => bit(bytes, section.butterflyMap, index);
-        if (section.magic !== 0x49424355 || section.version !== 1 || align(section.end, 8) !== bytes.length)
+        // The child holder digests, 32 bytes each, follow the maps' padding: declarations, then expressions.
+        section.childHolderDigests = align(section.end, 8);
+        section.childHolderDigestCount = (bytes.length - section.childHolderDigests) / 32;
+        section.childHolderDigest = index => hex(bytes.subarray(section.childHolderDigests + 32 * index, section.childHolderDigests + 32 * (index + 1)));
+        if (section.magic !== 0x49424355 || section.version !== 1 || !Number.isInteger(section.childHolderDigestCount) || section.childHolderDigestCount < 0)
             throw failure("ucb.identity does not have the layout of SPEC-ucb.md section 4.2", bytes);
         return section;
     }

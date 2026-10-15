@@ -1,7 +1,8 @@
 // jitcache-pin: off the derived default constructor runs until the DFG compiles it, and what the DFG freezes from its super_construct cache is what the native fix of SPEC-ics.md E1 changes
-// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer
+// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-delta-capture=compiled; Consumer
 // The Producer captures compiled bodies only: the windows count the requests of the bodies under test, and with the
-// scope all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js covers it).
+// delta capture all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js
+// covers it).
 
 // SPEC-ucb.md section 13.3, request-kinds.js: a body of each kind of request point imports in the Consumer (statistics,
 // imports) and passes its twins (SPEC-ucb.md section 13.2, which the engine runs at each import of a twins run): a

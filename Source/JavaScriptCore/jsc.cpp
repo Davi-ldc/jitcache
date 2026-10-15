@@ -534,7 +534,7 @@ public:
     JITCache::Role m_jitCacheRole { JITCache::Role::Consumer };
     size_t m_jitCacheMaxMemory { SIZE_MAX };
     bool m_jitCacheStrict { false };
-    JITCache::CaptureScope m_jitCacheCaptureScope { JITCache::CaptureScope::All };
+    JITCache::DeltaCapture m_jitCacheDeltaCapture { JITCache::DeltaCapture::All };
     bool m_jitCacheDeltaAtExit { false };
     bool m_jitCacheLog { false };
     bool m_jitCacheMaintenance { false };
@@ -4464,11 +4464,11 @@ static void runInteractive(GlobalObject* globalObject)
     fprintf(stderr, "  --jitcache-mode=c|p|p-c            JITCache's role: consumer (the default), producer or consumer-producer\n");
     fprintf(stderr, "  --jitcache-max-memory=<bytes>|unlimited  The producer's working-memory limit, with an optional K, M or G suffix (unlimited by default)\n");
     fprintf(stderr, "  --jitcache-strict[=0|1]            Validates the full structure of what JITCache reads and assumes (off by default)\n");
-    fprintf(stderr, "  --jitcache-capture=all|compiled    The bodies a producer saves: all that ran (the default) or only compiled ones\n");
+    fprintf(stderr, "  --jitcache-delta-capture=all|compiled  What delta saves: every body that ran (the default) or only compiled ones\n");
     fprintf(stderr, "  --jitcache-delta-at-exit           Calls JITCache's delta once the scripts and the run loop have finished\n");
     fprintf(stderr, "  --jitcache-log[=0|1]               Writes JITCache's start result, delta results and final status to stderr as JSON lines\n");
     fprintf(stderr, "  --jitcache-bench-report=<path>     Appends JITCache's bench report to path\n");
-    fprintf(stderr, "  --jitcache-maintenance -- <command>  Runs JITCache maintenance and exits: clean [<path>] or compact <ratio> [<path>] [--yes | --no]\n");
+    fprintf(stderr, "  --jitcache-maintenance -- <command>  Runs JITCache maintenance and exits: compact <ratio> [<path>] [--yes | --no]\n");
 #if ENABLE(JITCACHE_TWINS)
     fprintf(stderr, "  --jitcache-twins-report=<path>     Appends JITCache's twin report to path\n");
     fprintf(stderr, "  --jitcache-twins-record-layout=<path>  Records the executable pool, the structure reservation and the heap probes in path\n");
@@ -4648,13 +4648,13 @@ bool CommandLine::parseJITCacheArgument(const char* arg, bool& malformed)
         malformed = !strict;
         return true;
     }
-    if (auto flag = jitCacheFlagValue(arg, "--jitcache-capture")) {
-        std::optional<JITCache::CaptureScope> scope;
+    if (auto flag = jitCacheFlagValue(arg, "--jitcache-delta-capture")) {
+        std::optional<JITCache::DeltaCapture> deltaCapture;
         if (!flag->bare)
-            scope = JITCache::parseCaptureScope(StringView::fromLatin1(flag->value));
-        if (scope)
-            m_jitCacheCaptureScope = *scope;
-        malformed = !scope;
+            deltaCapture = JITCache::parseDeltaCapture(StringView::fromLatin1(flag->value));
+        if (deltaCapture)
+            m_jitCacheDeltaCapture = *deltaCapture;
+        malformed = !deltaCapture;
         return true;
     }
     if (auto flag = jitCacheFlagValue(arg, "--jitcache-delta-at-exit")) {
@@ -5074,7 +5074,7 @@ static void startJITCache(VM& vm, const CommandLine& options)
     config.role = options.m_jitCacheRole;
     config.producerLimitBytes = options.m_jitCacheMaxMemory;
     config.strict = options.m_jitCacheStrict;
-    config.captureScope = options.m_jitCacheCaptureScope;
+    config.deltaCapture = options.m_jitCacheDeltaCapture;
     config.benchReportPath = options.m_jitCacheBenchReport;
 #if ENABLE(JITCACHE_TWINS)
     config.twinReportPath = options.m_jitCacheTwinsReport;

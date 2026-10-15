@@ -5,8 +5,8 @@
 // with execution, as on a small serverless instance.
 //
 // A repetition starts with fresh producers for each case and branch: one calls delta at exit and one never does, and a
-// second capture scope (--capture) adds one that calls delta under it. Then, for each scenario, processes with JITCache
-// off and consumers of the first producer's artifact run interleaved, beside the variants the run asks for: consumers of
+// second delta capture (--delta-capture) adds one that calls delta under it. Then, for each scenario, processes with
+// JITCache off and consumers of the first producer's artifact run interleaved, beside the variants the run asks for: consumers of
 // the other producers, consumers that arm imported LLInt counters from zero, and cold processes, which start after the
 // files every process reads, and a consumer's artifact, were dropped from the page cache. After the last repetition,
 // untimed runs write JITCache's bench report and log the compiles of each call. Every process must compute the
@@ -28,21 +28,20 @@ const defaultCases: CaseName[] = ["hono", "elysia", "react-ssr", "preact-ssr", "
 const branchNames = ["fixed", "varied"] as const;
 type Branch = (typeof branchNames)[number];
 
-// The capture scopes of Bun's --jitcache-capture: `all` also captures, at delta, the bodies that ran without compiling.
-const captureScopes = ["all", "compiled"] as const;
-type CaptureScope = (typeof captureScopes)[number];
-type ScopeName = "All" | "Compiled";
-const scopeName = (scope: CaptureScope): ScopeName => (scope === "all" ? "All" : "Compiled");
+// The values of Bun's --jitcache-delta-capture: with `all`, delta also captures the bodies that ran without compiling.
+const deltaCaptures = ["all", "compiled"] as const;
+type DeltaCapture = (typeof deltaCaptures)[number];
+type DeltaCaptureName = "All" | "Compiled";
+const deltaCaptureName = (deltaCapture: DeltaCapture): DeltaCaptureName => (deltaCapture === "all" ? "All" : "Compiled");
 
-// `producer` calls delta at exit, under the run's first capture scope when it names one, and `producerNoDelta` never
+// `producer` calls delta at exit, under the run's first delta capture when it names one, and `producerNoDelta` never
 // does, so its artifact keeps only the captures made at each baseline compile; `producerAll` or `producerCompiled` calls
-// delta under the run's second scope. `consumer` reads the first one's artifact, `consumerNoLLIntProgress` the same with
-// the LLInt counters of imported bodies armed from zero, `consumerNoPopulate` the same without faulting in an imported
-// image's pages before its copy, `consumerNoDelta` the second one's, and `consumerAll` or
+// delta under the run's second delta capture. `consumer` reads the first one's artifact, `consumerNoLLIntProgress` the
+// same with the LLInt counters of imported bodies armed from zero, `consumerNoDelta` the second one's, and `consumerAll` or
 // `consumerCompiled` the third one's. `offCold` and `consumerCold` start after the files every process reads, and the
 // consumer's artifact, were dropped from the page cache.
-type Mode = "off" | "offCold" | "consumer" | "consumerCold" | "consumerNoDelta" | "consumerNoLLIntProgress" | "consumerNoPopulate" | `consumer${ScopeName}` | "producer" | "producerNoDelta" | `producer${ScopeName}`;
-const comparedModes: Mode[] = ["off", "consumer", "consumerAll", "consumerCompiled", "consumerNoLLIntProgress", "consumerNoPopulate", "consumerNoDelta", "offCold", "consumerCold"];
+type Mode = "off" | "offCold" | "consumer" | "consumerCold" | "consumerNoDelta" | "consumerNoLLIntProgress" | `consumer${DeltaCaptureName}` | "producer" | "producerNoDelta" | `producer${DeltaCaptureName}`;
+const comparedModes: Mode[] = ["off", "consumer", "consumerAll", "consumerCompiled", "consumerNoLLIntProgress", "consumerNoDelta", "offCold", "consumerCold"];
 // What each compared mode is measured against: a cold consumer against a cold JITCache-off process, which read the same
 // files from storage besides the artifact, and every other mode against off.
 const referenceOf = (mode: Mode): Mode | null => (mode === "off" ? null : mode === "consumerCold" ? "offCold" : "off");
@@ -84,13 +83,12 @@ const usage = `Usage: bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun execu
                               producers and the untimed runs
   --repetitions=3             each with fresh producers
   --producer-calls=100
-  --capture=all|compiled      the capture scope every producer passes to Bun's --jitcache-capture, by default none, so
-                              Bun's own default; a second scope after a comma adds producers that call delta under it
-                              and their consumers, consumerAll or consumerCompiled
+  --delta-capture=all|compiled
+                              the delta capture every producer passes to Bun's --jitcache-delta-capture, by default
+                              none, so Bun's own default; a second value after a comma adds producers that call delta
+                              under it and their consumers, consumerAll or consumerCompiled
   --compare-llint-progress    add consumers whose imported bodies arm their LLInt counters from zero
                               (BUN_JSC_jitCacheImportLLIntProgress=0), consumerNoLLIntProgress
-  --compare-populate          add consumers that copy imported images without faulting their pages in first
-                              (BUN_JSC_jitCachePopulateImagePages=0), consumerNoPopulate
   --cold-processes=3          JITCache-off processes and consumers each, per scenario, case and branch in each
                               repetition, that start after the Bun executable, this directory with its node_modules,
                               the transpiler cache and a consumer's artifact are dropped from the page cache
@@ -98,7 +96,7 @@ const usage = `Usage: bun Tools/Scripts/jitcache-macro-bench.ts --bun=<Bun execu
   --census, --no-census       count the baseline compiles each call starts and the DFG and FTL compiles it requests,
                               in an untimed off process and each warm consumer variant
   --reports, --no-reports     run untimed consumers per scenario with JITCache's bench report: warm, cold and the
-                              second capture scope's
+                              second delta capture's
   --out=<directory>           jitcache-macro/<time> beside the Bun executable by default
   --timeout=<seconds>         1800 by default; a process that runs longer is killed and fails
   --check                     correctness only: 1 repetition, 1 process per mode, scenarios of 5 and 35 calls,
@@ -120,9 +118,8 @@ interface Options {
   processes: number; // per mode, scenario, case and branch in a repetition
   repetitions: number;
   producerCalls: number;
-  capture: CaptureScope[]; // the producers' scopes, first the main one; empty leaves Bun's default
+  deltaCapture: DeltaCapture[]; // the producers' delta captures, first the main one; empty leaves Bun's default
   compareLLIntProgress: boolean; // whether consumerNoLLIntProgress runs
-  comparePopulate: boolean; // whether consumerNoPopulate runs
   coldProcesses: number; // of each cold mode, per scenario, case and branch in a repetition
   cpu: number; // the CPU every Bun process is pinned to
   census: boolean;
@@ -218,9 +215,8 @@ function parseCommandLine(argv: string[], allowed: number[]): Command {
   const processes = number("--processes", check ? 1 : 10, 0);
   const repetitions = number("--repetitions", check ? 1 : 3, 1);
   const producerCalls = number("--producer-calls", check ? 20 : 100, 1);
-  const capture = list("--capture", [], oneOf("--capture", captureScopes));
+  const deltaCapture = list("--delta-capture", [], oneOf("--delta-capture", deltaCaptures));
   const compareLLIntProgress = takeFlag("--compare-llint-progress");
-  const comparePopulate = takeFlag("--compare-populate");
   const coldProcesses = number("--cold-processes", check ? 1 : 3, 0);
   const cpu = number("--cpu", Math.max(...allowed), 0);
   if (!allowed.includes(cpu)) throw new UsageError(`--cpu names CPU ${cpu}, which this process may not use`);
@@ -238,7 +234,7 @@ function parseCommandLine(argv: string[], allowed: number[]): Command {
     const existing = statSync(out, { throwIfNoEntry: false });
     if (existing && (!existing.isDirectory() || readdirSync(out).length)) throw new UsageError(`--out names a file or a directory that is not empty: ${out}`);
   }
-  return { kind: "run", options: { bun, cases, branches, scenarios, processes, repetitions, producerCalls, capture, compareLLIntProgress, comparePopulate, coldProcesses, cpu, census, reports, out, timeoutSeconds, check } };
+  return { kind: "run", options: { bun, cases, branches, scenarios, processes, repetitions, producerCalls, deltaCapture, compareLLIntProgress, coldProcesses, cpu, census, reports, out, timeoutSeconds, check } };
 }
 
 function integer(text: string, name: string, minimum: number): number {
@@ -650,14 +646,14 @@ function labelOf(job: Job): string {
 }
 
 const isCold = (mode: Mode) => mode === "offCold" || mode === "consumerCold";
-// The second capture scope's producer and consumer, when the run names one.
-const secondScopeOf = (options: Options): CaptureScope | null => options.capture[1] ?? null;
+// The second delta capture's producer and consumer, when the run names one.
+const secondDeltaCaptureOf = (options: Options): DeltaCapture | null => options.deltaCapture[1] ?? null;
 
-// The artifact a producer writes and its consumers read, one per producer, repetition, case and branch, and the capture
-// scope that producer passes, or null for Bun's default.
-function artifactOf(options: Options, job: Job): { path: string; scope: CaptureScope | null } | null {
+// The artifact a producer writes and its consumers read, one per producer, repetition, case and branch, and the delta
+// capture that producer passes, or null for Bun's default.
+function artifactOf(options: Options, job: Job): { path: string; deltaCapture: DeltaCapture | null } | null {
   let producer: string;
-  let scope = options.capture[0] ?? null;
+  let deltaCapture = options.deltaCapture[0] ?? null;
   switch (job.mode) {
     case "off":
     case "offCold":
@@ -670,32 +666,31 @@ function artifactOf(options: Options, job: Job): { path: string; scope: CaptureS
     case "consumerAll":
     case "producerCompiled":
     case "consumerCompiled":
-      scope = secondScopeOf(options)!;
-      producer = `delta-${scope}`;
+      deltaCapture = secondDeltaCaptureOf(options)!;
+      producer = `delta-${deltaCapture}`;
       break;
     default:
       producer = "delta";
   }
-  return { path: join(options.out, "artifacts", `r${job.repetition}-${job.case}-${job.branch}-${producer}`), scope };
+  return { path: join(options.out, "artifacts", `r${job.repetition}-${job.case}-${job.branch}-${producer}`), deltaCapture };
 }
 
 // The JSC options a mode sets, beyond the run's environment.
 function modeEnvironment(job: Job): Record<string, string> {
   const environment: Record<string, string> = {};
   if (job.mode === "consumerNoLLIntProgress") environment.BUN_JSC_jitCacheImportLLIntProgress = "0";
-  if (job.mode === "consumerNoPopulate") environment.BUN_JSC_jitCachePopulateImagePages = "0";
   // JSC then logs the compiles readCensus counts.
   if (job.purpose === "census") environment.BUN_JSC_logCompilationChanges = "true";
   return environment;
 }
 
-function commandOf(context: Context, job: Job, artifact: { path: string; scope: CaptureScope | null } | null, reportPath: string | null): { command: string[]; killAtEnd: boolean } {
+function commandOf(context: Context, job: Job, artifact: { path: string; deltaCapture: DeltaCapture | null } | null, reportPath: string | null): { command: string[]; killAtEnd: boolean } {
   // JITCache's flags go before the script, where Bun reads its own. A consumer takes the default mode.
   const flags = artifact === null ? [] : [`--jitcache=${artifact.path}`];
   let killAtEnd = false;
   if (job.purpose === "producer") {
     flags.push("--jitcache-mode=p");
-    if (artifact!.scope !== null) flags.push(`--jitcache-capture=${artifact!.scope}`);
+    if (artifact!.deltaCapture !== null) flags.push(`--jitcache-delta-capture=${artifact!.deltaCapture}`);
     // A Bun that takes --jitcache-delta-at-exit calls delta at exit only when given it. An older one always does, so its
     // no-delta producer kills itself right after its end line, before the exit hook can run.
     if (job.mode !== "producerNoDelta" && context.deltaAtExitFlag) flags.push("--jitcache-delta-at-exit");
@@ -1015,11 +1010,11 @@ function countBodies(artifact: string, record: ProcessRecord) {
 }
 
 // The keys a pack's index lists and its valid end; null without a pack. The pack starts with JITCPACK and its layout
-// version, 1, as 2 bytes at 8; its root slots at 64 and 128 each hold a generation, the valid end and the latest index
-// block's offset, 8 bytes little-endian each, and the slot with the higher generation is current. An index block
-// (JITCINDX) holds its previous block's offset at 8, its kind at 16 (0 for the full index the chain ends at, 1 for a
-// delta), its entry count at 20, and 80-byte entries from 32, each starting with a 40-byte key and its record's offset,
-// 0 for a tombstone. The engine checks the rest, the CRCs among it.
+// version, 2, as 2 bytes at 8; its root at 56 is the valid end, 8 bytes little-endian, and the 8 bytes before the valid
+// end, the latest index block's trailer, give that block's offset. An index block (JITCINDX) holds its previous block's
+// offset at 8, its kind at 16 (0 for the full index the chain ends at, 1 for a delta), its entry count at 20, and 80-byte
+// entries from 32, each starting with a 40-byte key and its record's offset, 0 for a tombstone. The engine checks the
+// rest, the CRCs among it.
 function readPackKeys(path: string, record: ProcessRecord): { keys: Set<string>; validEnd: number } | null {
   let bytes: Buffer;
   try {
@@ -1028,15 +1023,18 @@ function readPackKeys(path: string, record: ProcessRecord): { keys: Set<string>;
     return null;
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.byteLength < 256 || bytes.toString("latin1", 0, 8) !== "JITCPACK" || view.getUint16(8, true) !== 1) {
-    record.problems.push(`left a pack, ${path}, whose prefix is not one of layout 1`);
+  if (bytes.byteLength < 64 || bytes.toString("latin1", 0, 8) !== "JITCPACK" || view.getUint16(8, true) !== 2) {
+    record.problems.push(`left a pack, ${path}, whose prefix is not one of layout 2`);
     return null;
   }
   const u64 = (offset: number) => Number(view.getBigUint64(offset, true));
-  const slot = u64(64) > u64(128) ? 64 : 128;
-  const validEnd = u64(slot + 8);
+  const validEnd = u64(56);
+  if (validEnd < 64 + 40 || validEnd > bytes.byteLength) {
+    record.problems.push(`left a pack, ${path}, whose valid end ${validEnd} lies outside its ${bytes.byteLength} bytes`);
+    return null;
+  }
   const chain: number[] = [];
-  for (let at = u64(slot + 16); ; at = u64(at + 8)) {
+  for (let at = u64(validEnd - 8); ; at = u64(at + 8)) {
     if (at + 32 > bytes.byteLength || bytes.toString("latin1", at, at + 8) !== "JITCINDX") {
       record.problems.push(`left a pack, ${path}, without an index block at ${at}`);
       return null;
@@ -1113,14 +1111,13 @@ function readCensus(text: string, calls: number, record: ProcessRecord) {
 // ---------------------------------------------------------------------------------------------------------------------
 // The plan
 
-// The warm consumer modes the run compares besides `consumer`: the second capture scope's and the one whose imported
+// The warm consumer modes the run compares besides `consumer`: the second delta capture's and the one whose imported
 // LLInt counters start from zero.
 function consumerVariants(options: Options): Mode[] {
-  const second = secondScopeOf(options);
+  const second = secondDeltaCaptureOf(options);
   const modes: Mode[] = [];
-  if (second !== null) modes.push(`consumer${scopeName(second)}`);
+  if (second !== null) modes.push(`consumer${deltaCaptureName(second)}`);
   if (options.compareLLIntProgress) modes.push("consumerNoLLIntProgress");
-  if (options.comparePopulate) modes.push("consumerNoPopulate");
   return modes;
 }
 
@@ -1131,8 +1128,8 @@ function consumerVariants(options: Options): Mode[] {
 function repetitionJobs(options: Options, repetition: number): Job[] {
   const jobs: Job[] = [];
   const longest = options.scenarios.at(-1)!;
-  const second = secondScopeOf(options);
-  const producers: Mode[] = ["producer", "producerNoDelta", ...(second === null ? [] : [`producer${scopeName(second)}` as const])];
+  const second = secondDeltaCaptureOf(options);
+  const producers: Mode[] = ["producer", "producerNoDelta", ...(second === null ? [] : [`producer${deltaCaptureName(second)}` as const])];
   for (const name of options.cases) {
     for (const branch of options.branches) {
       for (const mode of producers) jobs.push({ purpose: "producer", case: name, branch, scenario: null, calls: options.producerCalls, mode, repetition, index: 1 });
@@ -1157,17 +1154,17 @@ function repetitionJobs(options: Options, repetition: number): Job[] {
 }
 
 // After the last repetition, on its artifacts: for each case and branch, the consumers of every scenario that write the
-// bench report, warm, cold and of the second capture scope, and the census's off process and warm consumers, which make
+// bench report, warm, cold and of the second delta capture, and the census's off process and warm consumers, which make
 // the longest scenario's calls.
 function untimedJobs(options: Options): Job[] {
   const jobs: Job[] = [];
   const repetition = options.repetitions;
   const longest = options.scenarios.at(-1)!;
-  const second = secondScopeOf(options);
+  const second = secondDeltaCaptureOf(options);
   for (const name of options.cases) {
     for (const branch of options.branches) {
       if (options.reports) {
-        const modes: Mode[] = ["consumer", "consumerCold", ...(second === null ? [] : [`consumer${scopeName(second)}` as const])];
+        const modes: Mode[] = ["consumer", "consumerCold", ...(second === null ? [] : [`consumer${deltaCaptureName(second)}` as const])];
         for (const scenario of options.scenarios) {
           for (const mode of modes) jobs.push({ purpose: "report", case: name, branch, scenario, calls: scenario, mode, repetition, index: 1 });
         }
@@ -1469,16 +1466,15 @@ function describeRun(run: RunRecord, pool: Pool): string {
   const end = pool.ends.find(record => record.run === run.run);
   const siblings = run.pinnedCpuSiblings.filter(cpu => cpu !== options.cpu);
   const users = run.who ? run.who.split("\n").map(line => line.trim().split(/\s+/).slice(0, 2).join(" on ")).join("; ") : "nobody";
-  const capture = options.capture ?? [];
+  const deltaCapture = options.deltaCapture ?? [];
   return [
     `${pool.runs.length > 1 ? `Run ${(run.run ?? 0) + 1}: ` : ""}Bun ${run.bun}, revision ${run.revision}.`,
     run.deltaAtExitFlag ? "" : "This Bun has no --jitcache-delta-at-exit and calls delta at every producer's exit, so the producers without delta kill themselves right after their end line.",
     `Host ${run.host}, kernel ${run.kernel}, ${run.cpus} CPUs (${run.cpuModel ?? "model unknown"}), transparent huge pages ${run.transparentHugePages ?? "n/a"}, ${gibibytes(memory.totalBytes)} of memory (${gibibytes(memory.availableBytes)} available) and ${gibibytes(memory.swapTotalBytes)} of swap (${gibibytes(swapUsed)} in use); logged in: ${users}.`,
     `Every Bun process ran on CPU ${options.cpu}${siblings.length ? `, which shares its core with CPU ${joinWords(siblings.map(String))}` : ""}, and the driver ${run.driverCpu === null ? "had no CPU of its own" : `ran on CPU ${run.driverCpu}`}${run.driverNote ? ` (${run.driverNote})` : ""}.`,
     `${plural(options.repetitions, "repetition", "repetitions")} of ${plural(options.processes, "process", "processes")} per mode, scenarios of ${joinWords(options.scenarios.map(String))} calls, producers of ${options.producerCalls} calls and ${plural(options.coldProcesses, "cold pair", "cold pairs")}, a JITCache-off process and a consumer, per scenario and repetition.`,
-    capture.length ? `The producers passed --jitcache-capture=${capture[0]}${capture[1] ? `, and producer${scopeName(capture[1])} --jitcache-capture=${capture[1]}` : ""}.` : "",
+    deltaCapture.length ? `The producers passed --jitcache-delta-capture=${deltaCapture[0]}${deltaCapture[1] ? `, and producer${deltaCaptureName(deltaCapture[1])} --jitcache-delta-capture=${deltaCapture[1]}` : ""}.` : "",
     options.compareLLIntProgress ? "consumerNoLLIntProgress ran with BUN_JSC_jitCacheImportLLIntProgress=0." : "",
-    options.comparePopulate ? "consumerNoPopulate ran with BUN_JSC_jitCachePopulateImagePages=0." : "",
     run.driverRunsBun ? "The driver runs this Bun itself, so its executable stays in the page cache when cold processes start." : "",
     run.taskIoAccounting === false ? "This kernel counts no task's storage reads, so read from storage stays at 0." : "",
     `Started ${run.started} with a load average of ${load(run.loadAverage)}${end ? ` and finished ${end.finished} with ${load(end.loadAverage)}` : "; the run has no end record"}. Command line: ${run.argv.join(" ")}.`,
@@ -1546,8 +1542,8 @@ function describeProducers(producers: ProcessRecord[]): string {
   const calls = joinWords([...new Set(producers.map(record => String(record.calls)))], "or");
   const kinds: [Mode, string][] = [
     ["producer", "when they called delta at exit"],
-    ["producerAll", "when they called delta under the scope all"],
-    ["producerCompiled", "when they called delta under the scope compiled"],
+    ["producerAll", "when they called delta under the delta capture all"],
+    ["producerCompiled", "when they called delta under the delta capture compiled"],
     ["producerNoDelta", "when they did not call delta"],
   ];
   const committed = kinds.flatMap(([mode, when]) => {
@@ -1801,14 +1797,10 @@ function refusal(): string | null {
 // What keeps the run from using this Bun: a flag or JSC option the run needs that the Bun lacks. Bun lists the JITCache
 // flags it takes in its help, and exits at startup on a BUN_JSC_ option its JSC does not have.
 function bunRefusal(options: Options, help: string, environment: Record<string, string>): string | null {
-  if (options.capture.length && !help.includes("--jitcache-capture")) return `--capture needs a Bun that takes --jitcache-capture, which ${options.bun} does not list in its help`;
+  if (options.deltaCapture.length && !help.includes("--jitcache-delta-capture")) return `--delta-capture needs a Bun that takes --jitcache-delta-capture, which ${options.bun} does not list in its help`;
   if (options.compareLLIntProgress) {
     const result = Bun.spawnSync([options.bun, "-e", "0"], { env: { ...environment, ...modeEnvironment({ mode: "consumerNoLLIntProgress", purpose: "timed" } as Job) }, stdout: "pipe", stderr: "pipe" });
     if (!result.success) return `--compare-llint-progress needs a Bun whose JSC has the option jitCacheImportLLIntProgress, and ${options.bun} failed with it: ${result.stderr.toString().trim().split("\n")[0]}`;
-  }
-  if (options.comparePopulate) {
-    const result = Bun.spawnSync([options.bun, "-e", "0"], { env: { ...environment, ...modeEnvironment({ mode: "consumerNoPopulate", purpose: "timed" } as Job) }, stdout: "pipe", stderr: "pipe" });
-    if (!result.success) return `--compare-populate needs a Bun whose JSC has the option jitCachePopulateImagePages, and ${options.bun} failed with it: ${result.stderr.toString().trim().split("\n")[0]}`;
   }
   return null;
 }

@@ -330,45 +330,39 @@ std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const ui
     std::span<const uint8_t, 16> headerDigest, ValidationMode, std::span<const SectionKind> checksummedKinds);
 
 // The pack, cache/pack: one log-structured file holding every body. It is only ever appended to, except for its root
-// slots and its retired word, and a reader sees exactly the bytes below the valid end of the root it read.
+// and its retired word, and a reader sees exactly the bytes below the valid end it loaded from the root.
 //
-// The prefix, 256 bytes at offset 0:
+// The prefix, 64 bytes at offset 0:
 //   0    8   the bytes JITCPACK
-//   8    2   layout version, 1
-//   10   2   prefix size, 256
+//   8    2   layout version, 2
+//   10   2   prefix size, 64
 //   12   4   0
 //   16   16  the artifact header digest (artifactHeaderDigest)
 //   32   8   the pack identifier: nonzero, drawn with cryptographicallyRandomValues when the file is created
 //   40   4   CRC32C of bytes [0, 40)
 //   44   4   0
 //   48   8   retired: 0, or 1 once a compaction is about to rename another pack over this file
-//   56   8   0
-//   64   64  root slot 0
-//   128  64  root slot 1
-//   192  64  0
-// A root slot, 64 bytes; the root of generation g lives in slot g mod 2, and the valid root with the highest generation
-// is the pack's current root:
-//   0    8   the generation, nonzero
-//   8    8   the valid end: the first byte past the committed data, a multiple of 8
-//   16   8   the latest index block's offset
-//   24   32  0
-//   56   4   CRC32C of bytes [0, 56)
-//   60   4   0
-// Past the prefix lie records and index blocks, each at a multiple of 8, with zeros between.
+//   56   8   the root: the valid end, the first byte past the committed data. Within a file it only grows, so it also
+//            tells a reader that something was committed. The producer stores it with one atomic release store
+//            through a shared writable mapping, after every byte below it, and readers load it with acquire from
+//            their own mappings; an aligned 8-byte word is never seen half-written.
+// Past the prefix lie records and index blocks, each at a multiple of 8, with zeros between. The valid bytes always end
+// with an index block, whose trailer leads from the root to the latest index.
 // A record, a 64-byte header followed by the body's bytes exactly as the envelope and directory above lay out a body:
 //   0    40  the body key
 //   40   8   S, the body's size
 //   48   8   the body's commit identifier
 //   56   4   CRC32C of bytes [0, 56)
 //   60   4   0
-// An index block, a 32-byte header followed by N entries of 80 bytes:
+// An index block, a 32-byte header, N entries of 80 bytes and an 8-byte trailer:
 //   0    8   the bytes JITCINDX
-//   8    8   the previous block's offset: 0 for a full index, which lists every live key, else the block the root named
-//            before this one, a full index or a delta
+//   8    8   the previous block's offset: 0 for a full index, which lists every live key, else the block that ended the
+//            valid bytes before this one, a full index or a delta
 //   16   4   kind: 0 full, 1 delta
 //   20   4   N
 //   24   4   CRC32C of bytes [0, 24) followed by the entries
 //   28   4   0
+//   32 + 80 * N   8   the trailer: the block's own offset
 // An index entry; a full index lists live keys in strictly increasing byte order, and a delta lists changes in the order
 // they apply, the last entry for a key winning:
 //   0    40  the body key
@@ -379,21 +373,24 @@ std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const ui
 //   68   4   P
 //   72   1   the body's highest tier, 0 for a tombstone
 //   73   7   0
-constexpr size_t packPrefixBytes = 256;
+constexpr size_t packPrefixBytes = 64;
 constexpr size_t packRetiredOffset = 48;
-constexpr size_t packRootSlotBytes = 64;
+constexpr size_t packRootOffset = 56;
 constexpr size_t packRecordHeaderBytes = 64;
 constexpr size_t packIndexBlockHeaderBytes = 32;
 constexpr size_t packIndexEntryBytes = 80;
+constexpr size_t packIndexTrailerBytes = 8;
 constexpr uint64_t packAlignment = 8;
 static_assert(!(packRetiredOffset % alignof(uint64_t)), "the retired word is stored and loaded whole through a page-aligned mapping");
+static_assert(!(packRootOffset % alignof(uint64_t)), "the root is stored and loaded whole through page-aligned mappings");
 
 namespace ContainerChecks {
-inline constexpr ContainerCheck pack = "container.pack"_s; // the pack's own structure: prefix, roots, records, index blocks
+inline constexpr ContainerCheck pack = "container.pack"_s; // the pack's own structure: prefix, root, records, index blocks
 } // namespace ContainerChecks
 using PackRejection = ASCIILiteral; // why the pack fails container.pack
 
-constexpr size_t packRootSlotOffset(uint64_t generation) { return 64 + packRootSlotBytes * static_cast<size_t>(generation % 2); }
+// The bytes an index block of count entries takes: its header, its entries and its trailer.
+constexpr uint64_t packIndexBlockBytes(uint32_t count) { return packIndexBlockHeaderBytes + packIndexEntryBytes * count + packIndexTrailerBytes; }
 // The first multiple of 8 at or after offset; empty on overflow.
 std::optional<uint64_t> packAligned(uint64_t offset);
 // The bytes a record holding a body of bodySize takes, its header and padding included; empty on overflow.
@@ -403,20 +400,11 @@ struct PackPrefix {
     HeaderDigest headerDigest { };
     uint64_t identifier { 0 };
 };
-std::array<uint8_t, packPrefixBytes> encodePackPrefix(const PackPrefix&); // retired 0, both slots empty
+// A new file's prefix: retired 0, and validEnd in the root.
+std::array<uint8_t, packPrefixBytes> encodePackPrefix(const PackPrefix&, uint64_t validEnd);
 // The prefix's own checks: tag, version, size, zero bytes, CRC, and the artifact header digest. prefix holds at least the
-// first 48 bytes of the file.
+// first 48 bytes of the file; the retired word and the root, which change, are loaded on their own.
 std::expected<PackPrefix, PackRejection> decodePackPrefix(std::span<const uint8_t> prefix, std::span<const uint8_t, 16> headerDigest);
-
-struct PackRoot {
-    uint64_t generation { 0 };
-    uint64_t validEnd { 0 };
-    uint64_t indexOffset { 0 };
-    friend bool operator==(const PackRoot&, const PackRoot&) = default;
-};
-std::array<uint8_t, packRootSlotBytes> encodePackRoot(const PackRoot&);
-// A slot's root, or nothing for an empty slot, a torn or damaged one (its CRC), or one whose fields cannot describe a pack.
-std::optional<PackRoot> decodePackRoot(std::span<const uint8_t, packRootSlotBytes>);
 
 struct PackRecordHeader {
     BodyKey key { };
@@ -447,10 +435,14 @@ struct PackIndexEntry {
 
 // The block's header, its CRC computed over its first 24 bytes and entries, the N * 80 bytes that follow it.
 std::array<uint8_t, packIndexBlockHeaderBytes> encodePackIndexBlockHeader(const PackIndexBlock&, std::span<const uint8_t> entries);
+// Completes a block whose entries are in place: bytes holds exactly packIndexBlockBytes(block.count) bytes and receives
+// the header and the trailer, which gives offset, the block's own start in the pack.
+void sealPackIndexBlock(const PackIndexBlock&, uint64_t offset, std::span<uint8_t> bytes);
 // The header's checks: tag, kind, zero bytes, and a full index naming no previous block. The CRC needs the entries, which
-// checkPackIndexBlock checks.
+// checkPackIndexBlockCRC checks.
 std::expected<PackIndexBlock, PackRejection> decodePackIndexBlockHeader(std::span<const uint8_t, packIndexBlockHeaderBytes>);
 std::optional<PackRejection> checkPackIndexBlockCRC(std::span<const uint8_t, packIndexBlockHeaderBytes>, std::span<const uint8_t> entries);
+uint64_t decodePackIndexTrailer(std::span<const uint8_t, packIndexTrailerBytes>); // the offset the trailer gives
 void encodePackIndexEntry(const PackIndexEntry&, std::span<uint8_t> entry); // entry holds exactly 80 bytes
 // An entry's own checks: its key, its zero bytes, and for a tombstone zero size, version and tier.
 std::expected<PackIndexEntry, PackRejection> decodePackIndexEntry(std::span<const uint8_t> entry);

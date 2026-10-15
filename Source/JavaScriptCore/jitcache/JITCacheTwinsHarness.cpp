@@ -121,7 +121,8 @@
     v(llintInstructions) v(baselineCompiles) v(dfgCompiles) v(ftlCompiles) v(osrExits) v(jettisons) v(reoptimizations)
 #define JITCACHE_HARNESS_FOR_EACH_UCB_STATISTIC(v) \
     v(imports) v(seededDecodes) v(attaches) v(gateDrops) v(sourceDigests) v(suppliedSourceDigests) \
-    v(suppliedDigestVerifications) v(contextDigests) v(holderDigests) v(tdzEnvironmentDigests)
+    v(suppliedDigestVerifications) v(contextDigests) v(holderDigests) v(tdzEnvironmentDigests) v(childHolderDigests) \
+    v(vouchedHolderChecks)
 
 namespace JSC::JITCache {
 
@@ -1496,10 +1497,6 @@ void didStartShellVM(VM& vm, StartOutcome outcome, bool logsResults)
     if (ArtifactWriter* writer = state->writer()) {
         writer->setFaultForTesting(writerFault);
         writer->setKillForTesting(writerKill);
-        // A compaction's kill point or fault needs a compaction, which the end of a delta then runs on any dead byte.
-        bool compactionHook = (writerKill && (writerKill->point == ArtifactWriter::KillPoint::CompactionBeforeRename || writerKill->point == ArtifactWriter::KillPoint::CompactionAfterRename))
-            || (writerFault && StringView { writerFault->check }.startsWith("compaction."_s));
-        writer->setCompactsEagerlyForTesting(compactionHook);
     }
     // H1's test entry, of part Integrator and check test-entry.
     TwinReportSink* report = state->twinReportSink();

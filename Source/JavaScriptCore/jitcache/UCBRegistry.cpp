@@ -3,6 +3,7 @@
 
 #include "UnlinkedCodeBlock.h"
 #include "ValidatedBody.h"
+#include <algorithm>
 #include <wtf/Locker.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -54,15 +55,31 @@ bool isUCBRegistryLockHeldByCurrentThread()
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(UCBRegistry);
 
-Ref<ParentIdentity> ParentIdentity::create(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider)
+Ref<ParentIdentity> ParentIdentity::create(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
 {
-    return adoptRef(*new ParentIdentity(key, WTF::move(suppliedDigestProvider)));
+    return adoptRef(*new ParentIdentity(key, WTF::move(suppliedDigestProvider), declarationCount, childHolderDigests));
 }
 
-ParentIdentity::ParentIdentity(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider)
+ParentIdentity::ParentIdentity(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
     : m_key(key)
     , m_suppliedDigestProvider(WTF::move(suppliedDigestProvider))
+    , m_declarationCount(declarationCount)
+    , m_childHolderDigests(childHolderDigests.size() / sizeof(Digest256))
 {
+    ASSERT(!(childHolderDigests.size() % sizeof(Digest256)));
+    for (size_t i = 0; i < m_childHolderDigests.size(); ++i)
+        memcpySpan(std::span { m_childHolderDigests[i] }, childHolderDigests.subspan(i * sizeof(Digest256), sizeof(Digest256)));
+}
+
+std::optional<Digest256> ParentIdentity::childHolderDigest(ChildTable table, uint32_t index) const
+{
+    size_t position = table == ChildTable::Declarations ? index : static_cast<size_t>(m_declarationCount) + index;
+    if (position >= m_childHolderDigests.size())
+        return std::nullopt;
+    const Digest256& digest = m_childHolderDigests[position];
+    if (std::ranges::all_of(digest, [](uint8_t byte) { return !byte; }))
+        return std::nullopt;
+    return digest;
 }
 
 const BodyKey& ParentIdentity::key() const
@@ -141,7 +158,7 @@ std::optional<ExecutableIdentity> UCBRegistry::identityOf(const UnlinkedFunction
     return std::nullopt;
 }
 
-bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& record)
+bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& record, std::span<const uint8_t> childHolderDigests)
 {
     // The tables are read, and the node the children share is made, before the lock is taken, so the critical section only
     // inserts (section 6.1). Both are declared before the lock, so they go after it is released when nothing takes them.
@@ -155,7 +172,7 @@ bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& reco
             children.append(codeBlock.functionDecl(i));
         for (unsigned i = 0; i < expressionCount; ++i)
             children.append(codeBlock.functionExpr(i));
-        parent = ParentIdentity::create(record.key, RefPtr { record.suppliedDigestProvider });
+        parent = ParentIdentity::create(record.key, RefPtr { record.suppliedDigestProvider }, declarationCount, childHolderDigests);
     }
 
     UCBRegistryInternal::CriticalSectionMark mark;

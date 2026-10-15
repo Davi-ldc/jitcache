@@ -258,9 +258,28 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
     if (identityKind != IdentityKind::DirectEval)
         ++statistics.contextDigests;
 
+    // Step 5, the child holder digests: each child UFE's holder digest, from this producer's own UFE, so that a consumer
+    // that imports this core can answer its children's holder checks without encoding the UFEs its decode made. A refused charge
+    // leaves that entry zero, which a consumer reads as no digest.
+    size_t declarationCount = ucb.numberOfFunctionDecls();
+    size_t childCount = declarationCount + ucb.numberOfFunctionExprs();
+    size_t childDigestsBytes = childCount * sizeof(Digest256);
+    if (childDigestsBytes && !charges.tryCharge(childDigestsBytes))
+        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
+    Vector<Digest256> childHolderDigests(childCount);
+    for (size_t i = 0; i < childCount; ++i) {
+        UnlinkedFunctionExecutable* child = i < declarationCount ? ucb.functionDecl(i) : ucb.functionExpr(i - declarationCount);
+        unsigned environmentsDigested = 0;
+        std::optional<Digest256> digest = holderDigest(vm, *child, &encodingBudget, &environmentsDigested);
+        statistics.tdzEnvironmentDigests += environmentsDigested;
+        childHolderDigests[i] = digest.value_or(Digest256 { });
+        if (digest)
+            ++statistics.childHolderDigests;
+    }
+
     // Step 5, the identity section.
     uint32_t constantCount = static_cast<uint32_t>(ucb.constantRegisters().size());
-    size_t identitySize = identitySectionSize(constantCount);
+    size_t identitySize = identitySectionSize(constantCount, childCount);
     if (!charges.tryCharge(identitySize))
         return std::unexpected(UCBCaptureFailure::BudgetExceeded);
     Vector<uint8_t> identity(identitySize);
@@ -287,11 +306,14 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
         std::optional<std::span<const uint8_t>> keptMap;
         if (keepsButterflyMap)
             keptMap = keptButterflyMap.span();
-        writeIdentitySection(identity.mutableSpan(), vm, record->key, *contextDigest, provenance, coreDigest, holderDigestValue, coreKind, parseFields, ucb, keptMap);
+        writeIdentitySection(identity.mutableSpan(), vm, record->key, *contextDigest, provenance, coreDigest, holderDigestValue, coreKind, parseFields, ucb, keptMap, childHolderDigests.span());
     }
-    // The kept map's copy is freed with the scope above; it does not travel.
+    // The kept map's copy is freed with the scope above, and the digests now live in the section; neither copy travels.
     if (keptMapSize)
         charges.release(keptMapSize);
+    childHolderDigests.clear();
+    if (childDigestsBytes)
+        charges.release(childDigestsBytes);
 
     size_t chargedBytes = charges.handOff();
     return UCBSections { WTF::move(identity), core.releaseNonNull(), WTF::move(feedback), Ref<ProducerBudget> { budget }, chargedBytes };

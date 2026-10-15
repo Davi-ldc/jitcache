@@ -73,7 +73,7 @@ const bunPassedFlags = new Set([
   "--jitcache",
   "--jitcache-mode",
   "--jitcache-strict",
-  "--jitcache-capture",
+  "--jitcache-delta-capture",
   "--jitcache-delta-at-exit",
   "--jitcache-bench-report",
   "--jitcache-twins-report",

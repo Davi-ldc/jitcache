@@ -151,7 +151,6 @@ struct InstalledBody {
     CBCounterRestore restore;
     uint64_t codeSize;
     uint32_t imageCodeSize;
-    uint32_t imagePages; // the pages the image's linked bytes span, which the copy may fault in and the flush visits
     uint32_t imageFixupCount;
     PrepareTimings prepareTimings; // the stages of step 7's prepareImage
 };
@@ -191,7 +190,6 @@ static void recordInstallEvent(const InstallMeasurement& measurement, const Inst
         { "restore.slice"_s, installed.restore.slice },
         { "codeSize"_s, installed.codeSize },
         { "image.codeSize"_s, static_cast<uint64_t>(installed.imageCodeSize) },
-        { "image.pages"_s, static_cast<uint64_t>(installed.imagePages) },
         { "image.fixupCount"_s, static_cast<uint64_t>(installed.imageFixupCount) },
         { "supportGenerated"_s, supportGenerated },
     });
@@ -477,7 +475,6 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     // Step 18. The code's size is read before the twins builds' stash takes the code.
     ++state->progress().installs;
     uint64_t codeSize = measurement.report() ? static_cast<uint64_t>(code->size()) : 0;
-    uint32_t imagePages = measurement.report() ? pagesSpanned(code->start(), imageCodeSize) : 0;
 #if ENABLE(JITCACHE_TWINS)
     stashImageTwinCheck(*state, PendingImageTwinCheck { &newborn, WTF::move(code), Ref<ValidatedBody> { *body }, view });
 #endif
@@ -490,7 +487,7 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     uint64_t totalEnd = benchThreadCPUNanoseconds();
     body = nullptr;
     uint64_t releaseEnd = benchThreadCPUNanoseconds();
-    recordInstallEvent(measurement, InstalledBody { key, restore, codeSize, imageCodeSize, imagePages, imageFixupCount, prepareTimings }, totalEnd - measurement.startNanoseconds(),
+    recordInstallEvent(measurement, InstalledBody { key, restore, codeSize, imageCodeSize, imageFixupCount, prepareTimings }, totalEnd - measurement.startNanoseconds(),
         releaseEnd - totalEnd, measurement.supportGenerated());
 
     // Step 19.

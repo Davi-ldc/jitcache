@@ -70,6 +70,7 @@ struct RequestState {
     RefPtr<SourceProvider> suppliedDigestProvider; // set with the key: the provider an import at the key relies on (section 6.1); none for a direct eval
     std::optional<Digest256> context; // computed at most once, only when read (section 3.4)
     std::optional<Digest256> holderDigest; // FunctionBody: holderDigest of functionExecutable, computed at most once (C11, a root's context)
+    std::optional<Digest256> vouchedHolderDigest; // set with a child's key: the digest its imported parent's body lists for it, if any
     std::optional<MissReason> missReason; // why the import found no UCB to return, once it got that far; the generate event reports it
     std::optional<uint64_t> missNanoseconds; // with a bench report open: the thread CPU time when tryImport missed (harness sub-SPEC section 9.2)
 };

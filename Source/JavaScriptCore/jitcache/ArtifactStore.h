@@ -77,14 +77,14 @@ int listDirectory(int directoryFd, const ScopedLambda<void(std::span<const char>
 // failed.
 int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved);
 
-// Writes a new artifact's empty pack, under the producer lock: a pack temporary holding the prefix, an empty full index
-// and the root of generation 1, renamed to cache/pack. Returns 0 or the errno of the call that failed, after which no
+// Writes a new artifact's empty pack, under the producer lock: a pack temporary holding the prefix and an empty full
+// index, whose end the root names, renamed to cache/pack. Returns 0 or the errno of the call that failed, after which no
 // temporary is left.
 int createEmptyPack(int cacheFd, std::span<const uint8_t, 16> headerDigest);
 
-// Whether a header-less cache/'s pack may hold a committed body: false only for a pack whose current root is the one a new
-// artifact's pack starts with, an empty full index right after the prefix. A pack that cannot be read counts as holding
-// bodies.
+// Whether a header-less cache/'s pack may hold a committed body: false only for a pack whose root is the one a new
+// artifact's pack starts with, the end of an empty full index right after the prefix. A pack that cannot be read counts
+// as holding bodies.
 bool packHoldsBodies(int cacheFd);
 
 // Why the artifact could not be read: the errno of the call that failed, or, with error 0, the reason its pack fails
@@ -94,43 +94,51 @@ struct ArtifactReadFailure {
     PackRejection packRejection;
 };
 
+struct PackMapping;
+
 // One shared, read-only mapping of a pack file whose prefix passed its checks. It maps more than the file holds, so the
-// pack grows into it without a new mapping; nothing reads past a valid end a root of this file named, which the file
-// always holds. The opened artifact that mapped it and every body or saved summary that borrows from it hold references,
-// and the last one unmaps it. A pack replaced or deleted meanwhile stays readable through it.
+// pack grows into it without a new mapping; nothing reads past a valid end this file's root held, which the file always
+// holds. The opened artifact that mapped it and every body or saved summary that borrows from it hold references, and
+// the last one unmaps it. A pack replaced or deleted meanwhile stays readable through it.
 class MappedPack final : public ThreadSafeRefCounted<MappedPack> {
     WTF_MAKE_NONCOPYABLE(MappedPack);
     WTF_MAKE_TZONE_ALLOCATED(MappedPack);
 public:
-    // cacheFd's pack, mapped with room for at least minimumCapacity bytes. ENOENT when cacheFd holds no pack.
-    static std::expected<Ref<MappedPack>, ArtifactReadFailure> map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity);
+    // cacheFd's pack, mapped with room for at least minimumCapacity bytes, and its root as loaded once mapped, which the
+    // file's size, taken after that load, bounds: a root past the file is damage, never a read past it. ENOENT when
+    // cacheFd holds no pack.
+    static std::expected<PackMapping, ArtifactReadFailure> map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity);
     ~MappedPack();
 
     uint64_t inode() const { return m_inode; }
     uint64_t identifier() const { return m_identifier; }
     uint64_t capacity() const { return m_mapping.size(); }
-    // The bytes [offset, offset + size), which the caller has bounded by a valid end this file's root named.
+    // The bytes [offset, offset + size), which the caller has bounded by a valid end this file's root held.
     std::span<const uint8_t> bytes(uint64_t offset, uint64_t size) const LIFETIME_BOUND;
-    // The valid root with the highest generation, read with acquire order, so the bytes below its valid end are visible.
-    std::optional<PackRoot> currentRoot() const;
-    // The generations both slots hold now, read without checks: the cheap test of whether the root moved.
-    uint64_t highestSlotGeneration() const;
+    // The root, loaded with acquire order, so the bytes below the valid end are visible. The producer stores it only after
+    // the file holds those bytes, so once map has bounded the root it found, every later value lies inside the file too.
+    uint64_t validEnd() const;
     bool isRetired() const;
 
 private:
     MappedPack(std::span<const uint8_t> mapping, uint64_t inode, uint64_t identifier);
-    uint64_t loadWord(size_t offset) const;
+    uint64_t loadWord(size_t offset) const; // whole, with acquire order
 
     const std::span<const uint8_t> m_mapping; // MAP_SHARED, PROT_READ, larger than the file
     const uint64_t m_inode;
     const uint64_t m_identifier;
 };
 
+struct PackMapping {
+    Ref<MappedPack> pack;
+    uint64_t validEnd; // the root map loaded, inside the file
+};
+
 // The producer lock: a non-blocking flock on <parent>/.cache.producer.lock, a 64-byte file
 //   0   8  the bytes JITCLOCK
 //   8   4  layout version, 1
 //   12  52 0
-// which a producing VM, clean and compact hold through one type. The lock lives on the open file description, so
+// which a producing VM and compact hold through one type. The lock lives on the open file description, so
 // destroying the object, or the process exiting, releases it; two descriptors of one process conflict, so a second
 // producing VM in a process is busy too. The file is never deleted or replaced.
 class ProducerLock final {
@@ -171,18 +179,19 @@ static_assert(sizeof(BodyKey) == BodyKey::byteSize);
 // A pack's live entries by key, as its full index and deltas leave them.
 using PackIndex = HashMap<BodyKey, PackIndexEntry, BodyKeyHash, BodyKeyHashTraits>;
 
-// Reads the index the root names from a pack's bytes: walks the blocks back from the root's latest one to the full index,
-// or to stopAt when it meets it, and applies them in order to index. Every block and every entry must lie below the root's
-// valid end, and every body entry's record extent too, and a record header must repeat its entry's key, size and commit
-// identifier. Returns the number of blocks applied, or why the pack fails container.pack, after which index is
-// unspecified. readAt returns the bytes [offset, offset + size) of the pack, which the walk bounds first.
-// liveBytes, packLiveBytes of index, follows the blocks applied.
+// Reads the index a root names from a pack's bytes: the trailer that ends the valid bytes gives the latest block, which
+// must end exactly at validEnd; the walk goes back from it through the previous blocks to the full index, or to stopAt
+// when it meets it, and applies them in order to index. Every block lies below the block after it, its trailer gives its
+// own start, and every body entry's record extent lies below its block. Returns the blocks applied, or why the pack
+// fails container.pack, after which index is unspecified. readAt returns the bytes [offset, offset + size) of the pack,
+// which the walk bounds by validEnd first. liveBytes, packLiveBytes of index, follows the blocks applied.
 struct PackIndexRead {
+    uint64_t latestBlock { 0 }; // the block validEnd's trailer gives: the next read of a longer valid end stops at it
     uint64_t blocks { 0 };
     uint64_t deltasSinceFull { 0 }; // the delta blocks applied; with reachedFull, all of those since the full index
     bool reachedFull { false }; // the walk reached a full index, so index holds only what the applied blocks list
 };
-std::expected<PackIndexRead, PackRejection> readPackIndex(const PackRoot&, std::optional<uint64_t> stopAt, PackIndex&, uint64_t& liveBytes,
+std::expected<PackIndexRead, PackRejection> readPackIndex(uint64_t validEnd, std::optional<uint64_t> stopAt, PackIndex&, uint64_t& liveBytes,
     const ScopedLambda<std::span<const uint8_t>(uint64_t offset, uint64_t size)>& readAt);
 
 // The bytes a pack's live bodies take: its prefix and the extents of the records its index lists. The rest of its valid
@@ -216,8 +225,7 @@ struct BodyOpen {
 // from MonotonicTime, which the vDSO serves.
 struct IndexStatistics {
     uint64_t bodies { 0 }; // the keys the index lists now
-    uint64_t generation { 0 }; // the root the index follows now
-    uint64_t packBytes { 0 }; // its valid end
+    uint64_t packBytes { 0 }; // the valid end the index follows now
     uint64_t liveBytes { 0 }; // packLiveBytes of the index now
     uint64_t tableBytes { 0 }; // the index table's storage now: its buckets times their size
     uint64_t buildNanoseconds { 0 }; // the first reading of the pack: its mapping and its whole index
@@ -261,9 +269,9 @@ struct SavedSummaryRead {
 };
 
 // An opened artifact, which the VMs of a process that open one artifact share. It maps the pack once and follows its root:
-// every read first loads the two slots' generations from the mapping, and only when they moved does it read the new root
-// and apply the index blocks appended since, or, when the mapped pack was retired or outgrew its mapping, map the path
-// again and read the whole index. Everything outside m_indexLock is immutable once the object is built. m_indexLock is a
+// every read first loads the root from the mapping, and only when the valid end grew does it apply the index blocks
+// appended since, or, when the mapped pack was retired or outgrew its mapping, map the path again and read the whole
+// index. A valid end that shrank within a file is damage. Everything outside m_indexLock is immutable once the object is built. m_indexLock is a
 // leaf: nothing under it takes another lock, the only system calls made under it are a new mapping's, and it is never held
 // while a body is validated or while any lane, JSC or the collector is called.
 class OpenedArtifact final : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<OpenedArtifact> {
@@ -293,7 +301,7 @@ private:
     std::optional<StoreFailure> follow() WTF_REQUIRES_LOCK(m_indexLock);
     // Maps cache/pack afresh and reads its whole index; on failure keeps what the object had.
     std::optional<ArtifactReadFailure> reopen(uint64_t minimumCapacity) WTF_REQUIRES_LOCK(m_indexLock);
-    std::optional<StoreFailure> applyRoot(const PackRoot&) WTF_REQUIRES_LOCK(m_indexLock);
+    std::optional<StoreFailure> applyValidEnd(uint64_t) WTF_REQUIRES_LOCK(m_indexLock);
 
     const int m_parentFd; // O_PATH | O_DIRECTORY
     const int m_cacheFd;
@@ -301,7 +309,8 @@ private:
     Lock m_indexLock;
     PackIndex m_index WTF_GUARDED_BY_LOCK(m_indexLock);
     RefPtr<MappedPack> m_pack WTF_GUARDED_BY_LOCK(m_indexLock);
-    PackRoot m_root WTF_GUARDED_BY_LOCK(m_indexLock);
+    uint64_t m_validEnd WTF_GUARDED_BY_LOCK(m_indexLock) { 0 }; // the root the index follows
+    uint64_t m_latestBlock WTF_GUARDED_BY_LOCK(m_indexLock) { 0 }; // the index block that ends those valid bytes
     uint64_t m_liveBytes WTF_GUARDED_BY_LOCK(m_indexLock) { packPrefixBytes };
     uint64_t m_deltasSinceFull WTF_GUARDED_BY_LOCK(m_indexLock) { 0 };
     std::optional<StoreFailure> m_damage WTF_GUARDED_BY_LOCK(m_indexLock);

@@ -1,5 +1,5 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --forceCodeBlockToJettisonDueToOldAge=true; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-capture=compiled; Consumer
+// jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-delta-capture=compiled; Consumer
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer --jitCacheImportLLIntProgress=false
 // jitcache-runs: Producer --jitcache-delta-at-exit; ConsumerProducer --jitcache-delta-at-exit; Consumer
 
@@ -11,7 +11,7 @@
 //   Consumer each imports at its first call (statistics) with no install, its CodeBlocks start in the LLInt, and roSmall's
 //   counter keeps the 45 points the Producer left: its baseline compile comes at the call that the carried progress
 //   gives, earlier than a JITCache-off run's.
-// - Sequence 1, with the capture scope compiled: none of them has a body, and the Consumer generates them.
+// - Sequence 1, with the delta capture compiled: none of them has a body, and the Consumer generates them.
 // - Sequence 2, with jitCacheImportLLIntProgress off in the Consumer: roSmall imports, and its counter arms from zero, so
 //   it compiles at the JITCache-off run's call.
 // - Sequence 3: the ConsumerProducer imports roSmall without an image, runs it until it compiles natively, and that
@@ -51,7 +51,8 @@ load("./resources/sections.js", "caller relative");
             }
             const result = t.captureDelta();
             const imageless = t.sequence !== 1;
-            // roHot's finalize capture already holds what it learned, so with the scope compiled the delta may commit nothing.
+            // roHot's finalize capture already holds what it learned, so with the delta capture compiled the delta may commit
+            // nothing.
             if (imageless)
                 t.check(result.committedBodies >= 1, () => `the delta committed ${t.describe(result)}`);
             for (const name of ["roSmall", "roArrow", "roDead"]) {

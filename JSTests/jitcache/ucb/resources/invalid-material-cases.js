@@ -161,7 +161,7 @@ var invalidMaterialCases = (function () {
             unevenConstants: () => functionWhere("a constant count that is not a multiple of 8", b => b.identity().constantCount % 8),
             paddedIdentity: () => functionWhere("padding after its ucb.identity maps", b => {
                 const identity = b.identity();
-                return identity.end < identity.bytes.length;
+                return identity.end < identity.childHolderDigests;
             }),
             paddedFeedback: () => functionWhere("padding after its ucb.feedback constant bits", b => {
                 const feedback = b.feedback();

@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <wtf/FixedVector.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
@@ -52,6 +53,8 @@ struct UCBStatistics {
     uint64_t contextDigests { 0 }; // context digests computed, by requests and captures (section 3.4)
     uint64_t holderDigests { 0 }; // holder digests computed, by requests (C11, a root's context) and captures
     uint64_t tdzEnvironmentDigests { 0 }; // TDZ environments digested, each once while it lives (section 3.4)
+    uint64_t childHolderDigests { 0 }; // holder digests a capture computed for the child UFEs of the UCB it captured
+    uint64_t vouchedHolderChecks { 0 }; // holder checks that had the digest an imported parent's body lists for the child UFE
     std::array<uint64_t, 10> misses { }; // indexed by MissReason
     std::array<uint64_t, 3> records { }; // indexed by UCBOrigin
     std::array<uint64_t, 6> invalidMaterial { }; // indexed by InvalidMaterialStep
@@ -65,17 +68,22 @@ static_assert(static_cast<size_t>(InvalidMaterialStep::SuppliedDigest) + 1 == st
 // key relies on, kept only in a VM that imports with strict on, so that the import can verify it (section 7.3.1, step 4e);
 // else null, and always null for a direct eval and everything nested in one (section 3.5).
 // What the children of one recorded UCB share: its key and suppliedDigestProvider, kept once per parent and alive while
-// any of its child UFEs has an entry.
+// any of its child UFEs has an entry. A UCB imported from a body that lists its children's holder digests also keeps them,
+// declarations then expressions, which the holder check compares for the child UFEs its decode made.
 class ParentIdentity final : public ThreadSafeRefCounted<ParentIdentity> {
 public:
-    static Ref<ParentIdentity> create(const BodyKey&, RefPtr<SourceProvider>&& suppliedDigestProvider);
+    static Ref<ParentIdentity> create(const BodyKey&, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount = 0, std::span<const uint8_t> childHolderDigests = { });
     const BodyKey& key() const LIFETIME_BOUND;
     SourceProvider* suppliedDigestProvider() const;
+    // The digest the parent's body lists for that child, or none when it lists none or a zero digest.
+    std::optional<Digest256> childHolderDigest(ChildTable, uint32_t index) const;
 
 private:
-    ParentIdentity(const BodyKey&, RefPtr<SourceProvider>&&);
+    ParentIdentity(const BodyKey&, RefPtr<SourceProvider>&&, unsigned declarationCount, std::span<const uint8_t> childHolderDigests);
     BodyKey m_key;
     RefPtr<SourceProvider> m_suppliedDigestProvider;
+    unsigned m_declarationCount { 0 };
+    FixedVector<Digest256> m_childHolderDigests;
 };
 
 struct ChildIdentity { // parent never null; 16 bytes
@@ -125,7 +133,7 @@ struct UCBRecord {
     // Origin Decoded, in a VM whose production is active: the butterfly map of the body of provenance Generated the UCB
     // was last seeded or attached from (sections 7.3.3, 7.3.4 and 8.2); ceil(N / 8) bytes.
     std::optional<Vector<uint8_t>> generatedButterflyMap;
-    // Function code, in a VM whose production is active with the capture scope All: the UFE whose request produced the
+    // Function code, in a VM whose production is active with the delta capture All: the UFE whose request produced the
     // UCB, which delta needs to capture a body that no CodeBlock holds (section 8.3). A conservative root can keep the UCB
     // alive after the UFE dies, so the UFE's destructor hook clears the field (section 6.3). Null otherwise.
     UnlinkedFunctionExecutable* holder { nullptr };
@@ -156,7 +164,9 @@ public:
     // Records the UCB and gives each child UFE of its two tables a ChildIdentity, in table order, all referencing one
     // ParentIdentity made from the record's key and suppliedDigestProvider (none for a UCB without children).
     // A UCB that already has a record keeps it (THREAD: a UCB keeps the key it was recorded under); returns false then.
-    bool recordCodeBlock(UnlinkedCodeBlock&, UCBRecord&&);
+    // childHolderDigests: for a UCB imported from a body that lists them, that list (IdentitySection::childHolderDigests),
+    // which the ParentIdentity keeps; empty otherwise.
+    bool recordCodeBlock(UnlinkedCodeBlock&, UCBRecord&&, std::span<const uint8_t> childHolderDigests = { });
     struct RecordView {
         BodyKey key;
         RecordedContext context;

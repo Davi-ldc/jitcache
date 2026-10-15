@@ -23,16 +23,17 @@ namespace JSC::JITCache {
 
 enum class Role : uint8_t { Consumer = 1, Producer = 2, ConsumerProducer = 3 };
 
-// The bodies a producing VM captures (THREAD Capture): with All, delta also captures the bodies that ran without
-// compiling; with Compiled, only baseline compilations are captured. A Consumer captures nothing and ignores it.
-enum class CaptureScope : uint8_t { All = 1, Compiled = 2 };
+// What delta captures beyond the compiled bodies (THREAD Capture): with All, also the bodies that ran without
+// compiling; with Compiled, nothing more. Without a delta only compiled bodies are captured, whatever it says. A
+// Consumer captures nothing and ignores it.
+enum class DeltaCapture : uint8_t { All = 1, Compiled = 2 };
 
 struct Config {
     String artifactPath; // the parent directory of THREAD Storage
     Role role { Role::Consumer };
     std::optional<size_t> producerLimitBytes; // producing roles; empty: defaultProducerLimitBytes (section 16)
     bool strict { false }; // off unless the host turns it on (THREAD Session; section 4.3)
-    CaptureScope captureScope { CaptureScope::All }; // All unless the host sets Compiled (THREAD Session)
+    DeltaCapture deltaCapture { DeltaCapture::All }; // All unless the host sets Compiled (THREAD Session)
     String benchReportPath; // empty: no bench report
     String twinReportPath; // ENABLE(JITCACHE_TWINS) builds; ignored elsewhere
 };
@@ -119,10 +120,10 @@ JS_EXPORT_PRIVATE DeltaResult delta(VM&);
 JS_EXPORT_PRIVATE void flushBenchReport(VM&);
 JS_EXPORT_PRIVATE ASCIILiteral name(StartOutcome);
 JS_EXPORT_PRIVATE ASCIILiteral name(Role);
-JS_EXPORT_PRIVATE ASCIILiteral name(CaptureScope);
+JS_EXPORT_PRIVATE ASCIILiteral name(DeltaCapture);
 JS_EXPORT_PRIVATE ASCIILiteral name(FaultClass);
 JS_EXPORT_PRIVATE std::optional<Role> parseRole(StringView); // "consumer", "producer", "consumer-producer"
-JS_EXPORT_PRIVATE std::optional<CaptureScope> parseCaptureScope(StringView); // "all", "compiled"
+JS_EXPORT_PRIVATE std::optional<DeltaCapture> parseDeltaCapture(StringView); // "all", "compiled"
 
 // One-line JSON for hosts' logs: {"jitcache":"start"|"delta"|"status", ...} with every field of the struct by name,
 // enums as the names above (lowercase, words joined by "-"), faults as {"class","step","detail"}.

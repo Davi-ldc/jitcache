@@ -133,7 +133,6 @@ bool hasCapacityToUseLargeGigacage();
     v(Unsigned, structureHeapSizeInKB, 0, Normal, "Override for Structure Heap size (in KBs) if non-zero"_s) \
     v(Unsigned, jitMemoryReservationSize, 0, Normal, "Set this number to change the executable allocation size in ExecutableAllocatorFixedVMPool. (In bytes.)"_s) \
     v(Size, jitMemoryReservationAddress, 0, Restricted, "If non-zero, we will attempt to allocate JIT memory at the address provided and crash if we cannot.") \
-    v(Bool, jitCachePopulateImagePages, true, Normal, "JITCache: on Linux, an imported image that spans more than one page has its pages populated in one madvise call before the copy; false lets the copy fault them in one by one. A measurement switch."_s) \
     \
     v(Bool, forceCodeBlockLiveness, false, Normal, nullptr) \
     v(Bool, forceICFailure, false, Normal, nullptr) \
@@ -407,6 +406,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Int32, thresholdForJITAfterWarmUp, 500, Normal, nullptr) \
     v(Int32, thresholdForJITSoon, 100, Normal, nullptr) \
     v(Bool, jitCacheImportLLIntProgress, true, Normal, "JITCache: a body imported without baseline code arms its LLInt counter with the progress it carries, at most one invocation short of crossing; false arms it from zero. A measurement switch."_s) \
+    v(Bool, jitCacheVouchedHolderDigests, true, Normal, "JITCache: a child UFE an imported parent's decode made is checked against the holder digest the parent's body lists for it, which strict also recomputes; false computes every child's holder digest. A measurement switch."_s) \
     \
     v(Int32, thresholdForOptimizeAfterWarmUp, 1000, Normal, nullptr) \
     v(Int32, thresholdForOptimizeAfterLongWarmUp, 1000, Normal, nullptr) \

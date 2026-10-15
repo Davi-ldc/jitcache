@@ -139,6 +139,9 @@ static StoreOutcome outcomeOfError(int error)
     return StoreOutcome::Invalid;
 }
 
+// A new artifact's pack: the prefix and an empty full index.
+static constexpr uint64_t emptyPackBytes = packPrefixBytes + packIndexBlockBytes(0);
+
 static uint64_t freshPackIdentifier()
 {
     uint64_t identifier = 0;
@@ -430,15 +433,11 @@ int createEmptyPack(int cacheFd, std::span<const uint8_t, 16> headerDigest)
     PackPrefix prefix;
     memcpySpan(std::span { prefix.headerDigest }, headerDigest);
     prefix.identifier = freshPackIdentifier();
-    std::array<uint8_t, packPrefixBytes + packIndexBlockHeaderBytes> bytes { };
+    std::array<uint8_t, emptyPackBytes> bytes { };
     auto span = std::span { bytes };
-    auto prefixBytes = encodePackPrefix(prefix);
+    auto prefixBytes = encodePackPrefix(prefix, emptyPackBytes);
     memcpySpan(span.first(packPrefixBytes), std::span<const uint8_t> { prefixBytes });
-    auto indexBytes = encodePackIndexBlockHeader({ PackIndexKind::Full, 0, 0 }, { });
-    memcpySpan(span.subspan(packPrefixBytes), std::span<const uint8_t> { indexBytes });
-    PackRoot root { 1, bytes.size(), packPrefixBytes };
-    auto rootBytes = encodePackRoot(root);
-    memcpySpan(span.subspan(packRootSlotOffset(root.generation), packRootSlotBytes), std::span<const uint8_t> { rootBytes });
+    sealPackIndexBlock({ PackIndexKind::Full, 0, 0 }, packPrefixBytes, span.subspan(packPrefixBytes));
 
     TemporaryFileName temporary = temporaryFileName(TemporaryKind::Pack);
     int fd = openAt(cacheFd, temporary.data(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
@@ -465,18 +464,12 @@ bool packHoldsBodies(int cacheFd)
     int fd = openAt(cacheFd, ArtifactNames::pack.characters(), O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
         return errno != ENOENT;
-    std::array<uint8_t, packPrefixBytes> prefix { };
-    int error = readExactly(fd, prefix, 0);
+    // The caller holds the producer lock, so no writer moves the root during the read. Every record pushes the valid end
+    // past the empty pack's, so a root equal to it names only the empty full index.
+    uint64_t validEnd = 0;
+    int error = readExactly(fd, asMutableByteSpan(validEnd), packRootOffset);
     ::close(fd);
-    if (error)
-        return true;
-    std::optional<PackRoot> best;
-    for (uint64_t slot = 0; slot < 2; ++slot) {
-        auto root = decodePackRoot(std::span { prefix }.subspan(packRootSlotOffset(slot)).first<packRootSlotBytes>());
-        if (root && (!best || root->generation > best->generation))
-            best = root;
-    }
-    return !best || best->indexOffset != packPrefixBytes || best->validEnd != packPrefixBytes + packIndexBlockHeaderBytes;
+    return error || validEnd != emptyPackBytes;
 #endif
 }
 
@@ -574,34 +567,52 @@ uint64_t packLiveBytes(const PackIndex& index)
     return bytes;
 }
 
-std::expected<PackIndexRead, PackRejection> readPackIndex(const PackRoot& root, std::optional<uint64_t> stopAt, PackIndex& index,
+std::expected<PackIndexRead, PackRejection> readPackIndex(uint64_t validEnd, std::optional<uint64_t> stopAt, PackIndex& index,
     uint64_t& liveBytes, const ScopedLambda<std::span<const uint8_t>(uint64_t offset, uint64_t size)>& readAt)
 {
-    // Back from the latest block to the full index, or to the block the caller applied last. Offsets strictly decrease
-    // along the chain, which bounds the walk.
+    auto trailerAt = [&](uint64_t offset) {
+        return decodePackIndexTrailer(readAt(offset, packIndexTrailerBytes).first<packIndexTrailerBytes>());
+    };
+    // The valid bytes end with an index block, so the shortest pack is the prefix and an empty full index.
+    if (validEnd % packAlignment || validEnd < packPrefixBytes + packIndexBlockBytes(0))
+        return std::unexpected("the root's valid end cannot end a pack"_s);
+    PackIndexRead result;
+    result.latestBlock = trailerAt(validEnd - packIndexTrailerBytes);
+
+    // Back from the latest block to the full index, or to the block the caller applied last. The latest block ends exactly
+    // at the valid end and every earlier one at or before the start of the block after it, so offsets strictly decrease
+    // along the chain, which bounds the walk. The block the caller applied last is checked too, so a valid end that moved
+    // without a block of its own fails.
     Vector<std::pair<uint64_t, PackIndexBlock>, 16> chain;
-    uint64_t at = root.indexOffset;
-    bool reachedFull = false;
-    while (!(stopAt && at == *stopAt)) {
-        if (at < packPrefixBytes || at % packAlignment || at > root.validEnd || root.validEnd - at < packIndexBlockHeaderBytes)
+    uint64_t at = result.latestBlock;
+    uint64_t limit = validEnd; // where the block at `at` must end: exactly for the latest one, at the latest for the others
+    for (bool latest = true;; latest = false) {
+        if (at < packPrefixBytes || at % packAlignment || at >= limit || limit - at < packIndexBlockBytes(0))
             return std::unexpected("an index block lies outside the valid bytes"_s);
         auto block = decodePackIndexBlockHeader(readAt(at, packIndexBlockHeaderBytes).first<packIndexBlockHeaderBytes>());
         if (!block)
             return std::unexpected(block.error());
-        if (static_cast<uint64_t>(block->count) * packIndexEntryBytes > root.validEnd - at - packIndexBlockHeaderBytes)
-            return std::unexpected("an index block's entries pass the valid end"_s);
+        uint64_t extent = packIndexBlockBytes(block->count);
+        if (extent > limit - at)
+            return std::unexpected("an index block passes the valid end or the block after it"_s);
+        if (latest && extent != limit - at)
+            return std::unexpected("the valid end's trailer gives a block that does not end there"_s);
+        if (trailerAt(at + extent - packIndexTrailerBytes) != at)
+            return std::unexpected("an index block's trailer does not give its start"_s);
+        if (stopAt && at == *stopAt)
+            break;
         chain.append({ at, *block });
         if (block->kind == PackIndexKind::Full) {
-            reachedFull = true;
+            result.reachedFull = true;
             break;
         }
         if (block->previous >= at)
             return std::unexpected("an index block's previous block does not precede it"_s);
+        limit = at;
         at = block->previous;
     }
 
-    PackIndexRead result;
-    if (reachedFull) {
+    if (result.reachedFull) {
         index.clear();
         liveBytes = packPrefixBytes;
     }
@@ -640,7 +651,6 @@ std::expected<PackIndexRead, PackRejection> readPackIndex(const PackRoot& root, 
         if (block.kind == PackIndexKind::Delta)
             ++result.deltasSinceFull;
     }
-    result.reachedFull = reachedFull;
     return result;
 }
 
@@ -653,7 +663,7 @@ MappedPack::MappedPack(std::span<const uint8_t> mapping, uint64_t inode, uint64_
 {
 }
 
-std::expected<Ref<MappedPack>, ArtifactReadFailure> MappedPack::map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity)
+std::expected<PackMapping, ArtifactReadFailure> MappedPack::map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity)
 {
 #if !OS(LINUX)
     UNUSED_PARAM(cacheFd);
@@ -699,12 +709,28 @@ std::expected<Ref<MappedPack>, ArtifactReadFailure> MappedPack::map(int cacheFd,
         return std::unexpected(ArtifactReadFailure { EFBIG, { } });
     }
     void* address = mmap(nullptr, static_cast<size_t>(capacity), PROT_READ, MAP_SHARED, fd, 0);
-    int mapError = address == MAP_FAILED ? errno : 0;
-    ::close(fd);
-    if (mapError)
-        return std::unexpected(ArtifactReadFailure { mapError, { } });
+    if (address == MAP_FAILED) {
+        closeKeepingErrno(fd);
+        return std::unexpected(ArtifactReadFailure { errno, { } });
+    }
     auto mapping = unsafeMakeSpan(static_cast<const uint8_t*>(address), static_cast<size_t>(capacity));
-    return adoptRef(*new MappedPack(mapping, static_cast<uint64_t>(status.st_ino), prefix->identifier));
+    Ref<MappedPack> pack = adoptRef(*new MappedPack(mapping, static_cast<uint64_t>(status.st_ino), prefix->identifier));
+
+    // The producer extends the file before it stores a valid end, so the file's size taken after loading the root holds
+    // it. A root past that size is damage, and rejecting it keeps every read inside the file, since the mapped pages past
+    // the file's end fault.
+    uint64_t validEnd = pack->validEnd();
+    if (validEnd > fileSize) {
+        if (fstat(fd, &status)) {
+            closeKeepingErrno(fd);
+            return std::unexpected(ArtifactReadFailure { errno, { } });
+        }
+        fileSize = static_cast<uint64_t>(status.st_size);
+    }
+    ::close(fd);
+    if (validEnd > fileSize)
+        return std::unexpected(ArtifactReadFailure { 0, "the root's valid end passes the file"_s });
+    return PackMapping { WTF::move(pack), validEnd };
 #endif
 }
 
@@ -723,39 +749,18 @@ std::span<const uint8_t> MappedPack::bytes(uint64_t offset, uint64_t size) const
 
 uint64_t MappedPack::loadWord(size_t offset) const
 {
-    // A producer in another process may be writing these words: each is loaded whole, and the slot's CRC tells a torn
-    // root.
-    return __atomic_load_n(reinterpret_cast<const uint64_t*>(m_mapping.subspan(offset, sizeof(uint64_t)).data()), __ATOMIC_RELAXED);
+    // A producer in this process or another may be storing the word: an aligned 8-byte load sees it whole.
+    return __atomic_load_n(reinterpret_cast<const uint64_t*>(m_mapping.subspan(offset, sizeof(uint64_t)).data()), __ATOMIC_ACQUIRE);
 }
 
-uint64_t MappedPack::highestSlotGeneration() const
+uint64_t MappedPack::validEnd() const
 {
-    return std::max(loadWord(packRootSlotOffset(0)), loadWord(packRootSlotOffset(1)));
+    return loadWord(packRootOffset);
 }
 
 bool MappedPack::isRetired() const
 {
-    bool retired = !!loadWord(packRetiredOffset);
-    std::atomic_thread_fence(std::memory_order_acquire);
-    return retired;
-}
-
-std::optional<PackRoot> MappedPack::currentRoot() const
-{
-    std::optional<PackRoot> best;
-    for (uint64_t slot = 0; slot < 2; ++slot) {
-        std::array<uint8_t, packRootSlotBytes> bytes { };
-        for (size_t index = 0; index < packRootSlotBytes / sizeof(uint64_t); ++index) {
-            uint64_t word = loadWord(packRootSlotOffset(slot) + index * sizeof(uint64_t));
-            memcpySpan(std::span { bytes }.subspan(index * sizeof(uint64_t), sizeof(uint64_t)), asByteSpan(word));
-        }
-        auto root = decodePackRoot(std::span<const uint8_t, packRootSlotBytes> { bytes });
-        if (root && root->generation % 2 == slot && (!best || root->generation > best->generation))
-            best = root;
-    }
-    // The producer writes a root after the bytes it names, with a fence between: a reader that saw the root sees them.
-    std::atomic_thread_fence(std::memory_order_acquire);
-    return best;
+    return !!loadWord(packRetiredOffset);
 }
 
 // Saved summaries.
@@ -832,30 +837,25 @@ OpenedArtifact::~OpenedArtifact()
 std::optional<ArtifactReadFailure> OpenedArtifact::reopen(uint64_t minimumCapacity)
 {
     auto mapped = MappedPack::map(m_cacheFd, headerDigest(), minimumCapacity);
+    // The file grew past the mapping between the size that sized it and the root: map it again with room for that root.
+    // Each mapping has room for twice the root that asked for it, so only a pack that doubles meanwhile asks again.
+    while (mapped && mapped->validEnd > mapped->pack->capacity())
+        mapped = MappedPack::map(m_cacheFd, headerDigest(), mapped->validEnd);
     if (!mapped)
         return mapped.error();
-    auto root = (*mapped)->currentRoot();
-    if (!root)
-        return ArtifactReadFailure { 0, "neither root slot holds a valid root"_s };
-    if (root->validEnd > (*mapped)->capacity()) {
-        mapped = MappedPack::map(m_cacheFd, headerDigest(), root->validEnd);
-        if (!mapped)
-            return mapped.error();
-        root = (*mapped)->currentRoot();
-        if (!root || root->validEnd > (*mapped)->capacity())
-            return ArtifactReadFailure { 0, "the root's valid end passes the file"_s };
-    }
-    Ref<MappedPack> pack = WTF::move(*mapped);
+    Ref<MappedPack> pack = WTF::move(mapped->pack);
+    uint64_t validEnd = mapped->validEnd;
     PackIndex index;
     uint64_t liveBytes = packPrefixBytes;
-    auto read = readPackIndex(*root, std::nullopt, index, liveBytes, [&](uint64_t offset, uint64_t size) {
+    auto read = readPackIndex(validEnd, std::nullopt, index, liveBytes, [&](uint64_t offset, uint64_t size) {
         return pack->bytes(offset, size);
     });
     if (!read)
         return ArtifactReadFailure { 0, read.error() };
 
     m_pack = WTF::move(pack);
-    m_root = *root;
+    m_validEnd = validEnd;
+    m_latestBlock = read->latestBlock;
     m_index = WTF::move(index);
     m_liveBytes = liveBytes;
     m_deltasSinceFull = read->deltasSinceFull;
@@ -868,11 +868,11 @@ std::optional<ArtifactReadFailure> OpenedArtifact::reopen(uint64_t minimumCapaci
     return std::nullopt;
 }
 
-std::optional<StoreFailure> OpenedArtifact::applyRoot(const PackRoot& root)
+std::optional<StoreFailure> OpenedArtifact::applyValidEnd(uint64_t validEnd)
 {
-    if (root.validEnd > m_pack->capacity()) {
+    if (validEnd > m_pack->capacity()) {
         // The pack outgrew the mapping: a new, larger one; bodies borrowed from the old one keep it.
-        if (auto failure = reopen(root.validEnd)) {
+        if (auto failure = reopen(validEnd)) {
             if (failure->error) {
                 ++m_statistics.failedReopens;
                 return std::nullopt;
@@ -884,7 +884,7 @@ std::optional<StoreFailure> OpenedArtifact::applyRoot(const PackRoot& root)
     }
     RefPtr<MappedPack> pack = m_pack;
     // Blocks are applied in place: a failure marks the object damaged for good, so the index is never read again.
-    auto read = readPackIndex(root, m_root.indexOffset, m_index, m_liveBytes, [&](uint64_t offset, uint64_t size) {
+    auto read = readPackIndex(validEnd, m_latestBlock, m_index, m_liveBytes, [&](uint64_t offset, uint64_t size) {
         return pack->bytes(offset, size);
     });
     if (!read) {
@@ -892,7 +892,8 @@ std::optional<StoreFailure> OpenedArtifact::applyRoot(const PackRoot& root)
         return m_damage;
     }
     m_deltasSinceFull = read->reachedFull ? read->deltasSinceFull : m_deltasSinceFull + read->deltasSinceFull;
-    m_root = root;
+    m_validEnd = validEnd;
+    m_latestBlock = read->latestBlock;
     m_statistics.appliedBlocks += read->blocks;
     return std::nullopt;
 }
@@ -934,7 +935,7 @@ std::optional<StoreFailure> OpenedArtifact::follow()
             }
         }
         // The rename has not happened yet, or a compaction died between its mark and its rename, which the next producer
-        // or clean repairs: the mapped pack stays current until then. A rename follows its mark within microseconds, so
+        // or compact repairs: the mapped pack stays current until then. A rename follows its mark within microseconds, so
         // every read looks again during the first second, and a mark older than that is looked at once per interval.
         ++m_statistics.failedReopens;
         if (!m_retiredSince)
@@ -944,14 +945,16 @@ std::optional<StoreFailure> OpenedArtifact::follow()
     } else
         m_retiredSince = MonotonicTime { };
 
-    if (m_pack->highestSlotGeneration() == m_root.generation)
+    uint64_t validEnd = m_pack->validEnd();
+    if (validEnd == m_validEnd)
         return std::nullopt;
-    auto root = m_pack->currentRoot();
-    // A root being written fails its CRC and the other slot holds the one before it; the next read sees the new one.
-    if (!root || root->generation <= m_root.generation)
-        return std::nullopt;
+    if (validEnd < m_validEnd) {
+        // Within a file the valid end only grows.
+        m_damage = StoreFailure { ContainerChecks::pack, 0, "the root's valid end moved back"_s };
+        return m_damage;
+    }
     MonotonicTime start = MonotonicTime::now();
-    auto failure = applyRoot(*root);
+    auto failure = applyValidEnd(validEnd);
     ++m_statistics.refreshes;
     m_statistics.refreshNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
     return failure;
@@ -984,8 +987,7 @@ IndexStatistics OpenedArtifact::statistics()
     Locker locker { m_indexLock };
     IndexStatistics statistics = m_statistics;
     statistics.bodies = m_gone ? 0 : m_index.size();
-    statistics.generation = m_root.generation;
-    statistics.packBytes = m_root.validEnd;
+    statistics.packBytes = m_validEnd;
     statistics.liveBytes = m_liveBytes;
     statistics.tableBytes = static_cast<uint64_t>(m_index.capacity()) * sizeof(PackIndex::KeyValuePairType);
     return statistics;

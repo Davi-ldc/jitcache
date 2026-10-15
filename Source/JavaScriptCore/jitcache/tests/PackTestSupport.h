@@ -216,19 +216,31 @@ public:
         return written;
     }
 
-    // The pack's current root, read from the file.
-    std::optional<PackRoot> root() const
+    // The pack's root, its valid end, read from the file.
+    std::optional<uint64_t> validEnd() const
     {
         auto bytes = readPack();
         if (!bytes || bytes->size() < packPrefixBytes)
             return std::nullopt;
-        std::optional<PackRoot> best;
-        for (uint64_t slot = 0; slot < 2; ++slot) {
-            auto root = decodePackRoot(bytes->span().subspan(packRootSlotOffset(slot)).first<packRootSlotBytes>());
-            if (root && (!best || root->generation > best->generation))
-                best = root;
-        }
-        return best;
+        uint64_t validEnd = 0;
+        memcpySpan(asMutableByteSpan(validEnd), bytes->span().subspan(packRootOffset, sizeof(validEnd)));
+        return validEnd;
+    }
+
+    // The latest index block's offset: the trailer that ends the valid bytes.
+    std::optional<uint64_t> latestBlock() const
+    {
+        auto bytes = readPack();
+        auto end = validEnd();
+        if (!bytes || !end || *end < packPrefixBytes + packIndexTrailerBytes || *end > bytes->size())
+            return std::nullopt;
+        return decodePackIndexTrailer(bytes->span().subspan(*end - packIndexTrailerBytes).first<packIndexTrailerBytes>());
+    }
+
+    // Overwrites the root, as damage or another process would.
+    bool writeValidEnd(uint64_t validEnd)
+    {
+        return writePackAt(packRootOffset, asByteSpan(validEnd));
     }
 
     uint64_t packFileSize() const

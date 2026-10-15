@@ -37,7 +37,7 @@
 #include <wtf/text/MakeString.h>
 
 // The capture of bodies that ran without compiling (THREAD Capture; SPEC-ucb.md section 8.3, SPEC-integrator.md sections
-// 3.2 and 8.6): the capture scope at start, the registry's walk and the holders its records keep, the tier-0 scores and
+// 3.2 and 8.6): the delta capture at start, the registry's walk and the holders its records keep, the tier-0 scores and
 // counter arithmetic, container check B2, and delta end to end, from the producer's commit to the consumer's import. The
 // tests that configure a VM run strict on temporary directories.
 
@@ -104,7 +104,7 @@ private:
     JSLockHolder m_locker;
 };
 
-static Config strictConfig(const String& path, Role role, CaptureScope scope = CaptureScope::All)
+static Config strictConfig(const String& path, Role role, DeltaCapture deltaCapture = DeltaCapture::All)
 {
     Config config;
     config.artifactPath = path;
@@ -112,7 +112,7 @@ static Config strictConfig(const String& path, Role role, CaptureScope scope = C
     if (role != Role::Consumer)
         config.producerLimitBytes = 64 * MB;
     config.strict = true;
-    config.captureScope = scope;
+    config.deltaCapture = deltaCapture;
     return config;
 }
 
@@ -215,37 +215,37 @@ static bool sameScore(const CaptureScore& a, const CaptureScore& b)
 
 using namespace RunOnceCaptureTestsInternal;
 
-// T-START, the capture scope: the flag's two spellings, All by default, a value outside the enumeration rejected at
+// T-START, the delta capture: the flag's two spellings, All by default, a value outside the enumeration rejected at
 // start.config with the VM left unconfigured, and the state's answers. Only a producing role with All records holders.
-JITCACHE_TEST(runOnceCaptureScopeAtStart, Yes)
+JITCACHE_TEST(runOnceDeltaCaptureAtStart, Yes)
 {
-    JITCACHE_CHECK(parseCaptureScope("all"_s) == CaptureScope::All);
-    JITCACHE_CHECK(parseCaptureScope("compiled"_s) == CaptureScope::Compiled);
-    JITCACHE_CHECK(!parseCaptureScope("All"_s));
-    JITCACHE_CHECK(!parseCaptureScope(""_s));
-    JITCACHE_CHECK(name(CaptureScope::All) == "all"_s);
-    JITCACHE_CHECK(name(CaptureScope::Compiled) == "compiled"_s);
-    JITCACHE_CHECK(Config { }.captureScope == CaptureScope::All);
+    JITCACHE_CHECK(parseDeltaCapture("all"_s) == DeltaCapture::All);
+    JITCACHE_CHECK(parseDeltaCapture("compiled"_s) == DeltaCapture::Compiled);
+    JITCACHE_CHECK(!parseDeltaCapture("All"_s));
+    JITCACHE_CHECK(!parseDeltaCapture(""_s));
+    JITCACHE_CHECK(name(DeltaCapture::All) == "all"_s);
+    JITCACHE_CHECK(name(DeltaCapture::Compiled) == "compiled"_s);
+    JITCACHE_CHECK(Config { }.deltaCapture == DeltaCapture::All);
 
     auto directory = TemporaryDirectory::create(context);
     if (!directory)
         return;
     VM& vm = *context.vm();
     for (uint8_t value : { 0, 3, 255 }) {
-        StartResult result = JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, static_cast<CaptureScope>(value)));
-        if (startsAs(context, "a scope outside the enumeration"_s, result, StartOutcome::Rejected, "start.config"_s))
-            JITCACHE_CHECK(result.detail.contains("captureScope"_s));
+        StartResult result = JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, static_cast<DeltaCapture>(value)));
+        if (startsAs(context, "a delta capture outside the enumeration"_s, result, StartOutcome::Rejected, "start.config"_s))
+            JITCACHE_CHECK(result.detail.contains("deltaCapture"_s));
         JITCACHE_CHECK(!vm.jitCacheState());
     }
 
-    if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, CaptureScope::Compiled)), StartOutcome::Started))
+    if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, DeltaCapture::Compiled)), StartOutcome::Started))
         return;
-    JITCACHE_CHECK(vm.jitCacheState()->captureScope() == CaptureScope::Compiled);
+    JITCACHE_CHECK(vm.jitCacheState()->deltaCapture() == DeltaCapture::Compiled);
     JITCACHE_CHECK(!vm.jitCacheState()->capturesUncompiledBodies());
     {
         ExtraVM producer;
         if (startsAs(context, "a Producer with All"_s, JITCache::start(producer.vm(), strictConfig(directory->path("other"_s), Role::Producer)), StartOutcome::Started)) {
-            JITCACHE_CHECK(producer.vm().jitCacheState()->captureScope() == CaptureScope::All);
+            JITCACHE_CHECK(producer.vm().jitCacheState()->deltaCapture() == DeltaCapture::All);
             JITCACHE_CHECK(producer.vm().jitCacheState()->capturesUncompiledBodies());
         }
     }
@@ -424,9 +424,9 @@ JITCACHE_TEST(runOnceContainerAcceptsTierZero, No)
 
 #if ENABLE(JIT)
 
-// Delta with the scope All, end to end (SPEC-integrator.md section 8.6, phase 3): the program and the functions that ran
-// without compiling commit at tier 0, with L the carried LLInt progress and P zero, and the kept score is the one
-// scoreSections gives their sections. The scope Compiled commits none of them. A consumer imports them with no pending
+// Delta with the delta capture All, end to end (SPEC-integrator.md section 8.6, phase 3): the program and the functions
+// that ran without compiling commit at tier 0, with L the carried LLInt progress and P zero, and the kept score is the
+// one scoreSections gives their sections. The delta capture Compiled commits none of them. A consumer imports them with no pending
 // import, so their CodeBlocks start in the LLInt, and the counter keeps the carried progress. A later baseline
 // compilation's capture replaces the tier-0 body.
 JITCACHE_TEST(runOnceDeltaCommitsAndConsumerImports, Yes)
@@ -437,10 +437,10 @@ JITCACHE_TEST(runOnceDeltaCommitsAndConsumerImports, Yes)
     String artifact = directory->path("artifact"_s);
     VM& vm = *context.vm();
 
-    // The scope Compiled first, on an artifact of its own: nothing compiled, so nothing commits.
+    // The delta capture Compiled first, on an artifact of its own: nothing compiled, so nothing commits.
     {
         ExtraVM compiled;
-        if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(compiled.vm(), strictConfig(directory->path("compiled"_s), Role::Producer, CaptureScope::Compiled)), StartOutcome::Started))
+        if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(compiled.vm(), strictConfig(directory->path("compiled"_s), Role::Producer, DeltaCapture::Compiled)), StartOutcome::Started))
             return;
         if (!evaluateRunOnceSource(context, compiled.vm()))
             return;

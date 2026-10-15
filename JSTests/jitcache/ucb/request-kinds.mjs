@@ -15,7 +15,7 @@ function scaled(value)
 (function main(role, scratch, artifact, sequence) {
     const t = ucbTest(role, scratch, artifact, sequence);
     // The reads surround the call alone: t.check, a body that ran in the Producer, has a body of its own under the default
-    // capture scope and would import between them at its first call.
+    // delta capture and would import between them at its first call.
     const before = t.statistics();
     let total = scaled(1);
     const after = t.statistics();

@@ -783,6 +783,7 @@ static bool testIdentitySection(VM& vm, SelfTestPart& u5)
         .constantCount = constantCount,
         .atomMap = atomMap.span(),
         .butterflyMap = butterflyMap.span(),
+        .childHolderDigests = { },
     };
     IdentitySection functionExpected {
         .coreKind = UnlinkedCodeBlockCoreKind::Function,
@@ -795,6 +796,7 @@ static bool testIdentitySection(VM& vm, SelfTestPart& u5)
         .constantCount = constantCount,
         .atomMap = atomMap.span(),
         .butterflyMap = keptMap.span(),
+        .childHolderDigests = { },
     };
     if (!u5.check(identitySectionSize(constantCount) == roundUpToMultipleOf<8>(identityMapsOffset + 2 * mapBytes), "identitySectionSize disagrees with section 4.2"_s))
         return false;
@@ -1306,6 +1308,7 @@ static bool testAtomization(VM& vm, SelfTestPart& u5)
             .constantCount = count,
             .atomMap = atoms,
             .butterflyMap = butterflies,
+            .childHolderDigests = { },
         };
     };
     IdentitySection identity = identityWith(atomMap.span(), butterflyMap.span(), constantCount);

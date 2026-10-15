@@ -4,7 +4,7 @@
 // error as toJSON lines (SPEC-integrator.md sections 3.1 and 11.1); a Maintenance run writes its summary line to standard
 // output (maintenance sub-SPEC section 5). Each sequence's directory holds artifact/ beside scratch/ (harness sub-SPEC
 // section 7.3).
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const [stdoutPath, stderrPath, scratchPath] = process.argv.slice(2);
@@ -50,22 +50,39 @@ export function checkFinalStatus(expected: Record<string, unknown>) {
   }
 }
 
-// A clean that removed no temporary, since commits create none, and reclaimed bytes exactly when the kill left bytes past
-// the pack's valid end, after which cache/pack ends at its valid end.
-export function checkCleanTruncated(bytesPastValidEnd: boolean) {
-  const lines = readFileSync(stdoutPath, "utf8")
-    .split("\n")
-    .filter(line => line.startsWith("clean: "));
-  if (lines.length !== 1) failCheck(`the clean wrote ${lines.length} summary lines, expected one`);
-  const summary = /^clean: done, (\d+) temporaries removed, (\d+) bytes reclaimed$/.exec(lines[0]);
-  if (!summary) failCheck(`the clean's summary is ${JSON.stringify(lines[0])}`);
-  if (Number(summary[1])) failCheck(`the clean removed ${summary[1]} temporaries, expected none`);
-  if ((Number(summary[2]) > 0) !== bytesPastValidEnd)
-    failCheck(`the clean reclaimed ${summary[2]} bytes, expected ${bytesPastValidEnd ? "some" : "none"}`);
+// cache/pack's size and its valid end, the root: 8 bytes little-endian at 56.
+function packEnds(): { fileSize: number; validEnd: number } {
   const pack = readFileSync(join(dirname(scratchPath), "artifact", "cache", "pack"));
   const view = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
-  const generations = [view.getBigUint64(64, true), view.getBigUint64(128, true)];
-  const slot = generations[0] > generations[1] ? 64 : 128;
-  const validEnd = Number(view.getBigUint64(slot + 8, true));
-  if (pack.byteLength !== validEnd) failCheck(`cache/pack holds ${pack.byteLength} bytes past a valid end of ${validEnd}`);
+  return { fileSize: pack.byteLength, validEnd: Number(view.getBigUint64(56, true)) };
+}
+
+// Where the check after a kill records the pack's size for the check after the compact that follows.
+const packSizeAfterKill = () => join(scratchPath, "pack-size-after-kill");
+
+// After a killed commit: cache/pack holds bytes past its valid end exactly when the kill came after the commit appended
+// some and before it stored them in the root.
+export function checkBytesPastValidEnd(expected: boolean) {
+  const { fileSize, validEnd } = packEnds();
+  if ((fileSize > validEnd) !== expected)
+    failCheck(`cache/pack holds ${fileSize - validEnd} bytes past its valid end of ${validEnd}, expected ${expected ? "some" : "none"}`);
+  writeFileSync(packSizeAfterKill(), String(fileSize));
+}
+
+// The compact at ratio 0 after a killed commit: it removed no temporary, since commits create none, and evicted no body;
+// it reclaimed exactly the bytes cache/pack lost since the kill, and the pack now ends at its valid end.
+export function checkCompactCleanup() {
+  const lines = readFileSync(stdoutPath, "utf8")
+    .split("\n")
+    .filter(line => line.startsWith("compact: "));
+  if (lines.length !== 1) failCheck(`the compact wrote ${lines.length} summary lines, expected one`);
+  const summary = /^compact: done, (\d+) temporaries removed, (\d+) bodies evicted, (\d+) bytes reclaimed$/.exec(lines[0]);
+  if (!summary) failCheck(`the compact's summary is ${JSON.stringify(lines[0])}`);
+  if (Number(summary[1])) failCheck(`the compact removed ${summary[1]} temporaries, expected none`);
+  if (Number(summary[2])) failCheck(`the compact evicted ${summary[2]} bodies, expected none`);
+  const sizeAfterKill = Number(readFileSync(packSizeAfterKill(), "utf8"));
+  const { fileSize, validEnd } = packEnds();
+  if (fileSize !== validEnd) failCheck(`cache/pack holds ${fileSize - validEnd} bytes past its valid end of ${validEnd}`);
+  if (Number(summary[3]) !== sizeAfterKill - fileSize)
+    failCheck(`the compact reclaimed ${summary[3]} bytes, but cache/pack went from ${sizeAfterKill} to ${fileSize} bytes`);
 }

@@ -23,17 +23,17 @@ class OpenedArtifact;
 class ProducerBudget;
 class ProducerLock;
 struct PackIndexEntry;
-struct PackRoot;
 
 // The checks a commit fails at: the budget's own fault for a refused charge, and the writer's steps. The capture glue
 // raises each as a recording fault with the failure's detail.
 namespace WriterChecks {
 inline constexpr ASCIILiteral budgetLimit = "budget.limit"_s; // the staging charge, or rewriteSection's copy
-inline constexpr ASCIILiteral openPack = "writer.open"_s; // opening cache/pack for writing
+inline constexpr ASCIILiteral openPack = "writer.open"_s; // opening cache/pack for writing, and mapping its prefix
 inline constexpr ASCIILiteral section = "writer.section"_s; // sources whose sizes give no layout, or a source that broke its size or failed
 inline constexpr ASCIILiteral write = "writer.write"_s; // the record or the index block
 inline constexpr ASCIILiteral reread = "writer.reread"_s; // the record read back fails its checks
-inline constexpr ASCIILiteral publish = "writer.publish"_s; // the root
+// The opened artifact cannot follow the root the commit stored. The store itself cannot fail, so no fault hook names it.
+inline constexpr ASCIILiteral publish = "writer.publish"_s;
 #if ENABLE(JITCACHE_TWINS)
 // rewriteSection had nothing it could rewrite: open did not answer Found, the kind names no section the body's highest
 // tier requires, or the range does not lie inside that section. Nothing is written when it fails.
@@ -91,7 +91,7 @@ struct CommitResult {
 struct CommitTiming {
     std::array<uint64_t, numberOfSectionKinds> streamNanoseconds { }; // by SectionKind; 0 for a kind the commit lacks
     uint64_t rereadNanoseconds { 0 };
-    uint64_t publishNanoseconds { 0 }; // the index block, the root and the index update
+    uint64_t publishNanoseconds { 0 }; // the index block, the root's store and the index update
 };
 struct CommitFailure {
     ASCIILiteral check; // budget.limit or a writer.* step
@@ -112,11 +112,11 @@ struct CompactionFailure {
     ASCIILiteral check;
     String detail;
 };
-// A pack to compact: its mapping, its root and its index as a reader built them, and a descriptor of the same file opened
-// for writing, which receives the retired mark.
+// A pack to compact: its mapping, its valid end and its index as a reader built them, and a descriptor of the same file
+// opened for writing, which receives the retired mark.
 struct CompactionSource {
     const MappedPack& pack;
-    const PackRoot& root;
+    uint64_t validEnd;
     std::span<const PackIndexEntry> entries; // the live entries, in strictly increasing key order
     int writableFd;
 };
@@ -141,10 +141,10 @@ struct CompactionTarget {
 // The writer. Each producing VMState owns one, over the shared OpenedArtifact, the ProducerLock and the budget it holds;
 // the state destroys the writer before all three. A commit runs on the VM thread inside the capture: it appends a record
 // at the pack's valid end, streaming, checksumming and counting the sources through the staging buffer, rereads and
-// validates the body in Full mode, appends an index block naming the record, and publishes the next root, which is the
-// commit point; it then has the opened artifact follow that root. A failure before the root leaves bytes past the valid
-// end, which no reader sees and the next commit overwrites. Apart from the staging buffer, a failure's detail and an
-// occasional full index, a commit allocates nothing. It reads no lane format.
+// validates the body in Full mode, appends an index block naming the record, and stores the new valid end in the root,
+// which is the commit point; it then has the opened artifact follow that root. A failure before the store leaves bytes
+// past the valid end, which no reader sees and the next commit overwrites. Apart from the staging buffer, a failure's
+// detail and an occasional full index, a commit allocates nothing. It reads no lane format.
 class ArtifactWriter {
     WTF_MAKE_NONCOPYABLE(ArtifactWriter);
     WTF_MAKE_TZONE_ALLOCATED(ArtifactWriter);
@@ -156,15 +156,15 @@ public:
     std::expected<CommitResult, CommitFailure> commit(const CommitStamp&, const CommitSections&, CommitTiming* = nullptr);
     // Appends a tombstone for a key the index lists and publishes it; a key without a body is left alone.
     std::optional<CommitFailure> remove(const BodyKey&);
-    // The end of a delta: compacts the pack once its dead bytes pass half of its valid bytes. Returns the compaction, or
-    // nothing when the pack stays.
+    // The end of a delta: compacts the pack unless it already holds only its live records and one full index. Returns the
+    // compaction, or nothing when the pack stays.
     std::expected<std::optional<CompactionResult>, CompactionFailure> compactIfNeeded(bool timed);
     void releaseStagingBuffer(); // the end of production
 
-    // Writes the source's live bodies, except the excluded keys, into a new pack: a temporary holding a fresh prefix, the
-    // records in the entries' order, a full index and the root of the next generation; rereads its root and index, marks
-    // the source retired and renames the temporary over cache/pack. The caller holds the producer lock. A failure before
-    // the mark leaves the artifact as it was and no temporary.
+    // Writes the source's live bodies, except the excluded keys, into a new pack: a temporary holding the records in the
+    // entries' order, a full index and then a fresh prefix whose root names the index's end; rereads its prefix and index,
+    // marks the source retired and renames the temporary over cache/pack. The caller holds the producer lock. A failure
+    // before the mark leaves the artifact as it was and no temporary.
     static std::expected<CompactionResult, CompactionFailure> compactPack(const CompactionTarget&, const CompactionSource&,
         const ScopedLambda<bool(const BodyKey&)>& excludes, bool timed);
 
@@ -175,7 +175,7 @@ public:
 #if ENABLE(JITCACHE_TWINS)
     // n counts this writer's commits from 1, or its compactions for a compaction.* check or point.
     struct FaultForTesting {
-        ASCIILiteral check; // writer.open, writer.write, writer.reread, writer.publish, or a compaction.* step
+        ASCIILiteral check; // writer.open, writer.write, writer.reread, or a compaction.* step
         uint64_t n;
     };
     void setFaultForTesting(std::optional<FaultForTesting>);
@@ -190,8 +190,6 @@ public:
     // compaction-before-rename and compaction-after-rename.
     static ASCIILiteral name(KillPoint);
     static std::optional<KillPoint> killPointNamed(StringView);
-    // compactIfNeeded compacts whenever the pack holds a dead byte.
-    void setCompactsEagerlyForTesting(bool);
     // Opens the key's current body in Full mode through OpenedArtifact::open, copies its sections into a buffer charged
     // to the budget, overwrites bytes.size() bytes of the kind's section at offset, and commits the copy under the opened
     // body's key, tier, L and P, which recomputes every checksum and draws a fresh commit identifier.
@@ -201,11 +199,12 @@ public:
 private:
     // The staging buffer, charged before it is allocated and kept until production ends.
     bool ensureStagingBuffer();
-    // A descriptor of the file the opened artifact maps, opened for writing; clears a retired mark an abandoned
-    // compaction left on it. Returns 0 or the errno of the call that failed.
+    // A descriptor of the file the opened artifact maps, opened for writing, and its prefix mapped shared and writable;
+    // clears a retired mark an abandoned compaction left on it. Returns 0 or the errno of the call that failed.
     int ensurePackOpen();
-    // Appends one index block after the bytes up to end and publishes the root naming it. With a record entry, the block
-    // is a full index once the chain since the last one reaches packDeltaChainBound and the budget accepts its buffer.
+    void closePack();
+    // Appends one index block after the bytes up to end and stores its end in the root. With a record entry, the block is
+    // a full index once the chain since the last one reaches packDeltaChainBound and the budget accepts its buffer.
     std::optional<CommitFailure> publish(const PackIndexEntry&, uint64_t end);
 
     OpenedArtifact& m_artifact;
@@ -215,12 +214,12 @@ private:
     MallocSpan<uint8_t> m_staging;
     int m_packFd { -1 };
     uint64_t m_packInode { 0 };
+    std::span<uint8_t> m_writablePrefix; // the pack's prefix, MAP_SHARED and writable: the root is stored through it
 #if ENABLE(JITCACHE_TWINS)
     uint64_t m_commits { 0 };
     uint64_t m_compactions { 0 };
     std::optional<FaultForTesting> m_faultForTesting;
     std::optional<KillForTesting> m_killForTesting;
-    bool m_compactsEagerlyForTesting { false };
     std::optional<ASCIILiteral> m_commitFault; // the armed fault of the commit in progress
 #endif
 };
