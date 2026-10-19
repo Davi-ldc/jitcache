@@ -1,6 +1,6 @@
 # JITCache benches
 
-The beta, run on an Oracle Ampere A1 (Neoverse-N1, 4 OCPU, 24 GB) with the released aarch64 binary of v1.4.2-jitcache-beta.1, 2026-10-15. Each case is a small app in `apps/`, called the way a serverless platform calls a function, with the same request every call. A producer served 100 calls and saved with delta(vm) at exit, and the processes with JITCache read its cache from a warm page cache (assuming you will be downloading it). Every Bun process ran pinned to one CPU. Times are the median of 30 processes without and with JITCache.
+The beta, run on an Oracle Ampere A1 (Neoverse-N1, 4 OCPU, 24 GB) with the released aarch64 binary of v1.4.2-jitcache-beta.1, 2026-10-15. Each case is a small app in `apps/`, called the way a serverless platform calls a function, with the same request every call. A producer served 100 calls and saved the JIT code with delta(vm) at exit, and a processes with JITCache read its from a warm page cache (assuming you will be downloading it). Every Bun process ran pinned to one CPU. Times are the median of 30 processes without and with JITCache.
 
 | case | request 3 | requests 2-35 | requests 2-500 | startup + request 1 |
 |---|---|---|---|---|
@@ -9,6 +9,10 @@ The beta, run on an Oracle Ampere A1 (Neoverse-N1, 4 OCPU, 24 GB) with the relea
 | react-ssr | 79% faster | 12% faster | 3% faster | 47.4 → 31.0 ms |
 | preact-ssr | 18% faster | 3% faster | 2% faster | 16.5 → 15.4 ms |
 | webhook | 30% faster | 50% faster | 19% faster | 50.0 → 45.7 ms |
+
+# Currenty state
+
+![JSC JIT tiers with JITCache](../../docs/images/jitcache_stair.png)
 
 # difference
 
