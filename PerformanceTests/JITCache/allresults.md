@@ -91,7 +91,7 @@ hono's fixed branch, the first case of every repetition, does not measure JITCac
 
 ## Bun's own benches
 
-Three cases port benches from Bun's `bench/` directory, measured like the others: a fresh process per run, its calls timed one by one, with JITCache against without.
+Two cases port benches from Bun's `bench/` directory, measured like the others: a fresh process per run, its calls timed one by one, with JITCache against without.
 
 First results, bundled, warm page cache, from the first two repetitions of one run (18 processes per mode); five full runs follow. Times in ms, without → with JITCache:
 
@@ -99,20 +99,18 @@ First results, bundled, warm page cache, from the first two repetitions of one r
 |---|---|---|---|---|---|---|---|---|
 | express | fixed | 99.0 → 64.4 | 35% | 34.6 ms | 32.9 → 25.0 | 24% | 220 → 195 | 11% |
 | express | varied | 98.9 → 65.9 | 33% | 33.0 ms | 37.7 → 25.3 | 33% | 249 → 222 | 11% |
-| chat | fixed | 29.1 → 25.8 | 11% | 3.3 ms | 610 → 609 | same | 8758 → 8783 | same |
 | postgres | fixed | 45.0 → 39.9 | 11% | 5.1 ms | 368 → 335 | 9% | 4789 → 4787 | same |
 
-A chat round is mostly Bun's native WebSocket publishing to 32 clients, and over 500 calls postgres mostly waits on the database, so JITCache's gain there is at startup.
+Over 500 calls postgres mostly waits on the database, so JITCache's gain there is at startup and in the early calls.
 
 - express: the hello-world app of `bench/express`, an express 5 server on a loopback port. Each call goes through Bun's `fetch`, a TCP socket and Bun's `node:http` server into express. The varied branch adds a query string, `HEAD /` and requests no route takes, which express answers with 404, so express has five request variants where the other cases have ten.
-- chat: the chat room of `bench/websocket-server`, `Bun.serve` with 32 WebSocket clients in the same process. A call is one round: every client sends upstream's 50-message list, and the call ends when every client has received all 1600 messages back.
 - postgres: the queries of `bench/postgres` through Bun's SQL client. A call is one batch of 100 concurrent `SELECT * FROM "users_bun_bench" LIMIT 100`. Startup opens one connection and call 1 opens the pool's other nine, so startup plus request 1 is mostly connection setup on the server's side.
 
-chat and postgres send one request, as upstream does, so they run in the fixed branch alone. postgres runs only when `--cases` names it, and it needs a PostgreSQL server, which `postgres.sh` runs in a docker container on 127.0.0.1:55432, seeded with upstream's 100 users:
+postgres sends one request, as upstream does, so it runs in the fixed branch alone. It runs only when `--cases` names it, and it needs a PostgreSQL server, which `postgres.sh` runs in a docker container on 127.0.0.1:55432, seeded with upstream's 100 users:
 
 ```sh
 ./postgres.sh start
-bun bench.ts --bun=<a bun-ci-release build> --variants=bundle --cases=express,chat,postgres
+bun bench.ts --bun=<a bun-ci-release build> --variants=bundle --cases=express,postgres
 ./postgres.sh stop
 ```
 
@@ -120,9 +118,8 @@ The script needs only docker (on Ubuntu, the `docker.io` package, run by a user 
 
 Where the ports differ from upstream:
 
-- Upstream loads each server from another process for a fixed time and reports throughput. Here the clients run in the measured process: express's is Bun's `fetch` on one keep-alive connection, about 1.8 of 14.7 ms in requests 2-35, and chat's 32 clients are raw sockets whose writes take about 1.5% of a round and whose reads of the 1.3 MB of echoes also run on that CPU. Both cost the same with and without JITCache, so they lower the ratio without biasing it.
-- chat: a round sends the 50-message list once, where upstream's sends it 32 times, which would take a 500-call process about 95 s; upstream starts each round from a 64 ms timer, while here rounds run back to back; the server no longer publishes `ready` to a client process, and the CLIENTS_COUNT and PORT settings are fixed.
+- Upstream loads each server from another process for a fixed time and reports throughput. Here express's client runs in the measured process: Bun's `fetch` on one keep-alive connection, about 1.8 of 14.7 ms in requests 2-35. It costs the same with and without JITCache, so it lowers the ratio without biasing it.
 - postgres: birth dates are computed from the row number instead of drawn at random, so every run reads the same rows; the app connects to the container by URL instead of reading the environment and stops on an unseeded table instead of inserting; upstream's first batch has 101 queries and it closes the pool at the end.
 - express runs with NODE_ENV=production, as every case does; none of the measured paths reads it.
 
-express and chat join the default cases, so a default run takes longer, and it needs `bun install --frozen-lockfile` in this directory for express before the first build.
+express joins the default cases, so a default run takes longer, and it needs `bun install --frozen-lockfile` in this directory for express before the first build.

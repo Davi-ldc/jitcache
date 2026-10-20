@@ -29,15 +29,14 @@ import { cases } from "./run.ts";
 // The cases, run.ts, calls.ts and node_modules sit beside this file.
 const benchDirectory = import.meta.dir;
 
-const caseNames = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "express", "chat", "postgres", "pdf"] as const;
+const caseNames = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "express", "postgres", "pdf"] as const;
 type CaseName = (typeof caseNames)[number];
 // pdf and postgres run only when --cases names them; postgres queries the server postgres.sh starts.
-const defaultCases: CaseName[] = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "express", "chat"];
+const defaultCases: CaseName[] = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "express"];
 const branchNames = ["fixed", "varied"] as const;
 type Branch = (typeof branchNames)[number];
-// The branches a case runs: chat and postgres send the one request their upstream benches send, so they run the fixed
-// branch alone.
-const branchesOf = (options: Options, name: CaseName): Branch[] => (name === "chat" || name === "postgres" ? options.branches.filter(branch => branch === "fixed") : options.branches);
+// The branches a case runs: postgres sends the one request its upstream bench sends, so it runs the fixed branch alone.
+const branchesOf = (options: Options, name: CaseName): Branch[] => (name === "postgres" ? options.branches.filter(branch => branch === "fixed") : options.branches);
 // How a process runs its case: `source` runs run.ts, which imports the app through Bun's runtime transpiler cache;
 // `bundle` runs the app.js of `bun build --target=bun`; `compile` runs the standalone executable of `bun build --compile`;
 // `compile-bytecode` runs the same built with --bytecode, which adds Bun's bytecode cache.
@@ -105,7 +104,7 @@ const usage = `Usage: bun bench.ts --bun=<Bun executable> [options]
   --cases=${defaultCases.join(",")}
                               pdf runs only when named, and in the source variant alone; postgres runs only when
                               named, and needs the server ./postgres.sh start runs
-  --branches=fixed,varied     chat and postgres run the fixed branch alone
+  --branches=fixed,varied     postgres runs the fixed branch alone
   --variants=${variantNames.join(",")}
                               how each process runs its case: source runs run.ts through Bun's transpiler cache,
                               bundle the app.js of bun build --target=bun, compile the executable of bun build
