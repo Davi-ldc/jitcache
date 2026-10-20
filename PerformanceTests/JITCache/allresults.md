@@ -91,7 +91,18 @@ hono's fixed branch, the first case of every repetition, does not measure JITCac
 
 ## Bun's own benches
 
-Three cases port benches from Bun's `bench/` directory, measured like the others: a fresh process per run, its calls timed one by one, with JITCache against without. Their results come in a later run.
+Three cases port benches from Bun's `bench/` directory, measured like the others: a fresh process per run, its calls timed one by one, with JITCache against without.
+
+First results, bundled, warm page cache, from the first two repetitions of one run (18 processes per mode); five full runs follow. Times in ms, without → with JITCache:
+
+| case | branch | startup + request 1 | faster | saved | requests 2-35 | faster | requests 2-500 | faster |
+|---|---|---|---|---|---|---|---|---|
+| express | fixed | 99.0 → 64.4 | 35% | 34.6 ms | 32.9 → 25.0 | 24% | 220 → 195 | 11% |
+| express | varied | 98.9 → 65.9 | 33% | 33.0 ms | 37.7 → 25.3 | 33% | 249 → 222 | 11% |
+| chat | fixed | 29.1 → 25.8 | 11% | 3.3 ms | 610 → 609 | same | 8758 → 8783 | same |
+| postgres | fixed | 45.0 → 39.9 | 11% | 5.1 ms | 368 → 335 | 9% | 4789 → 4787 | same |
+
+A chat round is mostly Bun's native WebSocket publishing to 32 clients, and over 500 calls postgres mostly waits on the database, so JITCache's gain there is at startup.
 
 - express: the hello-world app of `bench/express`, an express 5 server on a loopback port. Each call goes through Bun's `fetch`, a TCP socket and Bun's `node:http` server into express. The varied branch adds a query string, `HEAD /` and requests no route takes, which express answers with 404, so express has five request variants where the other cases have ten.
 - chat: the chat room of `bench/websocket-server`, `Bun.serve` with 32 WebSocket clients in the same process. A call is one round: every client sends upstream's 50-message list, and the call ends when every client has received all 1600 messages back.
