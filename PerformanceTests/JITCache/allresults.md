@@ -88,3 +88,30 @@ Startup plus request 1:
 | webhook | varied | 429 | 445 | 4% slower | 4% slower | 3 to 4% slower |
 
 hono's fixed branch, the first case of every repetition, does not measure JITCache: in all fifteen repetitions the first and third cold process without JITCache started in about 135 ms and the second in about 417 ms, and the processes with JITCache took the mirror image (about 429, 128 and 429 ms). Every second cold process paid about 290 ms whichever mode it ran, so the median says which mode drew more of those slots. The exit of a cold process is left out for the same reason: with and without JITCache it took 0.76 to 1.05 s, which points at the cold procedure rather than at either mode.
+
+## Bun's own benches
+
+Three cases port benches from Bun's `bench/` directory, measured like the others: a fresh process per run, its calls timed one by one, with JITCache against without. Their results come in a later run.
+
+- express: the hello-world app of `bench/express`, an express 5 server on a loopback port. Each call goes through Bun's `fetch`, a TCP socket and Bun's `node:http` server into express. The varied branch adds a query string, `HEAD /` and requests no route takes, which express answers with 404, so express has five request variants where the other cases have ten.
+- chat: the chat room of `bench/websocket-server`, `Bun.serve` with 32 WebSocket clients in the same process. A call is one round: every client sends upstream's 50-message list, and the call ends when every client has received all 1600 messages back.
+- postgres: the queries of `bench/postgres` through Bun's SQL client. A call is one batch of 100 concurrent `SELECT * FROM "users_bun_bench" LIMIT 100`. Startup opens one connection and call 1 opens the pool's other nine, so startup plus request 1 is mostly connection setup on the server's side.
+
+chat and postgres send one request, as upstream does, so they run in the fixed branch alone. postgres runs only when `--cases` names it, and it needs a PostgreSQL server, which `postgres.sh` runs in a docker container on 127.0.0.1:55432, seeded with upstream's 100 users:
+
+```sh
+./postgres.sh start
+bun bench.ts --bun=<a bun-ci-release build> --variants=bundle --cases=express,chat,postgres
+./postgres.sh stop
+```
+
+The script needs only docker (on Ubuntu, the `docker.io` package, run by a user in the `docker` group) and refuses to start when the port is taken. It keeps the server off the highest CPU, the one the bench pins Bun to by default; `./postgres.sh start <cpus>` picks other CPUs when `--cpu` names another, and on a host with SMT the list should leave out that CPU's sibling as well.
+
+Where the ports differ from upstream:
+
+- Upstream loads each server from another process for a fixed time and reports throughput. Here the clients run in the measured process: express's is Bun's `fetch` on one keep-alive connection, about 1.8 of 14.7 ms in requests 2-35, and chat's 32 clients are raw sockets whose writes take about 1.5% of a round and whose reads of the 1.3 MB of echoes also run on that CPU. Both cost the same with and without JITCache, so they lower the ratio without biasing it.
+- chat: a round sends the 50-message list once, where upstream's sends it 32 times, which would take a 500-call process about 95 s; upstream starts each round from a 64 ms timer, while here rounds run back to back; the server no longer publishes `ready` to a client process, and the CLIENTS_COUNT and PORT settings are fixed.
+- postgres: birth dates are computed from the row number instead of drawn at random, so every run reads the same rows; the app connects to the container by URL instead of reading the environment and stops on an unseeded table instead of inserting; upstream's first batch has 101 queries and it closes the pool at the end.
+- express runs with NODE_ENV=production, as every case does; none of the measured paths reads it.
+
+express and chat join the default cases, so a default run takes longer, and it needs `bun install --frozen-lockfile` in this directory for express before the first build.

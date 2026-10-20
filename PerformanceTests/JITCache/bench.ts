@@ -29,12 +29,15 @@ import { cases } from "./run.ts";
 // The cases, run.ts, calls.ts and node_modules sit beside this file.
 const benchDirectory = import.meta.dir;
 
-const caseNames = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "pdf"] as const;
+const caseNames = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "express", "chat", "postgres", "pdf"] as const;
 type CaseName = (typeof caseNames)[number];
-// pdf runs only when --cases names it.
-const defaultCases: CaseName[] = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook"];
+// pdf and postgres run only when --cases names them; postgres queries the server postgres.sh starts.
+const defaultCases: CaseName[] = ["hono", "elysia", "react-ssr", "preact-ssr", "webhook", "express", "chat"];
 const branchNames = ["fixed", "varied"] as const;
 type Branch = (typeof branchNames)[number];
+// The branches a case runs: chat and postgres send the one request their upstream benches send, so they run the fixed
+// branch alone.
+const branchesOf = (options: Options, name: CaseName): Branch[] => (name === "chat" || name === "postgres" ? options.branches.filter(branch => branch === "fixed") : options.branches);
 // How a process runs its case: `source` runs run.ts, which imports the app through Bun's runtime transpiler cache;
 // `bundle` runs the app.js of `bun build --target=bun`; `compile` runs the standalone executable of `bun build --compile`;
 // `compile-bytecode` runs the same built with --bytecode, which adds Bun's bytecode cache.
@@ -99,8 +102,10 @@ const idleWaitSeconds = 300;
 const usage = `Usage: bun bench.ts --bun=<Bun executable> [options]
        bun bench.ts --summarize <results.jsonl>... [--out=<directory>]
 
-  --cases=${defaultCases.join(",")}   pdf runs only when named, and in the source variant alone
-  --branches=fixed,varied
+  --cases=${defaultCases.join(",")}
+                              pdf runs only when named, and in the source variant alone; postgres runs only when
+                              named, and needs the server ./postgres.sh start runs
+  --branches=fixed,varied     chat and postgres run the fixed branch alone
   --variants=${variantNames.join(",")}
                               how each process runs its case: source runs run.ts through Bun's transpiler cache,
                               bundle the app.js of bun build --target=bun, compile the executable of bun build
@@ -1292,7 +1297,7 @@ function repetitionJobs(options: Options, repetition: number): Job[] {
   const second = secondDeltaCaptureOf(options);
   const producers: Mode[] = ["producer", "producerNoDelta", ...(second === null ? [] : [`producer${deltaCaptureName(second)}` as const])];
   for (const name of options.cases) {
-    for (const branch of options.branches) {
+    for (const branch of branchesOf(options, name)) {
       for (const variant of variantsOf(options, name).filter(runsJITCache)) {
         for (const mode of producers) jobs.push({ purpose: "producer", case: name, branch, variant, scenario: null, calls: options.producerCalls, mode, repetition, index: 1 });
       }
@@ -1301,7 +1306,7 @@ function repetitionJobs(options: Options, repetition: number): Job[] {
   for (let index = 1; index <= options.processes; ++index) {
     const colds = [...Array(options.coldProcesses).keys()].filter(cold => Math.floor((cold * options.processes) / options.coldProcesses) + 1 === index);
     for (const name of options.cases) {
-      for (const branch of options.branches) {
+      for (const branch of branchesOf(options, name)) {
         for (const scenario of options.scenarios) {
           const group: Job[] = [];
           for (const variant of variantsOf(options, name)) {
@@ -1332,7 +1337,7 @@ function untimedJobs(options: Options): Job[] {
   const longest = options.scenarios.at(-1)!;
   const second = secondDeltaCaptureOf(options);
   for (const name of options.cases) {
-    for (const branch of options.branches) {
+    for (const branch of branchesOf(options, name)) {
       for (const variant of variantsOf(options, name)) {
         if (options.reports && runsJITCache(variant)) {
           const modes: Mode[] = ["consumer", "consumerCold", ...(second === null ? [] : [`consumer${deltaCaptureName(second)}` as const])];
@@ -1726,12 +1731,16 @@ function describeRun(run: RunRecord, pool: Pool): string {
   const siblings = run.pinnedCpuSiblings.filter(cpu => cpu !== options.cpu);
   const users = run.who ? run.who.split("\n").map(line => line.trim().split(/\s+/).slice(0, 2).join(" on ")).join("; ") : "nobody";
   const deltaCapture = options.deltaCapture ?? [];
+  const fixedOnly = options.branches.length > 1 ? options.cases.filter(name => branchesOf(options, name).length === 1) : [];
+  const unrun = options.cases.filter(name => branchesOf(options, name).length === 0);
   return [
     `${pool.runs.length > 1 ? `Run ${(run.run ?? 0) + 1}: ` : ""}Bun ${run.bun}, revision ${run.revision}.`,
     `Host ${run.host}, kernel ${run.kernel}, ${run.cpus} CPUs (${run.cpuModel ?? "model unknown"}), transparent huge pages ${run.transparentHugePages ?? "n/a"}, ${gibibytes(memory.totalBytes)} of memory (${gibibytes(memory.availableBytes)} available) and ${gibibytes(memory.swapTotalBytes)} of swap (${gibibytes(swapUsed)} in use); logged in: ${users}.`,
     `Every Bun process ran on CPU ${options.cpu}${siblings.length ? `, which shares its core with CPU ${joinWords(siblings.map(String))}` : ""}, and the driver ${run.driverCpu === null ? "had no CPU of its own" : `ran on CPU ${run.driverCpu}`}${run.driverNote ? ` (${run.driverNote})` : ""}.`,
     `${plural(options.repetitions, "repetition", "repetitions")} of ${plural(options.processes, "process", "processes")} per mode in the variants ${joinWords([...options.variants])}, scenarios of ${joinWords(options.scenarios.map(String))} calls, producers of ${options.producerCalls} calls and ${plural(options.coldProcesses, "cold pair", "cold pairs")}, a JITCache-off process and a consumer, per scenario, variant and repetition.`,
     options.cases.includes("pdf") && options.variants.some(isBuilt) ? "pdf reads inputs/pdf relative to its own source file, so it ran in the source variant alone." : "",
+    fixedOnly.length ? `${joinWords(fixedOnly)} ran in the fixed branch alone, since ${fixedOnly.length > 1 ? "they send the one request their upstream benches send" : "it sends the one request its upstream bench sends"}.` : "",
+    unrun.length ? `${joinWords(unrun)} did not run, since ${unrun.length > 1 ? "they run" : "it runs"} the fixed branch alone and the run had none.` : "",
     options.variants.some(variant => !runsJITCache(variant)) ? "compile-bytecode ran with JITCache off only, since JITCache ignores code built with --bytecode: its cold pairs were JITCache-off processes alone." : "",
     deltaCapture.length ? `The producers passed --jitcache-delta-capture=${deltaCapture[0]}${deltaCapture[1] ? `, and producer${deltaCaptureName(deltaCapture[1])} --jitcache-delta-capture=${deltaCapture[1]}` : ""}.` : "",
     options.compareLLIntProgress ? "consumerNoLLIntProgress ran with BUN_JSC_jitCacheImportLLIntProgress=0." : "",

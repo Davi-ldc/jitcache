@@ -15,6 +15,9 @@ export const cases: Record<string, { app: string; requests: string }> = {
   "preact-ssr": { app: "./apps/preact-ssr/index.tsx", requests: "./requests/preact-ssr.json" },
   pdf: { app: "./apps/pdf/index.ts", requests: "./requests/pdf.ts" },
   webhook: { app: "./apps/webhook/index.ts", requests: "./requests/webhook.json" },
+  express: { app: "./apps/express/index.ts", requests: "./requests/express.json" },
+  chat: { app: "./apps/chat/index.ts", requests: "./requests/chat.json" },
+  postgres: { app: "./apps/postgres/index.ts", requests: "./requests/postgres.json" },
 };
 
 const usage = `Usage: NODE_ENV=production bun run.ts <${Object.keys(cases).join("|")}> ${planUsage}`;

@@ -92,12 +92,13 @@ export function prepare(variant: Variant) {
   return { ...variant, headers: Object.entries(headers), body };
 }
 
-// SHA-256 of the response's status, headers and body, the body after its length. No app sets a header that holds a time
-// or a random id, so every header counts.
+// SHA-256 of the response's status, headers and body, the body after its length. An app that answers through Bun's HTTP
+// server gets the Date header it adds, which changes every second, so that header does not count. No app sets another
+// header that holds a time or a random id, so every other header counts.
 function checksum(response: Response, body: Uint8Array): string {
   const hasher = new Bun.CryptoHasher("sha256");
   let head = `${response.status}\n`;
-  for (const [name, value] of response.headers) head += `${name}: ${value}\n`;
+  for (const [name, value] of response.headers) if (name !== "date") head += `${name}: ${value}\n`;
   hasher.update(`${head}${body.byteLength}:`);
   hasher.update(body);
   return hasher.digest("hex");

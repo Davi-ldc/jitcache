@@ -1,6 +1,6 @@
 # JITCache
 
-JITCache lets Bun save JIT code and all its related state to disk resulting in up to ~2x faster (soon 5x) runs for a small cost in the beginning of each function.
+JITCache lets Bun save JIT code and all its related state to disk resulting in up to ~2x faster (soon 6x as I move up the cache ladder) runs for a small cost in the beginning of each function.
 
 [Benched in Oracle A1](PerformanceTests/JITCache/bench.md)
 

@@ -1,0 +1,7 @@
+[
+  { "method": "GET", "path": "/", "status": 200 },
+  { "method": "GET", "path": "/?page=2&sort=newest&utm_source=newsletter", "status": 200 },
+  { "method": "HEAD", "path": "/", "status": 200 },
+  { "method": "GET", "path": "/favicon.ico", "status": 404 },
+  { "method": "POST", "path": "/", "body": { "name": "Ana Souza", "email": "ana@example.com" }, "status": 404 }
+]
