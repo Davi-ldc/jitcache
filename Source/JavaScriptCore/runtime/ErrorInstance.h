@@ -71,10 +71,6 @@ public:
     void setRuntimeTypeForCause(RuntimeType type) { m_runtimeTypeForCause = type; }
     RuntimeType runtimeTypeForCause() const { return m_runtimeTypeForCause; }
     void clearRuntimeTypeForCause() { m_runtimeTypeForCause = TypeNothing; }
-#if USE(BUN_JSC_ADDITIONS)
-    void* bunErrorData() const { return m_bunErrorData; }
-    void setBunErrorData(void* bunErrorData) { m_bunErrorData = bunErrorData; }
-#endif
     ErrorType errorType() const { return m_errorType; }
     void setStackOverflowError()
     {
@@ -134,11 +130,13 @@ public:
     // still materialized lazily, exactly as they are for a captured stack trace.
     JS_EXPORT_PRIVATE void setErrorInfoForEmbedderError(LineColumn, String&& sourceURL, String&& stackString);
 
-    void setStackPropertyAlreadyMaterialized()
+    void setStackPropertyProvidedByCapturedStackTrace()
     {
         if (!m_errorInfoMaterialized)
-            m_stackPropertyAlreadyMaterialized = true;
+            m_stackPropertyProvidedByCapturedStackTrace = true;
     }
+
+    bool trySaveCapturedStackTraceForLazyMaterialization(VM&, Vector<StackFrame>&);
 
     JS_EXPORT_PRIVATE void reconcileWeakReferencesAtGCEnd(VM&, CollectionScope);
 
@@ -162,13 +160,14 @@ protected:
     JS_EXPORT_PRIVATE static bool deleteProperty(JSCell*, JSGlobalObject*, PropertyName, DeletePropertySlot&);
 
     void computeErrorInfo(VM&, bool allocationAllowed);
-
-#if USE(BUN_JSC_ADDITIONS)
-    void* m_bunErrorData { nullptr };
-#endif
+    bool materializeCapturedStackPropertyIfSaved(VM&);
 
     SourceAppender m_sourceAppender { nullptr };
+    // Frames captured by the constructor
     std::unique_ptr<Vector<StackFrame>> m_stackTrace;
+    // Frames captured by Error.captureStackTrace()
+    std::unique_ptr<Vector<StackFrame>> m_capturedStackTrace;
+
     LineColumn m_lineColumn;
     String m_sourceURL;
     String m_stackString;
@@ -177,11 +176,16 @@ protected:
     bool m_stackOverflowError : 1;
     bool m_outOfMemoryError : 1;
     bool m_errorInfoMaterialized : 1;
-    bool m_stackPropertyAlreadyMaterialized : 1;
+    bool m_hasErrorInfo : 1;
+    bool m_stackPropertyProvidedByCapturedStackTrace : 1;
     bool m_nativeGetterTypeError : 1;
     bool m_parseError : 1;
 #if ENABLE(WEBASSEMBLY)
     bool m_catchableFromWasm : 1;
+#endif
+#if USE(BUN_JSC_ADDITIONS)
+    bool m_stackStringIsFramesOnly : 1;
+    JSValue stackWithHeader(VM&, String&& frames);
 #endif
 };
 

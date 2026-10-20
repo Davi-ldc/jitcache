@@ -32,6 +32,7 @@
 #include "InlineFormattingUtils.h"
 #include "FontCascadeInlines.h"
 #include "InlineSoftLineBreakItem.h"
+#include "LayoutBoxInlines.h"
 #include "RenderObjectInlines.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleResolver.h"
@@ -214,7 +215,7 @@ void InlineItemsBuilder::adjustInlineItemsForWhiteSpaceTrim(InlineItemList& inli
         for (auto candidate : discardBeforeCandidates)
             itemsToDiscard.quickSet(candidate);
         hasItemsToDiscard |= !discardBeforeCandidates.isEmpty();
-        discardBeforeCandidates.clear();
+        discardBeforeCandidates.shrink(0);
     };
 
     for (size_t index = 0; index < inlineItemList.size(); ++index) {
@@ -259,13 +260,13 @@ void InlineItemsBuilder::adjustInlineItemsForWhiteSpaceTrim(InlineItemList& inli
                     itemsToDiscard.quickSet(candidate);
                 hasItemsToDiscard |= !discardBeforeCandidates.isEmpty();
             }
-            discardBeforeCandidates.clear();
+            discardBeforeCandidates.shrink(0);
             discardAfterActive = whiteSpaceTrim.contains(Style::WhiteSpaceTrimValue::DiscardAfter);
             continue;
         }
         // Any other item is real content and ends both adjacencies.
         discardAfterActive = false;
-        discardBeforeCandidates.clear();
+        discardBeforeCandidates.shrink(0);
     }
     if (!hasItemsToDiscard)
         return;
@@ -313,7 +314,7 @@ void InlineItemsBuilder::computeInlineBoxBoundaryTextSpacings(const InlineItemLi
         auto start = inlineTextItem->start();
         auto length = inlineTextItem->length();
         CheckedRef inlineTextBox = inlineTextItem->inlineTextBox();
-        auto content = inlineTextBox->content().substring(start, length);
+        auto content = StringView { inlineTextBox->content() }.substring(start, length);
         if (!processInlineBoxBoundary || !lastCharacterFromPreviousRun) {
             lastCharacterFromPreviousRun = TextUtil::lastBaseCharacterFromText(content);
             lastCharacterDepth = currentCharacterDepth;
@@ -341,7 +342,7 @@ static bool NODELETE requiresVisualReordering(const Box& layoutBox)
 {
     if (auto* inlineTextBox = dynamicDowncast<InlineTextBox>(layoutBox))
         return inlineTextBox->hasStrongDirectionalityContent();
-    if (layoutBox.isInlineBox() && layoutBox.isInFlow()) {
+    if ((layoutBox.isInlineBox() || layoutBox.isLineBreakBox()) && layoutBox.isInFlow()) {
         auto& style = layoutBox.style();
         return style.writingMode().isBidiRTL() || (style.rtlOrdering() == Order::Logical && style.unicodeBidi() != UnicodeBidi::Normal);
     }
@@ -398,8 +399,10 @@ InlineItemsBuilder::LayoutQueue InlineItemsBuilder::initializeLayoutQueue(Inline
 {
     CheckedRef root = this->root();
     if (!root->firstChild()) {
-        // There should always be at least one inflow child in this inline formatting context.
-        ASSERT_NOT_REACHED();
+        // A list item's outside marker is not in the box tree and takes no part in the line, so a list item with
+        // nothing else in it has no inflow child at all while still needing the line the marker sits on
+        // (see InlineFormattingContext::layout). Nothing else establishes a childless inline formatting context.
+        ASSERT(root->isListItem());
         return { };
     }
 
@@ -745,7 +748,9 @@ static inline void buildBidiParagraph(const Style::ComputedStyle& rootStyle, con
 
 void InlineItemsBuilder::breakAndComputeBidiLevels(InlineItemList& inlineItemList)
 {
-    ASSERT(!inlineItemList.isEmpty());
+    // A list item with nothing but its outside marker has no inline items at all, the marker not being in the box
+    // tree, and still needs the line the marker sits on (see InlineFormattingContext::layout).
+    ASSERT(!inlineItemList.isEmpty() || root().isListItem());
 
     StringBuilder paragraphContentBuilder;
     InlineItemOffsetList inlineItemOffsets;
@@ -1104,7 +1109,7 @@ void InlineItemsBuilder::handleTextContent(const InlineTextBox& inlineTextBox, I
     auto singleSpaceWidth = !deferWhitespaceMeasurement ? std::optional(std::max(0.f, TextUtil::singleSpaceWidth(fontCascade.get(), inlineTextBox.canUseSimplifiedContentMeasuring()))) : std::nullopt;
     auto shouldPreserveSpacesAndTabs = TextUtil::shouldPreserveSpacesAndTabs(inlineTextBox);
     auto shouldPreserveNewline = TextUtil::shouldPreserveNewline(inlineTextBox);
-    auto lineBreakIteratorFactory = CachedLineBreakIteratorFactory { text, Style::toPlatform(style->computedLocale()), TextUtil::lineBreakIteratorMode(style->lineBreak()), TextUtil::contentAnalysis(style->wordBreak()) };
+    auto lineBreakIteratorFactory = CachedLineBreakIteratorFactory { text, Style::toPlatform(style->usedLocale()), TextUtil::lineBreakIteratorMode(style->lineBreak()), TextUtil::contentAnalysis(style->wordBreak()) };
     auto currentPosition = partialContentOffset.value_or(0lu);
     ASSERT(currentPosition <= contentLength);
 
@@ -1225,6 +1230,9 @@ void InlineItemsBuilder::handleInlineBoxEnd(const Box& inlineBox, InlineItemList
 
 void InlineItemsBuilder::handleInlineLevelBox(const Box& layoutBox, InlineItemList& inlineItemList)
 {
+    if (layoutBox.isLineBreakBox())
+        return inlineItemList.append({ layoutBox, layoutBox.isWordBreakOpportunity() ? InlineItem::Type::WordBreakOpportunity : InlineItem::Type::HardLineBreak });
+
     if (layoutBox.isRubyAnnotationBox())
         return inlineItemList.append({ layoutBox, InlineItem::Type::OutOfFlow });
 
@@ -1235,9 +1243,6 @@ void InlineItemsBuilder::handleInlineLevelBox(const Box& layoutBox, InlineItemLi
             m_hasWhiteSpaceTrim |= !layoutBox.style().whiteSpaceTrim().isNone();
         return inlineItemList.append({ layoutBox, InlineItem::Type::AtomicInlineBox });
     }
-
-    if (layoutBox.isLineBreakBox())
-        return inlineItemList.append({ layoutBox, layoutBox.isWordBreakOpportunity() ? InlineItem::Type::WordBreakOpportunity : InlineItem::Type::HardLineBreak });
 
     ASSERT_NOT_REACHED();
 }

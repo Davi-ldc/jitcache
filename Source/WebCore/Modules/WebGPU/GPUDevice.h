@@ -102,6 +102,7 @@ public:
 
     virtual ~GPUDevice();
 
+    uint32_t owningThreadUID() const { return m_owningThreadUID; }
     bool isContextThread() const { return m_owningThreadUID == currentThreadID(); }
 
     // ContextDestructionObserver.
@@ -145,7 +146,7 @@ public:
     ExceptionOr<Ref<GPUQuerySet>> createQuerySet(GPUQuerySetDescriptor&&);
 
     void pushErrorScope(GPUErrorFilter);
-    using ErrorScopePromise = DOMPromiseDeferred<IDLNullable<IDLUnion<IDLInterface<GPUOutOfMemoryError>, IDLInterface<GPUValidationError>, IDLInterface<GPUInternalError>>>>;
+    using ErrorScopePromise = DOMPromiseDeferred<IDLNullable<IDLInterface<GPUError>>>;
     void popErrorScope(ErrorScopePromise&&);
 
     bool addEventListener(const AtomString& eventType, Ref<EventListener>&&, const AddEventListenerOptions&) override;
@@ -196,7 +197,7 @@ private:
     const UniqueRef<LostPromise> m_lostPromise;
     const Ref<WebGPU::Device> m_backing;
     const Ref<GPUQueue> m_queue;
-    RefPtr<GPUPipelineLayout> m_autoPipelineLayout;
+    const RefPtr<GPUPipelineLayout> m_autoPipelineLayout;
     WeakHashSet<GPUBuffer> m_buffersToUnmap;
     WeakHashSet<GPUBuffer> m_buffers;
     WeakHashSet<GPUTexture> m_textures;

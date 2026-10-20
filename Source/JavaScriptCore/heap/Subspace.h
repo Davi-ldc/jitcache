@@ -53,7 +53,7 @@ class Subspace {
 public:
     JS_EXPORT_PRIVATE virtual ~Subspace();
 
-    const char* name() const LIFETIME_BOUND { return m_name.data(); }
+    const ASCIICString& name() const LIFETIME_BOUND { return m_name; }
     unsigned nameHash() const { return m_name.hash(); } // FIXME: rdar://139998916
     MarkedSpace& space() const { return m_space; }
 
@@ -66,40 +66,32 @@ public:
 
     void prepareForAllocation();
     
-    void didCreateFirstDirectory(BlockDirectory* directory) { m_directoryForEmptyAllocation = directory; }
-    
-    // Finds an empty block from any Subspace that agrees to trade blocks with us.
-    MarkedBlock::Handle* findEmptyBlockToSteal();
-    
     template<typename Func>
-    void forEachDirectory(const Func&);
+    void forEachDirectory(NOESCAPE const Func&);
     
     Ref<SharedTask<BlockDirectory*()>> parallelDirectorySource();
     
     template<typename Func>
-    void forEachMarkedBlock(const Func&);
+    void forEachMarkedBlock(NOESCAPE const Func&);
     
     template<typename Func>
-    void forEachNotEmptyMarkedBlock(const Func&);
+    void forEachNotEmptyMarkedBlock(NOESCAPE const Func&);
     
     JS_EXPORT_PRIVATE Ref<SharedTask<MarkedBlock::Handle*()>> parallelNotEmptyMarkedBlockSource();
     
     template<typename Func>
-    void forEachPreciseAllocation(const Func&);
+    void forEachPreciseAllocation(NOESCAPE const Func&);
     
     template<typename Func>
-    void forEachMarkedCell(const Func&);
+    void forEachMarkedCell(NOESCAPE const Func&);
     
     template<typename Visitor, typename Func>
     Ref<SharedTask<void(Visitor&)>> forEachMarkedCellInParallel(const Func&);
 
     template<typename Func>
-    void forEachLiveCell(const Func&);
+    void forEachLiveCell(NOESCAPE const Func&);
     
     void sweepBlocks();
-    
-    Subspace* nextSubspaceInAlignedMemoryAllocator() const { return m_nextSubspaceInAlignedMemoryAllocator; }
-    void setNextSubspaceInAlignedMemoryAllocator(Subspace* subspace) { m_nextSubspaceInAlignedMemoryAllocator = subspace; }
     
     virtual void didResizeBits(unsigned newSize);
     virtual void didRemoveBlock(unsigned blockIndex);
@@ -110,7 +102,7 @@ public:
     bool isPreciseOnly() const { return kind() == SubspaceKind::PreciseSubspace; }
 
 protected:
-    Subspace(SubspaceKind, CString name, Heap&);
+    Subspace(SubspaceKind, ASCIICString name, Heap&);
 
     void initialize(const HeapCellType&, AlignedMemoryAllocator*);
     
@@ -120,15 +112,12 @@ protected:
     AlignedMemoryAllocator* m_alignedMemoryAllocator { nullptr };
     
     BlockDirectory* m_firstDirectory { nullptr };
-    BlockDirectory* m_directoryForEmptyAllocation { nullptr }; // Uses the MarkedSpace linked list of blocks.
     SentinelLinkedList<PreciseAllocation, BasicRawSentinelNode<PreciseAllocation>> m_preciseAllocations;
 
     SubspaceKind m_kind;
     uint8_t m_remainingLowerTierPreciseCount { 0 }; // Lower tier is a precise allocation but we use the term lower to avoid confusion with precise-only.
 
-    Subspace* m_nextSubspaceInAlignedMemoryAllocator { nullptr };
-
-    CString m_name;
+    ASCIICString m_name;
 };
 
 } // namespace JSC

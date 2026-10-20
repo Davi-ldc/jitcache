@@ -382,7 +382,7 @@
 #include <JavaScriptCore/JSGlobalObjectFunctions.h>
 #include <JavaScriptCore/JSHeapFinalizerPrivate.h>
 #include <JavaScriptCore/JSLock.h>
-#include <JavaScriptCore/JSONAtomStringCache.h>
+#include <JavaScriptCore/JSONCache.h>
 #include <JavaScriptCore/JSObject.h>
 #include <JavaScriptCore/JSRunLoopTimer.h>
 #include <JavaScriptCore/JSType.h>
@@ -434,6 +434,7 @@
 #include <JavaScriptCore/StrongSet.h>
 #include <JavaScriptCore/Structure.h>
 #include <JavaScriptCore/StructureID.h>
+#include <JavaScriptCore/StructureInlinesLight.h>
 #include <JavaScriptCore/StructureRareData.h>
 #include <JavaScriptCore/StructureTransitionTable.h>
 #include <JavaScriptCore/Subspace.h>
@@ -491,7 +492,6 @@
 #include <wtf/FastTLS.h>
 #include <wtf/FlatteningVariantAdaptor.h>
 #include <wtf/GenericHashKey.h>
-#include <wtf/GregorianDateTime.h>
 #include <wtf/Indenter.h>
 #include <wtf/InlineMap.h>
 #include <wtf/LazyRef.h>
@@ -503,6 +503,7 @@
 #include <wtf/PackedRefPtr.h>
 #include <wtf/PageAllocation.h>
 #include <wtf/ParallelHelperPool.h>
+#include <wtf/PlainGregorianDateTime.h>
 #include <wtf/PointerComparison.h>
 #include <wtf/ProcessID.h>
 #include <wtf/RawValueTraits.h>

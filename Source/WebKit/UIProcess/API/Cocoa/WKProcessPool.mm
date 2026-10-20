@@ -168,7 +168,7 @@ ALLOW_DEPRECATED_DECLARATIONS_END
 ALLOW_DEPRECATED_DECLARATIONS_BEGIN
 - (_WKProcessPoolConfiguration *)_configuration
 {
-    return wrapper(_processPool->configuration().copy()).autorelease();
+    return wrapper(protect(_processPool->configuration())->copy()).autorelease();
 }
 ALLOW_DEPRECATED_DECLARATIONS_END
 
@@ -397,6 +397,14 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
     return result.autorelease();
 }
 
+- (NSSet<NSNumber *> *)_crossOriginIsolatedProcessIdentifiersForTesting
+{
+    RetainPtr result = adoptNS([[NSMutableSet alloc] init]);
+    for (auto pid : protect(*_processPool)->crossOriginIsolatedProcessIdentifiers())
+        [result addObject:@(pid)];
+    return result.autorelease();
+}
+
 - (void)_countWebPagesInAllProcessesForTesting:(void(^)(unsigned))completionHandler
 {
     protect(*_processPool)->countWebPagesInAllProcessesForTesting([completionHandler = makeBlockPtr(completionHandler)] (unsigned result) {
@@ -406,7 +414,7 @@ ALLOW_DEPRECATED_IMPLEMENTATIONS_END
 
 - (void)_clearWebProcessCache
 {
-    _processPool->webProcessCache().clear();
+    protect(_processPool->webProcessCache())->clear();
 }
 
 - (void)_setCachedProcessLifetimeForTesting:(NSTimeInterval)lifetime

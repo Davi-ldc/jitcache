@@ -1239,7 +1239,7 @@ void URLParser::copyURLPartsUntil(const URL& base, URLPart part, const CodePoint
 {
     syntaxViolation(iterator);
 
-    m_asciiBuffer.clear();
+    m_asciiBuffer.shrink(0);
     copyASCIIStringUntil(base.m_string, urlLengthUntilPart(base, part));
     switch (part) {
     case URLPart::QueryEnd:
@@ -1582,7 +1582,7 @@ URLParser::URLParser(URL& result, String&& input, const URL& base, const URLText
 template<typename CharacterType>
 void URLParser::parse(std::span<const CharacterType> input, const URL& base, const URLTextEncoding* nonUTF8QueryEncoding)
 {
-    URL_PARSER_LOG("Parsing URL <%s> base <%s>", String(input).utf8().data(), base.string().utf8().data());
+    URL_PARSER_LOG("Parsing URL <%s> base <%s>", String(input).utf8(), base.string().utf8());
     ASSERT(!m_url.isValid() && m_url.m_string.isNull());
     ASSERT(m_asciiBuffer.isEmpty());
 
@@ -1639,7 +1639,7 @@ void URLParser::parse(std::span<const CharacterType> input, const URL& base, con
         Fragment,
     };
 
-#define LOG_STATE(x) URL_PARSER_LOG("State %s, code point %c, parsed data <%s> size %zu", x, *c, parsedDataView(0, currentPosition(c)).utf8().data(), currentPosition(c))
+#define LOG_STATE(x) URL_PARSER_LOG("State %s, code point %c, parsed data <%s> size %zu", x, *c, parsedDataView(0, currentPosition(c)).utf8(), currentPosition(c))
 #define LOG_FINAL_STATE(x) URL_PARSER_LOG("Final State: %s", x)
 
     State state = State::SchemeStart;
@@ -1840,7 +1840,7 @@ void URLParser::parse(std::span<const CharacterType> input, const URL& base, con
                     appendToASCIIBuffer(toASCIILower(*c));
                     advance(c);
                     if (c.atEnd()) {
-                        m_asciiBuffer.clear();
+                        m_asciiBuffer.shrink(0);
                         state = State::NoScheme;
                         c = iteratorAt(beginAfterControlAndSpace);
                         break;
@@ -1927,14 +1927,14 @@ void URLParser::parse(std::span<const CharacterType> input, const URL& base, con
                 }
                 break;
             } else {
-                m_asciiBuffer.clear();
+                m_asciiBuffer.shrink(0);
                 state = State::NoScheme;
                 c = iteratorAt(beginAfterControlAndSpace);
                 break;
             }
             advance(c);
             if (c.atEnd()) {
-                m_asciiBuffer.clear();
+                m_asciiBuffer.shrink(0);
                 state = State::NoScheme;
                 c = iteratorAt(beginAfterControlAndSpace);
             }
@@ -2902,7 +2902,7 @@ void URLParser::parse(std::span<const CharacterType> input, const URL& base, con
     } else
         m_url.m_string = String::adopt(WTF::move(m_asciiBuffer));
     m_url.m_isValid = true;
-    URL_PARSER_LOG("Parsed URL <%s>\n\n", m_url.m_string.utf8().data());
+    URL_PARSER_LOG("Parsed URL <%s>\n\n", m_url.m_string.utf8());
 }
 
 template<typename CharacterType>
@@ -3357,7 +3357,7 @@ std::optional<URLParser::IPv6Address> URLParser::parseIPv6Host(CodePointIterator
 
 // FIXME: This function should take span<const char8_t>, since it requires UTF-8.
 template<typename SyntaxViolationHandler>
-URLParser::Latin1Buffer URLParser::percentDecodeImpl(std::span<const Latin1Character> input, SyntaxViolationHandler&& syntaxViolationHandler)
+URLParser::Latin1Buffer URLParser::percentDecodeImpl(std::span<const Latin1Character> input, NOESCAPE const SyntaxViolationHandler& syntaxViolationHandler)
 {
     Latin1Buffer output;
     output.grow(input.size());
@@ -3990,7 +3990,7 @@ bool URLParser::allValuesEqual(const URL& a, const URL& b)
         a.m_pathAfterLastSlash,
         a.m_pathEnd,
         a.m_queryEnd,
-        a.m_string.utf8().data(),
+        a.m_string.utf8(),
         b.m_isValid,
         b.m_hasOpaquePath,
         b.m_protocolIsInHTTPFamily,
@@ -4003,7 +4003,7 @@ bool URLParser::allValuesEqual(const URL& a, const URL& b)
         b.m_pathAfterLastSlash,
         b.m_pathEnd,
         b.m_queryEnd,
-        b.m_string.utf8().data());
+        b.m_string.utf8());
 
     return a.m_string == b.m_string
         && a.m_isValid == b.m_isValid

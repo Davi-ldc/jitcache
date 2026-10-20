@@ -18,7 +18,7 @@
 #include <wtf/Vector.h>
 #endif
 
-// The artifact's formats: the section kinds' table, the header, the body files with their validation, and the pack that
+// The artifact's formats: the section kinds' table, the header, the body format with its validation, and the pack that
 // holds the bodies. Everything here works on bytes in memory: it opens no file, takes no lock and allocates nothing,
 // apart from the test builder at the end. No lane includes it: a lane sees a body through ValidatedBody.h.
 
@@ -41,6 +41,7 @@ inline constexpr std::array<SectionKindDescription, numberOfSectionKinds> sectio
     { 0x0101, 0, "ucb.identity"_s },
     { 0x0102, 0, "ucb.core"_s },
     { 0x0103, 0, "ucb.feedback"_s },
+    { 0x0104, 0, "ucb.analysis"_s },
     { 0x0201, 1, "image.baseline"_s },
     { 0x0202, 1, "baked-facts.baseline"_s },
     { 0x0203, 1, "image-twins.baseline"_s },
@@ -64,12 +65,15 @@ constexpr std::optional<SectionKind> sectionKindFor(uint16_t typeId, uint8_t tie
     return std::nullopt;
 }
 
-// Whether a body whose highest tier is highestTier holds the kind, which container.required checks: a body holds exactly
-// the kinds this returns true for, every kind whose tier is at most its highest tier, except image-twins.baseline, which
-// ENABLE(JITCACHE_TWINS) builds require and every other build forbids. The writer writes them all, and strict validation
-// checks it.
+// Whether a body whose highest tier is highestTier must hold the kind, which container.required checks: every kind whose
+// tier is at most its highest tier, except image-twins.baseline, which ENABLE(JITCACHE_TWINS) builds require and every
+// other build forbids, and ucb.analysis, which no tier requires. A body holds exactly the kinds this returns true for,
+// plus at most ucb.analysis, which only a module's body may hold. The writer writes every required kind, and strict
+// validation checks it.
 constexpr bool isSectionRequired(SectionKind kind, uint8_t highestTier)
 {
+    if (kind == SectionKind::UCBAnalysis)
+        return false;
 #if !ENABLE(JITCACHE_TWINS)
     if (kind == SectionKind::ImageTwinsBaseline)
         return false;
@@ -79,19 +83,23 @@ constexpr bool isSectionRequired(SectionKind kind, uint8_t highestTier)
 
 // The header, cache/header, with B build IDs and M = 3 must-match options:
 //   0         8     the bytes JITCHEAD
-//   8         2     layout version, 1
+//   8         2     layout version, 2
 //   10        1     architecture: 1 x86_64, 2 ARM64
 //   11        1     B, 1 or 2
-//   12        4     H, the header's size: 32 + 72 * B + 8 * M + 8
+//   12        4     H, the header's size: 40 + 72 * B + 8 * M + 8
 //   16        8     the CPU feature vector (JITCachePlatform.h)
 //   24        4     M, 3 in this version
-//   28        4     0
-//   32        72*B  build-ID records: u8 role (1 main executable, 2 engine object), u8 length n (1 to 64), u16 0, u32 0,
+//   28        1     the app record's flag: 0 when the header names no app, 1 when it names the app at offset 32
+//   29        3     0
+//   32        8     the app record's digest: the app the config that created the artifact named; 0 when the flag is 0
+//   40        72*B  build-ID records: u8 role (1 main executable, 2 engine object), u8 length n (1 to 64), u16 0, u32 0,
 //                   then 64 bytes holding the ID in the first n and zero after; the main executable's first
-//   32+72*B   8*M   option records: u16 index (0 evalMode, 1 useExplicitResourceManagement, 2 useImportDefer), u8 type
+//   40+72*B   8*M   option records: u16 index (0 evalMode, 1 useExplicitResourceManagement, 2 useImportDefer), u8 type
 //                   (1 Bool), u8 value (0 or 1), u32 0; in index order
 //   H-8       4     CRC32C of bytes [0, H - 8)
 //   H-4       4     0
+// The app record is bytes [28, 40). The app is a config's, not the process's, so the headers of one process differ at
+// most there, and any 64-bit value is an app: only the flag says that a header names none.
 enum class HeaderArchitecture : uint8_t { X86_64 = 1, ARM64 = 2 };
 
 constexpr uint8_t thisHeaderArchitecture()
@@ -105,14 +113,15 @@ constexpr uint8_t thisHeaderArchitecture()
 #endif
 }
 
-constexpr size_t maximumArtifactHeaderBytes = 208; // 32 + 72 * 2 + 8 * 3 + 8
-constexpr size_t minimumArtifactHeaderFileBytes = 40; // a shorter file is corrupt
+constexpr size_t maximumArtifactHeaderBytes = 216; // 40 + 72 * 2 + 8 * 3 + 8
+constexpr size_t minimumArtifactHeaderFileBytes = 48; // a shorter file is corrupt
 constexpr size_t maximumArtifactHeaderFileBytes = 4096; // a larger file is corrupt; a reader reads at most one byte more
 
 // What a header records.
 struct ArtifactHeader {
     uint8_t architecture { 0 }; // the byte at offset 10, HeaderArchitecture's value in a header this build writes
     ProcessFacts facts; // the build IDs, the must-match options' values and the CPU feature vector
+    std::optional<uint64_t> app; // the app record: the app the header names, or none
 };
 
 struct ArtifactHeaderBytes {
@@ -125,44 +134,56 @@ struct ArtifactHeaderBytes {
 // record is written exactly when facts.engineObject is set.
 std::optional<ArtifactHeaderBytes> encodeArtifactHeader(const ArtifactHeader&);
 
-// The process's own header, computed once, from processFacts() and the build's architecture, at the first call. start
-// makes that call only once the process facts have passed its build-ID check, so they hold every build ID; facts without
-// one fail a release assertion. Any thread.
+// The process's own header, computed once, from processFacts() and the build's architecture, at the first call, with an
+// app record that names no app. start makes that call only once the process facts have passed its build-ID check, so they
+// hold every build ID; facts without one fail a release assertion. Any thread.
 const ArtifactHeaderBytes& expectedHeader();
 
-// Reading a header. A header file is corrupt when it is shorter than 40 bytes, larger than 4 KiB or lacks the
-// tag; incompatible when its layout version is not 1, without reading the rest; otherwise corrupt when H differs from the
-// file's size or from the formula, B is not 1 or 2, M is not 3, a record has an out-of-range role (the first record's is 1
-// and the second's 2), length, index, type or value, a padding or reserved byte is not zero, or the CRC differs.
-enum class HeaderVerdict : uint8_t { Compatible, Incompatible, Corrupt };
+// The header a creation writes for a config's app: expectedHeader() when appDigest is empty, and otherwise a copy whose
+// app record names it, with the CRC computed again. Any thread, under the same condition as expectedHeader().
+ArtifactHeaderBytes headerNamingApp(std::optional<uint64_t> appDigest);
+
+// Reading a header. A header file is corrupt when it is shorter than 48 bytes, larger than 4 KiB or lacks the tag;
+// incompatible when its layout version is not 2, without reading the rest; otherwise corrupt when H differs from the file's
+// size or from the formula, B is not 1 or 2, M is not 3, a record has an out-of-range role (the first record's is 1 and
+// the second's 2), length, index, type or value, the app record's flag is neither 0 nor 1 or is 0 beside a digest other
+// than 0, a padding or reserved byte is not zero, or the CRC differs.
+enum class HeaderVerdict : uint8_t { Compatible, Incompatible, Corrupt, AnotherApp };
 
 struct HeaderRejection {
     HeaderVerdict verdict; // Corrupt, or Incompatible for another layout version
     ASCIILiteral reason; // the rule the bytes break
 };
 
-// The header's own checks, without the comparison with the running process: maintenance, which may run under another
-// binary, reads a header this way. file is the whole header file.
+// The header's own checks, without the comparison with the running process or with an app: maintenance, which may run
+// under another binary and has no config, reads a header this way. file is the whole header file.
 std::expected<ArtifactHeader, HeaderRejection> readArtifactHeader(std::span<const uint8_t> file);
 
 struct HeaderCheck {
     HeaderVerdict verdict;
     // Empty for Compatible. For Corrupt, the rule the bytes break. For Incompatible, "layout version" or the first field
     // that differs, in this order: "architecture", "main executable build ID", "engine object build ID", a CPU feature
-    // bit by its predicate's name, or "CPU feature bit <i>" for a bit no predicate names, and an option by its name.
+    // bit by its predicate's name, or "CPU feature bit <i>" for a bit no predicate names, and an option by its name. For
+    // AnotherApp, both apps as 16 lowercase hex digits: "app <the header's> in the cache, <the config's> in this run".
     String detail;
 };
 
-// start's reading of a Consumer's or ConsumerProducer's header: a header that is not corrupt is compatible exactly when
-// its bytes [0, H - 8) equal those of processHeader, the process's own header (expectedHeader()).
-HeaderCheck checkArtifactHeader(std::span<const uint8_t> file, std::span<const uint8_t> processHeader);
+// start's reading of a Consumer's or ConsumerProducer's header. A header that is not corrupt is compatible exactly when its
+// bytes [0, H - 8) equal those of processHeader, the process's own header (expectedHeader()), outside the app record. A
+// compatible header is made for another app (AnotherApp) exactly when it names an app, the config names one too in
+// appDigest, and the two differ; a header or a config that names no app gates nothing. The app is compared only on a
+// compatible header, so a header both incompatible and made for another app is Incompatible.
+HeaderCheck checkArtifactHeader(std::span<const uint8_t> file, std::span<const uint8_t> processHeader, std::optional<uint64_t> appDigest);
 
-// The header digest: the first 16 bytes of the SHA-256 of the header's H bytes. Every body stamps the digest of the header
-// it was written under, and every read of a body requires it to equal the opened artifact's (container.header-digest).
+// The header digest: the first 16 bytes of the SHA-256 of the header's H bytes, its app record included. Every body stamps
+// the digest of the header it was written under, and every read of a body requires it to equal the opened artifact's
+// (container.header-digest). start digests the bytes it read from cache/header or wrote there, never bytes a VM computes,
+// since a VM whose config names no app opens an artifact whose header may name one.
 using HeaderDigest = std::array<uint8_t, 16>;
 HeaderDigest artifactHeaderDigest(std::span<const uint8_t> header);
 
-// Body files: an envelope, a section directory and the sections.
+// A body: an envelope, a section directory and the sections. A body lives in the pack, as the bytes of a record that
+// follow the record's header (the pack's description below), and every offset here counts from the body's first byte.
 //
 // The envelope, 128 bytes at offset 0:
 //   0    8   the bytes JITCBODY
@@ -172,9 +193,9 @@ HeaderDigest artifactHeaderDigest(std::span<const uint8_t> header);
 //   14   1   the highest tier the body holds: 0 without an image, 1 for a baseline capture
 //   15   1   0
 //   16   40  the body key
-//   56   8   the commit identifier: nonzero, drawn with cryptographicallyRandomValues for every write of the file
+//   56   8   the commit identifier: nonzero, drawn with cryptographicallyRandomValues for every commit of the body
 //   64   16  the header digest
-//   80   8   the file's size
+//   80   8   the body's size, which equals S in the header of the record that holds it
 //   88   4   L: the LLInt threshold the import skips
 //   92   4   P: the baseline counter's progress
 //   96   4   CRC32C of the directory
@@ -186,11 +207,11 @@ HeaderDigest artifactHeaderDigest(std::span<const uint8_t> header);
 //   2    1   tier
 //   3    1   0
 //   4    4   CRC32C of the section's bytes
-//   8    8   the section's offset from the file's start
+//   8    8   the section's offset from the body's start
 //   16   8   the section's size
 // The entries strictly increase in (type id, tier). The first section starts at 128 + 24 * N, which is a multiple of 8,
 // each next one at the first multiple of 8 at or after the end of the one before, the bytes between sections are zero,
-// and the file ends where the last section ends.
+// and the body ends where the last section ends.
 constexpr size_t bodyEnvelopeBytes = 128;
 constexpr size_t bodyDirectoryEntryBytes = 24;
 constexpr unsigned maximumBodySections = 64;
@@ -202,7 +223,7 @@ struct BodyEnvelope {
     BodyKey key { };
     uint64_t version { 0 }; // the commit identifier
     HeaderDigest headerDigest { };
-    uint64_t fileSize { 0 };
+    uint64_t fileSize { 0 }; // the body's size
     uint32_t llintThreshold { 0 }; // L
     uint32_t counterProgress { 0 }; // P
     uint32_t directoryCRC { 0 };
@@ -219,7 +240,7 @@ struct BodyDirectoryEntry {
 };
 
 // Lays out sections whose kinds and sizes are given in directory order, as the directory's description above places them:
-// sets each entry's offset and returns the file's size; empty when there are no entries or more than 64, or when the
+// sets each entry's offset and returns the body's size; empty when there are no entries or more than 64, or when the
 // arithmetic overflows.
 std::optional<uint64_t> layOutBodySections(std::span<BodyDirectoryEntry>);
 
@@ -230,23 +251,23 @@ uint32_t encodeBodyDirectory(std::span<const BodyDirectoryEntry>, std::span<uint
 // Body validation. Each check has an integrity part, which both modes run, and some have a structure part, which only
 // Full adds. The checks run in this order, and validation names the first that fails:
 //
-//   container.size           integrity: the file is at least 128 bytes and its size equals the envelope's file size
+//   container.size           integrity: the body is at least 128 bytes and its size equals the envelope's
 //   container.envelope       integrity: the tag, layout version 1, envelope size 128, N from 1 to 64, the envelope's CRC;
 //                            structure: the zero bytes and a highest tier of 0 or 1
 //   container.key            integrity: the envelope's key equals the key the reader asked for
 //   container.header-digest  integrity: the envelope's header digest equals the opened artifact's
 //   container.version        structure: the commit identifier is not zero
-//   container.directory      integrity: the directory lies inside the file and its CRC holds; every entry's offset and
-//                            size lie inside the file without overflow; structure: every entry's zero byte, every
+//   container.directory      integrity: the directory lies inside the body and its CRC holds; every entry's offset and
+//                            size lie inside the body without overflow; structure: every entry's zero byte, every
 //                            (type id, tier) a section kind, entries strictly increasing, offsets and sizes as
 //                            layOutBodySections places them, zero padding
-//   container.required       structure: the sections present are exactly those isSectionRequired names for the highest
-//                            tier
+//   container.required       structure: the sections present are those isSectionRequired names for the highest tier,
+//                            plus at most ucb.analysis, which only a body whose key's identity kind is Module may hold
 //   container.checksum       integrity: each section's CRC
 //
 // Integrity is what a session that is not strict checks: the header digest ties the body to the header start checked,
 // the key check ties it to its key, and the envelope, directory and section checksums cover its bytes, with the sizes and
-// bounds that keep those checksums inside the file.
+// bounds that keep those checksums inside the body.
 enum class ValidationMode : uint8_t { Integrity, Full };
 
 using ContainerCheck = ASCIILiteral; // the failing check's name in the table above, such as "container.key"
@@ -278,19 +299,19 @@ struct BodyLayout {
 
 // With Integrity, the layout records the first directory entry of each section kind and ignores an entry whose
 // (type id, tier) names no kind; the writer produces neither case, and a session that is not strict trusts it not to.
-// container.checksum checks every entry's CRC in both modes. bytes is the whole file.
+// container.checksum checks every entry's CRC in both modes. bytes is the whole body.
 std::expected<BodyLayout, ContainerCheck> validateBody(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
     std::span<const uint8_t, 16> headerDigest, ValidationMode);
 
-// The same checks, in the same order, over the file's bytes fed in order in chunks of any size down to one byte: the
+// The same checks, in the same order, over the body's bytes fed in order in chunks of any size down to one byte: the
 // writer's reread of a record it wrote feeds it through the staging buffer, and validateBody feeds its whole span to one
 // stream. It keeps the envelope and directory (at most 128 + 64 * 24 bytes) and a CRC per section; allocates nothing.
-// The file is the bytes appended: when their count differs from fileSize, container.size fails.
+// The body is the bytes appended: when their count differs from fileSize, container.size fails.
 class BodyValidationStream {
     WTF_MAKE_NONCOPYABLE(BodyValidationStream);
 public:
     BodyValidationStream(const BodyKey& expectedKey, std::span<const uint8_t, 16> headerDigest, ValidationMode, uint64_t fileSize);
-    void append(std::span<const uint8_t>); // the file's bytes in order
+    void append(std::span<const uint8_t>); // the body's bytes in order
     std::expected<BodyLayout, ContainerCheck> finish(); // after the last byte; names the first check that failed
 
 private:
@@ -318,15 +339,9 @@ private:
     std::array<uint32_t, maximumBodySections> m_sectionCRCStates { }; // each directory entry's running crc32cExtend state
 };
 
-// The checks from container.size to container.version over the envelope alone, for a reader that reads no more of the
-// body. fileStart holds the file's first bytes, at least 128 of them when the file has that many, and fileSize is the
-// file's size.
-std::expected<BodyEnvelope, ContainerCheck> validateBodyEnvelope(std::span<const uint8_t> fileStart, uint64_t fileSize,
-    const BodyKey& expectedKey, std::span<const uint8_t, 16> headerDigest, ValidationMode);
-
 // The scoring read's checks: those from container.size to container.required on the envelope and the directory, and
 // container.checksum on the sections of checksummedKinds alone. It reads the envelope, the directory and those sections
-// of bytes, the whole file, and nothing else, so the padding, which lies outside them, is left to the full validation an
+// of bytes, the whole body, and nothing else, so the padding, which lies outside them, is left to the full validation an
 // import runs.
 std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
     std::span<const uint8_t, 16> headerDigest, ValidationMode, std::span<const SectionKind> checksummedKinds);
@@ -407,6 +422,9 @@ std::array<uint8_t, packPrefixBytes> encodePackPrefix(const PackPrefix&, uint64_
 // The prefix's own checks: tag, version, size, zero bytes, CRC, and the artifact header digest. prefix holds at least the
 // first 48 bytes of the file; the retired word and the root, which change, are loaded on their own.
 std::expected<PackPrefix, PackRejection> decodePackPrefix(std::span<const uint8_t> prefix, std::span<const uint8_t, 16> headerDigest);
+// decodePackPrefix's last check, so a prefix it rejects with this passed every other check, the CRC over the digest
+// included: a sound pack made under another artifact header.
+inline constexpr PackRejection packOfAnotherHeader = "the pack belongs to another artifact header"_s;
 // Whether prefix carries the pack's tag and a layout version other than this build's: a pack another binary wrote, which is
 // incompatible rather than damaged. Every layout keeps the tag and the version in its first 10 bytes, while the CRC's place
 // depends on the layout.
@@ -464,8 +482,8 @@ struct Section {
     std::span<const uint8_t> bytes;
 };
 
-// A body file as the writer lays it out, from sections in the order given: the envelope takes its key, commit identifier,
-// header digest, highest tier, L and P from stamp, and N, the file's size and both directory and envelope checksums are
+// A body as the writer lays it out, from sections in the order given: the envelope takes its key, commit identifier,
+// header digest, highest tier, L and P from stamp, and N, the body's size and both directory and envelope checksums are
 // computed. The container's, the store's, the writer's and maintenance's tests build their synthetic bodies with it.
 Vector<uint8_t> buildBody(const BodyEnvelope& stamp, std::span<const Section>);
 

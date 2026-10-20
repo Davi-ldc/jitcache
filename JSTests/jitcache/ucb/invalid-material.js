@@ -37,9 +37,6 @@
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; Consumer
 // jitcache-runs: Producer; Consumer
-// jitcache-runs: Producer; Consumer
-// jitcache-runs: Producer; Consumer
-// jitcache-runs: Producer; Consumer
 
 // With strict on, a body whose lane sections are malformed, in ucb.identity, against the UCB or in the core's decode, is
 // invalid material at the step that finds it, cache activity turns off, and the run goes on as the JITCache-off run
@@ -50,14 +47,14 @@
 // Each sequence above is one case of the table below, which the sequence index picks. The runner reads directives only in
 // a script's first 50 lines, so the rules of ucb.feedback have a script of their own, invalid-material-feedback.js. Here:
 // - ucb.identity, every rule of its layout that a rewrite of the same size can break: the magic, the layout version, a
-//   core kind past the last and one other than the key's, a provenance above 1, each field of the key that
+//   core kind past the last and one other than the key's, a nonzero reserved byte, each field of the key that
 //   BodyKey::fromBytes checks (its version, identity kind, specialization, code-generation mode and reserved bytes), a
 //   stored key other than the body's, which the import compares in both modes, a holder digest and each function field on a
-//   program body, each function field out of its range, a constant count of 1 << 28 or more, a bit at N in either map, a
-//   constant marked in both maps and a nonzero padding byte;
+//   program body, each function field out of its range, a constant count of 1 << 28 or more, a butterfly map bit at N and
+//   a nonzero padding byte;
 // - ucb.closure: profile counts that no longer match the UCB (the declaration and expression counts swapped), a
 //   link-time constant out of range, a RegExp constant whose flags make its pattern invalid, an exit site past the
-//   instructions, an atom map that marks an Int32 constant, a butterfly map that marks it and a singleton bit on it;
+//   instructions, a butterfly map that marks an Int32 constant and a singleton bit on it;
 // - ucb.decode: a symbol record naming a private name this VM lacks (a private name record turned into a well-known
 //   symbol that does not exist), a truncated payload (a root record offset at its end), a nested offset outside the
 //   payload, a string length past its record, an unknown constant kind, an unknown opcode and an instruction that runs
@@ -70,12 +67,12 @@ load("./resources/sections.js", "caller relative");
 load("./resources/invalid-material-cases.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {
-    invalidMaterialCases.run(ucbTest(role, scratch, artifact, sequence), 37, c => [
+    invalidMaterialCases.run(ucbTest(role, scratch, artifact, sequence), 34, c => [
         c.identityCase("the identity magic", identity => [0, [identity.bytes[0] ^ 1]]),
         c.identityCase("the identity layout version", () => [4, [2, 0]]),
         c.identityCase("a core kind past the last", () => [6, [4]]),
         c.identityCase("a core kind other than the key's", () => [6, [0]]),
-        c.identityCase("a provenance above 1", () => [7, [2]]),
+        c.identityCase("a nonzero reserved byte", () => [7, [1]]),
         c.identityCase("a key version other than 1", () => [8, [2]]),
         c.identityCase("a key identity kind of 0", () => [9, [0]]),
         c.identityCase("a key specialization of 2", () => [10, [2]]),
@@ -90,13 +87,7 @@ load("./resources/invalid-material-cases.js", "caller relative");
         c.identityCase("lexically scoped features past AllLexicallyScopedFeatures", () => [146, [0xff]]),
         c.identityCase("a captured-variables byte of 2", () => [147, [2]]),
         c.identityCase("a constant count of 1 << 28 more", identity => [151, [identity.bytes[151] | 0x10]]),
-        c.identityCase("an atom map bit at N", identity => c.setBit(identity.bytes, identity.atomMap, identity.constantCount), c.unevenConstants),
         c.identityCase("a butterfly map bit at N", identity => c.setBit(identity.bytes, identity.butterflyMap, identity.constantCount), c.unevenConstants),
-        c.identityCase("a string constant marked in both maps", (identity, body) => {
-            const { index } = c.stringRecord(body.core(), 37);
-            c.t.check(identity.atom(index), "the long string constant is not marked as an atom");
-            return c.setBit(identity.bytes, identity.butterflyMap, index);
-        }),
         c.identityCase("a nonzero padding byte", identity => [identity.end, [1]], c.paddedIdentity),
 
         c.sectionCase("swapped declaration and expression counts", "ucb.closure", "ucb.feedback", "imPlain", feedback => {
@@ -125,8 +116,6 @@ load("./resources/invalid-material-cases.js", "caller relative");
             c.t.check(feedback.counts.exitSites, "imExit has no exit site");
             return [feedback.exits, c.S.le32(0x7ffffff0)];
         }),
-        c.sectionCase("an atom map that marks an Int32 constant", "ucb.closure", "ucb.identity", "imPlain",
-            (identity, body) => c.setBit(identity.bytes, identity.atomMap, c.int32Constant(body.core(), 1000))),
         c.sectionCase("a butterfly map that marks an Int32 constant", "ucb.closure", "ucb.identity", "imPlain",
             (identity, body) => c.setBit(identity.bytes, identity.butterflyMap, c.int32Constant(body.core(), 1000))),
         c.sectionCase("a singleton bit on an Int32 constant", "ucb.closure", "ucb.feedback", "imPlain",

@@ -202,8 +202,8 @@
     for (const line of lines)
         print(line);
 
-    // The case happened (HARNESS.md, Tests): the producer compiled every function, so each ran its import here, and its
-    // images carry the targets the header claims.
+    // The case happened: the producer compiled every function, so each ran its import here, and its images carry the
+    // targets the header claims.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const bodies = {
@@ -214,21 +214,22 @@
         };
         sections.expectImports(role, bodies);
         sections.expectTargets(role, { call: bodies }, [
-            { site: "B9", kind: "Operation", form: "Pointer" },
-            { site: "F3", kind: "MathIC", form: "Pointer" },
-            { site: "F4", kind: "UCBBinaryArithProfile", form: "Pointer", where: "mathICSlowCall" },
-            { site: "F4", kind: "UCBUnaryArithProfile", form: "Pointer", where: "mathICSlowCall" },
-            { site: "F5, A1", kind: "SlowPathThunk", form: "Call" },
-            { site: "C4", kind: "BaselineThunk", a: "ValueIsTruthy", form: "Call" },
-            { site: "G", kind: "ImageOffset", form: "Jump" },
-            { site: "section 6.2", kind: "SnippetEntry", form: "Jump" },
+            { site: "a far call to an operation", kind: "Operation", form: "Pointer" },
+            { site: "a MathIC slow call's MathIC argument", kind: "MathIC", form: "Pointer" },
+            { site: "a MathIC slow call's profile", kind: "UCBBinaryArithProfile", form: "Pointer", where: "mathICSlowCall" },
+            { site: "a MathIC slow call's profile", kind: "UCBUnaryArithProfile", form: "Pointer", where: "mathICSlowCall" },
+            { site: "div's slow-path call", kind: "SlowPathThunk", form: "Call" },
+            { site: "jtrue's call to the truthiness thunk", kind: "BaselineThunk", a: "ValueIsTruthy", form: "Call" },
+            { site: "a MathIC snippet's jump back into the image", kind: "ImageOffset", form: "Jump" },
+            { site: "a MathIC's inline start rewritten to jump to its snippet", kind: "SnippetEntry", form: "Jump" },
         ]);
         // Each profile written in place or passed by a site without inline code, read only where that site alone puts one.
+        const withoutInlineCode = "the profile argument of a MathIC without inline code";
         const profileClaims = [
-            [{ quotient }, "A14", "UCBBinaryArithProfile"],
-            [{ conversions }, "A14, C26", "UCBUnaryArithProfile"],
-            [{ onlyStrings, prefixed, bigProduct }, "F2", "UCBBinaryArithProfile"],
-            [{ bigNegation }, "F2", "UCBUnaryArithProfile"],
+            [{ quotient }, "div's profile write in place", "UCBBinaryArithProfile"],
+            [{ conversions }, "to_number's and to_numeric's profile write in place", "UCBUnaryArithProfile"],
+            [{ onlyStrings, prefixed, bigProduct }, withoutInlineCode, "UCBBinaryArithProfile"],
+            [{ bigNegation }, withoutInlineCode, "UCBUnaryArithProfile"],
         ];
         for (const [group, site, kind] of profileClaims)
             sections.expectTargets(role, { call: group }, [{ site, kind, form: "Pointer" }]);

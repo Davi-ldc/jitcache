@@ -208,7 +208,12 @@ void RemoteRenderingBackendProxy::didClose(IPC::Connection&)
             continue;
 
         auto useLosslessCompression = WebCore::UseLosslessCompression::No;
-        send(Messages::RemoteRenderingBackend::CreateImageBuffer(imageBuffer->logicalSize(), imageBuffer->renderingMode(), imageBuffer->renderingPurpose(), imageBuffer->resolutionScale(), imageBuffer->colorSpace(), { imageBuffer->pixelFormat(), useLosslessCompression }, identifier, imageBuffer->contextIdentifier()));
+        // Client-allocated backing store survived the GPU process, so hand the same
+        // surface back rather than allocating a replacement.
+        if (auto backingStore = imageBuffer->createBackingStoreHandleForGPUProcess())
+            send(Messages::RemoteRenderingBackend::CreateMappableImageBuffer(imageBuffer->logicalSize(), imageBuffer->renderingMode(), imageBuffer->renderingPurpose(), imageBuffer->resolutionScale(), imageBuffer->colorSpace(), { imageBuffer->pixelFormat(), useLosslessCompression }, WTF::move(*backingStore), identifier, imageBuffer->contextIdentifier()));
+        else
+            send(Messages::RemoteRenderingBackend::CreateImageBuffer(imageBuffer->logicalSize(), imageBuffer->renderingMode(), imageBuffer->renderingPurpose(), imageBuffer->resolutionScale(), imageBuffer->colorSpace(), { imageBuffer->pixelFormat(), useLosslessCompression }, identifier, imageBuffer->contextIdentifier()));
     }
     for (auto& [identifier, weakImageBufferSet] : m_imageBufferSets) {
         RefPtr imageBufferSet = weakImageBufferSet.get();
@@ -259,34 +264,46 @@ bool RemoteRenderingBackendProxy::canMapRemoteImageBufferBackendBackingStore()
 
 RefPtr<RemoteImageBufferProxy> RemoteRenderingBackendProxy::createImageBuffer(const FloatSize& size, RenderingMode renderingMode, RenderingPurpose purpose, float resolutionScale, const ColorSpace& colorSpace, ImageBufferFormat bufferFormat)
 {
+    // Whoever needs to touch the pixels allocates them. Backends this process maps or
+    // shares onward are allocated here and their handle travels with CreateImageBuffer;
+    // the rest are allocated by the GPU process and are opaque to us.
+    // Note this only needs an IOSurface where canMapRemoteImageBufferBackendBackingStore()
+    // is true, which is exactly when this process is allowed to create one; see
+    // WebPage::platformInitialize()'s shouldBlockIOKit.
+    ImageBuffer::Parameters parameters { size, resolutionScale, colorSpace, bufferFormat, purpose };
+    ImageBufferCreationContext creationContext;
+
     RefPtr<RemoteImageBufferProxy> imageBuffer;
     switch (renderingMode) {
     case RenderingMode::Accelerated:
 #if HAVE(IOSURFACE)
         if (canMapRemoteImageBufferBackendBackingStore())
-            imageBuffer = RemoteImageBufferProxy::create<ImageBufferShareableMappedIOSurfaceBackend>(size, resolutionScale, colorSpace, bufferFormat, purpose, *this);
+            imageBuffer = RemoteImageBufferProxy::create<ImageBufferShareableMappedIOSurfaceBackend>(parameters, *this, creationContext);
         else
-            imageBuffer = RemoteImageBufferProxy::create<ImageBufferRemoteIOSurfaceBackend>(size, resolutionScale, colorSpace, bufferFormat, purpose, *this);
+            imageBuffer = RemoteImageBufferProxy::create<ImageBufferRemoteIOSurfaceBackend>(parameters, *this);
 #endif
         [[fallthrough]];
 
     case RenderingMode::Unaccelerated:
         if (!imageBuffer)
-            imageBuffer = RemoteImageBufferProxy::create<ImageBufferShareableBitmapBackend>(size, resolutionScale, colorSpace, bufferFormat, purpose, *this);
+            imageBuffer = RemoteImageBufferProxy::create<ImageBufferShareableBitmapBackend>(parameters, *this, creationContext);
         break;
 
     case RenderingMode::PDFDocument:
-        imageBuffer = RemoteImageBufferProxy::create<ImageBufferRemotePDFDocumentBackend>(size, resolutionScale, colorSpace, bufferFormat, purpose, *this);
+        imageBuffer = RemoteImageBufferProxy::create<ImageBufferRemotePDFDocumentBackend>(parameters, *this);
         break;
 
     case RenderingMode::DisplayList:
-        imageBuffer = RemoteImageBufferProxy::create<ImageBufferRemoteDisplayListBackend>(size, resolutionScale, colorSpace, bufferFormat, purpose, *this);
+        imageBuffer = RemoteImageBufferProxy::create<ImageBufferRemoteDisplayListBackend>(parameters, *this);
         break;
     }
 
     if (imageBuffer) {
         auto identifier = imageBuffer->renderingResourceIdentifier();
-        send(Messages::RemoteRenderingBackend::CreateImageBuffer(imageBuffer->logicalSize(), imageBuffer->renderingMode(), imageBuffer->renderingPurpose(), imageBuffer->resolutionScale(), imageBuffer->colorSpace(), { imageBuffer->pixelFormat(), bufferFormat.useLosslessCompression }, identifier, imageBuffer->contextIdentifier()));
+        if (auto backingStore = imageBuffer->createBackingStoreHandleForGPUProcess())
+            send(Messages::RemoteRenderingBackend::CreateMappableImageBuffer(imageBuffer->logicalSize(), imageBuffer->renderingMode(), imageBuffer->renderingPurpose(), imageBuffer->resolutionScale(), imageBuffer->colorSpace(), { imageBuffer->pixelFormat(), bufferFormat.useLosslessCompression }, WTF::move(*backingStore), identifier, imageBuffer->contextIdentifier()));
+        else
+            send(Messages::RemoteRenderingBackend::CreateImageBuffer(imageBuffer->logicalSize(), imageBuffer->renderingMode(), imageBuffer->renderingPurpose(), imageBuffer->resolutionScale(), imageBuffer->colorSpace(), { imageBuffer->pixelFormat(), bufferFormat.useLosslessCompression }, identifier, imageBuffer->contextIdentifier()));
         auto addResult = m_imageBuffers.add(identifier, *imageBuffer);
         ASSERT_UNUSED(addResult, addResult.isNewEntry);
     }
@@ -324,14 +341,46 @@ std::unique_ptr<RemoteSerializedImageBufferProxy> RemoteRenderingBackendProxy::m
     auto identifier = imageBuffer.renderingResourceIdentifier();
     bool success = m_imageBuffers.remove(identifier);
     ASSERT_UNUSED(success, success);
-    std::unique_ptr result = makeUnique<RemoteSerializedImageBufferProxy>(imageBuffer.parameters(), imageBuffer.backendInfo(), *this);
+    // Backing store this process allocated travels with the serialized buffer. For
+    // anything else the pixels stay in the GPU process and the handle, if it is ever
+    // needed, is asked for after the buffer is re-materialised.
+    std::unique_ptr result = makeUnique<RemoteSerializedImageBufferProxy>(imageBuffer.parameters(), imageBuffer.renderingMode(), imageBuffer.memoryCost(), imageBuffer.takeBackendHandleForSerialization(), *this);
     send(Messages::RemoteRenderingBackend::MoveToSerializedBuffer(identifier, result->identifier()));
     return result;
 }
 
-Ref<RemoteImageBufferProxy> RemoteRenderingBackendProxy::moveToImageBuffer(RemoteSerializedImageBufferProxy& serialized)
+// The pixels exist in the GPU process, so this process cannot allocate a backing
+// store here: it either re-adopts the one it handed over, or stands in for the
+// GPU process's one with a backend that has no pixels of its own.
+static std::unique_ptr<ImageBufferBackend> createBackendForSerializedBuffer(const ImageBuffer::Parameters& parameters, RenderingMode renderingMode, std::optional<ImageBufferBackendHandle>&& handle)
 {
-    auto result = RemoteImageBufferProxy::create(serialized.parameters(), serialized.info(), *this);
+    switch (renderingMode) {
+    case RenderingMode::Accelerated:
+#if HAVE(IOSURFACE)
+        if (handle && std::holds_alternative<MachSendRight>(*handle))
+            return ImageBufferShareableMappedIOSurfaceBackend::create(parameters, WTF::move(*handle));
+        if (!handle)
+            return ImageBufferRemoteIOSurfaceBackend::create(parameters);
+#endif
+        [[fallthrough]];
+    case RenderingMode::Unaccelerated:
+        if (handle && std::holds_alternative<ShareableBitmap::Handle>(*handle))
+            return ImageBufferShareableBitmapBackend::create(parameters, std::get<ShareableBitmap::Handle>(WTF::move(*handle)));
+        return nullptr;
+    case RenderingMode::PDFDocument:
+        return ImageBufferRemotePDFDocumentBackend::create(parameters);
+    case RenderingMode::DisplayList:
+        return ImageBufferRemoteDisplayListBackend::create(parameters);
+    }
+    return nullptr;
+}
+
+RefPtr<RemoteImageBufferProxy> RemoteRenderingBackendProxy::moveToImageBuffer(RemoteSerializedImageBufferProxy& serialized)
+{
+    auto backend = createBackendForSerializedBuffer(serialized.parameters(), serialized.renderingMode(), serialized.takeBackendHandle());
+    if (!backend)
+        return nullptr;
+    Ref result = RemoteImageBufferProxy::createForSerializedBuffer(serialized.parameters(), WTF::move(backend), *this);
     auto resultIdentifier = result->renderingResourceIdentifier();
     auto addResult = m_imageBuffers.add(resultIdentifier, result);
     ASSERT_UNUSED(addResult, addResult.isNewEntry);
@@ -339,9 +388,42 @@ Ref<RemoteImageBufferProxy> RemoteRenderingBackendProxy::moveToImageBuffer(Remot
     return result;
 }
 
-UniqueRef<RemoteSnapshotRecorderProxy> RemoteRenderingBackendProxy::createSnapshotRecorder(RemoteSnapshotIdentifier snapshotIdentifier)
+std::optional<WebCore::ImageBufferTransferIdentifier> RemoteRenderingBackendProxy::moveSerializedBufferToTransferHeap(RemoteSerializedImageBufferProxy& serialized)
 {
-    auto recorder = makeUniqueRef<RemoteSnapshotRecorderProxy>(*this);
+    // Waited for, so that the buffer is already in place when the message naming it is sent: a
+    // recipient's claim then never has to wait for this process.
+    auto sendResult = sendSync(Messages::RemoteRenderingBackend::MoveSerializedBufferToTransferHeap(serialized.identifier()));
+    if (!sendResult.succeeded())
+        return std::nullopt;
+    auto [transferIdentifier] = sendResult.takeReply();
+    return transferIdentifier;
+}
+
+RefPtr<RemoteImageBufferProxy> RemoteRenderingBackendProxy::takeTransferredBuffer(const WebCore::ImageBufferTransferHandle& handle)
+{
+    // The pixels are in the GPU process and stay there, so this process never has a backing store
+    // of its own to re-adopt here.
+    auto backend = createBackendForSerializedBuffer(handle.parameters, handle.renderingMode, std::nullopt);
+    if (!backend)
+        return nullptr;
+    Ref result = RemoteImageBufferProxy::createForSerializedBuffer(handle.parameters, WTF::move(backend), *this);
+    auto resultIdentifier = result->renderingResourceIdentifier();
+    auto addResult = m_imageBuffers.add(resultIdentifier, result);
+    ASSERT_UNUSED(addResult, addResult.isNewEntry);
+    send(Messages::RemoteRenderingBackend::TakeTransferredBuffer(handle, resultIdentifier, result->contextIdentifier()));
+    return result;
+}
+
+void RemoteRenderingBackendProxy::createSnapshot(RemoteSnapshotIdentifier snapshotIdentifier, WebCore::FrameIdentifier rootFrameIdentifier, const WebCore::FloatSize& size)
+{
+    // Waited for, so that the snapshot exists before any frame hosted elsewhere is asked to record
+    // into it.
+    sendSync(Messages::RemoteRenderingBackend::CreateSnapshot(snapshotIdentifier, rootFrameIdentifier, size));
+}
+
+UniqueRef<RemoteSnapshotRecorderProxy> RemoteRenderingBackendProxy::createSnapshotRecorder(const FloatRect& initialClip, RemoteSnapshotIdentifier snapshotIdentifier, RenderingMode renderingMode)
+{
+    auto recorder = makeUniqueRef<RemoteSnapshotRecorderProxy>(initialClip, renderingMode, *this);
     send(Messages::RemoteRenderingBackend::CreateSnapshotRecorder(recorder->identifier(), snapshotIdentifier));
     return recorder;
 }
@@ -565,7 +647,7 @@ void RemoteRenderingBackendProxy::endPreparingImageBufferSetsForDisplay()
         send(Messages::RemoteRenderingBackend::PrepareImageBufferSetsForDisplay(inputData));
     }
 
-    m_bufferSetsToPrepare.clear();
+    m_bufferSetsToPrepare.shrink(0);
 }
 
 void RemoteRenderingBackendProxy::prepareImageBufferSetForDisplay(LayerPrepareBuffersData&& bufferSetToPrepare)

@@ -367,14 +367,14 @@ static Node* NODELETE firstNode(const BoundaryPoint& point)
 
 TextIterator::TextIterator(const SimpleRange& range, TextIteratorBehaviors behaviors)
     : m_behaviors(behaviors)
+    , m_startContainer(range.start.container.ptr())
+    , m_endContainer(range.end.container.ptr())
 {
     ASSERT(!m_behaviors.contains(TextIteratorBehavior::EmitsObjectReplacementCharacters) || !m_behaviors.contains(TextIteratorBehavior::EmitsObjectReplacementCharactersForImages));
 
     protect(range.start.document())->updateLayoutIgnorePendingStylesheets();
 
-    m_startContainer = range.start.container.ptr();
     m_startOffset = range.start.offset;
-    m_endContainer = range.end.container.ptr();
     m_endOffset = range.end.offset;
 
     m_currentNode = firstNode(range.start);
@@ -430,19 +430,6 @@ static inline bool NODELETE isDescendantOf(TextIteratorBehaviors options, Node& 
     if (options.contains(TextIteratorBehavior::TraversesFlatTree)) [[unlikely]]
         return node.isShadowIncludingDescendantOf(&possibleAncestor);
     return node.isDescendantOf(&possibleAncestor);
-}
-
-static inline ContainerNode* NODELETE parentInComposedTreeIgnoringUserAgentShadow(Node& node)
-{
-    if (auto* slot = node.assignedSlot()) {
-        if (auto* shadowRoot = slot->containingShadowRoot(); shadowRoot && shadowRoot->mode() != ShadowRootMode::UserAgent)
-            return slot;
-    }
-
-    if (auto* shadowRoot = dynamicDowncast<ShadowRoot>(node))
-        return shadowRoot->host();
-
-    return node.parentNode();
 }
 
 static inline Node* NODELETE parentNodeOrShadowHost(TextIteratorBehaviors options, Node& node)
@@ -1436,9 +1423,9 @@ SimplifiedBackwardsTextIterator::SimplifiedBackwardsTextIterator(const SimpleRan
     m_handledNode = false;
     m_handledChildren = endOffset == 0;
 
-    m_startContainer = WTF::move(startNode);
+    lazyInitialize(m_startContainer, startNode.releaseNonNull());
     m_startOffset = startOffset;
-    m_endContainer = endNode;
+    lazyInitialize(m_endContainer, Ref { *endNode });
     m_endOffset = endOffset;
     
     m_positionNode = WTF::move(endNode);
@@ -2167,13 +2154,20 @@ SimpleRange resolveCharacterRange(const SimpleRange& scope, CharacterRange range
     uint64_t location = 0;
     for (TextIterator it(scope, behaviors); !it.atEnd(); it.advance()) {
         unsigned length = it.text().length();
-        auto textRunRange = it.range();
 
         auto found = [&] (uint64_t targetLocation) -> bool {
             return targetLocation >= location && targetLocation - location <= length;
         };
         bool foundStart = found(range.location);
         bool foundEnd = found(rangeEnd);
+
+        if (!foundStart && !foundEnd) {
+            location += length;
+            continue;
+        }
+
+        // TextIterator::range() costs a previous-sibling walk, so only resolve it for the runs that bound the result.
+        auto textRunRange = it.range();
 
         if (foundEnd) {
             // FIXME: This is a workaround for the fact that the end of a run is often at the wrong position for emitted '\n's or if the renderer of the current node is a replaced element.

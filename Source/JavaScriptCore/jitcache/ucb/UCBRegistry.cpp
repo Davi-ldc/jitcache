@@ -1,8 +1,10 @@
 #include "config.h"
 #include "UCBRegistry.h"
 
+#include "JSModuleRecord.h"
 #include "UnlinkedCodeBlock.h"
 #include "ValidatedBody.h"
+#include "WeakInlines.h"
 #include <algorithm>
 #include <wtf/Locker.h>
 #include <wtf/StdLibExtras.h>
@@ -52,6 +54,10 @@ bool isUCBRegistryLockHeldByCurrentThread()
 #endif
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(UCBRegistry);
+
+// The VM's state destroys the registry after the heap's last finalization has run every UCB's destructor hook, so no
+// record, and with it no analysis source, is left by then.
+UCBRegistry::~UCBRegistry() = default;
 
 Ref<ParentIdentity> ParentIdentity::create(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
 {
@@ -166,8 +172,13 @@ bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& reco
     RefPtr<ParentIdentity> parent;
     if (declarationCount || expressionCount) {
         children.reserveInitialCapacity(declarationCount + expressionCount);
-        for (unsigned i = 0; i < declarationCount; ++i)
-            children.append(codeBlock.functionDecl(i));
+        // A recorded UCB was generated or imported, and both fill every declaration slot: only a native decode leaves a
+        // declaration in its payload, and nothing a native decode makes is recorded. Reading the slot as it is decodes
+        // nothing.
+        for (unsigned i = 0; i < declarationCount; ++i) {
+            ASSERT(codeBlock.functionDeclIfDecoded(i));
+            children.append(codeBlock.functionDeclIfDecoded(i));
+        }
         for (unsigned i = 0; i < expressionCount; ++i)
             children.append(codeBlock.functionExpr(i));
         parent = ParentIdentity::create(record.key, RefPtr { record.suppliedDigestProvider }, declarationCount, childHolderDigests);
@@ -236,15 +247,7 @@ void UCBRegistry::setMissedBodyVersion(const UnlinkedCodeBlock& codeBlock, uint6
         iterator->value->missedBodyVersion = indexToken;
 }
 
-void UCBRegistry::setMatchedBodyVersion(const UnlinkedCodeBlock& codeBlock, uint64_t commitIdentifier)
-{
-    UCBRegistryInternal::CriticalSectionMark mark;
-    Locker locker { m_lock };
-    if (auto iterator = m_codeBlocks.find(&codeBlock); iterator != m_codeBlocks.end())
-        iterator->value->matchedBodyVersion = commitIdentifier;
-}
-
-bool UCBRegistry::attachPendingImport(const UnlinkedCodeBlock& codeBlock, Ref<PendingImport>&& import, std::optional<Vector<uint8_t>>&& generatedButterflyMap)
+bool UCBRegistry::attachPendingImport(const UnlinkedCodeBlock& codeBlock, Ref<PendingImport>&& import)
 {
     // Read before the lock, under which no integrator code runs.
     uint64_t commitIdentifier = import->body().version();
@@ -258,25 +261,6 @@ bool UCBRegistry::attachPendingImport(const UnlinkedCodeBlock& codeBlock, Ref<Pe
     UCBRecord& record = *iterator->value;
     record.pendingImport = WTF::move(import);
     record.matchedBodyVersion = commitIdentifier;
-    // Replaces the kept map, an empty argument included; freeing the old one is allowed here.
-    record.generatedButterflyMap = WTF::move(generatedButterflyMap);
-    return true;
-}
-
-bool UCBRegistry::copyGeneratedButterflyMap(const UnlinkedCodeBlock& codeBlock, std::span<uint8_t> out) const
-{
-    UCBRegistryInternal::CriticalSectionMark mark;
-    Locker locker { m_lock };
-    auto iterator = m_codeBlocks.find(&codeBlock);
-    if (iterator == m_codeBlocks.end() || !iterator->value->generatedButterflyMap)
-        return false;
-    const Vector<uint8_t>& map = *iterator->value->generatedButterflyMap;
-    // Both are ceil(N / 8) bytes for the UCB's N constants. A map of another size would not describe these
-    // constants, so the capture writes the maps its own constants give instead.
-    ASSERT(map.size() == out.size());
-    if (map.size() != out.size())
-        return false;
-    memcpySpan(out, map.span());
     return true;
 }
 
@@ -308,6 +292,41 @@ void UCBRegistry::resolvePendingImport(const UnlinkedCodeBlock& codeBlock, const
     }
     if (resolution == ImportResolution::DroppedByGate)
         ++m_statistics.gateDrops;
+}
+
+// The three below run on the VM thread with heap access, where reading a handle is a load that neither allocates nor
+// waits: the collector reaps dead handles only in a phase that stops the world, and sweeps them on the thread that holds
+// heap access.
+bool UCBRegistry::needsModuleAnalysisSource(const UnlinkedCodeBlock& codeBlock) const
+{
+    UCBRegistryInternal::CriticalSectionMark mark;
+    Locker locker { m_lock };
+    auto iterator = m_codeBlocks.find(&codeBlock);
+    return iterator != m_codeBlocks.end() && !iterator->value->analysisSource.get();
+}
+
+void UCBRegistry::setModuleAnalysisSource(const UnlinkedCodeBlock& codeBlock, Weak<JSModuleRecord>&& source)
+{
+    // Declared before the lock: it ends up holding either the argument, when the record keeps a live source or the UCB has
+    // no record, or the empty or dead handle the argument replaces, and goes once the lock is released.
+    Weak<JSModuleRecord> released = WTF::move(source);
+    UCBRegistryInternal::CriticalSectionMark mark;
+    Locker locker { m_lock };
+    auto iterator = m_codeBlocks.find(&codeBlock);
+    if (iterator == m_codeBlocks.end() || iterator->value->analysisSource.get())
+        return;
+    // A swap moves both handles without making or destroying one.
+    iterator->value->analysisSource.swap(released);
+}
+
+JSModuleRecord* UCBRegistry::moduleAnalysisSource(const UnlinkedCodeBlock& codeBlock) const
+{
+    UCBRegistryInternal::CriticalSectionMark mark;
+    Locker locker { m_lock };
+    auto iterator = m_codeBlocks.find(&codeBlock);
+    if (iterator == m_codeBlocks.end())
+        return nullptr;
+    return iterator->value->analysisSource.get();
 }
 
 bool UCBRegistry::suppliedDigestVerified(SourceID provider) const
@@ -348,7 +367,7 @@ size_t UCBRegistry::copyRecordedCodeBlocks(std::span<RecordedCodeBlock> out) con
 
 void UCBRegistry::unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock* codeBlock)
 {
-    // Declared before the lock, so the record's pending import and provider go after it is released.
+    // Declared before the lock, so the record's pending import, provider and analysis source go after it is released.
     std::unique_ptr<UCBRecord> removed;
     {
         UCBRegistryInternal::CriticalSectionMark mark;

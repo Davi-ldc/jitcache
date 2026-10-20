@@ -50,7 +50,7 @@ class RenderBlockFlow;
 class RenderBox;
 class RenderBoxModelObject;
 class RenderInline;
-class RenderListMarker;
+class RenderListOutsideMarker;
 struct PaintInfo;
 
 namespace Layout {
@@ -98,23 +98,26 @@ public:
 
     enum class ForceFullLayout : bool { No, Yes };
     std::optional<LayoutRect> layout(RenderBlockFlow::MarginInfo&, ForceFullLayout = ForceFullLayout::No);
-    void paint(PaintInfo&, const LayoutPoint& paintOffset, const RenderInline* layerRenderer = nullptr);
-    bool hitTest(const HitTestRequest&, HitTestResult&, const HitTestLocation&, const LayoutPoint& accumulatedOffset, HitTestAction, const RenderInline* layerRenderer = nullptr);
+    void paint(PaintInfo&, const LayoutPoint& paintOffset, const RenderBoxModelObject* layerRenderer = nullptr);
+    bool hitTest(const HitTestRequest&, HitTestResult&, const HitTestLocation&, const LayoutPoint& accumulatedOffset, HitTestAction, const RenderBoxModelObject* layerRenderer = nullptr);
     void adjustForPagination();
     void shiftLinesByInBlockDirection(LayoutUnit blockShift);
 
     void collectOverflow();
-    LayoutRect inkOverflowBoundingBoxRectFor(const RenderInline&) const;
-    Vector<FloatRect> collectInlineBoxRects(const RenderInline&) const;
+    LayoutRect inkOverflowBoundingBoxRectFor(const RenderBoxModelObject&) const;
+    Vector<FloatRect> collectInlineBoxRects(const RenderBoxModelObject&) const;
 
     LayoutUnit contentLogicalHeight() const;
     std::optional<LayoutUnit> clampedContentLogicalHeight() const;
     bool NODELETE hasEllipsisInBlockDirectionOnLastFormattedLine() const;
+    bool contentFitsWithinMaximumLines() const { return m_inlineContent && m_inlineContent->contentFitsWithinMaximumLines(); }
     bool contains(const RenderElement& renderer) const;
 
     bool NODELETE isPaginated() const;
     size_t NODELETE lineCount() const;
     size_t NODELETE lineCountIgnoringBlockLevelBoxes() const;
+    // Lines with contentful inline content (block-in-inline and empty lines don't count) ending within logicalHeight from the border box top, and whether any ends past it.
+    std::pair<size_t, bool> NODELETE lineCountForHeight(LayoutUnit logicalHeight) const;
     bool hasContent() const { return !!m_inlineContent; }
     bool NODELETE hasContentfulInlineOrBlockLine() const;
     bool NODELETE hasContentfulInlineLine() const;
@@ -122,14 +125,14 @@ public:
     bool NODELETE hasInkOverflow() const;
     std::optional<LayoutUnit> firstLineBaseline() const;
     std::optional<LayoutUnit> lastLineBaseline() const;
-    LayoutRect firstInlineBoxRect(const RenderInline&) const;
-    LayoutRect enclosingBorderBoxRectFor(const RenderInline&) const;
+    LayoutRect firstInlineBoxRect(const RenderBoxModelObject&) const;
+    LayoutRect enclosingBorderBoxRectFor(const RenderBoxModelObject&) const;
 
     InlineIterator::TextBoxIterator textBoxesFor(const RenderText&) const;
     InlineIterator::LeafBoxIterator boxFor(const RenderElement&) const;
-    InlineIterator::InlineBoxIterator firstInlineBoxFor(const RenderInline&) const;
+    InlineIterator::InlineBoxIterator firstInlineBoxFor(const RenderBoxModelObject&) const;
     InlineIterator::InlineBoxIterator firstRootInlineBox() const;
-    InlineIterator::InlineBoxIterator lastRootInlineBox() const;
+    InlineIterator::BoxIterator lastBox() const;
     InlineIterator::LineBoxIterator firstLineBox() const;
     InlineIterator::LineBoxIterator lastLineBox() const;
 
@@ -176,7 +179,7 @@ private:
 
     bool NODELETE isContentConsideredStale() const;
 
-    using ExcludedMarkerList = Vector<CheckedPtr<RenderListMarker>>;
+    using ExcludedMarkerList = Vector<CheckedPtr<RenderListOutsideMarker>>;
     ExcludedMarkerList excludedMarkersForFirstFormattedLine(Layout::InlineLayoutState&);
     void setExcludedMarkerPositions(const ExcludedMarkerList&);
 

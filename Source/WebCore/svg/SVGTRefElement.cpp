@@ -31,6 +31,7 @@
 #include "RenderSVGInline.h"
 #include "SVGDocumentExtensions.h"
 #include "SVGElementInlines.h"
+#include "SVGElementTypeHelpers.h"
 #include "SVGNames.h"
 #include "ScriptDisallowedScope.h"
 #include "ShadowRoot.h"
@@ -116,7 +117,7 @@ void SVGTRefTargetEventListener::handleEvent(ScriptExecutionContext&, Event& eve
 }
 
 inline SVGTRefElement::SVGTRefElement(const QualifiedName& tagName, Document& document)
-    : SVGTextPositioningElement(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGTextPositioningElement(tagName, document, PropertyRegistry::singleton())
     , SVGURIReference(this)
     , m_targetListener(SVGTRefTargetEventListener::create(*this))
 {
@@ -161,7 +162,7 @@ void SVGTRefElement::detachTarget()
     // Mark the referenced ID as pending.
     auto target = SVGURIReference::targetElementFromIRIString(href(), protect(document()));
     if (!target.identifier.isEmpty())
-        treeScopeForSVGReferences().addPendingSVGResource(target.identifier, protect(*this));
+        protect(treeScopeForSVGReferences())->addPendingSVGResource(target.identifier, protect(*this));
 }
 
 void SVGTRefElement::attributeChanged(const QualifiedName& name, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason attributeModificationReason)
@@ -223,7 +224,7 @@ void SVGTRefElement::buildPendingResource()
         if (target.identifier.isEmpty())
             return;
 
-        treeScopeForSVGReferences().addPendingSVGResource(target.identifier, protect(*this));
+        protect(treeScopeForSVGReferences())->addPendingSVGResource(target.identifier, protect(*this));
         ASSERT(hasPendingResources());
         return;
     }

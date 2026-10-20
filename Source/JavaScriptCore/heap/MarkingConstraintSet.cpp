@@ -36,10 +36,7 @@ namespace JSC {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(MarkingConstraintSet);
 
-MarkingConstraintSet::MarkingConstraintSet(JSC::Heap& heap)
-    : m_heap(heap)
-{
-}
+MarkingConstraintSet::MarkingConstraintSet() = default;
 
 MarkingConstraintSet::~MarkingConstraintSet() = default;
 
@@ -63,7 +60,7 @@ void MarkingConstraintSet::didStartMarking()
     m_iteration = 1;
 }
 
-void MarkingConstraintSet::add(CString abbreviatedName, CString name, MarkingConstraintExecutorPair&& executors, ConstraintVolatility volatility, ConstraintConcurrency concurrency, ConstraintParallelism parallelism)
+void MarkingConstraintSet::add(ASCIICString abbreviatedName, ASCIICString name, MarkingConstraintExecutorPair&& executors, ConstraintVolatility volatility, ConstraintConcurrency concurrency, ConstraintParallelism parallelism)
 {
     add(makeUnique<SimpleMarkingConstraint>(WTF::move(abbreviatedName), WTF::move(name), WTF::move(executors), volatility, concurrency, parallelism));
 }
@@ -97,7 +94,7 @@ bool MarkingConstraintSet::isWavefrontAdvancing(SlotVisitor& visitor)
 bool MarkingConstraintSet::executeConvergenceImpl(SlotVisitor& visitor)
 {
     SuperSamplerScope superSamplerScope(false);
-    MarkingConstraintSolver solver(*this);
+    MarkingConstraintSolver solver(*this, visitor);
     
     unsigned iteration = m_iteration++;
     

@@ -40,6 +40,12 @@
 
     // Non-standard
     [CEReactions=NotNeeded, Reflect="webkitprojection", EnabledBySetting=SpatialVideoRenderingEnabled] attribute DOMString projection;
+    [CEReactions=NotNeeded, Reflect="webkitfieldofview", EnabledBySetting=SpatialVideoRenderingEnabled] attribute DOMString fieldOfView;
+    [CEReactions=NotNeeded, Reflect="webkityaw", EnabledBySetting=SpatialVideoRenderingEnabled] attribute DOMString yaw;
+    [CEReactions=NotNeeded, Reflect="webkitpitch", EnabledBySetting=SpatialVideoRenderingEnabled] attribute DOMString pitch;
+    [EnabledBySetting=SpatialVideoRenderingEnabled] readonly attribute double cameraYaw;
+    [EnabledBySetting=SpatialVideoRenderingEnabled] readonly attribute double cameraPitch;
+    [EnabledBySetting=SpatialVideoRenderingEnabled] readonly attribute double cameraFieldOfView;
     readonly attribute boolean webkitSupportsFullscreen;
     readonly attribute boolean webkitDisplayingFullscreen;
 
@@ -65,6 +71,9 @@
     [Conditional=VIDEO_PRESENTATION_MODE, EnabledBySetting=VideoPresentationModeAPIEnabled] boolean webkitSupportsPresentationMode(VideoPresentationMode mode);
     [ImplementedAs=webkitPresentationModeForBindings, Conditional=VIDEO_PRESENTATION_MODE, EnabledBySetting=VideoPresentationModeAPIEnabled] readonly attribute VideoPresentationMode webkitPresentationMode;
     [Conditional=VIDEO_PRESENTATION_MODE, EnabledBySetting=VideoPresentationModeAPIEnabled] undefined webkitSetPresentationMode(VideoPresentationMode mode);
+
+    // Non-standard: whether the video is being presented outside the page by the platform.
+    [ImplementedAs=isInExternalPlayback, EnabledByQuirk=needsCaptionMirroring] readonly attribute boolean webkitIsInExternalPlayback;
 };
 
 [Conditional=VIDEO_PRESENTATION_MODE] enum VideoPresentationMode { "inline", "fullscreen", "picture-in-picture" };

@@ -81,6 +81,7 @@ struct Styleable {
 
     bool isRunningAcceleratedAnimationOfProperty(CSSPropertyID) const;
     bool isRunningAcceleratedTransformRelatedAnimation() const;
+    bool isRunningOrAboutToRunAcceleratedTransformRelatedAnimation() const;
     bool hasRunningAcceleratedAnimations() const;
 
     bool NODELETE capturedInViewTransition() const;
@@ -237,7 +238,7 @@ public:
         return Styleable(*m_element, m_pseudoElementIdentifier);
     }
 
-    WeakPtr<Element, WeakPtrImplWithEventTargetData> element() const { return m_element; }
+    const WeakPtr<Element, WeakPtrImplWithEventTargetData>& element() const LIFETIME_BOUND { return m_element; }
     std::optional<Style::PseudoElementIdentifier> pseudoElementIdentifier() const { return m_pseudoElementIdentifier; }
 
 private:

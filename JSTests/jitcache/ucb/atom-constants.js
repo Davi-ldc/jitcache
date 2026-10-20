@@ -1,125 +1,68 @@
-// jitcache-host: bun
-// jitcache-runs: Off; Producer; Consumer; Consumer
-// jitcache-runs: Off; Producer; Consumer
+// String constants longer than an inline string, compared with === and !==, whose baseline fast path compares an atom
+// constant by pointer. Generation makes every string constant an atom, and an import decodes each as one, so every string
+// constant register of an imported UCB is an atom before its first CodeBlock: the twin check compares the imported core
+// with its twin's, atoms included, and each install's image with its twin compile. Each function compares its own
+// constant as a value or as a branch; the one on the left is a template literal, since generation moves a string literal
+// on the left of === to the right, while a template literal stays the instruction's left operand. The alpha constant is
+// also a property name, read with get_by_id in acKeyedAlpha and written as a computed key by its caller.
+// The Producer runs every function until it compiles, which captures it with its image; the Consumer imports each at its
+// first call (statistics) and installs it. The runner turns concurrent JIT off in both runs, so a twin check that skips
+// itself fails the run. Every run prints the same results, which the oracle compares with the JITCache-off run.
+load("./resources/ucb.js", "caller relative");
 
-// The atom map of ucb.identity, which records which string constants were atoms, and the seeding that makes them atoms
-// again before publication. A string constant's atom-ness only grows. The constants here are string constants
-// longer than an inline string, compared with === and !== (whose baseline fast path needs an atom) and some also used as
-// property names, in bodies captured from a generated UCB and from one Bun decoded from bytecode. Two CommonJS modules in
-// resources/ hold the functions: atom-constants-a.js, which the Producer loads without Node's compile cache, so its
-// bodies are captured from generated UCBs, and atom-constants-b.js, which the Producer loads with the compile cache, so
-// Bun decodes it and its bodies are captured from decoded UCBs, provenance EmbedderDecoded. The Producer makes one
-// decoded constant, acbDelta's, an atom through a property-key use of its own value, only after acbDelta compiled, so
-// that function's image compiled the comparison against a plain string while a later capture's atom map marks the
-// constant, as image/atom-constants.js does for the jsc shell. That later capture is the delta Bun makes at exit: the
-// call that uses the constant as a key also gives two of acbDelta's profiles a type they never saw (an object argument
-// and the property's int32), a full collection right after drains them, and the richer capture replaces the one
-// acbDelta's compile made. acbDelta is still its executable's baseline CodeBlock then, so the delta can capture it:
-// its property read never runs before that call, so the read's value profile, its only one, stays empty, and each
-// baseline-to-DFG check it reaches by then defers (CodeBlock::shouldOptimizeNowFromBaseline, which compiles regardless
-// only after five).
-// - The first run of each sequence, with JITCache off, writes the compile cache for both modules.
-// - Sequence 0: two Consumers load both modules with the compile cache and first call the functions in opposite orders;
-//   in both, each decoded function is seeded at its first call (statistics, seededDecodes), whichever provenance its
-//   body has, with each constant the atom map marks made an atom before publication (the twin check's verifyMatched).
-// - Sequence 1: the Consumer loads both modules without the compile cache, so it generates where it can import: module
-//   a's functions import, with every string constant register an atom, as the twin check's core comparison shows, and
-//   module b's never import, since a body captured from a decoded UCB fits no generated one (misses Provenance).
-// Every install passes the Image lane's twin check without a skip. The results are printed in one order in every run,
-// and equal the JITCache-off run.
-const fs = require("node:fs");
-const path = require("node:path");
-const Module = require("node:module");
-const { context } = require("./resources/ucb-bun.js");
+(function main(role, scratch, artifact, sequence) {
+    const t = ucbTest(role, scratch, artifact, sequence);
 
-const t = context();
-const cacheDirectory = t.file("atom-constants-compile-cache");
-const marker = t.file("atom-constants.cache-written");
-const load = name => require(path.join(__dirname, "resources", name));
-
-if (t.off && !fs.existsSync(marker)) {
-    Module.enableCompileCache(cacheDirectory);
-    load("atom-constants-a.js");
-    load("atom-constants-b.js");
-    Module.flushCompileCache();
-    fs.writeFileSync(marker, "the first run wrote the compile cache");
-    console.log("the first run wrote the compile cache");
-    process.exit(0);
-}
-
-// Which of sequence 0's Consumers this is, so the second calls the functions in the other order.
-let consumerIndex = 0;
-if (t.role === "Consumer") {
-    const counter = t.file("atom-constants.consumers");
-    consumerIndex = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
-    fs.writeFileSync(counter, String(consumerIndex + 1));
-}
-
-let a;
-let b;
-if (t.role === "Producer") {
-    a = load("atom-constants-a.js");
-    Module.enableCompileCache(cacheDirectory);
-    b = load("atom-constants-b.js");
-} else if (t.sequence === 0) {
-    Module.enableCompileCache(cacheDirectory);
-    a = load("atom-constants-a.js");
-    b = load("atom-constants-b.js");
-} else {
-    a = load("atom-constants-a.js");
-    b = load("atom-constants-b.js");
-}
-
-const inputs = ["atom-constants-a-alpha-long", "atom-constants-a-beta-long", "atom-constants-a-gamma-long", "atom-constants-b-alpha-long",
-    "atom-constants-b-beta-long", "atom-constants-b-delta-long", ["atom-constants", "b", "delta", "long"].join("-"), "other"];
-const calls = {
-    acaEqualsAlpha: s => a.acaEqualsAlpha(s),
-    acaNotEqualsBeta: s => a.acaNotEqualsBeta(s),
-    acaBranchGamma: s => a.acaBranchGamma(s),
-    acaKeyedAlpha: s => a.acaKeyedAlpha({ [s]: s.length }),
-    acbEqualsAlpha: s => b.acbEqualsAlpha(s),
-    acbNotEqualsBeta: s => b.acbNotEqualsBeta(s),
-    acbDelta: s => b.acbDelta(s, null),
-};
-// The first calls go through functions that run once, so that no body of this script, which the Producer ran hot,
-// imports inside a window.
-const first = inputs[0];
-const firstCalls = {
-    acaEqualsAlpha: () => a.acaEqualsAlpha(first),
-    acaNotEqualsBeta: () => a.acaNotEqualsBeta(first),
-    acaBranchGamma: () => a.acaBranchGamma(first),
-    acaKeyedAlpha: () => a.acaKeyedAlpha({ [first]: first.length }),
-    acbEqualsAlpha: () => b.acbEqualsAlpha(first),
-    acbNotEqualsBeta: () => b.acbNotEqualsBeta(first),
-    acbDelta: () => b.acbDelta(first, null),
-};
-const names = Object.keys(calls).sort();
-const firstCallOrder = consumerIndex === 1 ? [...names].reverse() : names;
-
-const results = { };
-for (const name of firstCallOrder) {
-    const fromB = name.startsWith("acb");
-    let expectations = { };
-    if (t.imports && t.sequence === 0)
-        expectations = { seededDecodes: 1, imports: 0 };
-    else if (t.imports && !fromB)
-        expectations = { imports: 1 };
-    else if (t.imports)
-        expectations = { imports: 0, seededDecodes: 0, "misses.Provenance": 1 };
-    results[name] = [t.window(`${name}'s first call`, firstCalls[name], expectations)];
-}
-for (let round = 0; round < 400; ++round) {
-    for (const name of names) {
-        const value = calls[name](inputs[round % inputs.length]);
-        if (round < inputs.length)
-            results[name].push(value);
+    function acEqualsAlpha(s)
+    {
+        return s === "atom-constants-alpha-longer-than-inline";
     }
-}
-// The Producer makes the delta constant an atom now, after acbDelta compiled, and the full collection drains what this
-// call taught acbDelta's profiles, so the delta at exit captures it again with the constant marked. Every role reads
-// the property and collects alike.
-const keyed = b.acbDelta("", { "atom-constants-b-delta-long": 7 });
-Bun.gc(true);
-console.log(names.map(name => `${name}: ${results[name].join(" ")}`).join("\n"));
-console.log(`keyed ${keyed}`);
-t.finish();
+    function acNotEqualsBeta(s)
+    {
+        return s !== "atom-constants-beta-longer-than-inline";
+    }
+    function acBranchGamma(s)
+    {
+        if ("atom-constants-gamma-longer-than-inline" === s)
+            return 1;
+        return 0;
+    }
+    function acLeftDelta(s)
+    {
+        return `atom-constants-delta-longer-than-inline` === s;
+    }
+    function acKeyedAlpha(o)
+    {
+        return o["atom-constants-alpha-longer-than-inline"];
+    }
+
+    // Equal strings built at run time, which are not the constants' cells, beside the constants' own characters and a
+    // string no function holds.
+    const built = name => ["atom-constants", name, "longer-than-inline"].join("-");
+    const inputs = [built("alpha"), built("beta"), built("gamma"), built("delta"), "atom-constants-alpha-longer-than-inline", "other"];
+    const calls = [
+        ["acEqualsAlpha", s => acEqualsAlpha(s)],
+        ["acNotEqualsBeta", s => acNotEqualsBeta(s)],
+        ["acBranchGamma", s => acBranchGamma(s)],
+        ["acLeftDelta", s => acLeftDelta(s)],
+        ["acKeyedAlpha", s => acKeyedAlpha({ [s]: s.length })],
+    ];
+
+    for (const [name, call] of calls) {
+        const before = t.statistics();
+        const first = call(inputs[0]);
+        const after = t.statistics();
+        // The arrow that makes the call ran hot in the Producer as well, so its body may import beside the function's.
+        if (t.imports)
+            t.expect(`${name}'s first call`, t.delta(before, after), { imports: [">=", 1] });
+
+        const results = [first];
+        for (let round = 0; round < 400; ++round) {
+            const result = call(inputs[round % inputs.length]);
+            if (round < inputs.length)
+                results.push(result);
+        }
+        print(`${name}: ${results.join(" ")}`);
+    }
+    t.finish();
+})(...arguments);

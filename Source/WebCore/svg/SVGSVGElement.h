@@ -75,7 +75,6 @@ public: // DOM
     void unpauseAnimations();
     bool resumePausedAnimationsIfNeeded(const IntRect&);
     bool NODELETE animationsPaused() const;
-    bool NODELETE hasActiveAnimation() const;
     float getCurrentTime() const;
     void setCurrentTime(float);
     
@@ -142,6 +141,7 @@ private:
 
     void attributeChanged(const QualifiedName&, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason) override;
     void svgAttributeChanged(const QualifiedName&) override;
+    void collectExtraStyleForPresentationalHints(MutableStyleProperties&) final;
     bool selfHasRelativeLengths() const override;
     bool isValid() const override;
 
@@ -166,11 +166,11 @@ private:
 
     bool m_useCurrentView { false };
     const Ref<SMILTimeContainer> m_timeContainer;
-    RefPtr<SVGViewSpec> m_viewSpec;
+    const RefPtr<SVGViewSpec> m_viewSpec;
     RefPtr<SVGViewElement> m_currentViewElement;
     String m_currentViewFragmentIdentifier;
 
-    Ref<SVGPoint> m_currentTranslate { SVGPoint::create() };
+    const Ref<SVGPoint> m_currentTranslate { SVGPoint::create() };
 
     mutable std::optional<FloatSize> m_cachedViewportSizeExcludingZoom;
     mutable std::optional<FloatSize> m_cachedViewportSizeForLengthResolution;

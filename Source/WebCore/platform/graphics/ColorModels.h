@@ -152,7 +152,8 @@ enum class ColorComponentCategory {
 
 enum class ColorComponentType {
     Angle,
-    Number
+    Number,
+    Percentage
 };
 
 enum class ColorSpaceCoordinateSystem {
@@ -174,11 +175,12 @@ template<typename T> struct ColorComponentInfo {
 template<> struct HSLModel<float> {
     static constexpr std::array<ColorComponentInfo<float>, 3> componentInfo { {
         { 0, 360, ColorComponentType::Angle, ColorComponentCategory::Hue },
-        { 0, std::numeric_limits<float>::infinity(), ColorComponentType::Number, ColorComponentCategory::Colorfulness },
-        { -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), ColorComponentType::Number, ColorComponentCategory::Lightness }
+        { 0, std::numeric_limits<float>::infinity(), ColorComponentType::Percentage, ColorComponentCategory::Colorfulness },
+        { -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), ColorComponentType::Percentage, ColorComponentCategory::Lightness }
     } };
     static constexpr bool isInvertible = false;
     static constexpr auto coordinateSystem = ColorSpaceCoordinateSystem::CylindricalPolar;
+    static constexpr auto powerlessHueEpsilon = 0.001;
 };
 
 template<typename ColorType> struct ExposedColorType<ColorType, HSLModel<typename ColorType::ComponentType>> : ColorType {
@@ -200,11 +202,12 @@ template<typename ColorType> inline constexpr bool UsesHSLModel = std::is_same_v
 template<> struct HWBModel<float> {
     static constexpr std::array<ColorComponentInfo<float>, 3> componentInfo { {
         { 0, 360, ColorComponentType::Angle, ColorComponentCategory::Hue },
-        { -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), ColorComponentType::Number, std::nullopt },
-        { -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), ColorComponentType::Number, std::nullopt }
+        { -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), ColorComponentType::Percentage, std::nullopt },
+        { -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::infinity(), ColorComponentType::Percentage, std::nullopt }
     } };
     static constexpr bool isInvertible = false;
     static constexpr auto coordinateSystem = ColorSpaceCoordinateSystem::CylindricalPolar;
+    static constexpr auto powerlessHueEpsilon = 0.001;
 };
 
 template<typename ColorType> struct ExposedColorType<ColorType, HWBModel<typename ColorType::ComponentType>> : ColorType {
@@ -231,8 +234,6 @@ template<> struct LabModel<float> {
     } };
     static constexpr bool isInvertible = false;
     static constexpr auto coordinateSystem = ColorSpaceCoordinateSystem::RectangularOrthogonal;
-    // `achromaticEpsilon` is based on the value from color-js and derived from "reference extent" / 100000.
-    static constexpr auto achromaticEpsilon = 250.0 / 100000.0;
 };
 
 template<typename ColorType> struct ExposedColorType<ColorType, LabModel<typename ColorType::ComponentType>> : ColorType {
@@ -259,6 +260,7 @@ template<> struct LCHModel<float> {
     } };
     static constexpr bool isInvertible = false;
     static constexpr auto coordinateSystem = ColorSpaceCoordinateSystem::CylindricalPolar;
+    static constexpr auto powerlessHueEpsilon = 0.0015;
 };
 
 template<typename ColorType> struct ExposedColorType<ColorType, LCHModel<typename ColorType::ComponentType>> : ColorType {
@@ -285,8 +287,6 @@ template<> struct OKLabModel<float> {
     } };
     static constexpr bool isInvertible = false;
     static constexpr auto coordinateSystem = ColorSpaceCoordinateSystem::RectangularOrthogonal;
-    // `achromaticEpsilon` is based on the value from color-js and derived from "reference extent" / 100000.
-    static constexpr auto achromaticEpsilon = 0.8 / 100000.0;
 };
 
 template<typename ColorType> struct ExposedColorType<ColorType, OKLabModel<typename ColorType::ComponentType>> : ColorType {
@@ -313,6 +313,7 @@ template<> struct OKLCHModel<float> {
     } };
     static constexpr bool isInvertible = false;
     static constexpr auto coordinateSystem = ColorSpaceCoordinateSystem::CylindricalPolar;
+    static constexpr auto powerlessHueEpsilon = 0.000004;
 };
 
 template<typename ColorType> struct ExposedColorType<ColorType, OKLCHModel<typename ColorType::ComponentType>> : ColorType {

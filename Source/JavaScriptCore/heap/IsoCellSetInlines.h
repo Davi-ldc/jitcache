@@ -76,13 +76,13 @@ inline bool IsoCellSet::contains(HeapCell* cell) const
 }
 
 template<typename Func>
-void IsoCellSet::forEachMarkedCell(const Func& func)
+void IsoCellSet::forEachMarkedCell(NOESCAPE const Func& func)
 {
     BlockDirectory& directory = m_subspace.m_directory;
     directory.assertIsMutatorOrMutatorIsStopped();
     (directory.markingNotEmptyBitsView() & m_blocksWithBits).forEachSetBit(
         [&] (unsigned blockIndex) {
-            MarkedBlock::Handle* block = directory.m_blocks[blockIndex];
+            MarkedBlock::Handle* block = directory.m_blocks[blockIndex].first;
 
             auto* bits = m_bits[blockIndex].get();
             block->forEachMarkedCell(
@@ -148,12 +148,12 @@ Ref<SharedTask<void(Visitor&)>> IsoCellSet::forEachMarkedCellInParallel(const Fu
 }
 
 template<typename Func>
-void IsoCellSet::forEachLiveCell(const Func& func)
+void IsoCellSet::forEachLiveCell(NOESCAPE const Func& func)
 {
     BlockDirectory& directory = m_subspace.m_directory;
     m_blocksWithBits.forEachSetBit(
         [&] (unsigned blockIndex) {
-            MarkedBlock::Handle* block = directory.m_blocks[blockIndex];
+            MarkedBlock::Handle* block = directory.m_blocks[blockIndex].first;
 
             auto* bits = m_bits[blockIndex].get();
             block->forEachCell(

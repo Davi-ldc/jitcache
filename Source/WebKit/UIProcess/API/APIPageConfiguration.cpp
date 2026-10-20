@@ -257,17 +257,29 @@ WebPageProxy* PageConfiguration::relatedPage() const
     return m_data.relatedPage.get();
 }
 
+WebProcessProxy* PageConfiguration::preferredProcessFromOpener() const
+{
+    return m_data.preferredProcessFromOpener.get();
+}
+
 BrowsingContextGroup* PageConfiguration::preferredBrowsingContextGroup() const
 {
     if (auto opener = openerInfo())
         return opener->browsingContextGroup.ptr();
 
+    // Only an opener can bring a page into a cross-origin-isolated group.
     if (auto relatedPage = this->relatedPage()) {
-        if (!relatedPage->isClosed())
+        if (!relatedPage->isClosed() && relatedPage->browsingContextGroup().crossOriginMode() == WebCore::CrossOriginMode::Shared)
             return &relatedPage->browsingContextGroup();
     }
 
     return nullptr;
+}
+
+WebCore::CrossOriginMode PageConfiguration::crossOriginMode() const
+{
+    RefPtr group = preferredBrowsingContextGroup();
+    return group ? group->crossOriginMode() : WebCore::CrossOriginMode::Shared;
 }
 
 WebPageProxy* PageConfiguration::pageToCloneSessionStorageFrom() const

@@ -667,8 +667,8 @@ bool BaseDateAndTimeInputType::setupDateTimeChooserParameters(DateTimeChooserPar
     if (!document->settings().langAttributeAwareFormControlUIEnabled())
         parameters.locale = AtomString { defaultLanguage() };
     else {
-        AtomString computedLocale = element->effectiveLang();
-        parameters.locale = computedLocale.isEmpty() ? AtomString(defaultLanguage()) : computedLocale;
+        AtomString locale = element->effectiveLang();
+        parameters.locale = locale.isEmpty() ? AtomString { defaultLanguage() } : locale;
     }
 
     auto stepRange = createStepRange(AnyStepHandling::Reject);
@@ -681,9 +681,9 @@ bool BaseDateAndTimeInputType::setupDateTimeChooserParameters(DateTimeChooserPar
     }
 
     if (CheckedPtr renderer = element->renderer())
-        parameters.anchorRectInRootView = protect(document->view())->contentsToRootView(renderer->absoluteBoundingBoxRect());
+        parameters.anchorRectInMainFrameView = protect(document->view())->contentsToMainFrameView(renderer->absoluteBoundingBoxRect());
     else
-        parameters.anchorRectInRootView = IntRect();
+        parameters.anchorRectInMainFrameView = IntRect();
     parameters.rootFrameID = document->view()->rootFrameID();
     parameters.currentValue = element->value();
 

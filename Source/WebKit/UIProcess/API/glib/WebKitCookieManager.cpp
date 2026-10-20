@@ -48,7 +48,7 @@ using namespace WebKit;
  * You can get it from a #WebKitWebsiteDataManager with
  * webkit_website_data_manager_get_cookie_manager(), and use it to set where to
  * store cookies with webkit_cookie_manager_set_persistent_storage(),
- * or to set the acceptance policy, with webkit_cookie_manager_get_accept_policy().
+ * or to set the acceptance policy, with webkit_cookie_manager_set_accept_policy().
  */
 
 enum {
@@ -97,7 +97,7 @@ struct _WebKitCookieManagerPrivate {
 
     WebKitWebsiteDataManager* dataManager;
 
-    RefPtr<CookieStoreObserver> m_observer;
+    const RefPtr<CookieStoreObserver> m_observer;
 };
 
 static std::array<unsigned, LAST_SIGNAL> signals;
@@ -168,9 +168,9 @@ WebKitCookieManager* webkitCookieManagerCreate(WebKitWebsiteDataManager* dataMan
 {
     WebKitCookieManager* manager = WEBKIT_COOKIE_MANAGER(g_object_new(WEBKIT_TYPE_COOKIE_MANAGER, nullptr));
     manager->priv->dataManager = dataManager;
-    manager->priv->m_observer = CookieStoreObserver::create([manager] {
+    lazyInitialize(manager->priv->m_observer, CookieStoreObserver::create([manager] {
         g_signal_emit(manager, signals[CHANGED], 0);
-    });
+    }).releaseNonNull());
     manager->priv->cookieStore().registerObserver(*manager->priv->m_observer);
     return manager;
 }
@@ -178,7 +178,7 @@ WebKitCookieManager* webkitCookieManagerCreate(WebKitWebsiteDataManager* dataMan
 /**
  * webkit_cookie_manager_set_persistent_storage:
  * @cookie_manager: a #WebKitCookieManager
- * @filename: the filename to read to/write from
+ * @filename: the filename to read from/write to
  * @storage: a #WebKitCookiePersistentStorage
  *
  * Set non-session cookies.
@@ -191,7 +191,7 @@ WebKitCookieManager* webkitCookieManagerCreate(WebKitWebsiteDataManager* dataMan
  * By default, @cookie_manager doesn't store the cookies persistently, so you need to call this
  * method to keep cookies saved across sessions.
  *
- * This method should never be called on a #WebKitCookieManager associated to an ephemeral #WebKitWebsiteDataManager.
+ * This method should never be called on a #WebKitCookieManager associated with an ephemeral #WebKitWebsiteDataManager.
  */
 void webkit_cookie_manager_set_persistent_storage(WebKitCookieManager* manager, const char* filename, WebKitCookiePersistentStorage storage)
 {
@@ -322,7 +322,7 @@ gboolean webkit_cookie_manager_add_cookie_finish(WebKitCookieManager* manager, G
 /**
  * webkit_cookie_manager_get_cookies:
  * @cookie_manager: a #WebKitCookieManager
- * @uri: the URI associated to the cookies to be retrieved
+ * @uri: the URI associated with the cookies to be retrieved
  * @cancellable: (allow-none): a #GCancellable or %NULL to ignore
  * @callback: (scope async): a #GAsyncReadyCallback to call when the request is satisfied
  * @user_data: the data to pass to callback function

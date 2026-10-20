@@ -208,17 +208,48 @@ function restoredPropertyIC(producer) {
     };
 }
 
+// The four varargs opcodes keep their call link in the metadata entry; the other call opcodes point at call data, of
+// their own or shared by the VM's sites.
+function hasInlineCallLink(opcode) {
+    return ["op_call_varargs", "op_tail_call_varargs", "op_construct_varargs", "op_super_construct_varargs"].includes(opcode);
+}
+
+// The call opcodes whose call data keeps the profile of their this value.
+function hasThisProfile(opcode) {
+    return ["op_call", "op_call_ignore_result", "op_tail_call"].includes(opcode);
+}
+
+// A site comes back as the producer's last execution left it, ready to link at its next call: with call data of its own
+// when it holds what only such data can hold, which a tail call that ran always gets; on the VM's executed-once data when
+// it ran and holds nothing; as linking left it when it never ran or a reset left it with nothing learned.
 function restoredCallLink(producer) {
+    const thisArrayModes = hasThisProfile(producer.opcode) ? producer.thisArrayModes : 0;
+    const thisArrayProfileFlags = hasThisProfile(producer.opcode) ? producer.thisArrayProfileFlags : 0;
     const isVirtual = producer.mode === "Virtual";
+    const holding = isVirtual || producer.hasSeenClosure || producer.clearedByGC || producer.clearedByVirtual
+        || producer.maxArgumentCountIncludingThisForVarargs !== 0 || thisArrayModes !== 0 || thisArrayProfileFlags !== 0;
+    const empty = !holding && producer.mode === "Init" && !producer.seenOnce;
+    let data;
+    if (hasInlineCallLink(producer.opcode))
+        data = "Inline";
+    else if (empty)
+        data = "NotExecuted";
+    else if (holding || producer.opcode === "op_tail_call")
+        data = "Own";
+    else
+        data = "ExecutedOnce";
     return {
         opcode: producer.opcode,
         metadataID: producer.metadataID,
+        data,
         mode: isVirtual ? "Virtual" : "Init",
-        seenOnce: !isVirtual,
+        seenOnce: !empty && !isVirtual,
         hasSeenClosure: producer.hasSeenClosure,
         clearedByGC: producer.clearedByGC,
         clearedByVirtual: producer.clearedByVirtual || isVirtual,
         maxArgumentCountIncludingThisForVarargs: producer.maxArgumentCountIncludingThisForVarargs,
+        thisArrayModes,
+        thisArrayProfileFlags,
         hasStub: false,
         hasLastSeenCallee: false,
     };
@@ -242,7 +273,8 @@ function expectRestored(label, state, saved) {
 }
 
 // Checks a snapshot, taken before any site runs, of a CodeBlock that took a parked image natively: every IC as
-// installation builds it and never considered, every call-link site as linking leaves it.
+// installation builds it and never considered, every call-link site as linking leaves it, a lazy one on the shared call
+// data of sites that never ran and an inline one in Init without the seen bit.
 function expectFresh(label, state) {
     check(state, `${label} has no CodeBlock`);
     checkSame(state.jitType, "Baseline", `${label}'s JIT type`);
@@ -259,12 +291,15 @@ function expectFresh(label, state) {
         numberOfCoolDowns: 0,
     }));
     state.callLinks.forEach((site, index) => expectFields(`${label} call-link site ${index} (${site.opcode} ${site.metadataID})`, site, {
+        data: hasInlineCallLink(site.opcode) ? "Inline" : "NotExecuted",
         mode: "Init",
         seenOnce: false,
         hasSeenClosure: false,
         clearedByGC: false,
         clearedByVirtual: false,
         maxArgumentCountIncludingThisForVarargs: 0,
+        thisArrayModes: 0,
+        thisArrayProfileFlags: 0,
         hasStub: false,
         hasLastSeenCallee: false,
     }));

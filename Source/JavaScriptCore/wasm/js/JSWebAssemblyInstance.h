@@ -56,10 +56,15 @@
 #include <wtf/RefPtr.h>
 #include <wtf/ThreadSafeWeakPtr.h>
 
+#if ENABLE(WEBASSEMBLY_DEBUGGER)
+#include <JavaScriptCore/WasmVirtualAddress.h>
+#endif
+
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 
+class JSModuleLoader;
 class JSModuleNamespaceObject;
 class JSWebAssemblyArray;
 class JSWebAssemblyModule;
@@ -92,7 +97,7 @@ public:
 
     static Identifier createPrivateModuleKey();
 
-    static JSWebAssemblyInstance* tryCreate(VM&, Structure*, JSGlobalObject*, const Identifier& moduleKey, JSWebAssemblyModule*, JSObject* importObject, Wasm::CreationMode, RefPtr<SourceProvider>&&);
+    static JSWebAssemblyInstance* tryCreate(VM&, Structure*, JSGlobalObject*, JSModuleLoader*, const Identifier& moduleKey, JSWebAssemblyModule*, JSObject* importObject, Wasm::CreationMode, RefPtr<SourceProvider>&&);
     static Structure* createStructure(VM&, JSGlobalObject*, JSValue);
 
     DECLARE_EXPORT_INFO;
@@ -101,7 +106,7 @@ public:
 
     void initializeImports(JSGlobalObject*, JSObject* importObject, Wasm::CreationMode);
     void finalizeCreation(VM&, JSGlobalObject*, Ref<Wasm::CalleeGroup>&&, Wasm::CreationMode);
-    
+
     WebAssemblyModuleRecord* moduleRecord() LIFETIME_BOUND { return m_moduleRecord.get(); }
 
     JSWebAssemblyMemory* memory(unsigned i) const { return m_memories[i].get(); }
@@ -471,8 +476,10 @@ public:
     Wasm::ExceptionType exception() const { return m_exception; }
     void* faultPC() const { return m_faultPC; }
 
+#if ENABLE(WEBASSEMBLY_DEBUGGER)
     void setDebugId(uint32_t id) { m_debugId = id; }
     uint32_t debugId() const { return m_debugId; }
+#endif
 
     RefPtr<Wasm::InstanceAnchor> anchor() const { return m_anchor; }
 
@@ -520,7 +527,9 @@ private:
     // The actual callees are owned by builtins. Populated by WebAssemblyModuleRecord::initializeImports().
     CalleeBits m_builtinCalleeBits[WASM_BUILTIN_COUNT];
     Wasm::ExceptionType m_exception { Wasm::ExceptionType::Termination };
-    uint32_t m_debugId { 0 };
+#if ENABLE(WEBASSEMBLY_DEBUGGER)
+    uint32_t m_debugId { Wasm::VirtualAddress::INVALID_ID };
+#endif
 };
 
 } // namespace JSC

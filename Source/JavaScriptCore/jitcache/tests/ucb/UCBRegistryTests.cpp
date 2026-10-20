@@ -21,7 +21,6 @@
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedProgramCodeBlock.h"
 #include "ValidatedBody.h"
-#include <array>
 #include <optional>
 #include <span>
 #include <wtf/Function.h>
@@ -209,11 +208,9 @@ static bool testIdentitiesAndRecords(VM& vm, TestPart& part)
     return part.check(!rootProviderLog.insideRegistryLock, "the root destructor callback dropped its provider under the registry lock"_s);
 }
 
-// Stamping a missed index token; an attach, and an AtomMap miss, which stamps nothing, set the matched commit identifier;
-// an attach replaces the kept butterfly map with its argument, an empty one included, and copyGeneratedButterflyMap
-// copies a kept map or nothing; resolvePendingImport with Installed detaches only, and with DroppedByGate also stamps the
-// import's index token and counts the drop; a destructor callback drops a pending import, whose test body checks in its
-// destructor that the registry lock is not held.
+// Stamping a missed index token; an attach sets the matched commit identifier; resolvePendingImport with Installed detaches
+// only, and with DroppedByGate also stamps the import's index token and counts the drop; a destructor callback drops a
+// pending import, whose test body checks in its destructor that the registry lock is not held.
 static bool testStampsAndPendingImports(VM& vm, TestPart& part)
 {
     // Declared before the registry, which still holds the import when a check fails and returns.
@@ -227,7 +224,7 @@ static bool testStampsAndPendingImports(VM& vm, TestPart& part)
 
     UCBRegistry registry;
     BodyKey key = testKey(4);
-    bool recorded = registry.recordCodeBlock(codeBlock, testRecord(key, UCBOrigin::Decoded));
+    bool recorded = registry.recordCodeBlock(codeBlock, testRecord(key, UCBOrigin::Imported));
     if (!part.check(recorded && !registry.counts().children, "recordCodeBlock refused a UCB or gave a UCB without children child identities"_s))
         return false;
     auto recordIs = [&](std::optional<uint64_t> missedBodyVersion, std::optional<uint64_t> matchedBodyVersion, bool hasPendingImport) {
@@ -235,37 +232,27 @@ static bool testStampsAndPendingImports(VM& vm, TestPart& part)
         return view && view->missedBodyVersion == missedBodyVersion && view->matchedBodyVersion == matchedBodyVersion && view->hasPendingImport == hasPendingImport;
     };
 
-    // An AtomMap miss sets the matched commit identifier and stamps nothing; a miss stamps its index token.
-    registry.setMatchedBodyVersion(codeBlock, 9);
-    if (!part.check(recordIs(std::nullopt, 9, false), "setMatchedBodyVersion did not set the matched commit identifier alone"_s))
-        return false;
+    // A miss stamps its index token.
     registry.setMissedBodyVersion(codeBlock, 5);
-    if (!part.check(recordIs(5, 9, false), "setMissedBodyVersion did not stamp the missed index token alone"_s))
+    if (!part.check(recordIs(5, std::nullopt, false), "setMissedBodyVersion did not stamp the missed index token alone"_s))
         return false;
 
     // An attach needs a record.
-    bool attachedWithoutRecord = registry.attachPendingImport(*unrecorded.get(), testImport(key, 40, 1), std::nullopt);
+    bool attachedWithoutRecord = registry.attachPendingImport(*unrecorded.get(), testImport(key, 40, 1));
     if (!part.check(!attachedWithoutRecord && !registry.recordOf(*unrecorded.get()) && !registry.counts().pendingImports, "attachPendingImport accepted a UCB without a record"_s))
         return false;
 
-    // An attach sets the matched commit identifier to its body's and keeps its butterfly map.
-    const Vector<uint8_t> firstMap { 0xa5, 0x01 };
-    std::array<uint8_t, 2> copied { };
-    auto keptMapIs = [&](const Vector<uint8_t>& map) {
-        return registry.copyGeneratedButterflyMap(codeBlock, copied) && equalSpans(std::span { copied }, map.span());
-    };
+    // An attach sets the matched commit identifier to its body's.
     Ref<PendingImport> first = testImport(key, 41, 3);
-    bool attachedFirst = registry.attachPendingImport(codeBlock, first.copyRef(), Vector<uint8_t>(firstMap));
+    bool attachedFirst = registry.attachPendingImport(codeBlock, first.copyRef());
     bool firstIsAttached = recordIs(5, 41, true) && registry.pendingImport(codeBlock) == first.ptr() && registry.counts().pendingImports == 1;
     if (!part.check(attachedFirst && firstIsAttached, "attachPendingImport did not attach the import and set the matched commit identifier"_s))
         return false;
-    if (!part.check(keptMapIs(firstMap), "copyGeneratedButterflyMap did not copy the kept map"_s))
-        return false;
 
     // A UCB has at most one pending import.
-    bool attachedSecond = registry.attachPendingImport(codeBlock, testImport(key, 50, 4), Vector<uint8_t> { 0xff, 0xff });
+    bool attachedSecond = registry.attachPendingImport(codeBlock, testImport(key, 50, 4));
     bool firstStillAttached = recordIs(5, 41, true) && registry.pendingImport(codeBlock) == first.ptr();
-    if (!part.check(!attachedSecond && firstStillAttached && keptMapIs(firstMap), "a second attachPendingImport changed the record"_s))
+    if (!part.check(!attachedSecond && firstStillAttached, "a second attachPendingImport changed the record"_s))
         return false;
 
     // Installed detaches only.
@@ -275,14 +262,10 @@ static bool testStampsAndPendingImports(VM& vm, TestPart& part)
     if (!part.check(detachedOnly, "resolvePendingImport with Installed did more than detach the import"_s))
         return false;
 
-    // An attach replaces the kept map with its argument, here none.
+    // A UCB whose import was resolved takes another.
     Ref<PendingImport> second = testImport(key, 42, 6);
-    bool attachedAfterResolution = registry.attachPendingImport(codeBlock, second.copyRef(), std::nullopt);
+    bool attachedAfterResolution = registry.attachPendingImport(codeBlock, second.copyRef());
     if (!part.check(attachedAfterResolution && recordIs(5, 42, true), "attachPendingImport refused a UCB whose import was resolved"_s))
-        return false;
-    copied.fill(0x5a);
-    bool copiedWithoutMap = registry.copyGeneratedButterflyMap(codeBlock, copied);
-    if (!part.check(!copiedWithoutMap && copied[0] == 0x5a && copied[1] == 0x5a, "an attach without a map kept the earlier one, or copyGeneratedButterflyMap wrote without one"_s))
         return false;
 
     // A resolution acts only on the import still attached.
@@ -297,17 +280,15 @@ static bool testStampsAndPendingImports(VM& vm, TestPart& part)
     if (!part.check(dropped, "resolvePendingImport with DroppedByGate did not detach, stamp the import's index token and count the drop"_s))
         return false;
 
-    // An attach replaces an empty kept map with its argument, and the record pins the import's body until the UCB's
-    // destructor callback drops both, after the lock is released.
-    const Vector<uint8_t> lastMap { 0x3c, 0x00 };
+    // The record pins the import's body until the UCB's destructor callback drops both, after the lock is released.
     Ref<PendingImport> last = testImport(key, 43, 7, [&] {
         bodyLog.noteDestruction();
     });
     // A successful attach moves the import into the record, which then holds the only reference.
-    bool attachedAfterDrop = registry.attachPendingImport(codeBlock, WTF::move(last), Vector<uint8_t>(lastMap));
+    bool attachedAfterDrop = registry.attachPendingImport(codeBlock, WTF::move(last));
     if (!part.check(attachedAfterDrop, "attachPendingImport refused a UCB whose import the gate dropped"_s))
         return false;
-    if (!part.check(keptMapIs(lastMap) && !bodyLog.destroyed, "an attach did not replace an empty kept map, or the record did not pin its import's body"_s))
+    if (!part.check(recordIs(6, 43, true) && !bodyLog.destroyed, "an attach after a drop did not set the matched commit identifier, or the record did not pin its import's body"_s))
         return false;
     registry.unlinkedCodeBlockDestroyed(&codeBlock);
     bool droppedWithRecord = !registry.recordOf(codeBlock) && !registry.counts().codeBlocks && !registry.counts().pendingImports && bodyLog.destroyed;

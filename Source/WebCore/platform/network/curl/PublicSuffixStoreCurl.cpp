@@ -28,6 +28,7 @@
 
 #include <libpsl.h>
 #include <wtf/URL.h>
+#include <wtf/text/UTF8CStringView.h>
 
 namespace WebCore {
 
@@ -38,14 +39,14 @@ bool PublicSuffixStore::platformIsPublicSuffix(StringView domain) const
 
     const psl_ctx_t* psl = psl_builtin();
     ASSERT(psl);
-    bool ret = psl_is_public_suffix2(psl, domain.toStringWithoutCopying().convertToLowercaseWithoutLocale().utf8().data(), PSL_TYPE_ANY | PSL_TYPE_NO_STAR_RULE);
+    bool ret = psl_is_public_suffix2(psl, domain.toStringWithoutCopying().convertToLowercaseWithoutLocale().utf8().legacyCStringPointer(), PSL_TYPE_ANY | PSL_TYPE_NO_STAR_RULE);
     return ret;
 }
 
-static String topPrivatelyControlledDomainInternal(const psl_ctx_t* psl, const char* domain)
+static String topPrivatelyControlledDomainInternal(const psl_ctx_t* psl, UTF8CStringView domain)
 {
     // psl_registerable_domain returns a pointer to domain's data or null if there is no private domain
-    if (const char* topPrivateDomain = psl_registrable_domain(psl, domain))
+    if (const char* topPrivateDomain = psl_registrable_domain(psl, domain.utf8()))
         return String::fromLatin1(topPrivateDomain);
     return String();
 }
@@ -57,17 +58,18 @@ String PublicSuffixStore::platformTopPrivatelyControlledDomain(StringView domain
 
     // This function is expected to work with the format used by cookies, so skip any leading dots.
     auto domainUTF8 = domain.utf8();
+    auto characters = domainUTF8.span();
 
     unsigned position = 0;
-    while (domainUTF8.data()[position] == '.')
+    while (position < characters.size() && characters[position] == u8'.')
         position++;
 
-    if (position == domainUTF8.length())
+    if (position == characters.size())
         return String();
 
     const psl_ctx_t* psl = psl_builtin();
     ASSERT(psl);
-    return topPrivatelyControlledDomainInternal(psl, domainUTF8.data() + position);
+    return topPrivatelyControlledDomainInternal(psl, UTF8CStringView::fromUTF8(domainUTF8.spanIncludingNullTerminator().subspan(position)));
 }
 
 } // namespace WebCore

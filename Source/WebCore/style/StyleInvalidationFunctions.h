@@ -35,23 +35,23 @@ namespace WebCore {
 namespace Style {
 
 template <typename TraverseFunction>
-inline void traverseRuleFeaturesInShadowTree(Element& element, TraverseFunction&& function)
+inline void traverseRuleFeaturesInShadowTree(Element& element, NOESCAPE const TraverseFunction& function)
 {
     if (!element.shadowRoot())
         return;
 
     auto& shadowRuleSets = element.shadowRoot()->styleScope().resolver().ruleSets();
-    bool hasHostPseudoClassRule = shadowRuleSets.hasMatchingUserOrAuthorStyle([&] (auto& style) {
-        return !style.hostPseudoClassRules().isEmpty() || style.hasHostPseudoClassRulesMatchingInShadowTree();
+    bool hasRulesMatchingShadowHost = shadowRuleSets.hasMatchingUserOrAuthorStyle([&] (auto& style) {
+        return style.hasRulesMatchingShadowHost() || style.hasHostPseudoClassRulesMatchingInShadowTree();
     });
-    if (!hasHostPseudoClassRule)
+    if (!hasRulesMatchingShadowHost)
         return;
 
     function(shadowRuleSets.features(), false);
 }
 
 template <typename TraverseFunction>
-inline void traverseRuleFeaturesForSlotted(Element& element, TraverseFunction&& function)
+inline void traverseRuleFeaturesForSlotted(Element& element, NOESCAPE const TraverseFunction& function)
 {
     auto assignedShadowRoots = assignedShadowRootsIfSlotted(element);
     for (auto& assignedShadowRoot : assignedShadowRoots) {
@@ -64,7 +64,7 @@ inline void traverseRuleFeaturesForSlotted(Element& element, TraverseFunction&& 
 }
 
 template <typename TraverseFunction>
-inline void traverseRuleFeatures(Element& element, TraverseFunction&& function)
+inline void traverseRuleFeatures(Element& element, NOESCAPE const TraverseFunction& function)
 {
     auto& ruleSets = element.styleResolver().ruleSets();
 

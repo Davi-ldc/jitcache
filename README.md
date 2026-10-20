@@ -1,8 +1,8 @@
 # JITCache
 
-JITCache lets Bun save JIT code and all its related state to disk resulting in up to ~2x faster runs for a small cost in the beginning of each function.
+JITCache lets Bun save JIT code and all its related state to disk resulting in up to ~2x faster (soon 5x) runs for a small cost in the beginning of each function.
 
-[Benched in Oracle A1, 2 OCPU, 12 GB RAM](PerformanceTests/JITCache/bench.md)
+[Benched in Oracle A1](PerformanceTests/JITCache/bench.md)
 
 ## Getting started
 
@@ -34,7 +34,7 @@ bun --jitcache[=<dir>] --jitcache-mode=p run server.ts
 bun --jitcache[=<dir>] --jitcache-mode=c|p-c run server.ts
 ```
 
-`c` (default) just uses the cache. `p-c` also writes, updating when it learns more [^1]. Every write is atomic, so N processes can read a cache while one is writing.
+`c` (default) just uses the cache. `p-c` also writes, updating when it learns more [^1]. Every write is atomic, so N processes can read a cache while one is writing. A second process that asks to write (`p` or `p-c`) while another is writing runs with JITCache off and prints one warning line, `warn: JITCache is off: another process is writing <path>`; a worker whose main thread is writing just uses the cache.
 
 To avoid crashes `--jitcache-strict` adds validation for the full structure of everything we read and the assumptions we make about the current process, costing TODO
 

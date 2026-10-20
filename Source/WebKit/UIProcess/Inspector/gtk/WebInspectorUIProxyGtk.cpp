@@ -75,7 +75,7 @@ void WebInspectorUIProxy::setClient(std::unique_ptr<WebInspectorUIProxyClient>&&
 void WebInspectorUIProxy::updateInspectorWindowTitle() const
 {
     ASSERT(m_inspectorWindow);
-    webkitInspectorWindowSetSubtitle(WEBKIT_INSPECTOR_WINDOW(m_inspectorWindow.get()), !m_inspectedURLString.isEmpty() ? m_inspectedURLString.utf8().data() : nullptr);
+    webkitInspectorWindowSetSubtitle(WEBKIT_INSPECTOR_WINDOW(m_inspectorWindow.get()), !m_inspectedURLString.isEmpty() ? UTF8CStringView { m_inspectedURLString.utf8() } : UTF8CStringView { });
 }
 
 static unsigned long long exceededDatabaseQuota(WKPageRef, WKFrameRef, WKSecurityOriginRef, WKStringRef, WKStringRef, unsigned long long, unsigned long long, unsigned long long currentDatabaseUsage, unsigned long long expectedUsage, const void*)
@@ -187,6 +187,8 @@ RefPtr<WebPageProxy> WebInspectorUIProxy::platformCreateFrontendPage()
     preferences->setDeveloperExtrasEnabled(true);
     preferences->setLogsPageMessagesToSystemConsoleEnabled(true);
 #endif
+    // The Find banner and Search sidebar use the legacy results=N attribute for recent searches.
+    preferences->setSearchInputResultsAttributeEnabled(true);
     preferences->setAllowTopNavigationToDataURLs(true);
     preferences->setJavaScriptRuntimeFlags({
     });
@@ -552,7 +554,7 @@ void WebInspectorUIProxy::platformSave(Vector<WebCore::InspectorFrontendClient::
     // unfortunately.
     URL url { saveDatas[0].url };
     // Strip leading / character.
-    gtk_file_chooser_set_current_name(chooser, url.path().substring(1).utf8().data());
+    gtk_file_chooser_set_current_name(chooser, url.path().substring(1).utf8().legacyCStringPointer());
 
     if (gtk_native_dialog_run(GTK_NATIVE_DIALOG(dialog.get())) != GTK_RESPONSE_ACCEPT)
         return;

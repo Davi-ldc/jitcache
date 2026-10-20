@@ -47,12 +47,21 @@
 
 namespace WebCore {
 
+#if ENABLE(TREE_DEBUGGING)
+static void printScrollingStateTree()
+{
+    Page::forEachPage([](Page& page) {
+        SAFE_WTFLOGALWAYS("Scrolling state tree for page %p:\n%s", &page, page.scrollingStateTreeAsText().utf8());
+    });
+}
+#endif // ENABLE(TREE_DEBUGGING)
+
 void Page::platformInitialize()
 {
 #if PLATFORM(IOS_FAMILY)
-    addSchedulePair(SchedulePair::create(WebThreadNSRunLoop(), kCFRunLoopCommonModes));
+    addSchedulePair(SchedulePair::create(protect(WebThreadNSRunLoop()), kCFRunLoopCommonModes));
 #else
-    addSchedulePair(SchedulePair::create([[NSRunLoop currentRunLoop] getCFRunLoop], kCFRunLoopCommonModes));
+    addSchedulePair(SchedulePair::create(protect([[NSRunLoop currentRunLoop] getCFRunLoop]), kCFRunLoopCommonModes));
 #endif
 
     static std::once_flag onceFlag;
@@ -65,6 +74,7 @@ void Page::platformInitialize()
         PAL::registerNotifyCallback("com.apple.WebKit.showGraphicsLayerTree"_s, printGraphicsLayerTreeForLiveDocuments);
         PAL::registerNotifyCallback("com.apple.WebKit.showPaintOrderTree"_s, printPaintOrderTreeForLiveDocuments);
         PAL::registerNotifyCallback("com.apple.WebKit.showLayoutTree"_s, Layout::printLayoutTreeForLiveDocuments);
+        PAL::registerNotifyCallback("com.apple.WebKit.showScrollingStateTree"_s, printScrollingStateTree);
 #endif // ENABLE(TREE_DEBUGGING)
 
         PAL::registerNotifyCallback("com.apple.WebKit.showAllDocuments"_s, [] {
@@ -79,13 +89,13 @@ void Page::platformInitialize()
                 RefPtr localTopDocument = page.localTopDocument();
                 if (!localTopDocument)
                     return;
-                WTFLogAlways("Page %p with main document %p %s", &page, localTopDocument.get(), localTopDocument ? localTopDocument->url().string().utf8().data() : "");
+                SAFE_WTFLOGALWAYS("Page %p with main document %p %s", &page, localTopDocument.get(), localTopDocument ? localTopDocument->url().string().utf8() : ""_s);
             });
 
             WTFLogAlways("%u live documents:", Document::allDocuments().size());
             for (auto& document : Document::allDocuments()) {
-                const char* documentType = is<SVGDocument>(document.get()) ? "SVGDocument" : "Document";
-                WTFLogAlways("%s %p %" PRIu64 "-%s (refCount %d, referencingNodeCount %d) %s", documentType, document.ptr(), document->identifier().processIdentifier().toUInt64(), document->identifier().toString().utf8().data(), document->refCount(), document->referencingNodeCount(), document->url().string().utf8().data());
+                auto documentType = is<SVGDocument>(document.get()) ? "SVGDocument"_s : "Document"_s;
+                SAFE_WTFLOGALWAYS("%s %p %" PRIu64 "-%s (refCount %d, referencingNodeCount %d) %s", documentType, document.ptr(), document->identifier().processIdentifier().toUInt64(), document->identifier().toString().utf8(), document->refCount(), document->referencingNodeCount(), document->url().string().utf8());
             }
         });
     });
@@ -94,7 +104,7 @@ void Page::platformInitialize()
 void Page::addSchedulePair(Ref<SchedulePair>&& pair)
 {
     if (!m_scheduledRunLoopPairs)
-        m_scheduledRunLoopPairs = makeUnique<SchedulePairHashSet>();
+        lazyInitialize(m_scheduledRunLoopPairs, makeUnique<SchedulePairHashSet>());
     m_scheduledRunLoopPairs->add(pair.get());
 
     for (RefPtr frame = m_mainFrame.get(); frame; frame = frame->tree().traverseNext()) {

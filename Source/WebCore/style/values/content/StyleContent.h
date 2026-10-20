@@ -80,7 +80,7 @@ struct ContentCounter {
     String separator;
     CounterStyle style;
 
-    template<typename... F> decltype(auto) switchOn(F&&...) const;
+    template<typename... F> decltype(auto) switchOn(NOESCAPE F&&...) const;
 
     bool operator==(const ContentCounter&) const = default;
 };
@@ -92,12 +92,20 @@ struct ContentQuote {
 };
 DEFINE_TYPE_WRAPPER_GET(ContentQuote, quote);
 
+struct ContentGlyph {
+    SynthesizedGlyph glyph;
+
+    bool operator==(const ContentGlyph&) const = default;
+};
+DEFINE_TYPE_WRAPPER_GET(ContentGlyph, glyph);
+
 struct Content {
     using Text = ContentText;
     using Image = ContentImage;
     using Counter = ContentCounter;
     using Quote = ContentQuote;
-    using VisibleContentListItem = Variant<Text, Image, Counter, Quote>;
+    using Glyph = ContentGlyph;
+    using VisibleContentListItem = Variant<Text, Image, Counter, Quote, Glyph>;
     using VisibleContentList = SpaceSeparatedFixedVector<VisibleContentListItem>;
 
     // FIXME: This struct could be optimized down to a pointer when unused by using TrailingArray.
@@ -132,7 +140,7 @@ struct Content {
         return std::get_if<Data>(&m_value);
     }
 
-    template<typename... F> decltype(auto) switchOn(F&&... f) const
+    template<typename... F> decltype(auto) switchOn(NOESCAPE F&&... f) const
     {
         return WTF::switchOn(m_value, std::forward<F>(f)...);
     }
@@ -154,7 +162,7 @@ template<size_t I> const auto& get(const Content::Data& value)
         return value.alt;
 }
 
-template<typename... F> decltype(auto) ContentCounter::switchOn(F&&... f) const
+template<typename... F> decltype(auto) ContentCounter::switchOn(NOESCAPE F&&... f) const
 {
     auto visitor = WTF::makeVisitor(std::forward<F>(f)...);
 
@@ -191,5 +199,6 @@ DEFINE_SLASH_SEPARATED_TUPLE_LIKE_CONFORMANCE(WebCore::Style::Content::Data, 2)
 DEFINE_TUPLE_LIKE_CONFORMANCE_FOR_TYPE_WRAPPER(WebCore::Style::Content::Text)
 DEFINE_TUPLE_LIKE_CONFORMANCE_FOR_TYPE_WRAPPER(WebCore::Style::Content::Image)
 DEFINE_TUPLE_LIKE_CONFORMANCE_FOR_TYPE_WRAPPER(WebCore::Style::Content::Quote)
+DEFINE_TUPLE_LIKE_CONFORMANCE_FOR_TYPE_WRAPPER(WebCore::Style::Content::Glyph)
 DEFINE_VARIANT_LIKE_CONFORMANCE(WebCore::Style::Content::Counter)
 DEFINE_VARIANT_LIKE_CONFORMANCE(WebCore::Style::Content)

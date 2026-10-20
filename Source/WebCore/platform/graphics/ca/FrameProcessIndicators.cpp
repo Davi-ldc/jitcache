@@ -34,6 +34,7 @@
 #include "FontCascadeDescription.h"
 #include "FontSelector.h"
 #include "GraphicsLayerCA.h"
+#include "ProcessIdentifier.h"
 #include "TextRun.h"
 #include <wtf/ProcessID.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -42,7 +43,7 @@
 namespace WebCore {
 
 static constexpr float padding = 3;
-static constexpr float fontSize = 12;
+static constexpr float fontSize = 14;
 static constexpr float borderWidth = 4;
 static constexpr float depthStaggerStep = 12;
 
@@ -51,7 +52,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(FrameProcessIndicators);
 FrameProcessIndicators::FrameProcessIndicators(GraphicsLayerCA& graphicsLayer)
     : m_graphicsLayer(graphicsLayer)
     , m_backgroundColor(borderColor())
-    , m_text(makeString("pid="_s, getCurrentProcessID()))
+    , m_text(makeString("pid="_s, getCurrentProcessID(), "("_s, Process::identifier(), ") frame=("_s, graphicsLayer.frameID() ? frameIdentifierString(*graphicsLayer.frameID()) : "0"_s, ")"_s))
     , m_borderLayer(graphicsLayer.createPlatformCALayer(PlatformCALayer::LayerType::LayerTypeLayer, nullptr))
     , m_indicatorLayer(graphicsLayer.createPlatformCALayer(PlatformCALayer::LayerType::LayerTypeWebLayer, this))
 {
@@ -64,11 +65,12 @@ FrameProcessIndicators::FrameProcessIndicators(GraphicsLayerCA& graphicsLayer)
     m_indicatorLayer->setName(MAKE_STATIC_STRING_IMPL("frame process indicator"));
     m_indicatorLayer->setAnchorPoint({ });
     m_indicatorLayer->setBounds({ { }, size() });
-    m_indicatorLayer->setContentsScale(graphicsLayer.m_layer->contentsScale());
+    RefPtr layer = graphicsLayer.m_layer;
+    m_indicatorLayer->setContentsScale(layer->contentsScale());
     m_indicatorLayer->setUserInteractionEnabled(false);
     m_indicatorLayer->setNeedsDisplay();
 
-    updateGeometry(graphicsLayer.m_layer->bounds());
+    updateGeometry(layer->bounds());
 }
 
 FrameProcessIndicators::~FrameProcessIndicators()
@@ -90,8 +92,10 @@ void FrameProcessIndicators::updateGeometry(const FloatRect& bounds)
 
     // Stagger indicators by frame nesting depth so co-located frames (e.g. a mainframe and an
     // iframe both anchored at the page origin) don't draw their labels directly on top of each other.
-    float stagger = m_graphicsLayer ? m_graphicsLayer->frameProcessIndicatorDepth() * depthStaggerStep : 0;
-    m_indicatorLayer->setPosition({ location.x() + stagger, location.y() + stagger, 1 });
+    unsigned depth = m_graphicsLayer ? m_graphicsLayer->frameProcessIndicatorDepth() : 0;
+    float staggerX = borderWidth + depth * depthStaggerStep;
+    float staggerY = borderWidth + depth * m_indicatorLayer->bounds().height();
+    m_indicatorLayer->setPosition({ location.x() + staggerX, location.y() + staggerY, 1 });
 }
 
 void FrameProcessIndicators::updateContentsScale(float contentsScale)
@@ -128,12 +132,13 @@ FloatSize FrameProcessIndicators::size() const
 {
     auto font = makeFont();
     auto [textTop, textBottom] = textVerticalBounds(font);
-    return { 2 * padding + font.width(TextRun(m_text)), 2 * padding + textBottom - textTop };
+    return { 2 * padding + font.width(m_text), 2 * padding + textBottom - textTop };
 }
 
 std::pair<float, float> FrameProcessIndicators::textVerticalBounds(const FontCascade& font) const
 {
-    return ComplexTextController::enclosingGlyphBoundsForTextRun(font, TextRun(m_text));
+    TextRun textRun { m_text };
+    return ComplexTextController::enclosingGlyphBoundsForTextRun(font, textRun);
 }
 
 void FrameProcessIndicators::platformCALayerPaintContents(PlatformCALayer* layer, GraphicsContext& context, const FloatRect&, OptionSet<GraphicsLayerPaintBehavior>)
@@ -144,14 +149,15 @@ void FrameProcessIndicators::platformCALayerPaintContents(PlatformCALayer* layer
     auto indicatorSize = layer->bounds().size();
 
     context.setFillColor(m_backgroundColor);
-    context.fillRect(FloatRect { 0, borderWidth, indicatorSize.width() - borderWidth, indicatorSize.height() - borderWidth });
+    context.fillRect(FloatRect { { }, indicatorSize });
     context.setFillColor(textColor);
-    context.drawText(font, TextRun(m_text), { padding, padding - textTop });
+    TextRun textRun { m_text };
+    context.drawText(font, textRun, { padding, padding - textTop });
 }
 
 float FrameProcessIndicators::platformCALayerDeviceScaleFactor() const
 {
-    return m_graphicsLayer ? m_graphicsLayer->deviceScaleFactor() : 1;
+    return m_graphicsLayer ? protect(m_graphicsLayer)->deviceScaleFactor() : 1;
 }
 
 OptionSet<ContentsFormat> FrameProcessIndicators::screenContentsFormats() const

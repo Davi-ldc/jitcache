@@ -417,41 +417,21 @@ void BifurcatedGraphicsContext::drawPattern(const NativeImage& nativeImage, cons
     VERIFY_STATE_SYNCHRONIZATION();
 }
 
-ImageDrawResult BifurcatedGraphicsContext::drawImage(Image& image, const FloatRect& destination, const FloatRect& source, ImagePaintingOptions options)
+ImageDrawResult BifurcatedGraphicsContext::drawImage(Image& image, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& source, ImagePaintingOptions options, const ImageDrawingExtras* extras)
 {
-    auto result = m_primaryContext.drawImage(image, destination, source, options);
-    m_secondaryContext.drawImage(image, destination, source, options);
+    auto result = m_primaryContext.drawImage(image, concreteObjectSize, destination, source, options, extras);
+    m_secondaryContext.drawImage(image, concreteObjectSize, destination, source, options, extras);
 
-    VERIFY_STATE_SYNCHRONIZATION();
-
-    return result;
-}
-
-ImageDrawResult BifurcatedGraphicsContext::drawTiledImage(Image& image, const FloatRect& destination, const FloatPoint& source, const FloatSize& tileSize, const FloatSize& spacing, ImagePaintingOptions options)
-{
-    auto result = m_primaryContext.drawTiledImage(image, destination, source, tileSize, spacing, options);
-    m_secondaryContext.drawTiledImage(image, destination, source, tileSize, spacing, options);
-
-    VERIFY_STATE_SYNCHRONIZATION();
-
-    return result;
-}
-
-ImageDrawResult BifurcatedGraphicsContext::drawTiledImage(Image& image, const FloatRect& destination, const FloatRect& source, const FloatSize& tileScaleFactor, Image::TileRule hRule, Image::TileRule vRule, ImagePaintingOptions options)
-{
-    auto result = m_primaryContext.drawTiledImage(image, destination, source, tileScaleFactor, hRule, vRule, options);
-    m_secondaryContext.drawTiledImage(image, destination, source, tileScaleFactor, hRule, vRule, options);
-    
     VERIFY_STATE_SYNCHRONIZATION();
 
     return result;
 }
 
 #if ENABLE(VIDEO)
-void BifurcatedGraphicsContext::drawVideoFrame(const VideoFrame& videoFrame, const FloatRect& destination, WebCore::ImageOrientation orientation, bool shouldDiscardAlpha)
+void BifurcatedGraphicsContext::drawVideoFrame(const VideoFrame& videoFrame, const FloatRect& destination, ShouldDiscardAlpha shouldDiscardAlpha, ImagePaintingOptions options)
 {
-    m_primaryContext.drawVideoFrame(videoFrame, destination, orientation, shouldDiscardAlpha);
-    m_secondaryContext.drawVideoFrame(videoFrame, destination, orientation, shouldDiscardAlpha);
+    m_primaryContext.drawVideoFrame(videoFrame, destination, shouldDiscardAlpha, options);
+    m_secondaryContext.drawVideoFrame(videoFrame, destination, shouldDiscardAlpha, options);
 
     VERIFY_STATE_SYNCHRONIZATION();
 }
@@ -532,6 +512,14 @@ void BifurcatedGraphicsContext::drawGlyphs(const Font& font, std::span<const Gly
 {
     m_primaryContext.drawGlyphs(font, glyphs, advances, point, fontSmoothingMode);
     m_secondaryContext.drawGlyphs(font, glyphs, advances, point, fontSmoothingMode);
+
+    VERIFY_STATE_SYNCHRONIZATION();
+}
+
+void BifurcatedGraphicsContext::drawGlyphsImmediate(const FontBase& font, std::span<const GlyphBufferGlyph> glyphs, std::span<const GlyphBufferAdvance> advances, const FloatPoint& point, FontSmoothingMode fontSmoothingMode)
+{
+    m_primaryContext.drawGlyphsImmediate(font, glyphs, advances, point, fontSmoothingMode);
+    m_secondaryContext.drawGlyphsImmediate(font, glyphs, advances, point, fontSmoothingMode);
 
     VERIFY_STATE_SYNCHRONIZATION();
 }

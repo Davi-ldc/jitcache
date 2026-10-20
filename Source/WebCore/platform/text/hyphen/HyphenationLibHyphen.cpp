@@ -126,7 +126,7 @@ public:
         return adoptRef(*new HyphenationDictionary());
     }
 
-    static Ref<HyphenationDictionary> create(const CString& dictPath)
+    static Ref<HyphenationDictionary> create(const UTF8CString& dictPath)
     {
         return adoptRef(*new HyphenationDictionary(dictPath));
     }
@@ -137,8 +137,8 @@ public:
     }
 
 private:
-    HyphenationDictionary(const CString& dictPath)
-        : m_libhyphenDictionary(HyphenDictUniquePtr(hnj_hyphen_load(dictPath.data()), hnj_hyphen_free))
+    HyphenationDictionary(const UTF8CString& dictPath)
+        : m_libhyphenDictionary(HyphenDictUniquePtr(hnj_hyphen_load(dictPath.legacyCStringPointer()), hnj_hyphen_free))
     {
     }
 
@@ -186,11 +186,11 @@ public:
 
 namespace WebCore {
 
-static void countLeadingSpaces(const CString& utf8String, int32_t& pointerOffset, int32_t& characterOffset)
+static void countLeadingSpaces(const UTF8CString& utf8String, int32_t& pointerOffset, int32_t& characterOffset)
 {
     pointerOffset = 0;
     characterOffset = 0;
-    const char* stringData = utf8String.data();
+    const char* stringData = utf8String.legacyCStringPointer();
     char32_t character = 0;
     while (static_cast<unsigned>(pointerOffset) < utf8String.length()) {
         int32_t nextPointerOffset = pointerOffset;
@@ -209,7 +209,7 @@ size_t lastHyphenLocation(StringView string, size_t beforeIndex, const AtomStrin
     // which stores either UTF-16 or Latin1 data. This is unfortunate for performance
     // reasons and we should consider switching to a more flexible hyphenation library
     // if it is available.
-    CString utf8StringCopy = string.utf8();
+    auto utf8StringCopy = string.utf8();
 
     // WebCore often passes strings like " wordtohyphenate" to the platform layer. Since
     // libhyphen isn't advanced enough to deal with leading spaces (presumably CoreFoundation
@@ -239,7 +239,7 @@ size_t lastHyphenLocation(StringView string, size_t beforeIndex, const AtomStrin
         int* positions = nullptr;
         int* removedCharacterCounts = nullptr;
         hnj_hyphen_hyphenate2(dictionary->libhyphenDictionary(),
-            utf8StringCopy.data() + leadingSpaceBytes,
+            utf8StringCopy.legacyCStringPointer() + leadingSpaceBytes,
             utf8StringCopy.length() - leadingSpaceBytes,
             hyphenArrayData,
             nullptr, /* output parameter for hyphenated word */

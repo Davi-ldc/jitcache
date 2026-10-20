@@ -585,14 +585,14 @@ public:
     // the rewrite path (RTT::rewriteInternalRefs) and the cycle-break path
     // (RTT::clearReferencedRTTs).
     template<typename Callback>
-    void visitChildrenRTT(Callback&& cb)
+    void visitChildrenRTT(NOESCAPE const Callback& cb)
     {
         for (TypeSlot& slot : m_signature)
             cb(slot);
     }
 
     template<typename Callback>
-    void forEachPayloadRTTRef(Callback&& cb) const
+    void forEachPayloadRTTRef(NOESCAPE const Callback& cb) const
     {
         for (const TypeSlot& slot : m_signature) {
             if (slot.rttAnchor)
@@ -635,6 +635,7 @@ public:
     StructFieldCount fieldCount() const { return m_fields.size(); }
     const FieldType& field(StructFieldCount i) const LIFETIME_BOUND { return m_fields[i].type; }
     unsigned offsetOfFieldInPayload(StructFieldCount i) const { return m_fields[i].offset; }
+    const StructFieldEntry& fieldEntry(StructFieldCount i) const LIFETIME_BOUND { return m_fields[i]; }
     size_t instancePayloadSize() const { return m_instancePayloadSize; }
     bool hasRefFieldTypes() const { return m_hasRefFieldTypes; }
     bool hasRecursiveReference() const { return m_hasRecursiveReference; }
@@ -644,7 +645,7 @@ public:
     // built from the entry's FieldType + rttAnchor; mutations are written
     // back into the entry on return.
     template<typename Callback>
-    void visitChildrenRTT(Callback&& cb)
+    void visitChildrenRTT(NOESCAPE const Callback& cb)
     {
         for (StructFieldEntry& entry : m_fields) {
             if (!entry.type.type.is<Type>())
@@ -657,7 +658,7 @@ public:
     }
 
     template<typename Callback>
-    void forEachPayloadRTTRef(Callback&& cb) const
+    void forEachPayloadRTTRef(NOESCAPE const Callback& cb) const
     {
         for (const StructFieldEntry& entry : m_fields) {
             if (entry.rttAnchor)
@@ -697,7 +698,7 @@ public:
     // Iterate the (single) ref-bearing element, if any. PackedType element
     // types are skipped. Same view-pattern as RTTStructPayload::visitChildrenRTT.
     template<typename Callback>
-    void visitChildrenRTT(Callback&& cb)
+    void visitChildrenRTT(NOESCAPE const Callback& cb)
     {
         if (!m_elementType.type.is<Type>())
             return;
@@ -708,7 +709,7 @@ public:
     }
 
     template<typename Callback>
-    void forEachPayloadRTTRef(Callback&& cb) const
+    void forEachPayloadRTTRef(NOESCAPE const Callback& cb) const
     {
         if (m_elementTypeAnchor)
             cb(m_elementTypeAnchor.get());
@@ -725,6 +726,7 @@ private:
 class alignas(16) RTT final : public ThreadSafeRefCounted<RTT>, private TrailingArray<RTT, RefPtr<const RTT>> {
     WTF_DEPRECATED_MAKE_FAST_COMPACT_ALLOCATED(RTT);
     WTF_MAKE_NONMOVABLE(RTT);
+    using Malloc = FastCompactMalloc;
     using TrailingArrayType = TrailingArray<RTT, RefPtr<const RTT>>;
     friend TrailingArrayType;
     friend class JSC::LLIntOffsetsExtractor;
@@ -801,6 +803,13 @@ public:
         return structPayload().field(i);
     }
     unsigned offsetOfFieldInPayload(StructFieldCount i) const { return structPayload().offsetOfFieldInPayload(i); }
+
+    const StructFieldEntry& fieldEntry(StructFieldCount i) const LIFETIME_BOUND
+    {
+        ASSERT(m_kind == RTTKind::Struct);
+        return structPayload().fieldEntry(i);
+    }
+
     size_t instancePayloadSize() const { return structPayload().instancePayloadSize(); }
     bool hasRefFieldTypes() const { return structPayload().hasRefFieldTypes(); }
 
@@ -876,34 +885,34 @@ public:
     // rewriteInternalRefs (sets each slot's anchor inline as it rewrites)
     // and clearReferencedRTTs (nulls each anchor).
     template<typename Callback>
-    void visitChildrenRTT(Callback&& cb)
+    void visitChildrenRTT(NOESCAPE const Callback& cb)
     {
         switch (m_kind) {
         case RTTKind::Function:
-            std::get<RTTFunctionPayload>(m_payload).visitChildrenRTT(std::forward<Callback>(cb));
+            std::get<RTTFunctionPayload>(m_payload).visitChildrenRTT(cb);
             return;
         case RTTKind::Struct:
-            std::get<RTTStructPayload>(m_payload).visitChildrenRTT(std::forward<Callback>(cb));
+            std::get<RTTStructPayload>(m_payload).visitChildrenRTT(cb);
             return;
         case RTTKind::Array:
-            std::get<RTTArrayPayload>(m_payload).visitChildrenRTT(std::forward<Callback>(cb));
+            std::get<RTTArrayPayload>(m_payload).visitChildrenRTT(cb);
             return;
         }
         RELEASE_ASSERT_NOT_REACHED();
     }
 
     template<typename Callback>
-    void forEachPayloadRTTRef(Callback&& cb) const
+    void forEachPayloadRTTRef(NOESCAPE const Callback& cb) const
     {
         switch (m_kind) {
         case RTTKind::Function:
-            std::get<RTTFunctionPayload>(m_payload).forEachPayloadRTTRef(std::forward<Callback>(cb));
+            std::get<RTTFunctionPayload>(m_payload).forEachPayloadRTTRef(cb);
             return;
         case RTTKind::Struct:
-            std::get<RTTStructPayload>(m_payload).forEachPayloadRTTRef(std::forward<Callback>(cb));
+            std::get<RTTStructPayload>(m_payload).forEachPayloadRTTRef(cb);
             return;
         case RTTKind::Array:
-            std::get<RTTArrayPayload>(m_payload).forEachPayloadRTTRef(std::forward<Callback>(cb));
+            std::get<RTTArrayPayload>(m_payload).forEachPayloadRTTRef(cb);
             return;
         }
         RELEASE_ASSERT_NOT_REACHED();
@@ -1213,9 +1222,9 @@ private:
     // TypeSectionState::createCanonicalRTT's rebuild-with-substitution path
     // where the intermediate Vector was purely scaffolding.
     template<typename FieldProvider>
-    static Ref<const RTT> typeDefinitionForStructFromProvider(StructFieldCount, FieldProvider&&);
+    static Ref<const RTT> typeDefinitionForStructFromProvider(StructFieldCount, NOESCAPE const FieldProvider&);
     template<typename ReturnProvider, typename ArgProvider>
-    static Ref<const RTT> typeDefinitionForFunctionFromProviders(FunctionArgCount retCount, ReturnProvider&&, FunctionArgCount argCount, ArgProvider&&);
+    static Ref<const RTT> typeDefinitionForFunctionFromProviders(FunctionArgCount retCount, NOESCAPE const ReturnProvider&, FunctionArgCount, NOESCAPE const ArgProvider&);
 
     // Isorecursive RTT canonicalization at recursion-group granularity.
     // Given a freshly-parsed recursion group identified by recursionGroup

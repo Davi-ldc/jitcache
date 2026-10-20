@@ -88,7 +88,6 @@ enum TestConfidence { "high", "kinda-low" };
     [ReturnsPromisePair] PromisePair returnsPromisePair();
     attribute [LegacyNullToEmptyString] DOMString stringAttrTreatingNullAsEmptyString;
     attribute [LegacyNullToEmptyString] USVString usvstringAttrTreatingNullAsEmptyString;
-    attribute [LegacyNullToEmptyString] ByteString byteStringAttrTreatingNullAsEmptyString;
     attribute record<DOMString, long> stringLongRecordAttr;
     attribute record<USVString, long> usvstringLongRecordAttr;
     attribute record<ByteString, long> usvstringLongRecordAttr;
@@ -207,7 +206,6 @@ enum TestConfidence { "high", "kinda-low" };
 
     undefined methodWithByteStringArg(ByteString str);
     undefined methodWithNullableByteStringArg(ByteString? str);
-    undefined methodWithByteStringArgTreatingNullAsEmptyString([LegacyNullToEmptyString] ByteString str);
 
     undefined serializedValue(SerializedScriptValue serializedArg);
 
@@ -483,6 +481,11 @@ enum TestConfidence { "high", "kinda-low" };
     stringifier attribute USVString stringifierAttribute;
 
     undefined bufferSourceParameter(BufferSource data);
+    undefined allowSharedBufferSourceParameter([AllowShared] BufferSource data);
+    undefined annotatedBufferSourceMembersParameter(([AllowShared] ArrayBuffer or [AllowShared] ArrayBufferView) data);
+    undefined nullableBufferSourceMemberParameter((ArrayBufferView? or ArrayBuffer) data);
+    undefined allowSharedBufferSourceParameterFromTypedef(AllowSharedBufferSource data);
+    undefined nestedAllowSharedBufferSourceParameter((AllowSharedBufferSource or DOMString) data);
 
     Node testReturnValueOptimization([ReturnValue] Node a, Node b);
 

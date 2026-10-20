@@ -1,4 +1,4 @@
-// jitcache-pin: off the derived default constructor runs until the DFG compiles it, and what the DFG freezes from its super_construct cache is what the native fix of SPEC-ics.md E1 changes
+// jitcache-pin: off the derived default constructor runs until the DFG compiles it, and what the DFG freezes from its super_construct cache is what the native fix to the baseline super_construct template changes
 // jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-delta-capture=compiled; Consumer
 // The Producer captures compiled bodies only: the windows count the requests of the bodies under test, and with the
 // delta capture all each window's own action, which ran in the Producer, would have a body too (run-once-capture.js

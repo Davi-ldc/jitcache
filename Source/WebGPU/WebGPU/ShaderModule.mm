@@ -37,29 +37,32 @@
 #import "WGSLShaderModule.h"
 
 #import <WebGPU/WebGPU.h>
+#import <wtf/BlockPtr.h>
 #import <wtf/DataLog.h>
 #import <wtf/StringPrintStream.h>
 #import <wtf/TZoneMallocInlines.h>
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 struct ShaderModuleParameters {
     String wgslCode;
     const WGPUShaderModuleCompilationHint* hints;
 };
 
-static std::optional<ShaderModuleParameters> NODELETE findShaderModuleParameters(const WGPUShaderModuleDescriptor& descriptor)
+static std::optional<ShaderModuleParameters> findShaderModuleParameters(const WGPUShaderModuleDescriptor& descriptor)
 {
-    const auto& wgslCode = descriptor.wgslDescriptor;
-    const WGPUShaderModuleCompilationHint* hints = descriptor.hints;
+    auto* wgsl = findChainedStruct<WGPUShaderSourceWGSL>(descriptor.nextInChain);
+    if (!wgsl)
+        return std::nullopt;
 
+    auto wgslCode = fromAPI(wgsl->code);
     if (!wgslCode)
         return std::nullopt;
 
-    return { { wgslCode, hints } };
+    return { { WTF::move(wgslCode), descriptor.hints } };
 }
 
-id<MTLLibrary> ShaderModule::createLibrary(id<MTLDevice> device, const String& msl, String&& label, NSError** error, WGSL::DeviceState&& deviceState)
+static MTLCompileOptions *compileOptions(const WGSL::DeviceState& deviceState)
 {
     static bool requireSafeMath = false;
     auto options = [MTLCompileOptions new];
@@ -84,16 +87,44 @@ ALLOW_DEPRECATED_DECLARATIONS_END
     if (deviceState.usesInvariant)
         options.preserveInvariance = true;
 
-    // FIXME(PERFORMANCE): Run the asynchronous version of this
-    id<MTLLibrary> library = [device newLibraryWithSource:msl.createNSString().get() options:options error:error];
-    if (error && *error) {
-        // FIXME: https://bugs.webkit.org/show_bug.cgi?id=250442
-        WTFLogAlways("MSL compilation error: %@", [*error localizedDescription]);
-        *error = [NSError errorWithDomain:@"WebGPU" code:1 userInfo:@{ NSLocalizedDescriptionKey: adoptNS([[NSString alloc] initWithFormat:@"Failed to compile the shader source, generated metal:\n%@ - error %@", msl.createNSString().get(), [*error localizedDescription]]).get() }];
+    return options;
+}
+
+static NSError *libraryCompilationError(NSString *msl, NSError *compilationError)
+{
+    // FIXME: https://bugs.webkit.org/show_bug.cgi?id=250442
+    WTFLogAlways("MSL compilation error: %@", [compilationError localizedDescription]); // NOLINT
+    return [NSError errorWithDomain:@"WebGPU" code:1 userInfo:@{ NSLocalizedDescriptionKey: adoptNS([[NSString alloc] initWithFormat:@"Failed to compile the shader source, generated metal:\n%@ - error %@", msl, [compilationError localizedDescription]]).get() }];
+}
+
+id<MTLLibrary> ShaderModule::createLibrary(id<MTLDevice> device, const String& msl, String&& label, NSError** error, WGSL::DeviceState&& deviceState)
+{
+    return createLibrary(device, msl.createNSString().get(), label.createNSString().get(), error, deviceState);
+}
+
+id<MTLLibrary> ShaderModule::createLibrary(id<MTLDevice> device, NSString *msl, NSString *label, NSError** error, const WGSL::DeviceState& deviceState)
+{
+    NSError *compilationError = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:msl options:compileOptions(deviceState) error:&compilationError];
+    if (!library || compilationError) {
+        if (error)
+            *error = libraryCompilationError(msl, compilationError);
         return nil;
     }
-    library.label = label.createNSString().get();
+    library.label = label;
     return library;
+}
+
+void ShaderModule::createLibraryAsync(id<MTLDevice> device, NSString *msl, NSString *label, const WGSL::DeviceState& deviceState, CompletionHandler<void(id<MTLLibrary>, NSError *)>&& callback)
+{
+    [device newLibraryWithSource:msl options:compileOptions(deviceState) completionHandler:makeBlockPtr([msl, label, callback = WTF::move(callback)](id<MTLLibrary> library, NSError *compilationError) mutable {
+        if (!library || compilationError) {
+            callback(nil, libraryCompilationError(msl, compilationError));
+            return;
+        }
+        library.label = label;
+        callback(library, nil);
+    }).get()];
 }
 
 static RefPtr<ShaderModule> earlyCompileShaderModule(Device& device, Variant<WGSL::SuccessfulCheck, WGSL::FailedCheck>&& checkResult, const WGPUShaderModuleDescriptor& suppliedHints, String&& label)
@@ -102,9 +133,9 @@ static RefPtr<ShaderModule> earlyCompileShaderModule(Device& device, Variant<WGS
     HashMap<String, WGSL::PipelineLayout*> wgslHints;
     Vector<WGSL::PipelineLayout> wgslPipelineLayouts;
     wgslPipelineLayouts.reserveCapacity(suppliedHints.hintCount);
-    for (const auto& hint : suppliedHints.hintsSpan()) {
+    for (const auto& hint : hintsSpan(suppliedHints)) {
         auto hintKey = fromAPI(hint.entryPoint);
-        Ref layout = WebGPU::fromAPI(hint.layout);
+        Ref layout = WebGPU::Metal::fromAPI(hint.layout);
         hints.add(hintKey, layout);
         WGSL::PipelineLayout* convertedPipelineLayout = nullptr;
         if (layout->numberOfBindGroupLayouts()) {
@@ -146,7 +177,7 @@ static const HashSet<String> buildFeatureSet(const Vector<WGPUFeatureName>& feat
     return result;
 }
 
-static Ref<ShaderModule> handleShaderSuccessOrFailure(WebGPU::Device &object, Variant<WGSL::SuccessfulCheck, WGSL::FailedCheck> &checkResult, const WGPUShaderModuleDescriptor &descriptor, std::optional<ShaderModuleParameters> &shaderModuleParameters)
+static Ref<ShaderModule> handleShaderSuccessOrFailure(WebGPU::Metal::Device &object, Variant<WGSL::SuccessfulCheck, WGSL::FailedCheck> &checkResult, const WGPUShaderModuleDescriptor &descriptor, std::optional<ShaderModuleParameters> &shaderModuleParameters)
 {
     if (std::holds_alternative<WGSL::SuccessfulCheck>(checkResult)) {
         if (shaderModuleParameters->hints && descriptor.hintCount) {
@@ -1014,29 +1045,29 @@ static WGSL::TexelFormat NODELETE wgslFormat(WGPUTextureFormat format)
 
 static WGSL::BindGroupLayoutEntry::BindingMember convertBindingLayout(const BindGroupLayout::Entry::BindingLayout& bindingLayout)
 {
-    return WTF::switchOn(bindingLayout, [](const WGPUBufferBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
+    return WTF::switchOn(bindingLayout, [](const BindGroupLayout::BufferBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
         return WGSL::BufferBindingLayout {
             .type = wgslBindingType(bindingLayout.type),
             .hasDynamicOffset = !!bindingLayout.hasDynamicOffset,
             .minBindingSize = bindingLayout.minBindingSize
         };
-    }, [](const WGPUSamplerBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
+    }, [](const BindGroupLayout::SamplerBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
         return WGSL::SamplerBindingLayout {
             .type = wgslSamplerType(bindingLayout.type)
         };
-    }, [](const WGPUTextureBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
+    }, [](const BindGroupLayout::TextureBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
         return WGSL::TextureBindingLayout {
             .sampleType = wgslSampleType(bindingLayout.sampleType),
             .viewDimension = wgslViewDimension(bindingLayout.viewDimension),
             .multisampled = !!bindingLayout.multisampled
         };
-    }, [](const WGPUStorageTextureBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
+    }, [](const BindGroupLayout::StorageTextureBindingLayout& bindingLayout) -> WGSL::BindGroupLayoutEntry::BindingMember {
         return WGSL::StorageTextureBindingLayout {
             .access = wgslAccess(bindingLayout.access),
             .format = wgslFormat(bindingLayout.format),
             .viewDimension = wgslViewDimension(bindingLayout.viewDimension)
         };
-    }, [](const WGPUExternalTextureBindingLayout&) -> WGSL::BindGroupLayoutEntry::BindingMember {
+    }, [](const BindGroupLayout::ExternalTextureBindingLayout&) -> WGSL::BindGroupLayoutEntry::BindingMember {
         return WGSL::ExternalTextureBindingLayout {
         };
     });
@@ -1056,22 +1087,22 @@ WGSL::PipelineLayout ShaderModule::convertPipelineLayout(const PipelineLayout& p
             wgslEntry.binding = entry.value.binding;
             wgslEntry.visibility = wgslEntry.visibility.fromRaw(entry.value.visibility);
             wgslEntry.bindingMember = convertBindingLayout(entry.value.bindingLayout);
-            wgslEntry.vertexArgumentBufferIndex = entry.value.argumentBufferIndices[WebGPU::ShaderStage::Vertex];
-            wgslEntry.vertexArgumentBufferSizeIndex = entry.value.bufferSizeArgumentBufferIndices[WebGPU::ShaderStage::Vertex];
+            wgslEntry.vertexArgumentBufferIndex = entry.value.argumentBufferIndices[WebGPU::Metal::ShaderStage::Vertex];
+            wgslEntry.vertexArgumentBufferSizeIndex = entry.value.bufferSizeArgumentBufferIndices[WebGPU::Metal::ShaderStage::Vertex];
             if (entry.value.vertexDynamicOffset) {
                 RELEASE_ASSERT(!(entry.value.vertexDynamicOffset.value() % sizeof(uint32_t)));
                 wgslEntry.vertexBufferDynamicOffset = (vertexOffset + *entry.value.vertexDynamicOffset) / sizeof(uint32_t);
                 maxVertexOffset = std::max<size_t>(maxVertexOffset, *entry.value.vertexDynamicOffset + sizeof(uint32_t) + vertexOffset);
             }
-            wgslEntry.fragmentArgumentBufferIndex = entry.value.argumentBufferIndices[WebGPU::ShaderStage::Fragment];
-            wgslEntry.fragmentArgumentBufferSizeIndex = entry.value.bufferSizeArgumentBufferIndices[WebGPU::ShaderStage::Fragment];
+            wgslEntry.fragmentArgumentBufferIndex = entry.value.argumentBufferIndices[WebGPU::Metal::ShaderStage::Fragment];
+            wgslEntry.fragmentArgumentBufferSizeIndex = entry.value.bufferSizeArgumentBufferIndices[WebGPU::Metal::ShaderStage::Fragment];
             if (entry.value.fragmentDynamicOffset) {
                 RELEASE_ASSERT(!(entry.value.fragmentDynamicOffset.value() % sizeof(uint32_t)));
                 wgslEntry.fragmentBufferDynamicOffset = (fragmentOffset + *entry.value.fragmentDynamicOffset) / sizeof(uint32_t) + RenderBundleEncoder::startIndexForFragmentDynamicOffsets;
                 maxFragmentOffset = std::max<size_t>(maxFragmentOffset, *entry.value.fragmentDynamicOffset + sizeof(uint32_t) + fragmentOffset);
             }
-            wgslEntry.computeArgumentBufferIndex = entry.value.argumentBufferIndices[WebGPU::ShaderStage::Compute];
-            wgslEntry.computeArgumentBufferSizeIndex = entry.value.bufferSizeArgumentBufferIndices[WebGPU::ShaderStage::Compute];
+            wgslEntry.computeArgumentBufferIndex = entry.value.argumentBufferIndices[WebGPU::Metal::ShaderStage::Compute];
+            wgslEntry.computeArgumentBufferSizeIndex = entry.value.bufferSizeArgumentBufferIndices[WebGPU::Metal::ShaderStage::Compute];
             if (entry.value.computeDynamicOffset) {
                 RELEASE_ASSERT(!(entry.value.computeDynamicOffset.value() % sizeof(uint32_t)));
                 wgslEntry.computeBufferDynamicOffset = (computeOffset + *entry.value.computeDynamicOffset) / sizeof(uint32_t);
@@ -1130,37 +1161,37 @@ const String& ShaderModule::defaultComputeEntryPoint() const
     return m_defaultComputeEntryPoint;
 }
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuShaderModuleReference(WGPUShaderModule shaderModule)
+void NODELETE wgpuShaderModuleAddRef(WGPUShaderModule shaderModule)
 {
-    WebGPU::fromAPI(shaderModule).ref();
+    WebGPU::Metal::fromAPI(shaderModule).ref();
 }
 
 void wgpuShaderModuleRelease(WGPUShaderModule shaderModule)
 {
-    WebGPU::fromAPI(shaderModule).deref();
+    WebGPU::Metal::fromAPI(shaderModule).deref();
 }
 
 void wgpuShaderModuleGetCompilationInfo(WGPUShaderModule shaderModule, WGPUCompilationInfoCallback callback, void * userdata)
 {
-    protect(WebGPU::fromAPI(shaderModule))->getCompilationInfo([callback, userdata](WGPUCompilationInfoRequestStatus status, const WGPUCompilationInfo& compilationInfo) {
+    protect(WebGPU::Metal::fromAPI(shaderModule))->getCompilationInfo([callback, userdata](WGPUCompilationInfoRequestStatus status, const WGPUCompilationInfo& compilationInfo) {
         callback(status, &compilationInfo, userdata);
     });
 }
 
 void wgpuShaderModuleGetCompilationInfoWithBlock(WGPUShaderModule shaderModule, WGPUCompilationInfoBlockCallback callback)
 {
-    protect(WebGPU::fromAPI(shaderModule))->getCompilationInfo([callback = WebGPU::fromAPI(WTF::move(callback))](WGPUCompilationInfoRequestStatus status, const WGPUCompilationInfo& compilationInfo) {
+    protect(WebGPU::Metal::fromAPI(shaderModule))->getCompilationInfo([callback = WebGPU::Metal::fromAPI(WTF::move(callback))](WGPUCompilationInfoRequestStatus status, const WGPUCompilationInfo& compilationInfo) {
         callback(status, &compilationInfo);
     });
 }
 
-void wgpuShaderModuleSetLabel(WGPUShaderModule shaderModule, const char* label)
+void wgpuShaderModuleSetLabel(WGPUShaderModule shaderModule, WGPUStringView label)
 {
-    protect(WebGPU::fromAPI(shaderModule))->setLabel(WebGPU::fromAPI(label));
+    protect(WebGPU::Metal::fromAPI(shaderModule))->setLabel(WebGPU::Metal::fromAPI(label));
 }
 
 String wgpuAdapterFeatureName(WGPUFeatureName feature)

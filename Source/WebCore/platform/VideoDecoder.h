@@ -27,7 +27,7 @@
 
 #include <WebCore/PlatformVideoColorSpace.h>
 #include <WebCore/ProcessIdentity.h>
-#include <span>
+#include <WebCore/VideoEncodedData.h>
 #include <wtf/CompletionHandler.h>
 #include <wtf/NativePromise.h>
 
@@ -53,12 +53,6 @@ public:
         ProcessIdentity resourceOwner { };
     };
 
-    struct EncodedFrame {
-        std::span<const uint8_t> data;
-        bool isKeyFrame { false };
-        int64_t timestamp { 0 };
-        std::optional<uint64_t> duration;
-    };
     struct DecodedFrame {
         Ref<VideoFrame> frame;
         int64_t timestamp { 0 };
@@ -79,7 +73,7 @@ public:
     WEBCORE_EXPORT static void createLocalDecoder(const String&, const Config&, CreateCallback&&, OutputCallback&&);
 
     using DecodePromise = NativePromise<void, String>;
-    virtual Ref<DecodePromise> decode(EncodedFrame&&) = 0;
+    virtual Ref<DecodePromise> decode(VideoEncodedData&&) = 0;
 
     virtual Ref<GenericPromise> flush() = 0;
     virtual void reset() = 0;

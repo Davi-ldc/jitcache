@@ -1,4 +1,4 @@
-// jitcache-runs: Producer --jitcache-test-kill=after-rename@1
+// jitcache-runs: Producer --jitcache-test-kill=after-root@1
 // jitcache-expect-exit: 0 abort
 
 // A run that ends by SIGKILL fails a directive that expects SIGABRT.

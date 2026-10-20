@@ -592,17 +592,17 @@ void VideoPresentationModelContext::requestHideCaptionDisplaySettingsPreview()
 #if !RELEASE_LOG_DISABLED
 uint64_t VideoPresentationModelContext::logIdentifier() const
 {
-    return protect(m_playbackSessionModel)->logIdentifier();
+    return m_playbackSessionModel->logIdentifier();
 }
 
 uint64_t VideoPresentationModelContext::nextChildIdentifier() const
 {
-    return LoggerHelper::childLogIdentifier(protect(m_playbackSessionModel)->logIdentifier(), ++m_childIdentifierSeed);
+    return LoggerHelper::childLogIdentifier(m_playbackSessionModel->logIdentifier(), ++m_childIdentifierSeed);
 }
 
 const Logger* VideoPresentationModelContext::loggerPtr() const
 {
-    return protect(m_playbackSessionModel)->loggerPtr();
+    return m_playbackSessionModel->loggerPtr();
 }
 
 WTFLogChannel& VideoPresentationModelContext::logChannel() const
@@ -645,6 +645,7 @@ void VideoPresentationManagerProxy::invalidate()
 
     auto contextMap = std::exchange(m_contextMap, { });
     m_clientCounts.clear();
+    m_contextsHoldingFullscreenClient.clear();
 
     for (auto& [model, interface] : contextMap.values())
         invalidateInterface(interface);
@@ -842,6 +843,7 @@ void VideoPresentationManagerProxy::removeClientForContext(PlaybackSessionContex
         m_playbackSessionManagerProxy->removeClientForContext(contextId);
         m_clientCounts.remove(contextId);
         m_contextMap.remove(contextId);
+        m_contextsHoldingFullscreenClient.remove(contextId);
 
         if (RefPtr page = m_page.get())
             page->didCleanupFullscreen(contextId);
@@ -852,7 +854,7 @@ void VideoPresentationManagerProxy::removeClientForContext(PlaybackSessionContex
     m_clientCounts.set(contextId, clientCount);
 }
 
-void VideoPresentationManagerProxy::forEachSession(Function<void(VideoPresentationModelContext&, PlatformVideoPresentationInterface&)>&& callback)
+void VideoPresentationManagerProxy::forEachSession(NOESCAPE const Function<void(VideoPresentationModelContext&, PlatformVideoPresentationInterface&)>& callback)
 {
     if (m_contextMap.isEmpty())
         return;
@@ -1103,12 +1105,11 @@ void VideoPresentationManagerProxy::setupFullscreenWithID(IPC::Connection& conne
     if (!page)
         return;
 
+    m_lastSetupFullscreenRectForTesting = screenRect;
+
     auto contextId = contextIdForConnection(connection, identifier);
     auto [model, interface] = ensureModelAndInterface(contextId);
 
-    // Do not add another refcount for this contextId if the interface is already in
-    // a fullscreen mode, lest the refcounts get out of sync, as removeClientForContext
-    // is only called once both PiP and video fullscreen are fully exited.
     bool shouldAddClient = interface->mode() == HTMLMediaElementEnums::VideoFullscreenModeNone || interface->mode() == HTMLMediaElementEnums::VideoFullscreenModeInWindow;
 
 #if PLATFORM(IOS)
@@ -1117,7 +1118,7 @@ void VideoPresentationManagerProxy::setupFullscreenWithID(IPC::Connection& conne
     shouldAddClient = shouldAddClient || interface->isPlayingVideoInPictureInPicture();
 #endif
 
-    if (shouldAddClient)
+    if (shouldAddClient && m_contextsHoldingFullscreenClient.add(contextId).isNewEntry)
         addClientForContext(contextId);
 
     if (m_mockVideoPresentationModeEnabled) {
@@ -1636,7 +1637,8 @@ void VideoPresentationManagerProxy::didCleanupFullscreen(PlaybackSessionContextI
 
     if (!hasMode(HTMLMediaElementEnums::VideoFullscreenModeInWindow)) {
         interface->setMode(HTMLMediaElementEnums::VideoFullscreenModeNone, VideoPresentationModel::ShouldNotifyMediaElement::No);
-        removeClientForContext(contextId);
+        if (m_contextsHoldingFullscreenClient.remove(contextId))
+            removeClientForContext(contextId);
     }
 
     page->didCleanupFullscreen(contextId);

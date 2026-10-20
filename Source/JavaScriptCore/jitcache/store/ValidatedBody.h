@@ -12,7 +12,7 @@
 #include <wtf/ThreadSafeRefCounted.h>
 
 // What the lanes see of storage, the one store header they include: the section kinds, a body that passed the container
-// checks, and what VMState::openBody answers.
+// checks, and what VMState::openBody and VMState::readBodySection answer.
 
 namespace JSC::JITCache {
 
@@ -22,6 +22,7 @@ namespace JSC::JITCache {
 //   UCBIdentity          ucb.identity              0x0101   0     required
 //   UCBCore              ucb.core                  0x0102   0     required
 //   UCBFeedback          ucb.feedback              0x0103   0     required
+//   UCBAnalysis          ucb.analysis              0x0104   0     optional at every tier, and only in a module's body
 //   ImageBaseline        image.baseline            0x0201   1     required
 //   BakedFactsBaseline   baked-facts.baseline      0x0202   1     required
 //   ImageTwinsBaseline   image-twins.baseline      0x0203   1     required in ENABLE(JITCACHE_TWINS) builds, forbidden elsewhere
@@ -32,12 +33,12 @@ namespace JSC::JITCache {
 // The high byte of a type id names the lane and the low byte the section family; the directory entry's tier byte
 // separates tiers, 0 for the sections every tier shares. The order of the enumerators is the directory's order.
 enum class SectionKind : uint8_t {
-    UCBIdentity, UCBCore, UCBFeedback,
+    UCBIdentity, UCBCore, UCBFeedback, UCBAnalysis,
     ImageBaseline, BakedFactsBaseline, ImageTwinsBaseline,
     CBStateBaseline, CBSummaryBaseline,
     ICsBaseline,
 };
-constexpr unsigned numberOfSectionKinds = 9;
+constexpr unsigned numberOfSectionKinds = 10;
 static_assert(static_cast<unsigned>(SectionKind::ICsBaseline) + 1 == numberOfSectionKinds);
 
 class MappedPack;
@@ -113,6 +114,28 @@ private:
 
     Kind m_kind;
     RefPtr<ValidatedBody> m_body;
+};
+
+// What VMState::readBodySection answers: one section of a key's newest body, read without checksumming the body's other
+// sections. Absent: no body has the key. Unusable: the integrator has already raised invalid material. Found: the section,
+// which the lookup keeps readable while it lives. Movable.
+class SectionLookup {
+public:
+    enum class Kind : uint8_t { Absent, Unusable, Found };
+    Kind kind() const;
+    std::span<const uint8_t> bytes() const LIFETIME_BOUND; // Found: the section, empty when the body lacks it; 8-byte aligned
+    SectionLookup(SectionLookup&&);
+    SectionLookup& operator=(SectionLookup&&);
+    ~SectionLookup(); // drops what keeps the bytes; any thread that holds no JITCache lock
+
+private:
+    friend class VMState;
+    SectionLookup(Kind, RefPtr<MappedPack>&&, RefPtr<ValidatedBody>&&, std::span<const uint8_t>);
+
+    Kind m_kind;
+    RefPtr<MappedPack> m_pack; // the store's mapping the bytes lie in
+    RefPtr<ValidatedBody> m_body; // or the test override's body they lie in
+    std::span<const uint8_t> m_bytes;
 };
 
 } // namespace JSC::JITCache

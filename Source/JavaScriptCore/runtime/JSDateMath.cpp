@@ -95,6 +95,11 @@ namespace JSC {
 
 namespace JSDateMathInternal {
 static constexpr bool verbose = false;
+
+static bool canNarrowToInt64Milliseconds(double milliseconds)
+{
+    return std::isfinite(milliseconds) && std::abs(milliseconds) <= WTF::maxECMAScriptTime + WTF::msPerDay;
+}
 }
 
 class OpaqueICUTimeZone {
@@ -331,14 +336,14 @@ double DateCache::gregorianDateTimeToMS(int32_t year, int32_t month, int32_t mon
     double ms = timeToMS(hour, minute, second, milliseconds);
     double localTimeResult = (day * WTF::msPerDay) + ms;
 
-    if (inputTimeType == TimeType::LocalTime && std::isfinite(localTimeResult))
+    if (inputTimeType == TimeType::LocalTime && JSDateMathInternal::canNarrowToInt64Milliseconds(localTimeResult))
         return localTimeResult - localTimeOffset(static_cast<int64_t>(localTimeResult), inputTimeType).offset;
     return localTimeResult;
 }
 
 double DateCache::localTimeToMS(double milliseconds, TimeType inputTimeType)
 {
-    if (inputTimeType == TimeType::LocalTime && std::isfinite(milliseconds))
+    if (inputTimeType == TimeType::LocalTime && JSDateMathInternal::canNarrowToInt64Milliseconds(milliseconds))
         return milliseconds - localTimeOffset(static_cast<int64_t>(milliseconds), inputTimeType).offset;
     return milliseconds;
 }
@@ -366,11 +371,11 @@ ALWAYS_INLINE std::tuple<int32_t, int32_t, int32_t> DateCache::yearMonthDayFromD
 ALWAYS_INLINE PlainGregorianDateTime DateCache::computeGregorianDateTime(double millisecondsFromEpoch, TimeType outputTimeType)
 {
     LocalTimeOffset localTime;
-    if (outputTimeType == TimeType::LocalTime && std::isfinite(millisecondsFromEpoch)) {
+    if (outputTimeType == TimeType::LocalTime && JSDateMathInternal::canNarrowToInt64Milliseconds(millisecondsFromEpoch)) {
         localTime = localTimeOffset(static_cast<int64_t>(millisecondsFromEpoch));
         millisecondsFromEpoch += localTime.offset;
     }
-    if (!std::isfinite(millisecondsFromEpoch))
+    if (!JSDateMathInternal::canNarrowToInt64Milliseconds(millisecondsFromEpoch))
         return { };
 
     WTF::Int64Milliseconds timeClipped(static_cast<int64_t>(millisecondsFromEpoch));
@@ -420,7 +425,7 @@ double DateCache::parseDate(JSGlobalObject* globalObject, VM& vm, const String& 
             auto result = StringImpl::createUninitialized(characters.size(), buffer);
             for (size_t i = 0; i < characters.size(); ++i) {
                 char16_t c = characters[i];
-                buffer[i] = Lexer<char16_t>::isWhiteSpace(c) ? static_cast<char16_t>(space) : c;
+                buffer[i] = isWhiteSpace<char16_t>(c) ? static_cast<char16_t>(space) : c;
             }
             updatedString = WTF::move(result);
         }
@@ -451,7 +456,7 @@ double DateCache::parseDate(JSGlobalObject* globalObject, VM& vm, const String& 
         if (std::isnan(value))
             value = WTF::parseDate(dateString, isLocalTime);
 
-        if (isLocalTime && std::isfinite(value))
+        if (isLocalTime && JSDateMathInternal::canNarrowToInt64Milliseconds(value))
             value -= localTimeOffset(static_cast<int64_t>(value), TimeType::LocalTime).offset;
 
         return value;
@@ -474,16 +479,16 @@ String DateCache::timeZoneDisplayName(bool isDST)
 {
     if (m_timeZoneStandardDisplayNameCache.isNull()) {
         auto& timeZoneCache = *this->timeZoneCache();
-        CString language = defaultLanguage().utf8();
+        auto language = defaultLanguage().utf8();
         {
             Vector<char16_t, 32> standardDisplayNameBuffer;
-            auto status = callBufferProducingFunction(ucal_getTimeZoneDisplayName, timeZoneCache.m_calendar.get(), UCAL_STANDARD, language.data(), standardDisplayNameBuffer);
+            auto status = callBufferProducingFunction(ucal_getTimeZoneDisplayName, timeZoneCache.m_calendar.get(), UCAL_STANDARD, language.legacyCStringPointer(), standardDisplayNameBuffer);
             if (U_SUCCESS(status))
                 m_timeZoneStandardDisplayNameCache = String::adopt(WTF::move(standardDisplayNameBuffer));
         }
         {
             Vector<char16_t, 32> dstDisplayNameBuffer;
-            auto status = callBufferProducingFunction(ucal_getTimeZoneDisplayName, timeZoneCache.m_calendar.get(), UCAL_DST, language.data(), dstDisplayNameBuffer);
+            auto status = callBufferProducingFunction(ucal_getTimeZoneDisplayName, timeZoneCache.m_calendar.get(), UCAL_DST, language.legacyCStringPointer(), dstDisplayNameBuffer);
             if (U_SUCCESS(status))
                 m_timeZoneDSTDisplayNameCache = String::adopt(WTF::move(dstDisplayNameBuffer));
         }

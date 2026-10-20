@@ -153,11 +153,11 @@ var invalidMaterialCases = (function () {
             identityCase: (name, edit, target = "imPlain") => sectionCase(name, "ucb.identity", "ucb.identity", target, edit),
             feedbackCase: (name, edit, target = "imPlain") => sectionCase(name, "ucb.feedback", "ucb.feedback", target, edit),
             coreCase: (name, step, target, edit) => sectionCase(name, step, "ucb.core", target, edit),
-            // Bodies with the layouts some rules need: a constant count that is not a multiple of 8, so that the maps and
-            // the constant bits have a bit at N; padding at the end of either section; and an alignment gap before the
-            // exit sites, which ucb.feedback has when its arithmetic profiles take a number of halfwords that is odd.
+            // Bodies with the layouts some rules need: a constant count that is not a multiple of 8, so that the butterfly
+            // map and the constant bits have a bit at N; padding at the end of either section; and an alignment gap before
+            // the exit sites, which ucb.feedback has when its arithmetic profiles take a number of halfwords that is odd.
             unevenConstants: () => functionWhere("a constant count that is not a multiple of 8", b => b.identity().constantCount % 8),
-            paddedIdentity: () => functionWhere("padding after its ucb.identity maps", b => {
+            paddedIdentity: () => functionWhere("padding after its ucb.identity butterfly map", b => {
                 const identity = b.identity();
                 return identity.end < identity.childHolderDigests;
             }),

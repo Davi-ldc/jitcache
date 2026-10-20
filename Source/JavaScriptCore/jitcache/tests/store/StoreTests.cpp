@@ -5,6 +5,7 @@
 #include "JITCacheParameters.h"
 #include "TestArtifact.h"
 #include "ValidatedBody.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <limits>
@@ -14,9 +15,9 @@
 #include <wtf/threads/BinarySemaphore.h>
 
 // Tests of ArtifactStore and ValidatedBody (store/ArtifactStore.h, store/ValidatedBody.h and their .cpp): the pack's byte
-// layouts, the producer lock, an opened artifact that follows the root, borrows bodies from its mapping and survives
-// compactions, and the bodies tests build with their lookups. None needs a VM; a second OpenedArtifact built with
-// registry sharing off stands for another process's view of the same directory.
+// layouts, the producer lock, an opened artifact that follows the root, borrows bodies from its mapping, reads one section
+// of a body and survives compactions, the registry that shares it, and the bodies tests build with their lookups. None needs a VM; a second
+// OpenedArtifact built with registry sharing off stands for another process's view of the same directory.
 
 namespace JSC::JITCache::Tests {
 
@@ -462,6 +463,158 @@ JITCACHE_TEST(storeDeletedPackMissesEveryKey, No)
     JITCACHE_CHECK(!other->token(testKey(1)));
     JITCACHE_CHECK(other->open(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Absent);
     JITCACHE_CHECK(!other->indexedBodies());
+}
+
+// A sound pack renamed over a retired one under another header, as a Producer whose config names another app writes when
+// it reuses a whole deletion's remnant, means the artifact the view checked is gone, so the view misses every key. The same
+// successor with a damaged digest byte fails the prefix's CRC first and stays damage.
+JITCACHE_TEST(storeRetiredPackFollowedByAnotherHeadersPackIsGone, No)
+{
+    HookScope hooks;
+    ArtifactHeaderBytes another = headerNamingApp(0x5eed);
+    HeaderDigest anotherDigest = artifactHeaderDigest(another.span());
+    HeaderDigest original = headerDigest();
+    JITCACHE_CHECK(!equalSpans(std::span { anotherDigest }, std::span { original }));
+    for (bool damaged : { false, true }) {
+        auto pack = PackArtifact::create(context);
+        if (!pack)
+            return;
+        RefPtr<OpenedArtifact> other = pack->takeAnother(context);
+        if (!other)
+            return;
+        JITCACHE_CHECK(!!commitBody(pack->writer(), testKey(1), 72));
+        JITCACHE_CHECK(!!other->token(testKey(1)));
+
+        uint64_t retired = 1;
+        JITCACHE_CHECK(pack->writePackAt(packRetiredOffset, asByteSpan(retired)));
+        JITCACHE_CHECK(!createEmptyPack(pack->cacheFd(), std::span<const uint8_t, 16> { anotherDigest }));
+        if (damaged) {
+            std::array<uint8_t, 1> flipped { static_cast<uint8_t>(anotherDigest[4] ^ 1) };
+            JITCACHE_CHECK(pack->writePackAt(20, flipped)); // the digest's fifth byte, which the CRC covers
+        }
+        BodyOpen opened = other->open(testKey(1), ValidationMode::Full);
+        if (damaged) {
+            JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::pack);
+            continue;
+        }
+        JITCACHE_CHECK(opened.outcome == StoreOutcome::Absent);
+        JITCACHE_CHECK(!other->token(testKey(1)) && !other->indexedBodies());
+    }
+}
+
+// The registry shares an object only with a VM that checked the header the object was built from, and only while the
+// object follows a pack. A header naming an app, written in the same cache/ over a pack under its digest, as a Producer
+// that reuses a whole deletion's remnant writes one, gets a new object, which later takes of that header share, while the
+// object held across the rewrite keeps its digest and the pack it mapped. An object whose pack went gets a new one too,
+// under an equal header.
+JITCACHE_TEST(storeRegistryRebuildsWhenTheHeaderChanges, No)
+{
+    HookScope hooks;
+    auto pack = PackArtifact::create(context);
+    if (!pack)
+        return;
+    RefPtr<OpenedArtifact> held = pack->take(context);
+    JITCACHE_CHECK(held.get() == &pack->artifact());
+    JITCACHE_CHECK(!!commitBody(pack->writer(), testKey(1), 91));
+    JITCACHE_CHECK(held && !!held->token(testKey(1)));
+    if (!held)
+        return;
+
+    HeaderDigest original = headerDigest();
+    ArtifactHeaderBytes another = headerNamingApp(0x5eed);
+    HeaderDigest anotherDigest = artifactHeaderDigest(another.span());
+    JITCACHE_CHECK(!equalSpans(std::span { anotherDigest }, std::span { original }));
+    JITCACHE_CHECK(!createEmptyPack(pack->cacheFd(), std::span<const uint8_t, 16> { anotherDigest }));
+    auto taken = ArtifactRegistry::take(pack->parentFd(), pack->cacheFd(), another.span());
+    if (!taken) {
+        JITCACHE_FAIL("ArtifactRegistry::take failed for the new header"_s);
+        return;
+    }
+    RefPtr<OpenedArtifact> rebuilt = WTF::move(*taken);
+    JITCACHE_CHECK(rebuilt != held);
+    JITCACHE_CHECK(equalSpans(rebuilt->headerDigest(), std::span { anotherDigest }));
+    JITCACHE_CHECK(!rebuilt->indexedBodies() && !rebuilt->token(testKey(1)));
+    auto shared = ArtifactRegistry::take(pack->parentFd(), pack->cacheFd(), another.span());
+    JITCACHE_CHECK(shared && shared->ptr() == rebuilt.get());
+    JITCACHE_CHECK(equalSpans(held->headerDigest(), std::span { original }));
+    JITCACHE_CHECK(!!held->token(testKey(1)));
+
+    // A whole deletion retires the pack and unlinks it, which a read of the object then finds; a pack created again under
+    // the same header gets a new object.
+    uint64_t retired = 1;
+    JITCACHE_CHECK(pack->writePackAt(packRetiredOffset, asByteSpan(retired)));
+    JITCACHE_CHECK(!unlinkat(pack->cacheFd(), ArtifactNames::pack.characters(), 0));
+    JITCACHE_CHECK(!rebuilt->token(testKey(1)));
+    JITCACHE_CHECK(!createEmptyPack(pack->cacheFd(), std::span<const uint8_t, 16> { anotherDigest }));
+    auto afterDeletion = ArtifactRegistry::take(pack->parentFd(), pack->cacheFd(), another.span());
+    JITCACHE_CHECK(afterDeletion && afterDeletion->ptr() != rebuilt.get());
+    JITCACHE_CHECK(afterDeletion && equalSpans((*afterDeletion)->headerDigest(), std::span { anotherDigest }));
+    auto sharedAfterDeletion = ArtifactRegistry::take(pack->parentFd(), pack->cacheFd(), another.span());
+    JITCACHE_CHECK(afterDeletion && sharedAfterDeletion && sharedAfterDeletion->ptr() == afterDeletion->ptr());
+}
+
+// readSection checksums the one section it returns: a module body's ucb.analysis, an empty span for a body without one,
+// and Absent for a key without a body. Damage in another section passes it unseen, which open then reports, while damage
+// in that section is Invalid at container.checksum. Each read that reaches a body counts as an open of the index.
+JITCACHE_TEST(storeReadSectionChecksOneSection, No)
+{
+    HookScope hooks;
+    auto pack = PackArtifact::create(context);
+    if (!pack)
+        return;
+    constexpr size_t analysisBytes = 37;
+    BodyKey module = testKey(1, IdentityKind::Module);
+    BodyKey plain = testKey(2);
+    BodyKey absent = testKey(3);
+    // The module's body is the pack's first record, so its bytes start right after the empty pack's index block.
+    auto moduleSections = bodySections(81, 1, analysisBytes);
+    auto committed = pack->writer().commit({ module, 500, 81, 1 }, moduleSections->sections());
+    if (!committed || !commitBody(pack->writer(), plain, 82)) {
+        JITCACHE_FAIL("a commit failed"_s);
+        return;
+    }
+    auto analysis = moduleSections->bytes[static_cast<size_t>(SectionKind::UCBAnalysis)].span();
+
+    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
+        uint64_t opens = pack->artifact().statistics().opens;
+        SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis, mode);
+        JITCACHE_CHECK(read.outcome == StoreOutcome::Found && read.pack && equalSpans(read.section, analysis));
+        JITCACHE_CHECK(isEightByteAligned(read.section));
+        SectionRead without = pack->artifact().readSection(plain, SectionKind::UCBAnalysis, mode);
+        JITCACHE_CHECK(without.outcome == StoreOutcome::Found && without.section.empty());
+        SectionRead core = pack->artifact().readSection(plain, SectionKind::UCBCore, mode);
+        JITCACHE_CHECK(core.outcome == StoreOutcome::Found && equalSpans(core.section, bodySections(82)->bytes[static_cast<size_t>(SectionKind::UCBCore)].span()));
+        JITCACHE_CHECK(pack->artifact().readSection(absent, SectionKind::UCBAnalysis, mode).outcome == StoreOutcome::Absent);
+        JITCACHE_CHECK(pack->artifact().statistics().opens == opens + 3);
+    }
+
+    // The module body's last byte belongs to its last section, ICsBaseline.
+    uint64_t bodyStart = packPrefixBytes + packIndexBlockBytes(0) + packRecordHeaderBytes;
+    std::array<uint8_t, 1> damage { 0xEE };
+    JITCACHE_CHECK(pack->writePackAt(bodyStart + committed->fileSize - 1, damage));
+    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
+        SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis, mode);
+        JITCACHE_CHECK(read.outcome == StoreOutcome::Found && equalSpans(read.section, analysis));
+        BodyOpen opened = pack->artifact().open(module, mode);
+        JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::checksum);
+    }
+
+    // Damage in ucb.analysis itself: its offset in the body is where the writer's layout put it.
+    Vector<BodyDirectoryEntry> entries;
+    for (auto& source : moduleSections->sources)
+        entries.append(BodyDirectoryEntry { source.kind, source.size, 0, 0 });
+    JITCACHE_CHECK(layOutBodySections(entries.mutableSpan()) == committed->fileSize);
+    auto analysisEntry = std::ranges::find_if(entries, [](auto& entry) {
+        return entry.kind == SectionKind::UCBAnalysis;
+    });
+    if (analysisEntry == entries.end())
+        return;
+    JITCACHE_CHECK(pack->writePackAt(bodyStart + analysisEntry->offset + 5, damage));
+    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
+        SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis, mode);
+        JITCACHE_CHECK(read.outcome == StoreOutcome::Invalid && read.failure.check == ContainerChecks::checksum && !read.pack);
+        JITCACHE_CHECK(pack->artifact().readSection(module, SectionKind::UCBCore, mode).outcome == StoreOutcome::Found);
+    }
 }
 
 // The delta chain a reader walks when it opens the pack: the producer writes a full index once the chain reaches

@@ -37,6 +37,7 @@
 #include "ElementAncestorIteratorInlines.h"
 #include "FloatQuad.h"
 #include "FrameSelection.h"
+#include "FrameView.h"
 #include "GeometryUtilities.h"
 #include "GraphicsContext.h"
 #include "GraphicsLayer.h"
@@ -69,7 +70,8 @@
 #include "RenderLayerCompositor.h"
 #include "RenderLayerScrollableArea.h"
 #include "RenderLineBreak.h"
-#include "RenderListMarker.h"
+#include "RenderListItem.h"
+#include "RenderListOutsideMarker.h"
 #include "RenderMultiColumnFlow.h"
 #include "RenderMultiColumnSet.h"
 #include "RenderMultiColumnSpannerPlaceholder.h"
@@ -92,13 +94,16 @@
 #include "ScrollAnchoringController.h"
 #include "SelectionGeometry.h"
 #include "Settings.h"
+#include "StylePrimitiveNumericTypes+Evaluation.h"
 #include "StyleResolver.h"
 #include "StyleTransformResolver.h"
 #include "TransformState.h"
 #include "ViewTransition.h"
+#include "VisibleRectContext.h"
 #include <algorithm>
 #include <stdio.h>
 #include <wtf/HexNumber.h>
+#include <wtf/ScopedLambda.h>
 #include <wtf/Seconds.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/WeakRandomNumber.h>
@@ -425,8 +430,6 @@ RenderObject* RenderObject::lastLeafChild() const
     return r;
 }
 
-#if ENABLE(TEXT_AUTOSIZING)
-
 // Non-recursive version of the DFS search.
 RenderObject* RenderObject::traverseNext(const RenderObject* stayWithin, HeightTypeTraverseNextInclusionFunction inclusionFunction, int& currentDepth, int& newFixedDepth) const
 {
@@ -474,8 +477,6 @@ RenderObject* RenderObject::traverseNext(const RenderObject* stayWithin, HeightT
     }
     return nullptr;
 }
-
-#endif // ENABLE(TEXT_AUTOSIZING)
 
 RenderLayer* RenderObject::enclosingLayer() const
 {
@@ -724,8 +725,9 @@ void RenderObject::setLayerNeedsFullRepaintForOutOfFlowMovementLayout()
     downcast<RenderLayerModelObject>(*this).layer()->setRepaintStatus(RepaintStatus::NeedsFullRepaintForOutOfFlowMovementLayout);
 }
 
-static inline RenderBlock* nearestNonAnonymousContainingBlockIncludingSelf(RenderElement* renderer)
+RenderBlock* RenderElement::nearestNonAnonymousContainingBlockIncludingSelf() const
 {
+    auto* renderer = const_cast<RenderElement*>(this);
     while (renderer && (!is<RenderBlock>(*renderer) || renderer->isAnonymousBlock()))
         renderer = renderer->containingBlock();
     return downcast<RenderBlock>(renderer);
@@ -745,16 +747,16 @@ RenderBlock* RenderObject::containingBlockForPositionType(PositionType positionT
 
     if (positionType == PositionType::Absolute) {
         auto containingBlockForAbsolutePosition = [&] {
-            if (CheckedPtr renderInline = dynamicDowncast<RenderInline>(renderer); renderInline && renderInline->style().position() == PositionType::Relative) {
+            if (renderer.isInlineBox() && renderer.style().position() == PositionType::Relative) {
                 // A relatively positioned RenderInline forwards its absolute positioned descendants to
                 // its nearest non-anonymous containing block (to avoid having positioned objects list in RenderInlines).
-                return nearestNonAnonymousContainingBlockIncludingSelf(renderer.parent());
+                return renderer.parent() ? renderer.parent()->nearestNonAnonymousContainingBlockIncludingSelf() : nullptr;
             }
             CheckedPtr ancestor = renderer.parent();
             while (ancestor && !ancestor->canContainAbsolutelyPositionedObjects())
                 ancestor = ancestor->parent();
             // Make sure we only return non-anonymous RenderBlock as containing block.
-            return nearestNonAnonymousContainingBlockIncludingSelf(ancestor.get());
+            return ancestor ? ancestor->nearestNonAnonymousContainingBlockIncludingSelf() : nullptr;
         };
         return containingBlockForAbsolutePosition();
     }
@@ -767,7 +769,7 @@ RenderBlock* RenderObject::containingBlockForPositionType(PositionType positionT
                     return &renderer.view();
                 ancestor = ancestor->parent();
             }
-            return nearestNonAnonymousContainingBlockIncludingSelf(ancestor.get());
+            return ancestor ? ancestor->nearestNonAnonymousContainingBlockIncludingSelf() : nullptr;
         };
         return containingBlockForFixedPosition();
     }
@@ -1188,6 +1190,145 @@ std::optional<FloatRect> RenderObject::computeFloatVisibleRectInContainer(const 
     return FloatRect();
 }
 
+LayoutRect RenderObject::localBoundsForIntersection() const
+{
+    if (CheckedPtr renderBox = dynamicDowncast<RenderBox>(*this))
+        return renderBox->borderBoundingBox();
+
+    if (isInlineBox()) {
+        Vector<LayoutRect> rects;
+        boundingRects(rects, { });
+        return unionRect(rects);
+    }
+
+    if (CheckedPtr renderLineBreak = dynamicDowncast<RenderLineBreak>(*this))
+        return renderLineBreak->linesBoundingBox();
+
+    if (CheckedPtr svgModelObject = dynamicDowncast<RenderSVGModelObject>(*this))
+        return svgModelObject->borderBoxRectEquivalent();
+
+    if (CheckedPtr legacySVGModelObject = dynamicDowncast<LegacyRenderSVGModelObject>(*this))
+        return enclosingLayoutRect(legacySVGModelObject->strokeBoundingBox());
+
+    return { };
+}
+
+static std::optional<LayoutRect> clippedRectInContentsSpace(const RenderObject& renderer, const LayoutRect& rect, const ClipRectAdjuster* clipRectAdjuster)
+{
+    auto rects = renderer.computeVisibleRectsInContainer({ rect }, protect(renderer.view()).ptr(), {
+        .options = {
+            VisibleRectContext::Option::UseEdgeInclusiveIntersection,
+            VisibleRectContext::Option::ApplyCompositedClips,
+            VisibleRectContext::Option::ApplyCompositedContainerScrolls
+        },
+        .scrollContainerClipRectAdjuster = clipRectAdjuster
+    }, { });
+    if (!rects)
+        return std::nullopt;
+    return rects->clippedOverflowRect;
+}
+
+std::optional<LayoutRect> RenderObject::computeClippedRectInContentCoordinates(const LayoutRect& localRect) const
+{
+    if (isSkippedContent())
+        return std::nullopt;
+
+    return clippedRectInContentsSpace(*this, localRect, nullptr);
+}
+
+// Given a rectangle in the coordinate space of rendererOrFrame, compute the visible
+// rectangle in the content coordinate space of the root's (main frame) RenderView.
+// This is done by computing the visible rectangle in the nearest frame, then its
+// parent frame, ... up to the main frame.
+//
+// If rendererOrFrame is a:
+// * Renderer: rect is in the coordinate space of the renderer.
+// * Frame: rect is in the coordinate space of the frame's owner renderer.
+//   This is only used in Site Isolation mode, when the frame is out-of-process
+//   and its owner renderer is not available.
+//
+// clipRectAdjuster is given the chance to adjust each scroll container and frame
+// viewport clip encountered along the way, from the innermost frame outwards.
+static std::optional<LayoutRect> computeClippedRectInMainFrameContentCoordinates(const LayoutRect& rect, Variant<const RenderObject*, const Frame*> rendererOrFrame, NOESCAPE const ClipRectAdjuster& clipRectAdjuster)
+{
+    RefPtr<const Frame> enclosingFrame = WTF::visit(WTF::makeVisitor(
+        [&] (const RenderObject* renderer) { return static_cast<const Frame*>(&renderer->frame()); },
+        [&] (const Frame* frame) { return static_cast<const Frame*>(frame->tree().parent()); }
+    ), rendererOrFrame);
+
+    if (!enclosingFrame)
+        return std::nullopt;
+
+    RefPtr<const FrameView> enclosingFrameView = enclosingFrame->virtualView();
+    ASSERT(enclosingFrameView);
+    if (!enclosingFrameView)
+        return std::nullopt;
+
+    auto absoluteClippedRect = WTF::visit(WTF::makeVisitor(
+        [&] (const RenderObject* renderer) {
+            return clippedRectInContentsSpace(*renderer, rect, &clipRectAdjuster);
+        },
+        [&] (const Frame* frame) -> std::optional<LayoutRect> {
+            // This rect is in coordinate space of parent frame. It doesn't give clipRectAdjuster
+            // a chance to adjust the out-of-process frame's clips, since they aren't available here.
+            auto visibleRectInParentFrame = enclosingFrameView->visibleRectOfChild(*frame);
+            if (!visibleRectInParentFrame)
+                return std::nullopt;
+
+            // rect is in coordinate space of the frame's owner renderer,
+            // it needs to be converted to parent frame's coordinate space first before intersecting.
+            auto absoluteRect = LayoutRect { enclosingFrameView->childFrameOwnerToRootContentTransform(*frame).mapRect(rect) };
+            if (!absoluteRect.edgeInclusiveIntersect(*visibleRectInParentFrame))
+                return std::nullopt;
+
+            return std::make_optional(absoluteRect);
+    }), rendererOrFrame);
+
+    if (!absoluteClippedRect)
+        return std::nullopt;
+
+    // Stop here if there are no more parent frames to traverse to.
+    RefPtr enclosingFrameParent = enclosingFrame->parent();
+    if (!enclosingFrameParent)
+        return absoluteClippedRect;
+
+    RefPtr enclosingFrameParentView = enclosingFrameParent->virtualView();
+    if (!enclosingFrameParentView)
+        return absoluteClippedRect;
+
+    // The computed visible rect is in the coordinate space of enclosingFrame.
+    // But only the iframe's viewport is visible, so clip by the iframe's viewport.
+
+    // Compute the frame's viewport (this is in the coordinate space of enclosingFrame too.)
+    auto frameRect = enclosingFrameView->layoutViewportRect();
+    if (auto adjustedFrameRect = clipRectAdjuster(*enclosingFrame, frameRect))
+        frameRect = *adjustedFrameRect;
+
+    if (!absoluteClippedRect->edgeInclusiveIntersect(frameRect))
+        return std::nullopt;
+
+    // Then convert it to the view coordinate space of enclosingFrame.
+    // This is now the visible portion in enclosingFrame's owner renderer's content box.
+    absoluteClippedRect = LayoutRect { enclosingFrameView->contentsToView(*absoluteClippedRect) };
+
+    if (RefPtr ownerRenderer = enclosingFrame->ownerRenderer()) {
+        // Adjust for borders and/or padding of the owner renderer box.
+        absoluteClippedRect->moveBy(ownerRenderer->contentBoxLocation());
+        return computeClippedRectInMainFrameContentCoordinates(*absoluteClippedRect, ownerRenderer.get(), clipRectAdjuster);
+    }
+
+    absoluteClippedRect->moveBy(enclosingFrameParentView->childFrameOwnerContentBoxLocation(*enclosingFrame));
+    return computeClippedRectInMainFrameContentCoordinates(*absoluteClippedRect, enclosingFrame.get(), clipRectAdjuster);
+}
+
+std::optional<LayoutRect> RenderObject::computeClippedRectInMainFrameContentCoordinates(const LayoutRect& localRect, NOESCAPE const ClipRectAdjuster& clipRectAdjuster) const
+{
+    if (isSkippedContent())
+        return std::nullopt;
+
+    return WebCore::computeClippedRectInMainFrameContentCoordinates(localRect, this, clipRectAdjuster);
+}
+
 #if ENABLE(TREE_DEBUGGING)
 
 static void outputRenderTreeLegend(TextStream& stream)
@@ -1211,7 +1352,7 @@ void RenderObject::showRenderTreeForThis() const
     TextStream stream(TextStream::LineMode::MultipleLine, TextStream::Formatting::SVGStyleRect);
     outputRenderTreeLegend(stream);
     root->outputRenderSubTreeAndMark(stream, this, 1);
-    WTFLogAlways("%s", stream.release().utf8().data());
+    SAFE_WTFLOGALWAYS("%s", stream.release().utf8());
 }
 
 void RenderObject::showSubtreeForThis() const
@@ -1219,7 +1360,7 @@ void RenderObject::showSubtreeForThis() const
     TextStream stream(TextStream::LineMode::MultipleLine, TextStream::Formatting::SVGStyleRect);
     outputRenderTreeLegend(stream);
     outputRenderSubTreeAndMark(stream, this, 1);
-    WTFLogAlways("%s", stream.release().utf8().data());
+    SAFE_WTFLOGALWAYS("%s", stream.release().utf8());
 }
 
 void RenderObject::showLineTreeForThis() const
@@ -1231,7 +1372,7 @@ void RenderObject::showLineTreeForThis() const
     outputRenderTreeLegend(stream);
     outputRenderObject(stream, false, 1);
     blockFlow->outputLineTreeAndMark(stream, nullptr, 2);
-    WTFLogAlways("%s", stream.release().utf8().data());
+    SAFE_WTFLOGALWAYS("%s", stream.release().utf8());
 }
 
 static const RenderFragmentedFlow* enclosingFragmentedFlowFromRenderer(const RenderObject* renderer)
@@ -1361,7 +1502,7 @@ void RenderObject::outputRenderObject(TextStream& stream, bool mark, int depth) 
         stream << " ";
 
     if (node())
-        stream << node()->nodeName().utf8().data() << " ";
+        stream << node()->nodeName() << " ";
 
     ASCIILiteral name = renderName();
     StringView nameView { name };
@@ -1404,9 +1545,9 @@ void RenderObject::outputRenderObject(TextStream& stream, bool mark, int depth) 
         const int maxPrintedLength = 80;
         if (value.length() > maxPrintedLength) {
             auto substring = StringView(value).left(maxPrintedLength);
-            stream << " \"" << substring.utf8().data() << "\"...";
+            stream << " \"" << substring << "\"...";
         } else
-            stream << " \"" << value.utf8().data() << "\"";
+            stream << " \"" << value << "\"";
     }
 
     if (auto* box = dynamicDowncast<RenderBox>(*this)) {
@@ -1893,7 +2034,8 @@ Node* RenderObject::nodeForHitTest() const
     auto* node = this->node();
     // If we hit the anonymous renderers inside generated content we should
     // actually hit the generated content so walk up to the PseudoElement.
-    if (!node && parent() && parent()->isBeforeOrAfterContent()) {
+    // A marker has no element of its own, so hitting its content is hitting the list item.
+    if (!node && parent() && (parent()->isBeforeOrAfterContent() || parent()->style().isListMarkerStyle())) {
         for (auto* renderer = parent(); renderer && !node; renderer = renderer->parent())
             node = renderer->element();
     }
@@ -2172,7 +2314,6 @@ bool RenderObject::hasEmptyVisibleRectRespectingParentFrames() const
     auto hasEmptyVisibleRect = [] (const RenderObject& renderer) {
         VisibleRectContext context {
             .options = { VisibleRectContext::Option::UseEdgeInclusiveIntersection, VisibleRectContext::Option::ApplyCompositedClips },
-            .scrollMargin = { }
         };
         CheckedRef box = renderer.enclosingBoxModelObject();
         auto clippedBounds = box->computeVisibleRectsInContainer({ box->borderBoundingBox() }, &box->view(), context, { });
@@ -2317,23 +2458,10 @@ static Vector<FloatRect> borderAndTextRects(const SimpleRange& range, Coordinate
         if (textOnly == TextOnly::No && element && selectedElementsSet.contains(element) && (useVisibleBounds || !node->parentElement() || !selectedElementsSet.contains(node->parentElement()))) {
             if (CheckedPtr renderer = element->renderBoxModelObject()) {
                 if (useVisibleBounds) {
-                    auto localBounds = renderer->borderBoundingBox();
-                    auto rootClippedBounds = renderer->computeVisibleRectsInContainer(
-                        { localBounds },
-                        protect(renderer->view()).ptr(),
-                        {
-                            .options = {
-                                VisibleRectContext::Option::UseEdgeInclusiveIntersection,
-                                VisibleRectContext::Option::ApplyCompositedClips,
-                                VisibleRectContext::Option::ApplyCompositedContainerScrolls
-                            },
-                            .scrollMargin = { }
-                        },
-                        { }
-                    );
+                    auto rootClippedBounds = renderer->computeClippedRectInContentCoordinates(renderer->borderBoundingBox());
                     if (!rootClippedBounds)
                         continue;
-                    auto snappedBounds = snapRectToDevicePixels(rootClippedBounds->clippedOverflowRect, protect(node->document())->deviceScaleFactor());
+                    auto snappedBounds = snapRectToDevicePixels(*rootClippedBounds, protect(node->document())->deviceScaleFactor());
                     if (space == CoordinateSpace::Client)
                         protect(node->document())->convertAbsoluteToClientRect(snappedBounds, renderer->style());
                     rects.append(snappedBounds);
@@ -3149,13 +3277,12 @@ VisibleInViewportState RenderObject::imageFrameAvailable(CachedImage& image, Ima
 bool RenderObject::isExcludedMarker() const
 {
     // An excluded list marker is the direct child of its list item, never wrapped in an anonymous block, and no part of in-flow layout.
-    // Only markers whose first formatted line lives in a descendant block qualify (see childrenInline)
-    auto* marker = dynamicDowncast<RenderListMarker>(*this);
+    auto* marker = dynamicDowncast<RenderListOutsideMarker>(*this);
     if (!marker)
         return false;
-    if (marker->isInside() || !document().settings().listMarkerPositionedPostLayoutEnabled())
+    if (!document().settings().listMarkerPositionedPostLayoutEnabled())
         return false;
-    return parent() && !parent()->childrenInline();
+    return parent() && parent() == marker->listItem();
 }
 
 #if ENABLE(TREE_DEBUGGING)
@@ -3167,7 +3294,7 @@ void printPaintOrderTreeForLiveDocuments()
             continue;
         if (document->frame() && document->frame()->isRootFrame())
             WTFLogAlways("----------------------root frame--------------------------\n");
-        WTFLogAlways("%s", document->url().string().utf8().data());
+        SAFE_WTFLOGALWAYS("%s", document->url().string().utf8());
         showPaintOrderTree(document->renderView());
     }
 }
@@ -3179,7 +3306,7 @@ void printRenderTreeForLiveDocuments()
             continue;
         if (document->frame() && document->frame()->isRootFrame())
             WTFLogAlways("----------------------root frame--------------------------\n");
-        WTFLogAlways("%s", document->url().string().utf8().data());
+        SAFE_WTFLOGALWAYS("%s", document->url().string().utf8());
         showRenderTree(document->renderView());
     }
 }
@@ -3191,7 +3318,7 @@ void printLayerTreeForLiveDocuments()
             continue;
         if (document->frame() && document->frame()->isRootFrame())
             WTFLogAlways("----------------------root frame--------------------------\n");
-        WTFLogAlways("%s", document->url().string().utf8().data());
+        SAFE_WTFLOGALWAYS("%s", document->url().string().utf8());
         showLayerTree(document->renderView());
     }
 }
@@ -3214,9 +3341,9 @@ void printAccessibilityTreeForLiveDocuments()
             continue;
         if (document->frame()) {
             if (document->frame()->isRootFrame())
-                WTFLogAlways("\nPID %d: Accessibility tree for root document %p %s", getpid(), document.ptr(), document->url().string().utf8().data());
+                SAFE_WTFLOGALWAYS("\nPID %d: Accessibility tree for root document %p %s", getpid(), document.ptr(), document->url().string().utf8());
             else
-                WTFLogAlways("\nPID %d: Accessibility tree for non-root document %p %s", getpid(), document.ptr(), document->url().string().utf8().data());
+                SAFE_WTFLOGALWAYS("\nPID %d: Accessibility tree for non-root document %p %s", getpid(), document.ptr(), document->url().string().utf8());
             dumpAccessibilityTreeToStderr(document.get());
         }
     }
@@ -3228,8 +3355,8 @@ void printGraphicsLayerTreeForLiveDocuments()
         if (!document->renderView())
             continue;
         if (document->frame() && document->frame()->isRootFrame()) {
-            WTFLogAlways("Graphics layer tree for root document %p %s", document.ptr(), document->url().string().utf8().data());
-            showGraphicsLayerTreeForCompositor(document->renderView()->compositor());
+            SAFE_WTFLOGALWAYS("Graphics layer tree for root document %p %s", document.ptr(), document->url().string().utf8());
+            showGraphicsLayerTreeForCompositor(protect(document->renderView())->compositor());
         }
     }
 }

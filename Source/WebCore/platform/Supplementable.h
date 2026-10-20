@@ -99,6 +99,7 @@ public:
     virtual bool isNavigatorClipboard() const { return false; }
     virtual bool isNavigatorContacts() const { return false; }
     virtual bool isNavigatorCredentials() const { return false; }
+    virtual bool isNavigatorDevicePosture() const { return false; }
     virtual bool isNavigatorGamepad() const { return false; }
     virtual bool isNavigatorGeolocation() const { return false; }
     virtual bool isNavigatorLoginStatus() const { return false; }
@@ -108,7 +109,6 @@ public:
     virtual bool isNavigatorPermissions() const { return false; }
     virtual bool isNavigatorScreenWakeLock() const { return false; }
     virtual bool isNavigatorUserActivation() const { return false; }
-    virtual bool isNavigatorWebDriver() const { return false; }
     virtual bool isNotificationController() const { return false; }
     virtual bool isServiceWorkerRegistrationBackgroundFetchAPI() const { return false; }
     virtual bool isServiceWorkerRegistrationPushAPI() const { return false; }

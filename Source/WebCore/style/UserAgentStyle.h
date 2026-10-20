@@ -49,6 +49,8 @@ public:
     static StyleSheetContents* mediaQueryStyleSheet;
     static StyleSheetContents* horizontalFormControlsStyleSheet;
     static StyleSheetContents* htmlSwitchControlStyleSheet;
+    static StyleSheetContents* selectMultipleAndListBoxStyleSheet;
+    static StyleSheetContents* selectMultipleSelectedContentStyleSheet;
     static StyleSheetContents* popoverStyleSheet;
     static StyleSheetContents* counterStylesStyleSheet;
     static StyleSheetContents* viewTransitionsStyleSheet;

@@ -11,8 +11,8 @@
 #include <wtf/Vector.h>
 
 // The facts a baseline compilation read from its CB and turned into unguarded code: the capability class, the taint,
-// and the kind and depth of every unguarded scope access, with the codec of the baked-facts.baseline section and the
-// comparison an install runs on a newborn CB.
+// and the kind, depth and module import slot of every unguarded scope access, with the codec of the baked-facts.baseline
+// section and the comparison an install runs on a newborn CB.
 
 namespace JSC {
 class CodeBlock;
@@ -29,18 +29,22 @@ enum class ScopeOpcode : uint8_t {
     PutToScope = 3,
 };
 
+// A resolve_scope of a module variable walks its depth and then loads the import slot that holds the exporting module's
+// environment, so its fact carries both.
 struct ScopeFact {
     uint32_t bytecodeOffset { 0 };
     ScopeOpcode opcode { };
     ResolveType resolveType { GlobalProperty };
-    uint32_t localScopeDepth { 0 }; // resolve_scope with ClosureVar only, else 0
+    uint32_t localScopeDepth { 0 }; // resolve_scope with ClosureVar or ModuleVar only, else 0
+    uint32_t moduleImportSlot { 0 }; // resolve_scope with ModuleVar only, else 0
 
     friend bool operator==(const ScopeFact&, const ScopeFact&) = default;
 };
 
 // The resolve types each opcode's emitter bakes without a guard, the only ones recording writes:
-// resolve_scope ModuleVar, ClosureVar and ClosureVarWithVarInjectionChecks; get_from_scope ClosureVar; put_to_scope
-// ClosureVar, ResolvedClosureVar and ClosureVarWithVarInjectionChecks from the main pass and ModuleVar from the slow pass.
+// resolve_scope ModuleVar, ClosureVar and ClosureVarWithVarInjectionChecks; get_from_scope ClosureVar and
+// LazyClosureVar; put_to_scope ClosureVar, ResolvedClosureVar and ClosureVarWithVarInjectionChecks from the main pass
+// and ModuleVar from the slow pass.
 bool isBakedScopeShape(ScopeOpcode, ResolveType);
 
 struct BakedFacts {
@@ -78,10 +82,11 @@ private:
 };
 
 // The baked-facts.baseline section: an 8-byte header (u8 capability level, u8 taint, u16
-// reserved, u32 scopeFactCount), then scopeFactCount entries of 12 bytes (u32 bytecode offset, u8 opcode, u8 resolve
-// type, u16 reserved, u32 local scope depth), sorted by bytecode offset. Little-endian, read with memcpy-based loads.
+// reserved, u32 scopeFactCount), then scopeFactCount entries of 16 bytes (u32 bytecode offset, u8 opcode, u8 resolve
+// type, u16 reserved, u32 local scope depth, u32 module import slot), sorted by bytecode offset. Little-endian, read
+// with memcpy-based loads.
 inline constexpr size_t bakedFactsHeaderSize = 8;
-inline constexpr size_t bakedFactsEntrySize = 12;
+inline constexpr size_t bakedFactsEntrySize = 16;
 
 size_t bakedFactsSectionSize(const BakedFacts&);
 // Streams the section through the sink with no buffer of its own; false once the sink refuses.
@@ -111,7 +116,8 @@ private:
 };
 
 // Locates the section. A section shorter than its header or its counted entries cannot be located and fails
-// ImageCheck::V7 in either mode. Under strict it runs V7; with strict off, debug builds ASSERT what V7 checks.
+// ImageCheck::BakedFacts in either mode. Under strict it runs that check; with strict off, debug builds ASSERT what it
+// checks.
 std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const uint8_t>, bool strict);
 
 enum class BakedFactsResult : uint8_t {
@@ -123,9 +129,12 @@ enum class BakedFactsResult : uint8_t {
 // nothing to the CB: its capability class comes from capabilityLevelState() when set and otherwise from
 // computeCapabilityLevel(), which does not memoize. The class matches when both sides agree on DFG::CannotCompile, the
 // one test the code depends on; the taint matches when couldBeTainted() equals the recorded value; a scope fact matches
-// when the CB's metadata for its instruction holds the same resolve type, and for a resolve_scope of type ClosureVar the
-// same depth. Every fact names an instruction of its own opcode, which recording guarantees and ImageCheck::U4 checks
-// under strict. The install glue only branches on the result, so nothing reports which fact differed.
+// when the CB's metadata for its instruction holds the same resolve type, for a resolve_scope of type ClosureVar or
+// ModuleVar the same depth, and for one of type ModuleVar the same import slot. A get_from_scope of type LazyClosureVar
+// matches only LazyClosureVar: linking chooses between it and ClosureVar from the body and a fixed option, so every CB
+// of the body links it alike. Every fact names an instruction of its own opcode, which recording guarantees and
+// ImageCheck::BytecodeIndexes checks under strict. The install glue only branches on the result, so nothing reports
+// which fact differed.
 BakedFactsResult compareBakedFacts(const ImageSectionsView&, CodeBlock& newborn);
 
 } // namespace JSC::JITCache

@@ -78,14 +78,15 @@ inline HeaderDigest headerDigest()
     return artifactHeaderDigest(headerBytes());
 }
 
-// The key of a program body called as a function, built from its canonical bytes as the store reads them, so a test needs
-// none of the UCB lane's key derivation: version 1, no mode bits, and an identity digest drawn from both bytes of the
-// seed, so distinct seeds give distinct keys, and seeds below 256 give keys in the seeds' order.
-inline BodyKey testKey(uint16_t seed)
+// The key of a body of the given kind, a program by default, called as a function, built from its canonical bytes as the
+// store reads them, so a test needs none of the UCB lane's key derivation: version 1, no mode bits, and an identity digest
+// drawn from both bytes of the seed, so distinct seeds give distinct keys of a kind, and seeds below 256 give keys in the
+// seeds' order.
+inline BodyKey testKey(uint16_t seed, IdentityKind kind = IdentityKind::Program)
 {
     std::array<uint8_t, BodyKey::byteSize> bytes { };
     bytes[0] = 1;
-    bytes[1] = static_cast<uint8_t>(IdentityKind::Program);
+    bytes[1] = static_cast<uint8_t>(kind);
     for (size_t index = 8; index < bytes.size(); ++index)
         bytes[index] = static_cast<uint8_t>((seed >> ((index & 1) * 8)) ^ (29 * (index - 8)));
     auto parsed = BodyKey::fromBytes(bytes);
@@ -144,7 +145,8 @@ inline String scoreText(const CaptureScore& score)
         score.icSitesWithCases, ", counter "_s, score.counterWithheld ? "withheld"_s : "carried"_s, ", progress "_s, score.counterProgress, " }"_s);
 }
 
-// The sections of a body of highest tier 1 in this build, each filled from the seed; scale multiplies their sizes.
+// The sections of a body of highest tier 1 in this build, each filled from the seed; scale multiplies their sizes. With
+// analysisBytes, the body also holds a ucb.analysis section of that many bytes, which only a module's body may hold.
 struct BodySections {
 
     std::array<Vector<uint8_t>, numberOfSectionKinds> bytes;
@@ -153,15 +155,18 @@ struct BodySections {
     CommitSections sections() const { return CommitSections { sources.span() }; }
 };
 
-inline std::unique_ptr<BodySections> bodySections(uint8_t seed, size_t scale = 1)
+inline std::unique_ptr<BodySections> bodySections(uint8_t seed, size_t scale = 1, size_t analysisBytes = 0)
 {
-    static constexpr std::array<size_t, numberOfSectionKinds> sizes { 24, 40, 17, 64, 8, 12, 33, 9, 20 };
+    // By kind; ucb.analysis takes analysisBytes.
+    static constexpr std::array<size_t, numberOfSectionKinds> sizes { 24, 40, 17, 0, 64, 8, 12, 33, 9, 20 };
     auto body = std::make_unique<BodySections>(); // a plain struct of the tests, which WTF's allocators need not know
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
         auto kind = static_cast<SectionKind>(index);
-        if (!isSectionRequired(kind, 1))
+        bool isAnalysis = kind == SectionKind::UCBAnalysis;
+        if (isAnalysis ? !analysisBytes : !isSectionRequired(kind, 1))
             continue;
-        for (size_t offset = 0; offset < sizes[index] * scale; ++offset)
+        size_t size = isAnalysis ? analysisBytes : sizes[index] * scale;
+        for (size_t offset = 0; offset < size; ++offset)
             body->bytes[index].append(static_cast<uint8_t>(seed + 13 * index + offset));
         body->sources.append(SectionSource::inMemory(kind, body->bytes[index].span()));
     }
@@ -174,10 +179,10 @@ inline std::expected<CommitResult, CommitFailure> commitBody(ArtifactWriter& wri
     return writer.commit({ key, 500, seed, 1 }, body->sections());
 }
 
-// Whether the opened body holds exactly the sections bodySections(seed) builds.
-inline bool holdsSections(const ValidatedBody& body, uint8_t seed, size_t scale = 1)
+// Whether the opened body holds exactly the sections bodySections(seed, scale, analysisBytes) builds.
+inline bool holdsSections(const ValidatedBody& body, uint8_t seed, size_t scale = 1, size_t analysisBytes = 0)
 {
-    auto expected = bodySections(seed, scale);
+    auto expected = bodySections(seed, scale, analysisBytes);
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
         if (!equalSpans(body.section(static_cast<SectionKind>(index)), expected->bytes[index].span()))
             return false;

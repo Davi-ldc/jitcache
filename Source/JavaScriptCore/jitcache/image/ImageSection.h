@@ -20,10 +20,11 @@
 #endif
 
 // The image.baseline section: its entry codecs, the writer capture streams it through with every footprint canonical,
-// the view an import reads it through, and the checks an import runs on it, structural (ImageCheck::V1 to V6) and
-// against its UCB (U1 to U7). The baked-facts.baseline codec and its check, ImageCheck::V7, live in BakedFacts.h, the
-// image-twins.baseline codec and ImageCheck::W1 to W4 in ImageTwinsSection.h, and the per-architecture footprints in
-// ImageFootprint.h. The Image lane, its glue and its tests include this header.
+// the view an import reads it through, and the checks an import runs on it, structural (ImageCheck::Header to
+// MathICAndSwitchTargets) and against its UCB (SimpleSwitchTables to ConstantTargets). The baked-facts.baseline codec
+// and its check, ImageCheck::BakedFacts, live in BakedFacts.h, the image-twins.baseline codec and its checks
+// (TwinsHeader to TwinInputSites) in ImageTwinsSection.h, and the per-architecture footprints in ImageFootprint.h. The
+// Image lane, its glue and its tests include this header.
 
 namespace JSC {
 
@@ -262,8 +263,8 @@ struct ImageSectionSpans {
 #endif
 };
 
-// Spans into the borrowed payload, valid while it lives. Under strict, a view passed ImageCheck::V1 to V7, and in twins
-// builds W1 to W3.
+// Spans into the borrowed payload, valid while it lives. Under strict, a view passed the structural checks of the image
+// and baked-facts sections, and in twins builds those of the twins section.
 class ImageSectionsView {
 public:
     const ImageSectionHeader& header() const { return m_header; }
@@ -315,13 +316,13 @@ private:
     ImageSectionsView(std::span<const uint8_t> image, const ImageSectionHeader&, const Layout&);
 
     static std::optional<Layout> locate(std::span<const uint8_t> image, const ImageSectionHeader&);
-    std::optional<ImageCheck> firstStructureFailure() const; // ImageCheck::V1 to V6
-    bool passesV1() const;
-    bool passesV2() const;
-    bool passesV3() const;
-    bool passesV4() const;
-    bool passesV5() const;
-    bool passesV6() const;
+    std::optional<ImageCheck> firstStructureFailure() const; // ImageCheck::Header to MathICAndSwitchTargets
+    bool passesHeader() const;
+    bool passesCodeBounds() const;
+    bool passesFixups() const;
+    bool passesSideTables() const;
+    bool passesMathICEntries() const;
+    bool passesMathICAndSwitchTargets() const;
 
     std::span<const uint8_t> m_image;
     ImageSectionHeader m_header;
@@ -333,16 +334,16 @@ private:
 };
 
 // Locates the regions of image.baseline and baked-facts.baseline, and in twins builds image-twins.baseline. A section
-// whose regions do not fit inside its span cannot be located and fails ImageCheck::V1, V7 or W1 in either mode. Under
-// strict it then runs V1 to V7 and W1 to W3; with strict off it trusts what capture wrote, and debug builds ASSERT what
-// those checks verify.
+// whose regions do not fit inside its span cannot be located and fails ImageCheck::Header, BakedFacts or TwinsHeader in
+// either mode. Under strict it then runs every structural check of the three sections; with strict off it trusts what
+// capture wrote, and debug builds ASSERT what those checks verify.
 std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&, bool strict);
 
-// ImageCheck::U1 to U7 against the import's UCB, which exists once the import's request point produced it, and in twins
-// builds W4. The glue calls it only under strict.
+// The checks against the import's UCB, which exists once the import's request point produced it: ImageCheck's
+// SimpleSwitchTables to ConstantTargets, and in twins builds TwinInputSites. The glue calls it only under strict.
 std::expected<void, ImageCheck> validateImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
-// With strict off, debug builds ASSERT what ImageCheck::U1 to U7, and W4 in twins builds, verify; preparation calls this
-// once the import's UCB exists. Nothing in other builds.
+// With strict off, debug builds ASSERT what validateImageSectionsAgainst checks; preparation calls this once the
+// import's UCB exists. Nothing in other builds.
 void assertImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
 
 template<typename Functor>

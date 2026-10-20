@@ -109,7 +109,7 @@ void ServiceWorkerInternals::schedulePushSubscriptionChangeEvent(PushSubscriptio
 
 void ServiceWorkerInternals::waitForFetchEventToFinish(FetchEvent& event, DOMPromiseDeferred<IDLInterface<FetchResponse>>&& promise)
 {
-    event.onResponse([promise = WTF::move(promise), event = Ref { event }] (auto&& result) mutable {
+    event.onResponse([promise = WTF::move(promise), event = Ref { event }] (std::expected<Ref<FetchResponse>, std::optional<ResourceError>>&& result) mutable {
         if (!result.has_value()) {
             String description;
             if (auto& error = result.error())
@@ -178,7 +178,7 @@ void ServiceWorkerInternals::lastNavigationWasAppInitiated(Ref<DeferredPromise>&
                 if (!protectedThis || !protectedThis->m_lastNavigationWasAppInitiatedPromise)
                     return;
 
-                protectedThis->m_lastNavigationWasAppInitiatedPromise->resolve<IDLBoolean>(appInitiated);
+                protect(protectedThis->m_lastNavigationWasAppInitiatedPromise)->resolve<IDLBoolean>(appInitiated);
                 protectedThis->m_lastNavigationWasAppInitiatedPromise = nullptr;
             }, WorkerRunLoop::defaultMode());
         }
@@ -226,10 +226,10 @@ String ServiceWorkerInternals::effectiveRenderingModeOfNewlyCreatedAcceleratedCa
     RefPtr imageBuffer = ImageBuffer::create({ 100, 100 }, RenderingMode::Accelerated, RenderingPurpose::Canvas, 1, ColorSpace::SRGB(), PixelFormat::BGRA8, graphicsClient);
     if (!imageBuffer)
         return "none"_s;
-    imageBuffer->ensureBackendCreated();
-    if (!imageBuffer->hasBackend())
+    auto renderingMode = imageBuffer->getEffectiveRenderingModeForTesting();
+    if (!renderingMode)
         return "none"_s;
-    if (imageBuffer->renderingMode() != RenderingMode::Accelerated)
+    if (*renderingMode != RenderingMode::Accelerated)
         return "unaccelerated"_s;
     return imageBuffer->isRemoteImageBufferProxy() ? "remote"_s : "local-iosurface"_s;
 }

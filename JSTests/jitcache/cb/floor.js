@@ -1,6 +1,8 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false --verboseOSR=true
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false --verboseOSR=true
-// jitcache-check: 1 resources/floor-check.ts
+// jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false --startupJITDeferralScale=4
+// jitcache-check: 0:1 resources/floor-check.ts
+// jitcache-check: 1:1 resources/floor-check.ts
 
 // The floor finishCounter gives an imported counter, two entry increments short of crossing. floorBody neither loops
 // nor recurses and reads one property of one structure, so it has no polymorphic site and its counter travels. Its
@@ -26,6 +28,12 @@
 // operationOptimize writes on entry under verboseOSR. The script writes a marker on stderr before each invocation. The
 // Producer, whose floorBody must stay one call short of crossing, makes the same three calls on the probe, which
 // returns the same values.
+//
+// The third sequence checks the startup deferral scale. Its twins Producer rewrites the committed counter to m_counter
+// 0 and a progress of 2·T, which the baseline-to-DFG check at a scale of 1 reports crossed and at a scale of 4 does not,
+// since it crosses from s·M·T - min(T, C) / 2 on. Its Consumer runs at a scale of 4, so finishCounter must pass the
+// scale to the check: its twins hold finishCounter's result to the envelope of that scale, where a crossing below
+// 4·T - min(T, C) / 2 is a difference. floor-check.ts does not run there.
 (function main(role, scratch, artifact, sequence) {
     function floorBody(o) {
         return o.a * 2 + 1;
@@ -57,9 +65,9 @@
                 throw new Error("floorBody's committed counter does not travel");
             const threshold = header.counterActiveThreshold;
             let progress = header.counterTotalCount + header.counterValue;
-            const rewritten = sequence === "1";
+            const rewritten = sequence === "1" || sequence === "2";
             if (rewritten) {
-                progress = threshold + 400;
+                progress = sequence === "1" ? threshold + 400 : 2 * threshold;
                 sections.rewriteCounter(body, 0, progress);
                 const after = sections.checkBody(floorBody, "call", "floorBody after the rewrite").state.header;
                 if (after.counterValue !== 0 || after.counterTotalCount !== progress || after.counterActiveThreshold !== threshold)

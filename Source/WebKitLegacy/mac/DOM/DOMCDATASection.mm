@@ -33,13 +33,13 @@
 #import <WebCore/WebScriptObjectPrivate.h>
 #import <wtf/GetPtr.h>
 
-#define IMPL static_cast<WebCore::CDATASection*>(reinterpret_cast<WebCore::Node*>(_internal))
+#define IMPL downcast<WebCore::CDATASection>(reinterpret_cast<WebCore::Node*>(_internal))
 
 @implementation DOMCDATASection
 
 @end
 
-DOMCDATASection *kit(WebCore::CDATASection* value)
+SUPPRESS_NODELETE DOMCDATASection *kit(WebCore::CDATASection* value)
 {
     WebCoreThreadViolationCheckRoundOne();
     return static_cast<DOMCDATASection*>(kit(static_cast<WebCore::Node*>(value)));

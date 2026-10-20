@@ -30,11 +30,13 @@
 #include <WebCore/DecodingOptions.h>
 #include <WebCore/GainMap.h>
 #include <WebCore/ImageTypes.h>
+#include <WebCore/PixelFormat.h>
 #include <WebCore/PlatformImage.h>
 #include <WebCore/RenderingResource.h>
 #include <wtf/CheckedRef.h>
 #include <wtf/Lock.h>
 #include <wtf/TZoneMalloc.h>
+#include <wtf/Vector.h>
 
 #if USE(SKIA)
 class GrDirectContext;
@@ -75,7 +77,7 @@ public:
 #if USE(CG)
     WEBCORE_EXPORT static RefPtr<NativeImage> create(RetainPtr<CVPixelBufferRef>, CGImageAlphaInfo, RetainPtr<CGColorSpaceRef>);
 #endif
-    WEBCORE_EXPORT static RefPtr<NativeImage> create(Ref<PixelBuffer>&&, bool hasAlpha);
+    WEBCORE_EXPORT static RefPtr<NativeImage> create(Ref<PixelBuffer>&&);
 
     WEBCORE_EXPORT virtual ~NativeImage();
 
@@ -86,12 +88,24 @@ public:
     WEBCORE_EXPORT size_t sizeInBytes() const;
     std::optional<Color> singlePixelSolidColor() const;
     WEBCORE_EXPORT virtual ColorSpace colorSpace() const;
+
+    // Tightly packed unpremultiplied pixels at the depth they were decoded at.
+    struct UnpremultipliedPixels {
+        Vector<uint8_t> pixels;
+        PixelFormat format { PixelFormat::RGBA8 };
+    };
+    // Empty pixels when the decoded form cannot be read this way; the caller composites instead.
+    WEBCORE_EXPORT UnpremultipliedPixels unpremultipliedPixels() const;
     WEBCORE_EXPORT bool hasHDRContent() const;
     bool hasHDRGainMap() const { return m_gainMap.has_value(); }
     Headroom baseImageHeadroom() const { return m_baseImageHeadroom; }
     Headroom headroom() const { return m_headroom; }
 
     RefPtr<NativeImage> rotatedImage(ImageOrientation);
+
+#if ENABLE(AX_CUSTOM_COLOR_MODE) && USE(CG)
+    ImagePaintTimeTransformation paintTimeTransformation() const;
+#endif
 
     void clearSubimages();
 
@@ -131,6 +145,9 @@ protected:
     mutable Headroom m_baseImageHeadroom { Headroom::None };
     mutable Headroom m_headroom { Headroom::None };
     mutable WeakHashSet<RenderingResourceObserver> m_observers;
+#if ENABLE(AX_CUSTOM_COLOR_MODE) && USE(CG)
+    mutable std::optional<ImagePaintTimeTransformation> m_paintTimeTransformation WTF_GUARDED_BY_LOCK(m_lock);
+#endif
     RenderingResourceIdentifier m_renderingResourceIdentifier { RenderingResourceIdentifier::generate() };
 #if USE(SKIA)
     GrDirectContext* m_grContext { nullptr };

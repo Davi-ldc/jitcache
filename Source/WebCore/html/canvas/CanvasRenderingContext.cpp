@@ -27,6 +27,7 @@
 #include "CanvasRenderingContext.h"
 
 #include "CachedImage.h"
+#include "CanvasImageSource+OriginClean.h"
 #include "CanvasPattern.h"
 #include "ColorSpace.h"
 #include "GraphicsLayer.h"
@@ -148,47 +149,23 @@ bool CanvasRenderingContext::taintsOrigin(const CanvasPattern* pattern)
 
 bool CanvasRenderingContext::taintsOrigin(const CanvasBase* sourceCanvas)
 {
-    return sourceCanvas && !sourceCanvas->originClean();
-}
-
-bool CanvasRenderingContext::taintsOrigin(const CachedImage* cachedImage)
-{
-    if (!cachedImage)
-        return false;
-
-    RefPtr image = cachedImage->image();
-    if (!image)
-        return false;
-
-    if (image->sourceURL().protocolIsData())
-        return false;
-
-    if (image->renderingTaintsOrigin())
-        return true;
-
-    if (cachedImage->isCORSCrossOrigin())
-        return true;
-
-    ASSERT(m_canvas->securityOrigin());
-    ASSERT(cachedImage->origin());
-    ASSERT(m_canvas->securityOrigin()->toString() == cachedImage->origin()->toString());
-    return false;
+    return sourceCanvas && !isOriginClean(*sourceCanvas, *protect(protect(m_canvas)->securityOrigin()));
 }
 
 bool CanvasRenderingContext::taintsOrigin(const HTMLImageElement* element)
 {
-    return element && taintsOrigin(protect(element->cachedImage()));
+    return element && !isOriginClean(*element, *protect(protect(m_canvas)->securityOrigin()));
 }
 
 bool CanvasRenderingContext::taintsOrigin(const SVGImageElement* element)
 {
-    return element && taintsOrigin(protect(element->cachedImage()));
+    return element && !isOriginClean(*element, *protect(protect(m_canvas)->securityOrigin()));
 }
 
 bool CanvasRenderingContext::taintsOrigin(const HTMLVideoElement* video)
 {
 #if ENABLE(VIDEO)
-    return video && protect(video)->taintsOrigin(*m_canvas->securityOrigin());
+    return video && !isOriginClean(*video, *protect(protect(m_canvas)->securityOrigin()));
 #else
     UNUSED_PARAM(video);
     return false;
@@ -197,12 +174,12 @@ bool CanvasRenderingContext::taintsOrigin(const HTMLVideoElement* video)
 
 bool CanvasRenderingContext::taintsOrigin(const ImageBitmap* imageBitmap)
 {
-    return imageBitmap && !imageBitmap->originClean();
+    return imageBitmap && !isOriginClean(*imageBitmap, *protect(protect(m_canvas)->securityOrigin()));
 }
 
 bool CanvasRenderingContext::taintsOrigin(const URL& url)
 {
-    return !url.protocolIsData() && !protect(m_canvas)->securityOrigin()->canRequest(url, OriginAccessPatternsForWebProcess::singleton());
+    return !url.protocolIsData() && !protect(protect(m_canvas)->securityOrigin())->canRequest(url, OriginAccessPatternsForWebProcess::singleton());
 }
 
 void CanvasRenderingContext::checkOrigin(const URL& url)
@@ -220,10 +197,10 @@ void CanvasRenderingContext::updateMemoryCost(size_t newMemoryCost) const
 {
     size_t oldMemoryCost = m_memoryCost.load(std::memory_order_relaxed);
     m_memoryCost.store(newMemoryCost, std::memory_order_relaxed);
-    if (newMemoryCost) {
+    if (newMemoryCost > oldMemoryCost) {
         if (RefPtr scriptExecutionContext = protect(canvasBase())->scriptExecutionContext()) {
             JSC::JSLockHolder lock(scriptExecutionContext->vm());
-            scriptExecutionContext->vm().heap.reportExtraMemoryAllocated(static_cast<JSCell*>(nullptr), newMemoryCost);
+            scriptExecutionContext->vm().heap.reportExtraMemoryAllocated(static_cast<JSCell*>(nullptr), newMemoryCost - oldMemoryCost);
         }
     }
     if (oldMemoryCost != newMemoryCost)

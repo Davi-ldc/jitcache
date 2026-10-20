@@ -86,7 +86,7 @@ public:
 
     bool isURLForThisExtension(const URL&) const;
 
-    RefPtr<JSON::Object> manifest() const { return m_manifest ? m_manifest.get()->asObject() : nullptr; }
+    RefPtr<JSON::Object> manifest() const { return m_manifest ? protect(m_manifest)->asObject() : nullptr; }
 
     double manifestVersion() const { return m_manifestVersion; }
     bool supportsManifestVersion(double version) const { return manifestVersion() >= version; }
@@ -156,6 +156,9 @@ private:
 
     static RefPtr<WebExtensionLocalization> parseLocalization(RefPtr<API::Data>, const URL& baseURL);
 
+    bool isBackgroundServiceWorkerStillActivating();
+    void dispatchRuntimeMessageEventOnceBackgroundServiceWorkerIsActive(WebExtensionContentWorldType, String messageJSON, std::optional<WebExtensionMessageTargetParameters>, WebExtensionMessageSenderParameters, bool userGesture, CompletionHandler<void(String&& replyJSON)>&&, unsigned remainingActivationPollAttempts);
+
     // Action
     void dispatchActionClickedEvent(const std::optional<WebExtensionTabParameters>&);
 
@@ -196,6 +199,13 @@ private:
 
     // Menus
     void dispatchMenusClickedEvent(const WebExtensionMenuItemParameters&, bool wasChecked, const WebExtensionMenuItemContextParameters&, const std::optional<WebExtensionTabParameters>&);
+
+#if ENABLE(WK_WEB_EXTENSIONS_NOTIFICATIONS)
+    // Notifications
+    void dispatchNotificationsClickedEvent(const String& identifier);
+    void dispatchNotificationsButtonClickedEvent(const String& identifier, uint64_t buttonIndex);
+    void dispatchNotificationsClosedEvent(const String& identifier, bool byUser);
+#endif
 
     // Permissions
     void updateGrantedPermissions(PermissionsMap&&);

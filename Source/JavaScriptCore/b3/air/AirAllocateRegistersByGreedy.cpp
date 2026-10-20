@@ -210,34 +210,56 @@ static constexpr unsigned spillCostSizeBias = 25000 * PointOffsets::PointsPerIns
 
 class LiveRange {
 public:
+    // Nearly every Tmp gets a live range and nearly every range is a handful of intervals, so an
+    // out-of-line buffer here would be one malloc per Tmp. A contiguous buffer also suits the
+    // conflict queries, which iterate the intervals and are by far the hottest reader.
+    using Intervals = Vector<Interval, 4>;
+
     LiveRange() = default;
 
-    inline void NODELETE validate()
+    inline void NODELETE validate(bool isDescending = false)
     {
 #if ASSERT_ENABLED
         size_t size = 0;
         Interval* prevInterval = nullptr;
         for (auto& interval : m_intervals) {
             ASSERT(interval.begin() < interval.end());
-            ASSERT(!prevInterval || prevInterval->end() < interval.begin());
+            if (prevInterval)
+                ASSERT(isDescending ? interval.end() < prevInterval->begin() : prevInterval->end() < interval.begin());
             size += interval.distance();
             prevInterval = &interval;
         }
         ASSERT(size == m_size);
+#else
+        UNUSED_PARAM(isDescending);
 #endif
     }
 
-    // interval must come before all the intervals already in this LiveRange.
-    void prepend(Interval interval)
+    // Adds an interval to a range being built by a backwards walk over the code. The intervals are
+    // held in descending order until finishDescendingBuild() puts them the right way round, so that
+    // what would be a front insertion is an append. Only lowestSoFar() may read the range while it
+    // is in this state.
+    void prependDescending(Interval interval)
     {
         ASSERT(interval);
-        if (m_intervals.isEmpty() || interval.end() < m_intervals.first().begin())
-            m_intervals.prepend(interval);
+        if (m_intervals.isEmpty() || interval.end() < m_intervals.last().begin())
+            m_intervals.append(interval);
         else {
-            ASSERT(interval.end() == m_intervals.first().begin());
-            m_intervals.first() |= interval;
+            ASSERT(interval.end() == m_intervals.last().begin());
+            m_intervals.last() |= interval;
         }
         m_size += interval.distance();
+        validate(true);
+    }
+
+    const Interval& NODELETE lowestSoFar() const
+    {
+        return m_intervals.last();
+    }
+
+    void finishDescendingBuild()
+    {
+        m_intervals.reverse();
         validate();
     }
 
@@ -255,7 +277,7 @@ public:
         validate();
     }
 
-    const Deque<Interval>& NODELETE intervals() const
+    const Intervals& NODELETE intervals() const
     {
         return m_intervals;
     }
@@ -381,7 +403,7 @@ public:
     }
 
 private:
-    Deque<Interval> m_intervals;
+    Intervals m_intervals;
     size_t m_size { 0 }; // Sum of the distances over m_intervals
 };
 
@@ -505,6 +527,13 @@ public:
     void add(Tmp tmp, LiveRange& range)
     {
         ASSERT(!hasConflict(range, Width64)); // Can't add overlapping LiveRanges
+
+        // The first range can build the tree directly from its intervals in one pass.
+        if (m_allocations.isEmpty()) {
+            m_allocations = AllocatedIntervalSet(range.intervals().span(), tmp);
+            return;
+        }
+
         for (auto& interval : range.intervals()) {
             ASSERT(interval != Interval()); // Strict ordering requires no empty intervals.
             m_allocations.insert(interval, tmp);
@@ -543,7 +572,7 @@ public:
     //
     // func is allowed to modify this RegisterRange, e.g. by calling evict().
     // func must not modify 'range' for the duration of this forEachConflict invocation.
-    void forEachConflict(const LiveRange& range, Width width, const Invocable<IterationStatus(AllocatedInterval&)> auto& func)
+    void forEachConflict(const LiveRange& range, Width width, NOESCAPE const Invocable<IterationStatus(AllocatedInterval&)> auto& func)
     {
         auto status = forEachConflictImpl(m_allocations, range, func);
         if (width > Width64) [[unlikely]] {
@@ -577,7 +606,7 @@ public:
     }
 
 private:
-    static IterationStatus forEachConflictImpl(AllocatedIntervalSet& allocatedSet, const LiveRange& range, const Invocable<IterationStatus(AllocatedInterval&)> auto& func)
+    static IterationStatus forEachConflictImpl(AllocatedIntervalSet& allocatedSet, const LiveRange& range, NOESCAPE const Invocable<IterationStatus(AllocatedInterval&)> auto& func)
     {
         for (auto interval : range.intervals()) {
             while (true) {
@@ -630,7 +659,7 @@ public:
         ASSERT_NOT_REACHED();
     }
 
-    void removeAllMatching(const Invocable<bool(Tmp)> auto& predicate)
+    void removeAllMatching(NOESCAPE const Invocable<bool(Tmp)> auto& predicate)
     {
         ASSERT(!m_isSorted);
         for (size_t i = 0; i < m_entries.size(); ) {
@@ -687,7 +716,9 @@ private:
         }
     };
 
-    Vector<Entry> m_entries;
+    // Most Tmps that are coalescable at all have just one or two partners, and this list lives in
+    // the per-Tmp map, so an out-of-line buffer here is another malloc per Tmp.
+    Vector<Entry, 2> m_entries;
 #if ASSERT_ENABLED
     bool m_isSorted { false };
 #endif
@@ -956,10 +987,10 @@ public:
 
     bool shouldDumpFunction() const
     {
-        const char* filter = Options::airGreedyRegAllocDumpFunction();
+        const char8_t* filter = Options::airGreedyRegAllocDumpFunction();
         if (!filter)
             return false;
-        return m_code.proc().name().find(String::fromLatin1(filter)) != notFound;
+        return m_code.proc().name().find(String { filter }) != notFound;
     }
 
     void dump(PrintStream& out) const
@@ -1057,7 +1088,7 @@ private:
         m_stats[GP].numInsts += (tailPosition + 1) / PointOffsets::PointsPerInst;
     }
 
-    void forEachBlockInLiveRange(const LiveRange& liveRange, const Invocable<IterationStatus(BasicBlock*)> auto& func)
+    void forEachBlockInLiveRange(const LiveRange& liveRange, NOESCAPE const Invocable<IterationStatus(BasicBlock*)> auto& func)
     {
         for (auto& interval : liveRange.intervals()) {
             size_t blockIdx = findBlockIndexContainingPoint(interval.begin());
@@ -1351,10 +1382,10 @@ private:
             if (activeEnds[tmp])
                 return true;
             // Tmp may have had a dead def at point (e.g. clobber).
-            auto& intervals = m_map[tmp].liveRange.intervals();
-            if (intervals.isEmpty())
+            const LiveRange& liveRange = m_map[tmp].liveRange;
+            if (liveRange.intervals().isEmpty())
                 return false;
-            return intervals.first().contains(point);
+            return liveRange.lowestSoFar().contains(point);
         };
 
         auto assertPinnedRegsAreLive = [&]() {
@@ -1396,7 +1427,7 @@ private:
             Point end = activeEnds[tmp];
             if (!end) [[unlikely]]
                 end = point + 1; // Dead def / clobber
-            m_map[tmp].liveRange.prepend({ point, end });
+            m_map[tmp].liveRange.prependDescending({ point, end });
             activeEnds[tmp] = 0;
         };
 
@@ -1565,7 +1596,11 @@ private:
         m_code.pinnedRegisters().forEachReg([&](Reg reg) {
             Tmp tmp = Tmp(reg);
             ASSERT(activeEnds[tmp] == funcEndPoint + 1 && !m_map[tmp].liveRange.size());
-            m_map[tmp].liveRange.prepend({ 0, activeEnds[tmp] });
+            m_map[tmp].liveRange.prependDescending({ 0, activeEnds[tmp] });
+        });
+
+        m_map.forEachValue([](TmpData& data) {
+            data.liveRange.finishDescendingBuild();
         });
 
 #if ASSERT_ENABLED
@@ -1639,7 +1674,7 @@ private:
         }
 
         // Calls func with the TmpList for any intervals in this map that overlaps with the given range.
-        IterationStatus forEachOverlap(const LiveRange& range, const Invocable<IterationStatus(const TmpList&)> auto& func) const
+        IterationStatus forEachOverlap(const LiveRange& range, NOESCAPE const Invocable<IterationStatus(const TmpList&)> auto& func) const
         {
             for (auto interval : range.intervals()) {
                 while (true) {
@@ -1658,7 +1693,7 @@ private:
         }
 
         // Calls func with both TmpLists for each pair of overlapping intervals in a and b.
-        static IterationStatus forEachPairwiseOverlap(const LivenessMap& a, const LivenessMap& b, const Invocable<IterationStatus(const TmpList&, const TmpList&)> auto& func)
+        static IterationStatus forEachPairwiseOverlap(const LivenessMap& a, const LivenessMap& b, NOESCAPE const Invocable<IterationStatus(const TmpList&, const TmpList&)> auto& func)
         {
             const LivenessMap* smaller = &a;
             const LivenessMap* larger = &b;
@@ -1862,12 +1897,12 @@ private:
 
         using TmpList = typename LivenessMap<bank>::TmpList;
 
-        IterationStatus forEachOverlap(const LiveRange& range, const Invocable<IterationStatus(const TmpList&)> auto& func) const
+        IterationStatus forEachOverlap(const LiveRange& range, NOESCAPE const Invocable<IterationStatus(const TmpList&)> auto& func) const
         {
             return m_liveness.forEachOverlap(range, func);
         }
 
-        static IterationStatus forEachPairwiseOverlap(const AffinityGroup& a, const AffinityGroup& b, const Invocable<IterationStatus(const TmpList&, const TmpList&)> auto& func)
+        static IterationStatus forEachPairwiseOverlap(const AffinityGroup& a, const AffinityGroup& b, NOESCAPE const Invocable<IterationStatus(const TmpList&, const TmpList&)> auto& func)
         {
             return LivenessMap<bank>::forEachPairwiseOverlap(a.m_liveness, b.m_liveness, func);
         }
@@ -2227,7 +2262,7 @@ private:
         m_map.append(tmp, TmpData());
         TmpData& tmpData = m_map[tmp];
         if (interval)
-            tmpData.liveRange.prepend(interval);
+            tmpData.liveRange.append(interval);
         tmpData.useDefCost = useDefCost;
         tmpData.validate();
         return tmp;
@@ -2319,7 +2354,7 @@ private:
                     StringPrintStream out;
                     out.println("Pop: ", entry, " tmp: ", tmpData);
                     dumpRegRanges<bank>(out);
-                    dataLog(out.toCString());
+                    dataLog(out.toUTF8CString());
                 }
                 switch (tmpData.stage) {
                 case Stage::Unspillable:
@@ -2443,7 +2478,7 @@ private:
             }
             out.println("Code:", m_code);
             out.println("Register Allocator State:\n", pointerDump(this));
-            dataLogLn(out.toCString());
+            dataLogLn(out.toUTF8CString());
             RELEASE_ASSERT_NOT_REACHED();
         };
 
@@ -2921,7 +2956,7 @@ private:
     // uses or defs the given tmp, up to the end of the basic block.
     // Returns the unprocessed portion of the interval (if interval spans multiple blocks).
     // `cursor` can be used to perform a "sort-merge join" when the caller is making queries over a sorted set of intervals for the same tmp
-    Interval forEachUseDefWithin(Tmp tmp, Interval interval, size_t& cursor, const Invocable<void(Point, Inst&, BasicBlock&)> auto& func)
+    Interval forEachUseDefWithin(Tmp tmp, Interval interval, size_t& cursor, NOESCAPE const Invocable<void(Point, Inst&, BasicBlock&)> auto& func)
     {
         auto& useDefs = m_useDefLists[tmp].useDefs();
 

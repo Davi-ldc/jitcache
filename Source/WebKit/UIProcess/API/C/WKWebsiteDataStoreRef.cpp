@@ -45,6 +45,9 @@
 #include "WebsiteDataRecord.h"
 #include "WebsiteDataStore.h"
 #include "WebsiteDataType.h"
+#include <WebCore/ClientOrigin.h>
+#include <WebCore/IPAddressSpace.h>
+#include <WebCore/PermissionState.h>
 #include <WebCore/RegistrableDomain.h>
 #include <wtf/CallbackAggregator.h>
 #include <wtf/URL.h>
@@ -219,7 +222,7 @@ void WKWebsiteDataStoreSetStatisticsVeryPrevalentResource(WKWebsiteDataStoreRef 
 void WKWebsiteDataStoreDumpResourceLoadStatistics(WKWebsiteDataStoreRef dataStoreRef, void* context, WKWebsiteDataStoreDumpResourceLoadStatisticsFunction callback)
 {
     protect(WebKit::toImpl(dataStoreRef))->dumpResourceLoadStatistics([context, callback] (const String& resourceLoadStatistics) {
-        callback(WebKit::toAPI(resourceLoadStatistics.impl()), context);
+        callback(WebKit::toAPI(resourceLoadStatistics), context);
     });
 }
 
@@ -781,7 +784,7 @@ void WKWebsiteDataStoreGetAllStorageAccessEntries(WKWebsiteDataStoreRef dataStor
     protect(WebKit::toImpl(dataStoreRef))->getAllStorageAccessEntries(WebKit::toImpl(pageRef)->identifier(), [context, callback] (Vector<String>&& domains) {
         auto domainArrayRef = WKMutableArrayCreate();
         for (auto domain : domains)
-            WKArrayAppendItem(domainArrayRef, adoptWK(WKStringCreateWithUTF8CString(domain.utf8().data())).get());
+            WKArrayAppendItem(domainArrayRef, adoptWK(WebKit::toCopiedAPI(domain)).get());
 
         callback(context, domainArrayRef);
     });
@@ -823,6 +826,20 @@ void WKWebsiteDataStoreSetStorageAccessForTesting(WKWebsiteDataStoreRef dataStor
     if (blocked)
         store->clearStorageAccessForTesting([callbackAggregator] { });
     store->setResourceLoadStatisticsShouldBlockThirdPartyCookiesForTesting(blocked, WebCore::ThirdPartyCookieBlockingMode::All, [callbackAggregator] { });
+}
+
+void WKWebsiteDataStoreRevokeLocalNetworkAccessPermissionsForTesting(WKWebsiteDataStoreRef dataStoreRef, WKStringRef originString, void* context, WKWebsiteDataStoreRevokeLocalNetworkAccessPermissionsForTestingFunction completionHandler)
+{
+    Ref store = *WebKit::toImpl(dataStoreRef);
+    store->removeLocalNetworkAccessPermissions(WebCore::SecurityOriginData::fromURL(URL { protect(WebKit::toImpl(originString))->string() }));
+    completionHandler(context);
+}
+
+void WKWebsiteDataStoreClearLocalNetworkAccessPermissionsForTesting(WKWebsiteDataStoreRef dataStoreRef, void* context, WKWebsiteDataStoreClearLocalNetworkAccessPermissionsForTestingFunction completionHandler)
+{
+    Ref store = *WebKit::toImpl(dataStoreRef);
+    store->clearLocalNetworkAccessPermissionsForTesting();
+    completionHandler(context);
 }
 
 void WKWebsiteDataStoreFlushNetworkProcessIPC(WKWebsiteDataStoreRef dataStore, void* context, WKWebsiteDataStoreFlushNetworkProcessIPCCallback callback)

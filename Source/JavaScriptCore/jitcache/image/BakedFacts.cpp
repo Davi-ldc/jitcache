@@ -13,8 +13,8 @@
 #include <optional>
 #include <utility>
 
-// Besides the declarations of its header, the section's field offsets, the rules ImageCheck::V7 applies to its header
-// and entries, and the test of one scope fact against a newborn CB's metadata.
+// Besides the declarations of its header, the section's field offsets, the rules ImageCheck::BakedFacts applies to its
+// header and entries, and the test of one scope fact against a newborn CB's metadata.
 
 namespace JSC::JITCache {
 
@@ -32,8 +32,22 @@ static constexpr size_t entryOpcodeOffset = 4;
 static constexpr size_t entryResolveTypeOffset = 5;
 static constexpr size_t entryReservedOffset = 6;
 static constexpr size_t entryDepthOffset = 8;
+static constexpr size_t entryImportSlotOffset = 12;
+static_assert(entryImportSlotOffset + sizeof(uint32_t) == bakedFactsEntrySize);
 
 static_assert(sizeof(DFG::CapabilityLevel) == 1);
+
+// The resolve_scope kinds whose code bakes a depth or an import slot: one of a closure variable walks its depth, and one
+// of a module variable walks its depth and then loads its import slot.
+static bool mayHaveDepth(ScopeOpcode opcode, ResolveType resolveType)
+{
+    return opcode == ScopeOpcode::ResolveScope && (resolveType == ClosureVar || resolveType == ModuleVar);
+}
+
+static bool mayHaveImportSlot(ScopeOpcode opcode, ResolveType resolveType)
+{
+    return opcode == ScopeOpcode::ResolveScope && resolveType == ModuleVar;
+}
 
 static bool isValidCapabilityLevel(uint8_t level)
 {
@@ -60,10 +74,10 @@ static std::span<const uint8_t> entryAt(std::span<const uint8_t> section, unsign
     return section.subspan(bakedFactsHeaderSize + static_cast<size_t>(index) * bakedFactsEntrySize, bakedFactsEntrySize);
 }
 
-// ImageCheck::V7, on a section whose header and counted entries lie inside it: the exact size, known values, zero
-// reserved fields, facts strictly increasing by bytecode offset, each a shape recording writes, with a depth only on a
-// ClosureVar resolve_scope.
-static bool passesV7(std::span<const uint8_t> section)
+// ImageCheck::BakedFacts, on a section whose header and counted entries lie inside it: the exact size, known values,
+// zero reserved fields, facts strictly increasing by bytecode offset, each a shape recording writes, with a depth only
+// on a ClosureVar or ModuleVar resolve_scope and an import slot only on a ModuleVar one.
+static bool passesBakedFacts(std::span<const uint8_t> section)
 {
     uint32_t count = readField<uint32_t>(section, countOffset);
     if (section.size() != bakedFactsHeaderSize + static_cast<size_t>(count) * bakedFactsEntrySize)
@@ -90,15 +104,17 @@ static bool passesV7(std::span<const uint8_t> section)
             return false;
         if (readField<uint16_t>(entry, entryReservedOffset))
             return false;
-        uint32_t depth = readField<uint32_t>(entry, entryDepthOffset);
-        if (depth && !(opcode == ScopeOpcode::ResolveScope && resolveType == ClosureVar))
+        if (readField<uint32_t>(entry, entryDepthOffset) && !mayHaveDepth(opcode, resolveType))
+            return false;
+        if (readField<uint32_t>(entry, entryImportSlotOffset) && !mayHaveImportSlot(opcode, resolveType))
             return false;
     }
     return true;
 }
 
-// Whether the CB's metadata for the fact's instruction holds what the compilation baked. Only the depth of a
-// resolve_scope of type ClosureVar is baked; the other baked kinds read their depth from the metadata at run time.
+// Whether the CB's metadata for the fact's instruction holds what the compilation baked. Only a resolve_scope of type
+// ClosureVar or ModuleVar bakes its depth, and only one of type ModuleVar its import slot; the other baked kinds read
+// their depth from the metadata at run time.
 static bool scopeFactHolds(const ScopeFact& fact, CodeBlock& codeBlock)
 {
     auto& instructions = codeBlock.instructions();
@@ -110,7 +126,9 @@ static bool scopeFactHolds(const ScopeFact& fact, CodeBlock& codeBlock)
         auto& metadata = instruction->as<OpResolveScope>().metadata(&codeBlock);
         if (metadata.m_resolveType != fact.resolveType)
             return false;
-        return fact.resolveType != ClosureVar || metadata.m_localScopeDepth == fact.localScopeDepth;
+        if (mayHaveDepth(fact.opcode, fact.resolveType) && metadata.m_localScopeDepth != fact.localScopeDepth)
+            return false;
+        return !mayHaveImportSlot(fact.opcode, fact.resolveType) || metadata.m_moduleImportSlot == fact.moduleImportSlot;
     }
     case ScopeOpcode::GetFromScope:
         ASSERT(instruction->is<OpGetFromScope>());
@@ -130,7 +148,7 @@ bool isBakedScopeShape(ScopeOpcode opcode, ResolveType resolveType)
     case ScopeOpcode::ResolveScope:
         return resolveType == ModuleVar || resolveType == ClosureVar || resolveType == ClosureVarWithVarInjectionChecks;
     case ScopeOpcode::GetFromScope:
-        return resolveType == ClosureVar;
+        return resolveType == ClosureVar || resolveType == LazyClosureVar;
     case ScopeOpcode::PutToScope:
         return resolveType == ClosureVar || resolveType == ResolvedClosureVar || resolveType == ClosureVarWithVarInjectionChecks || resolveType == ModuleVar;
     }
@@ -154,7 +172,8 @@ void BakedFactsBuilder::setCodeBlockFacts(DFG::CapabilityLevel capabilityLevel, 
 void BakedFactsBuilder::addScopeFact(ScopeFact fact)
 {
     ASSERT(isBakedScopeShape(fact.opcode, fact.resolveType));
-    ASSERT(!fact.localScopeDepth || (fact.opcode == ScopeOpcode::ResolveScope && fact.resolveType == ClosureVar));
+    ASSERT(!fact.localScopeDepth || BakedFactsInternal::mayHaveDepth(fact.opcode, fact.resolveType));
+    ASSERT(!fact.moduleImportSlot || BakedFactsInternal::mayHaveImportSlot(fact.opcode, fact.resolveType));
     auto& facts = m_facts.scopeFacts;
     size_t addedBytes = 0;
     size_t newCapacity = facts.capacity();
@@ -205,6 +224,7 @@ bool writeBakedFactsSection(const BakedFacts& facts, const ImageSectionSink& sin
         entry[entryOpcodeOffset] = static_cast<uint8_t>(fact.opcode);
         entry[entryResolveTypeOffset] = static_cast<uint8_t>(fact.resolveType);
         writeField<uint32_t>(entry, entryDepthOffset, fact.localScopeDepth);
+        writeField<uint32_t>(entry, entryImportSlotOffset, fact.moduleImportSlot);
         if (!sink(std::span<const uint8_t>(entry)))
             return false;
     }
@@ -221,6 +241,7 @@ ScopeFact BakedFactsView::scopeFact(unsigned index) const
         .opcode = static_cast<ScopeOpcode>(entry[entryOpcodeOffset]),
         .resolveType = static_cast<ResolveType>(entry[entryResolveTypeOffset]),
         .localScopeDepth = readField<uint32_t>(entry, entryDepthOffset),
+        .moduleImportSlot = readField<uint32_t>(entry, entryImportSlotOffset),
     };
 }
 
@@ -235,17 +256,17 @@ std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const
 {
     using namespace BakedFactsInternal;
     if (section.size() < bakedFactsHeaderSize)
-        return std::unexpected(ImageCheck::V7);
+        return std::unexpected(ImageCheck::BakedFacts);
     uint32_t count = readField<uint32_t>(section, countOffset);
     uint64_t locatedSize = bakedFactsHeaderSize + static_cast<uint64_t>(count) * bakedFactsEntrySize;
     if (locatedSize > section.size())
-        return std::unexpected(ImageCheck::V7);
+        return std::unexpected(ImageCheck::BakedFacts);
 
     if (strict) {
-        if (!passesV7(section))
-            return std::unexpected(ImageCheck::V7);
+        if (!passesBakedFacts(section))
+            return std::unexpected(ImageCheck::BakedFacts);
     } else
-        ASSERT(passesV7(section));
+        ASSERT(passesBakedFacts(section));
 
     BakedFactsView view;
     view.m_bytes = section.first(static_cast<size_t>(locatedSize));

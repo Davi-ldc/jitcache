@@ -39,9 +39,10 @@
 
 namespace WebCore {
 
-ClipPathPaintScope::ClipPathPaintScope(GraphicsContext& context, RegionContext* regionContext, RenderLayerModelObject& renderer, const LayoutSize& offsetFromRoot, const LayoutSize& subpixelOffset, const LayoutRect& clippedContentBounds, bool isCollectingEventRegion, CoordinateMode mode)
+ClipPathPaintScope::ClipPathPaintScope(GraphicsContext& context, RegionContext* regionContext, RenderLayerModelObject& renderer, const LayoutSize& offsetFromRoot, const LayoutSize& subpixelOffset, const LayoutRect& clippedContentBounds, bool isCollectingEventRegion, CoordinateMode mode, StateSavedByCaller stateSavedByCaller)
     : m_clipSaver(context, false)
     , m_regionSaver(regionContext)
+    , m_savesContextState(stateSavedByCaller == StateSavedByCaller::No)
 {
     auto& clipPathStyle = renderer.style().clipPath();
     ASSERT(!WTF::holdsAlternative<CSS::Keyword::None>(clipPathStyle));
@@ -52,6 +53,12 @@ ClipPathPaintScope::ClipPathPaintScope(GraphicsContext& context, RegionContext* 
         applySVGResourceClip(context, renderer, *svgClipper, offsetFromRoot, subpixelOffset, clippedContentBounds, mode);
     else if (CheckedPtr legacyClipper = renderer.legacySVGClipperResourceFromStyle())
         applyLegacySVGResourceClip(context, renderer, *legacyClipper, offsetFromRoot, clippedContentBounds);
+}
+
+void ClipPathPaintScope::saveContextStateIfNeeded()
+{
+    if (m_savesContextState)
+        m_clipSaver.save();
 }
 
 FloatRect ClipPathPaintScope::referenceBoxRectForClipPath(const RenderLayerModelObject& renderer, CSSBoxType boxType, const LayoutSize& offsetFromRoot, const LayoutRect& rootRelativeBounds)
@@ -80,12 +87,23 @@ std::pair<Path, WindRule> ClipPathPaintScope::computeClipPath(const RenderLayerM
         },
         [&](const Style::BoxPath& clipPath) -> std::pair<Path, WindRule> {
             CheckedPtr box = dynamicDowncast<RenderBox>(renderer);
-            if (box) {
-                auto shapeRect = computeRoundedRectForBoxShape(clipPath.referenceBox(), *box).pixelSnappedRoundedRectForPainting(renderer.document().deviceScaleFactor());
-                shapeRect.move(offsetFromRoot);
-                return { shapeRect.path(), WindRule::NonZero };
+            if (!box)
+                return { Path(), WindRule::NonZero };
+
+            auto deviceScaleFactor = renderer.document().deviceScaleFactor();
+            auto geometry = computeGeometryForBoxShape(clipPath.referenceBox(), *box);
+
+            if (style->border().hasNonRoundCornerShape()) {
+                auto shapePath = geometry.edge == BoxShapeGeometry::Edge::Inner
+                    ? geometry.borderShape.pathForInnerShape(deviceScaleFactor)
+                    : geometry.borderShape.pathForOuterShape(deviceScaleFactor);
+                shapePath.translate(FloatSize { offsetFromRoot });
+                return { shapePath, WindRule::NonZero };
             }
-            return { Path(), WindRule::NonZero };
+
+            auto shapeRect = geometry.roundedRect().pixelSnappedRoundedRectForPainting(deviceScaleFactor);
+            shapeRect.move(offsetFromRoot);
+            return { shapeRect.path(), WindRule::NonZero };
         },
         [&](const auto&) -> std::pair<Path, WindRule> {
             return { Path(), WindRule::NonZero };
@@ -117,7 +135,7 @@ void ClipPathPaintScope::applyBasicShapeOrBoxClip(GraphicsContext& context, Rend
         return;
     }
 
-    m_clipSaver.save();
+    saveContextStateIfNeeded();
     context.clipPath(path, windRule);
 }
 
@@ -129,7 +147,7 @@ void ClipPathPaintScope::applySVGResourceClip(GraphicsContext& context, RenderLa
         return;
     }
 
-    m_clipSaver.save();
+    saveContextStateIfNeeded();
     FloatRect svgReferenceBox;
     // userSpaceOnUse geometry is in absolute user space, so move it to the renderer's content origin
     // with a translate. objectBoundingBox geometry carries its origin in objectBoundingBox.location()
@@ -171,7 +189,7 @@ void ClipPathPaintScope::applyLegacySVGResourceClip(GraphicsContext& context, Re
     auto snappedClippingBounds = snapRectToDevicePixelsIfNeeded(clippedContentBounds, renderer);
     snappedClippingBounds.moveBy(-offset);
 
-    m_clipSaver.save();
+    saveContextStateIfNeeded();
     context.translate(offset);
     svgClipper.applyClippingToContext(context, renderer, { { }, referenceBox.size() }, snappedClippingBounds, renderer.style().usedZoom());
     context.translate(-offset);

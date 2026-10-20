@@ -166,14 +166,13 @@ Digest256 directEvalIdentityDigest(const BodyKey& caller, BytecodeIndex bytecode
     return hasher.finalize();
 }
 
-Digest256 globalContextDigest(IdentityKind kind, unsigned providerOffset, unsigned firstLine, JSParserScriptMode scriptMode, DerivedContextType derivedContextType, EvalContextType evalContextType, bool isArrowFunctionContext)
+Digest256 globalContextDigest(IdentityKind kind, unsigned providerOffset, JSParserScriptMode scriptMode, DerivedContextType derivedContextType, EvalContextType evalContextType, bool isArrowFunctionContext)
 {
     ASSERT(UCBKeysInternal::isGlobalKind(kind));
 
     UCBKeysInternal::RecordHasher hasher("JITCache.gctx.v1");
     hasher.u8(static_cast<uint8_t>(kind));
     hasher.u32(providerOffset);
-    hasher.u32(firstLine);
     hasher.u8(static_cast<uint8_t>(scriptMode));
     hasher.u8(static_cast<uint8_t>(derivedContextType));
     hasher.u8(static_cast<uint8_t>(evalContextType));
@@ -181,7 +180,7 @@ Digest256 globalContextDigest(IdentityKind kind, unsigned providerOffset, unsign
     return hasher.finalize();
 }
 
-Digest256 executableBodyContextDigest(IdentityKind kind, unsigned providerOffset, unsigned firstLine, const std::optional<Digest256>& rootHolderDigest)
+Digest256 executableBodyContextDigest(IdentityKind kind, unsigned providerOffset, const std::optional<Digest256>& rootHolderDigest)
 {
     using namespace UCBKeysInternal;
 
@@ -194,7 +193,6 @@ Digest256 executableBodyContextDigest(IdentityKind kind, unsigned providerOffset
     RecordHasher hasher("JITCache.fctx.v1");
     hasher.u8(static_cast<uint8_t>(kind));
     hasher.u32(providerOffset);
-    hasher.u32(firstLine);
     hasher.flag(isRoot);
     hasher.bytes(isRoot && rootHolderDigest ? *rootHolderDigest : Digest256 { });
     return hasher.finalize();
@@ -223,13 +221,12 @@ std::optional<Digest256> holderDigest(VM& vm, const UnlinkedFunctionExecutable& 
     return hasher.finalize();
 }
 
-Digest256 directEvalContextDigest(unsigned providerOffset, unsigned firstLine, LexicallyScopedFeatures lexicallyScopedFeatures, DerivedContextType derivedContextType,
+Digest256 directEvalContextDigest(unsigned providerOffset, LexicallyScopedFeatures lexicallyScopedFeatures, DerivedContextType derivedContextType,
     NeedsClassFieldInitializer needsClassFieldInitializer, PrivateBrandRequirement privateBrandRequirement, bool isArrowFunctionContext, bool isInsideOrdinaryFunction,
     EvalContextType evalContextType, const TDZEnvironment& variablesUnderTDZ, const PrivateNameEnvironment& privateNameEnvironment)
 {
     UCBKeysInternal::RecordHasher hasher("JITCache.dctx.v1");
     hasher.u32(providerOffset);
-    hasher.u32(firstLine);
     hasher.u8(lexicallyScopedFeatures);
     hasher.u8(static_cast<uint8_t>(derivedContextType));
     hasher.u8(static_cast<uint8_t>(needsClassFieldInitializer));
@@ -274,14 +271,14 @@ std::optional<Digest256> contextDigestOf(IdentityKind kind, const RecordedContex
     return WTF::switchOn(context,
         [&](const GlobalContextInputs& inputs) -> std::optional<Digest256> {
             ASSERT(isGlobalKind(kind));
-            return globalContextDigest(kind, inputs.providerOffset, inputs.firstLine, inputs.scriptMode, inputs.derivedContextType, inputs.evalContextType, inputs.isArrowFunctionContext);
+            return globalContextDigest(kind, inputs.providerOffset, inputs.scriptMode, inputs.derivedContextType, inputs.evalContextType, inputs.isArrowFunctionContext);
         },
         [&](const BodyContextInputs& inputs) -> std::optional<Digest256> {
             if (!isRootExecutableKind(kind))
-                return executableBodyContextDigest(kind, inputs.providerOffset, inputs.firstLine, std::nullopt);
+                return executableBodyContextDigest(kind, inputs.providerOffset, std::nullopt);
             if (!rootHolderDigest)
                 return std::nullopt;
-            return executableBodyContextDigest(kind, inputs.providerOffset, inputs.firstLine, rootHolderDigest);
+            return executableBodyContextDigest(kind, inputs.providerOffset, rootHolderDigest);
         },
         [&](const DirectEvalContext& inputs) -> std::optional<Digest256> {
             ASSERT(kind == IdentityKind::DirectEval);

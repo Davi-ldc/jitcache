@@ -34,6 +34,7 @@
 #import <IOSurface/IOSurfaceRef.h>
 #import <Metal/Metal.h>
 #import <WebGPU/WebGPU.h>
+#import <WebGPU/WebGPUCpp.h>
 #import <WebGPU/WebGPUExt.h>
 #import <simd/matrix_types.h>
 #import <wtf/CompletionHandler.h>
@@ -55,7 +56,7 @@ IGNORE_CLANG_WARNINGS_BEGIN("nullability-completeness")
 struct WGPUDeviceImpl {
 };
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class BindGroup;
 class BindGroupLayout;
@@ -76,6 +77,8 @@ class XRBinding;
 class XRSubImage;
 class XRProjectionLayer;
 class XRView;
+
+struct LibraryCompileRequest;
 
 #if ENABLE(WEBGPU_BY_DEFAULT)
 using GPUShaderValidation = MTLShaderValidation;
@@ -98,7 +101,7 @@ struct WebKitMTLDrawPrimitivesIndirectArguments { \
 WEBKIT_DRAW_INDIRECT_STRUCT_TYPE
 
 // https://gpuweb.github.io/gpuweb/#gpudevice
-class Device : public WGPUDeviceImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Device> {
+class Device final : public WebGPU::Device, public WGPUDeviceImpl {
     WTF_MAKE_TZONE_ALLOCATED(Device);
 public:
     static Ref<Device> create(id<MTLDevice>, String&& deviceLabel, HardwareCapabilities&&, Adapter&);
@@ -143,14 +146,19 @@ public:
     void pushErrorScope(WGPUErrorFilter);
     void setDeviceLostCallback(Function<void(WGPUDeviceLostReason, String&&)>&&);
     void setUncapturedErrorCallback(Function<void(WGPUErrorType, String&&)>&&);
-    void NODELETE setLabel(String&&);
+    void NODELETE setLabel(String&&) final;
 
-    bool isValid() const { return m_device; }
+    bool NODELETE isValid() const final { return m_device; }
     bool isLost() const { return m_isLost; }
-    const WGPULimits& limits() const LIFETIME_BOUND { return m_capabilities.limits; }
-    const WGPULimits limitsCopy() const { return m_capabilities.limits; }
+    const Limits& limits() const LIFETIME_BOUND { return m_capabilities.limits; }
+    const Limits limitsCopy() const { return m_capabilities.limits; }
     const Vector<WGPUFeatureName>& features() const LIFETIME_BOUND { return m_capabilities.features; }
     const HardwareCapabilities::BaseCapabilities& baseCapabilities() const LIFETIME_BOUND { return m_capabilities.baseCapabilities; }
+
+    // Encoding an ICB into an argument buffer, and dereferencing that argument buffer from a shader
+    // in order to write render_command slots, both require argument buffers tier 2. Tier 1 devices
+    // (Apple4/Apple5, e.g. A12) must replay render bundle commands into the render pass instead.
+    bool supportsIndirectCommandBuffersInArgumentBuffers() const { return m_capabilities.baseCapabilities.argumentBuffersTier >= MTLArgumentBuffersTier2; }
 
     id<MTLDevice> _Nullable device() const { return m_device; }
     void generateAValidationError(NSString * message);
@@ -215,8 +223,19 @@ public:
         id<MTLTexture> _Nullable texture1 { nil };
         simd::float3x2 uvRemappingMatrix;
         simd::float4x3 colorSpaceConversionMatrix;
+        // Converts the frame's primaries to the color space the import asked for, applied to
+        // linear-light values. All zero, which no real conversion can be, when the frame's primaries
+        // already are that color space and the transfer function round trip has to be skipped.
+        simd::float3x3 primariesConversionMatrix { simd::float3x3(0.f) };
     };
-    ExternalTextureData createExternalTextureFromPixelBuffer(CVPixelBufferRef, WGPUColorSpace) const;
+    // A single-plane frame's color is premultiplied into a copy when it is imported for sampling,
+    // because textureSampleBaseClampToEdge() has to filter premultiplied color rather than
+    // premultiply what the sampler filtered. copyExternalImageToTexture() carries the frame's color
+    // through unchanged instead, and asks for the planes as they arrived.
+    enum class PremultiplyAlpha : bool { No, Yes };
+    ExternalTextureData createExternalTextureFromPixelBuffer(CVPixelBufferRef, WGPUColorSpace, PremultiplyAlpha) const;
+    id<MTLTexture> _Nullable premultipliedAlphaTexture(id<MTLTexture>, MTLPixelFormat, std::optional<MTLTextureSwizzleChannels> sourceSwizzle) const;
+    id<MTLComputePipelineState> _Nullable premultiplyAlphaPipeline() const;
     RefPtr<XRSubImage> getXRViewSubImage(XRProjectionLayer&);
     RefPtr<XRSubImage> NODELETE getXRViewSubImage() const;
     id<MTLTexture> _Nullable getXRViewSubImageDepthTexture() const;
@@ -275,6 +294,16 @@ private:
 
     bool NODELETE validateRenderPipeline(const WGPURenderPipelineDescriptor&);
 
+    enum class LibraryCompilation : bool { Synchronous, Asynchronous };
+    // Asynchronous, unless something process-wide requires compiling one pipeline at a time.
+    static LibraryCompilation asynchronousIfPossible();
+
+    void compileLibrary(const LibraryCompileRequest&, LibraryCompilation, CompletionHandler<void(id<MTLLibrary>, NSError *)>&&);
+    void createComputePipelineState(MTLComputePipelineDescriptor *, String&& shaderSource, LibraryCompilation, CompletionHandler<void(id<MTLComputePipelineState>)>&&);
+
+    void createComputePipeline(const WGPUComputePipelineDescriptor&, bool isAsync, const ComputePipeline* pipelineToReplace, LibraryCompilation, CompletionHandler<void(std::pair<Ref<ComputePipeline>, NSString*>&&)>&&);
+    void createRenderPipeline(const WGPURenderPipelineDescriptor&, bool isAsync, const RenderPipeline* pipelineToReplace, LibraryCompilation, CompletionHandler<void(std::pair<Ref<RenderPipeline>, NSString*>&&)>&&);
+
     void makeInvalid();
     NSString * _Nullable addPipelineLayouts(Vector<Vector<WGPUBindGroupLayoutEntry>>&, const std::optional<WGSL::PipelineLayout>&);
     Ref<PipelineLayout> generatePipelineLayout(const Vector<Vector<WGPUBindGroupLayoutEntry>> &bindGroupEntries);
@@ -309,6 +338,7 @@ private:
     id<MTLTexture> m_placeholderDepthStencilTexture { nil };
     id<MTLBuffer> _Nullable m_dispatchCallBuffer { nil };
     id<MTLComputePipelineState> _Nullable m_dispatchCallPipelineState { nil };
+    mutable id<MTLComputePipelineState> _Nullable m_premultiplyAlphaPipeline { nil };
 
     id<MTLRenderPipelineState> _Nullable m_indexBufferClampUintPSO { nil };
     id<MTLRenderPipelineState> _Nullable m_indexBufferClampUshortPSO { nil };
@@ -353,18 +383,20 @@ private:
     bool m_supressAllErrors { false };
     const uint32_t m_maxVerticesPerDrawCall { 0 };
     bool m_shaderValidationEnabled { true };
-} SWIFT_SHARED_REFERENCE(refDevice, derefDevice) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+} DERIVED_CLASS_SWIFT_SHARED_REFERENCE(refDevice, derefDevice);
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
-inline void refDevice(WebGPU::Device* obj)
+#if !ENABLE(SWIFT_BASE_CLASS_ANNOTATIONS)
+inline void refDevice(WebGPU::Metal::Device* obj)
 {
     obj->ref();
 }
 
-inline void derefDevice(WebGPU::Device* obj)
+inline void derefDevice(WebGPU::Metal::Device* obj)
 {
     obj->deref();
 }
+#endif
 
 IGNORE_CLANG_WARNINGS_END

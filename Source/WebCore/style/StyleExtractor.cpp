@@ -43,12 +43,15 @@
 #include "RenderObjectInlines.h"
 #include "SVGElement.h"
 #include "ShorthandSerializer.h"
+#include "StyleAppleColorFilter.h"
+#include "StyleComputedStyle+GettersInlines.h"
 #include "StyleCustomProperty.h"
 #include "StyleCustomPropertyRegistry.h"
 #include "StyleDocumentScope.h"
 #include "StyleExtractorGenerated.h"
 #include "StyleInterpolation.h"
 #include "StylePrimitiveNumericTypes+Conversions.h"
+#include "StylePrimitiveNumericTypes+Serialization.h"
 #include "StylePropertyShorthand.h"
 #include "StyleResolver.h"
 #include "StyleZoomPrimitivesInlines.h"
@@ -142,7 +145,7 @@ const RenderElement* Extractor::computeRenderer() const
     return element->renderer();
 }
 
-static inline bool hasValidStyleForProperty(Element& element, CSSPropertyID propertyID)
+static inline bool hasValidStyleForProperty(Element& element, const std::optional<Style::PseudoElementIdentifier>& pseudoElementIdentifier, CSSPropertyID propertyID)
 {
     if (element.styleValidity() != Style::Validity::Valid)
         return false;
@@ -151,7 +154,7 @@ static inline bool hasValidStyleForProperty(Element& element, CSSPropertyID prop
     if (!element.document().childNeedsStyleRecalc())
         return true;
 
-    if (auto* keyframeEffectStack = Styleable(element, { }).keyframeEffectStack()) {
+    if (auto* keyframeEffectStack = Styleable(element, pseudoElementIdentifier).keyframeEffectStack()) {
         if (keyframeEffectStack->containsProperty(propertyID))
             return false;
     }
@@ -181,7 +184,7 @@ static inline bool hasValidStyleForProperty(Element& element, CSSPropertyID prop
     return true;
 }
 
-bool Extractor::updateStyleIfNeededForProperty(Element& element, CSSPropertyID propertyID)
+bool Extractor::updateStyleIfNeededForProperty(Element& element, const std::optional<Style::PseudoElementIdentifier>& pseudoElementIdentifier, CSSPropertyID propertyID)
 {
     Ref document = element.document();
 
@@ -191,12 +194,12 @@ bool Extractor::updateStyleIfNeededForProperty(Element& element, CSSPropertyID p
         auto shorthand = shorthandForProperty(propertyID);
         if (shorthand.length()) {
             for (auto longhand : shorthand) {
-                if (!hasValidStyleForProperty(element, longhand))
+                if (!hasValidStyleForProperty(element, pseudoElementIdentifier, longhand))
                     return false;
             }
             return true;
         }
-        return hasValidStyleForProperty(element, propertyID);
+        return hasValidStyleForProperty(element, pseudoElementIdentifier, propertyID);
     }();
 
     if (hasValidStyle)
@@ -225,7 +228,7 @@ const Style::ComputedStyle* Extractor::computeStyleForCustomProperty(std::unique
     if (!element)
         return nullptr;
 
-    updateStyleIfNeededForProperty(*element, CSSPropertyCustom);
+    updateStyleIfNeededForProperty(*element, m_pseudoElementIdentifier, CSSPropertyCustom);
 
     auto* style = computeRenderStyleForProperty(*element, m_pseudoElementIdentifier, CSSPropertyCustom, ownedStyle);
     if (!style)
@@ -420,7 +423,7 @@ const Style::ComputedStyle* Extractor::computeStyle(CSSPropertyID propertyID, Up
     if (updateLayout == UpdateLayout::Yes) {
         Ref document = element->document();
 
-        updateStyleIfNeededForProperty(*element, propertyID);
+        updateStyleIfNeededForProperty(*element, m_pseudoElementIdentifier, propertyID);
         auto renderer = computeRenderer();
         if (propertyID == CSSPropertyDisplay && !renderer) {
             RefPtr svgElement = dynamicDowncast<SVGElement>(*element);
@@ -565,7 +568,7 @@ WTF::String Extractor::propertyValueSerializationInStyle(const Style::ComputedSt
 
     auto valueSerialization = value->cssText(serializationContext);
 
-    RELEASE_ASSERT_WITH_MESSAGE(directSerialization == valueSerialization, "Direct serialization, '%s', does not match value serialization, '%s', for property '%s'", directSerialization.utf8().data(), valueSerialization.utf8().data(), nameLiteral(propertyID).characters());
+    RELEASE_ASSERT_WITH_MESSAGE(directSerialization == valueSerialization, "Direct serialization, '%s', does not match value serialization, '%s', for property '%s'", directSerialization.utf8(), valueSerialization.utf8(), nameLiteral(propertyID).characters());
 
     return directSerialization;
 #else
@@ -580,7 +583,7 @@ bool Extractor::propertyMatches(CSSPropertyID propertyID, const CSSValue* value)
     if (propertyID == CSSPropertyFontSize) {
         if (auto* keywordValue = dynamicDowncast<CSSKeywordValue>(*value)) {
             protect(m_element->document())->updateLayoutIgnorePendingStylesheets();
-            if (auto* style = protect(m_element)->computedStyle(m_pseudoElementIdentifier)) {
+            if (auto* style = m_element->computedStyle(m_pseudoElementIdentifier)) {
                 if (CSSValueID sizeIdentifier = style->fontDescription().keywordSizeAsIdentifier()) {
                     if (keywordValue->valueID() == sizeIdentifier)
                         return true;
@@ -610,6 +613,15 @@ Ref<MutableStyleProperties> Extractor::copyProperties() const
             return std::nullopt;
         return { { property, value.releaseNonNull() } };
     }).span());
+}
+
+WTF::String Extractor::appleColorFilterSerializationForTesting(Element& element)
+{
+    updateStyleIfNeededForProperty(element, std::nullopt, CSSPropertyAppleColorFilter);
+
+    if (CheckedPtr style = element.computedStyle())
+        return serializationForCSS(CSS::defaultSerializationContext(), *style, style->appleColorFilter());
+    return { };
 }
 
 } // namespace Style

@@ -252,18 +252,14 @@ inline GetterSetter* JSGlobalObject::regExpProtoUnicodeGetter() const { return s
 inline GetterSetter* JSGlobalObject::regExpProtoUnicodeSetsGetter() const { return std::bit_cast<GetterSetter*>(linkTimeConstant(LinkTimeConstant::regExpProtoUnicodeSetsGetter)); }
 
 template<typename T>
-inline unsigned JSGlobalObject::WeakCustomGetterOrSetterHash<T>::hash(const Weak<T>& value)
+inline unsigned JSGlobalObject::WeakCustomGetterOrSetterHash<T>::hash(T* value)
 {
-    if (!value)
-        return 0;
     return hash(value->propertyName(), value->customFunctionPointer(), value->slotBaseClassInfoIfExists());
 }
 
 template<typename T>
-inline bool JSGlobalObject::WeakCustomGetterOrSetterHash<T>::equal(const Weak<T>& a, const Weak<T>& b)
+inline bool JSGlobalObject::WeakCustomGetterOrSetterHash<T>::equal(T* a, T* b)
 {
-    if (!a || !b)
-        return false;
     return a == b;
 }
 
@@ -274,6 +270,14 @@ inline unsigned JSGlobalObject::WeakCustomGetterOrSetterHash<T>::hash(const Prop
     if (!propertyName.isNull())
         return WTF::computeHash(functionPointer, propertyName.uid()->existingSymbolAwareHash(), classInfo);
     return WTF::computeHash(functionPointer, classInfo);
+}
+
+inline bool JSGlobalObject::isOriginalArrayStructureWithImmutableProperties(Structure* structure)
+{
+    if (structure->transitionKind() != TransitionKind::MakePropertiesImmutable)
+        return false;
+    Structure* previous = structure->previousID();
+    return previous && isOriginalArrayStructure(previous);
 }
 
 inline JSArray* constructEmptyArray(JSGlobalObject* globalObject, ArrayAllocationProfile* profile, unsigned initialLength = 0, JSValue newTarget = JSValue())

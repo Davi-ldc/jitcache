@@ -367,13 +367,13 @@ void TwinCheck::run(JSScope* scope)
     ArithProfileOverride arithProfiles(m_unlinkedCodeBlock);
     arithProfiles.overwrite(m_twins);
 
-    // The twin compile, with the producer's seeds and inputs, which the twin recorder reads until the JIT dies.
+    // The twin compile, with the producer's seeds, which the twin recorder reads until the JIT dies.
     TwinData twinData = m_twins.twinData();
     RefPtr<BaselineJITCode> twinCode;
     {
         Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(twin));
         JIT jit(m_vm, plan.get(), twin);
-        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), twinData.seeds, twinData.compileInputs);
+        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), twinData.seeds);
         twinCode = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
     }
     if (!twinCode) {
@@ -445,15 +445,11 @@ CodeBlock* TwinCheck::createTwin(JSScope* scope)
 
 bool TwinCheck::writeCompileInputs(CodeBlock& twin)
 {
-    // Every kind but StrictEqualityAtomOperand goes into the twin's own metadata, each entry left in a state the collector
-    // reads safely, since a conservative root may keep the twin to a collection's finalization
-    // (CodeBlock::reconcileLLIntInlineCachesAtGCEnd). StrictEqualityAtomOperand reaches the compilation through the twin
-    // recorder.
+    // Every input goes into the twin's own metadata, each entry left in a state the collector reads safely, since a
+    // conservative root may keep the twin to a collection's finalization (CodeBlock::reconcileLLIntInlineCachesAtGCEnd).
     auto& instructions = twin.instructions();
     for (unsigned index = 0; index < m_twins.header().inputCount; ++index) {
         auto input = m_twins.compileInput(index);
-        if (input.kind == CompileInputKind::StrictEqualityAtomOperand)
-            continue;
         // The compile input check put every input at an instruction start of its kind's opcode.
         if (input.bytecodeOffset >= instructions.size()) {
             difference("compile-inputs"_s, makeString("an input at "_s, input.bytecodeOffset, " lies past the bytecode"_s));
@@ -467,21 +463,30 @@ bool TwinCheck::writeCompileInputs(CodeBlock& twin)
         }
         switch (input.kind) {
         case CompileInputKind::ResolveScopeType: {
-            // The collector reads only the entry's cell union, which linking filled with a cell or null whatever the type.
+            // The collector reads the entry's cell union as a SymbolTable unless the type is ModuleVar, whose import slot
+            // shares it. So the union is cleared first, which also drops an import slot the twin's own linking left there,
+            // and only a ModuleVar entry gets its slot back.
             auto& metadata = instruction->as<OpResolveScope>().metadata(&twin);
             metadata.m_resolveType = static_cast<ResolveType>(input.value);
-            if (metadata.m_resolveType == ClosureVar)
+            metadata.m_symbolTable.clear();
+            if (metadata.m_resolveType == ClosureVar || metadata.m_resolveType == ModuleVar)
                 metadata.m_localScopeDepth = input.localScopeDepth;
+            if (metadata.m_resolveType == ModuleVar)
+                metadata.m_moduleImportSlot = input.moduleImportSlot;
             break;
         }
         case CompileInputKind::GetFromScopeType:
         case CompileInputKind::PutToScopeType: {
-            // For every type but the variable kinds the collector reads the union as a StructureID, so a watchpoint set
-            // another type left would decode as garbage: the union is cleared, with the operand.
+            // For every type but the variable kinds the collector reads put_to_scope's union as a StructureID, so a
+            // watchpoint set another type left would decode as garbage: the union is cleared, with the operand.
+            // get_from_scope holds only the structure, which is cleared the same way.
             auto rewrite = [&](auto& metadata) {
                 GetPutInfo linked = metadata.m_getPutInfo;
                 metadata.m_getPutInfo = GetPutInfo(linked.resolveMode(), static_cast<ResolveType>(input.value), linked.initializationMode(), linked.ecmaMode());
-                metadata.m_watchpointSet = nullptr;
+                if constexpr (std::is_same_v<std::remove_cvref_t<decltype(metadata)>, OpGetFromScope::Metadata>)
+                    metadata.m_structureID.clear();
+                else
+                    metadata.m_watchpointSet = nullptr;
                 metadata.m_operand = 0;
             };
             if (input.kind == CompileInputKind::GetFromScopeType)
@@ -515,8 +520,6 @@ bool TwinCheck::writeCompileInputs(CodeBlock& twin)
         case CompileInputKind::EnumeratorMetadata:
             instruction->as<OpEnumeratorNext>().metadata(&twin).m_enumeratorMetadata = input.value;
             break;
-        case CompileInputKind::StrictEqualityAtomOperand:
-            RELEASE_ASSERT_NOT_REACHED();
         }
     }
     return true;

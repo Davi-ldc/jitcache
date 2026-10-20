@@ -30,23 +30,30 @@
 #include "EventDispatcher.h"
 #include "IdentifierTypes.h"
 #include "NetworkProcessConnection.h"
+#include "RemoteSnapshotIdentifier.h"
 #include "ScriptTrackingPrivacyFilter.h"
 #include "SharedPreferencesForWebProcess.h"
 #include "StorageAreaMapIdentifier.h"
 #include "TextCheckerState.h"
 #include "WebInspectorInterruptDispatcher.h"
 #include "WebPageProxyIdentifier.h"
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+#include <WebCore/ImageBuffer.h>
+#include <WebCore/PlaceholderFrameIdentifier.h>
+#include <WebCore/PlaceholderRenderingContextIdentifier.h>
+#endif
 #include "WebSocketChannelManager.h"
 #include <WebCore/ActivityState.h>
 #include <WebCore/BackForwardFrameItemIdentifier.h>
 #include <WebCore/CaptionUserPreferences.h>
 #include <WebCore/FrameIdentifier.h>
 #include <WebCore/MediaSessionIdentifier.h>
-#include <WebCore/NetworkStorageSession.h>
 #include <WebCore/PageIdentifier.h>
 #include <WebCore/ProcessIdentity.h>
 #include <WebCore/RegistrableDomain.h>
+#include <WebCore/RenderingMode.h>
 #include <WebCore/ServiceWorkerTypes.h>
+#include <WebCore/ThirdPartyCookieBlockingMode.h>
 #include <WebCore/Timer.h>
 #include <WebCore/UserGestureTokenIdentifier.h>
 #include <pal/HysteresisActivity.h>
@@ -82,7 +89,7 @@ OBJC_CLASS NSMutableDictionary;
 #include "RendererBufferTransportMode.h"
 #endif
 
-#if PLATFORM(IOS_FAMILY)
+#if ENABLE(UI_SIDE_COMPOSITING)
 #include "ViewUpdateDispatcher.h"
 #endif
 
@@ -111,6 +118,7 @@ class SecurityOriginData;
 class Site;
 class UserGestureToken;
 
+enum class AccessibilityMode : uint8_t;
 enum class EventMakesGamepadsVisible : bool;
 enum class PlatformMediaSessionRemoteControlCommandType : uint8_t;
 enum class RenderAsTextFlag : uint16_t;
@@ -255,6 +263,12 @@ public:
     bool fullKeyboardAccessEnabled() const { return m_fullKeyboardAccessEnabled; }
 
     void contentWorldDestroyed(ContentWorldIdentifier);
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+    void commitOffscreenCanvasPlaceholderFrame(WebCore::PlaceholderRenderingContextIdentifier, WebCore::ImageBufferTransferHandle&&, WebCore::PlaceholderFrameIdentifier, bool originClean, bool opaque, CompletionHandler<void(bool)>&&);
+    // For a transferred buffer this process owns but has no use for; it is otherwise kept until this
+    // process exits.
+    void releaseTransferredImageBuffer(WebCore::ImageBufferTransferIdentifier);
+#endif
 
 #if HAVE(MOUSE_DEVICE_OBSERVATION)
     bool hasMouseDevice() const { return m_hasMouseDevice; }
@@ -299,6 +313,10 @@ public:
 
 #if ENABLE(GPU_PROCESS)
     GPUProcessConnection& ensureGPUProcessConnection();
+    // Resolves a frame of a snapshot that will not be recorded, so that the snapshot does not wait for it.
+    void abandonSnapshotFrame(RemoteSnapshotIdentifier, WebCore::FrameIdentifier);
+    // Fails a snapshot whose root will not be recorded, so that nothing waits for it.
+    void failSnapshot(RemoteSnapshotIdentifier);
     GPUProcessConnection* existingGPUProcessConnection() { return m_gpuProcessConnection.get(); }
     // Returns timeout duration for GPU process connections. Thread-safe.
     Seconds NODELETE gpuProcessTimeoutDuration() const;
@@ -608,7 +626,12 @@ private:
     void NODELETE platformSetCacheModel(CacheModel);
 
     void setEnhancedAccessibility(bool);
+    void setAccessibilityMode(WebCore::AccessibilityMode);
     void bindAccessibilityFrameWithData(WebCore::FrameIdentifier, std::span<const uint8_t>);
+
+#if ENABLE(GPU_PROCESS)
+    void drawFrameToSnapshot(WebCore::FrameIdentifier, const WebCore::IntRect&, RemoteSnapshotIdentifier, WebCore::RenderingMode);
+#endif
 
     void startMemorySampler(SandboxExtension::Handle&&, const String&, const double);
     void stopMemorySampler();
@@ -785,7 +808,7 @@ private:
     Seconds m_hiddenPageDOMTimerThrottlingIncreaseLimit;
 
     EventDispatcher m_eventDispatcher;
-#if PLATFORM(IOS_FAMILY)
+#if ENABLE(UI_SIDE_COMPOSITING)
     ViewUpdateDispatcher m_viewUpdateDispatcher;
 #endif
     WebInspectorInterruptDispatcher m_webInspectorInterruptDispatcher;
@@ -821,13 +844,13 @@ private:
 #if ENABLE(GPU_PROCESS)
     RefPtr<GPUProcessConnection> m_gpuProcessConnection;
 #if PLATFORM(COCOA) && USE(LIBWEBRTC)
-    RefPtr<LibWebRTCCodecs> m_libWebRTCCodecs;
+    const RefPtr<LibWebRTCCodecs> m_libWebRTCCodecs;
 #if ENABLE(WEB_CODECS)
     RemoteVideoCodecFactory m_remoteVideoCodecFactory;
 #endif
 #endif
 #if ENABLE(MEDIA_STREAM) && PLATFORM(COCOA)
-    std::unique_ptr<AudioMediaStreamTrackRendererInternalUnitManager> m_audioMediaStreamTrackRendererInternalUnitManager;
+    const std::unique_ptr<AudioMediaStreamTrackRendererInternalUnitManager> m_audioMediaStreamTrackRendererInternalUnitManager;
 #endif
 #endif
 
@@ -877,7 +900,7 @@ private:
     bool m_loggedProcessLimitCriticalMemoryStatistics { false };
     bool m_wasVisibleSinceLastProcessSuspensionEvent { false };
 #if PLATFORM(MAC)
-    std::unique_ptr<WebCore::CPUMonitor> m_cpuMonitor;
+    const std::unique_ptr<WebCore::CPUMonitor> m_cpuMonitor;
     std::optional<double> m_cpuLimit;
 
     String m_uiProcessName;
@@ -897,6 +920,7 @@ private:
 #if PLATFORM(GTK) || PLATFORM(WPE)
     OptionSet<RendererBufferTransportMode> m_rendererBufferTransportMode;
     OptionSet<AvailableInputDevices> m_availableInputDevices;
+    bool m_isStoppingRunLoop { false };
 #endif
 
     bool m_hasSuspendedPageProxy { false };
@@ -931,7 +955,7 @@ private:
 #if PLATFORM(COCOA)
     HashCountedSet<String> m_pendingPasteboardWriteCounts;
     std::optional<audit_token_t> m_auditTokenForSelf;
-    RetainPtr<NSMutableDictionary> m_accessibilityRemoteFrameTokenCache;
+    const RetainPtr<NSMutableDictionary> m_accessibilityRemoteFrameTokenCache;
 #endif
 
     bool m_childProcessDebuggabilityEnabled { false };

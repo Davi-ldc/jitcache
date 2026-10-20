@@ -36,13 +36,13 @@ namespace JSC {
 #define CODEBLOCK_MAGIC 0xc0deb10c
 
 template<typename Functor>
-void CodeBlock::forEachValueProfile(const Functor& func)
+void CodeBlock::forEachValueProfile(NOESCAPE const Functor& func)
 {
     for (auto& profile : argumentValueProfiles())
         func(profile, true);
 
     if (m_metadata) {
-        auto wrapper = [&] (ValueProfile& profile) {
+        auto wrapper = [&] (ValueProfileRef profile) {
             func(profile, false);
         };
         m_metadata->forEachValueProfile(wrapper);
@@ -50,7 +50,7 @@ void CodeBlock::forEachValueProfile(const Functor& func)
 }
 
 template<typename Functor>
-void CodeBlock::forEachArrayAllocationProfile(const Functor& func)
+void CodeBlock::forEachArrayAllocationProfile(NOESCAPE const Functor& func)
 {
     if (m_metadata) {
 #define VISIT(__op) \
@@ -63,7 +63,7 @@ void CodeBlock::forEachArrayAllocationProfile(const Functor& func)
 }
 
 template<typename Functor>
-void CodeBlock::forEachObjectAllocationProfile(const Functor& func)
+void CodeBlock::forEachObjectAllocationProfile(NOESCAPE const Functor& func)
 {
     if (m_metadata) {
 #define VISIT(__op) \
@@ -76,11 +76,16 @@ void CodeBlock::forEachObjectAllocationProfile(const Functor& func)
 }
 
 template<typename Functor>
-void CodeBlock::forEachLLIntOrBaselineCallLinkInfo(const Functor& func)
+void CodeBlock::forEachLLIntOrBaselineCallLinkInfo(NOESCAPE const Functor& func)
 {
     if (m_metadata) {
 #define VISIT(__op) \
-    m_metadata->forEach<__op>([&] (auto& metadata) { func(metadata.m_callLinkInfo); });
+    m_metadata->forEach<__op>([&] (auto& metadata) { \
+        if constexpr (std::is_same_v<decltype(metadata.m_callLinkInfo), DataOnlyCallLinkInfo>) \
+            func(metadata.m_callLinkInfo); \
+        else if (auto* callLinkInfo = metadata.m_callLinkInfo.get()) \
+            func(*callLinkInfo); \
+    });
 
         FOR_EACH_OPCODE_WITH_CALL_LINK_INFO(VISIT)
 

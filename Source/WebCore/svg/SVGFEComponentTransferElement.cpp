@@ -37,7 +37,7 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGFEComponentTransferElement);
 
 inline SVGFEComponentTransferElement::SVGFEComponentTransferElement(const QualifiedName& tagName, Document& document)
-    : SVGFilterPrimitiveStandardAttributes(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGFilterPrimitiveStandardAttributes(tagName, document, PropertyRegistry::singleton())
 {
     ASSERT(hasTagName(SVGNames::feComponentTransferTag));
 
@@ -120,8 +120,10 @@ bool SVGFEComponentTransferElement::setFilterEffectAttributeFromChild(FilterEffe
         return effect.setExponent(child->channel(), child->exponent());
     case AttributeNames::offsetAttr:
         return effect.setOffset(child->channel(), child->offset());
-    case AttributeNames::tableValuesAttr:
-        return effect.setTableValues(protect(child)->channel(), child->tableValues());
+    case AttributeNames::tableValuesAttr: {
+        Ref transferFunction = *child;
+        return effect.setTableValues(transferFunction->channel(), protect(transferFunction->tableValues()).get());
+    }
     default:
         break;
     }

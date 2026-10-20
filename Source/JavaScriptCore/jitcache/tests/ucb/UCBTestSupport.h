@@ -109,11 +109,12 @@ private:
     VMEntryScope m_entryScope;
 };
 
-// Starts JITCache on the test's VM in `role`, strict or not, with the delta capture All, on an artifact in `directory`, and
-// with a twin report at `twinReportPath` unless it is null. A Consumer and a ConsumerProducer open an artifact that exists,
-// so for them a Producer on a VM of its own creates one first, and that VM goes before the test's VM starts, releasing the
-// producer lock a ConsumerProducer takes. Fails the test unless every start returns Started.
-inline bool startJITCache(TestContext& context, VM& vm, const TemporaryDirectory& directory, Role role, bool strict, const String& twinReportPath = { })
+// Starts JITCache on the test's VM in `role`, strict or not, with the delta capture All, on an artifact in `directory`, with
+// a twin report at `twinReportPath` and a bench report at `benchReportPath` unless each is null. A Consumer and a
+// ConsumerProducer open an artifact that exists, so for them a Producer on a VM of its own creates one first, and that VM
+// goes before the test's VM starts, releasing the producer lock a ConsumerProducer takes. Fails the test unless every
+// start returns Started.
+inline bool startJITCache(TestContext& context, VM& vm, const TemporaryDirectory& directory, Role role, bool strict, const String& twinReportPath = { }, const String& benchReportPath = { })
 {
     String artifact = directory.path("artifact"_s);
     if (role != Role::Producer) {
@@ -124,6 +125,7 @@ inline bool startJITCache(TestContext& context, VM& vm, const TemporaryDirectory
     Config config = strictConfig(artifact, role, DeltaCapture::All);
     config.strict = strict;
     config.twinReportPath = twinReportPath;
+    config.benchReportPath = benchReportPath;
     return startsAs(context, "the test's VM"_s, JITCache::start(vm, config), StartOutcome::Started);
 }
 
@@ -138,22 +140,20 @@ inline void checkRegistry(TestContext& context, VM& vm)
         JITCACHE_FAIL(makeString("verifyRegistry found "_s, violations, " violations"_s));
 }
 
-// A record under `key` with fixed program context inputs, no stamp and no pending import.
+// A record under `key` with fixed program context inputs, no stamp, no pending import and no analysis source.
 inline UCBRecord testRecord(const BodyKey& key, UCBOrigin origin, RefPtr<SourceProvider>&& suppliedDigestProvider = nullptr, UnlinkedFunctionExecutable* holder = nullptr)
 {
-    UCBRecord record {
-        key,
-        GlobalContextInputs { 0, 1, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false },
-        origin,
-        NoLexicallyScopedFeatures,
-        std::nullopt,
-        std::nullopt,
-        nullptr,
-        WTF::move(suppliedDigestProvider),
-        std::nullopt,
+    return UCBRecord {
+        .key = key,
+        .context = GlobalContextInputs { 0, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false },
+        .origin = origin,
+        .keyFeatures = NoLexicallyScopedFeatures,
+        .missedBodyVersion = std::nullopt,
+        .matchedBodyVersion = std::nullopt,
+        .pendingImport = nullptr,
+        .suppliedDigestProvider = WTF::move(suppliedDigestProvider),
+        .holder = holder,
     };
-    record.holder = holder;
-    return record;
 }
 
 // Calls functor(child, table, index) for each child UFE in table order until it returns false.
@@ -176,7 +176,7 @@ bool allChildren(UnlinkedCodeBlock& codeBlock, const Functor& functor)
 inline constexpr uint32_t identitySectionMagic = 0x49424355;
 inline constexpr size_t identityVersionOffset = 4;
 inline constexpr size_t identityCoreKindOffset = 6;
-inline constexpr size_t identityProvenanceOffset = 7;
+inline constexpr size_t identityReservedOffset = 7;
 inline constexpr size_t identityKeyOffset = 8;
 inline constexpr size_t identityContextDigestOffset = 48;
 inline constexpr size_t identityCoreDigestOffset = 80;
@@ -185,7 +185,7 @@ inline constexpr size_t identityFeaturesOffset = 144;
 inline constexpr size_t identityLexicallyScopedFeaturesOffset = 146;
 inline constexpr size_t identityHasCapturedVariablesOffset = 147;
 inline constexpr size_t identityConstantCountOffset = 148;
-inline constexpr size_t identityMapsOffset = 152;
+inline constexpr size_t identityButterflyMapOffset = 152;
 
 // The smallest count of the identity and feedback sections that strict parsing refuses.
 inline constexpr uint32_t sectionCountLimit = 1u << 28;
@@ -628,8 +628,7 @@ inline bool differsOnlyInFlag(UnlinkedFunctionExecutable& a, UnlinkedFunctionExe
             return false;
     }
     bool samePositions = a.startOffset() == b.startOffset() && a.sourceLength() == b.sourceLength() && a.unlinkedFunctionStart() == b.unlinkedFunctionStart()
-        && a.unlinkedFunctionEnd() == b.unlinkedFunctionEnd() && a.parametersStartOffset() == b.parametersStartOffset()
-        && a.unlinkedBodyStartColumn() == b.unlinkedBodyStartColumn() && a.unlinkedBodyEndColumn() == b.unlinkedBodyEndColumn() && a.lineCount() == b.lineCount();
+        && a.unlinkedFunctionEnd() == b.unlinkedFunctionEnd() && a.parametersStartOffset() == b.parametersStartOffset();
     bool sameScalars = a.ecmaName() == b.ecmaName() && a.parameterCount() == b.parameterCount() && a.parseMode() == b.parseMode()
         && a.lexicallyScopedFeatures() == b.lexicallyScopedFeatures();
     auto sizeOf = [](const auto* vector) -> size_t {

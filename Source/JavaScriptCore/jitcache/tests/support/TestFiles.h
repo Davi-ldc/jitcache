@@ -18,6 +18,7 @@
 #include <wtf/Noncopyable.h>
 #include <wtf/SafeStrerror.h>
 #include <wtf/Vector.h>
+#include <wtf/posix/POSIXExtras.h>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
@@ -43,7 +44,7 @@ public:
     static std::unique_ptr<TemporaryDirectory> create(TestContext& context, ASCIILiteral name)
     {
         const char* base = getenv("TMPDIR");
-        CString pattern = makeString(String::fromUTF8(base && *base ? base : "/tmp"), '/', name, "-XXXXXX"_s).utf8();
+        UTF8CString pattern = makeString(String::fromUTF8(base && *base ? base : "/tmp"), '/', name, "-XXXXXX"_s).utf8();
         Vector<char> path;
         path.append(pattern.spanIncludingNullTerminator());
         if (!mkdtemp(path.mutableSpan().data())) {
@@ -77,12 +78,12 @@ private:
 inline bool pathExists(const String& path)
 {
     struct stat fileStatus;
-    return !::lstat(path.utf8().data(), &fileStatus);
+    return !posixLstat(path.utf8(), &fileStatus);
 }
 
 inline bool makeDirectory(TestContext& context, const String& path)
 {
-    if (!::mkdir(path.utf8().data(), 0755))
+    if (!posixMkdir(path.utf8(), 0755))
         return true;
     JITCACHE_FAIL(makeString("cannot create "_s, path, ": "_s, errnoText(errno)));
     return false;
@@ -91,7 +92,7 @@ inline bool makeDirectory(TestContext& context, const String& path)
 // Creates or truncates the file and writes the bytes, retrying an interrupted write.
 inline bool writeFile(TestContext& context, const String& path, std::span<const uint8_t> bytes)
 {
-    int fd = ::open(path.utf8().data(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    int fd = posixOpen(path.utf8(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
         JITCACHE_FAIL(makeString("cannot create "_s, path, ": "_s, errnoText(errno)));
         return false;
@@ -111,10 +112,22 @@ inline bool writeFile(TestContext& context, const String& path, std::span<const 
     return true;
 }
 
+// Replaces whatever has the name with a FIFO, on which an open without O_NONBLOCK waits until a writer opens it.
+inline bool replaceWithFIFO(TestContext& context, const String& path)
+{
+    UTF8CString bytes = path.utf8();
+    // WTF has no wrapper for mkfifo, so it takes the path through legacyCStringPointer().
+    if ((posixUnlink(bytes) && errno != ENOENT) || ::mkfifo(bytes.legacyCStringPointer(), 0644)) {
+        JITCACHE_FAIL(makeString("cannot make a FIFO at "_s, path, ": "_s, errnoText(errno)));
+        return false;
+    }
+    return true;
+}
+
 // The whole file, or nothing when it cannot be read.
 inline std::optional<Vector<uint8_t>> readFileBytes(const String& path)
 {
-    int fd = ::open(path.utf8().data(), O_RDONLY | O_CLOEXEC);
+    int fd = posixOpen(path.utf8(), O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return std::nullopt;
     Vector<uint8_t> bytes;

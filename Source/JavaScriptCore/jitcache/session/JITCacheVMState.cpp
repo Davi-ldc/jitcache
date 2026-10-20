@@ -212,6 +212,53 @@ BodyLookup VMState::openBody(const BodyKey& key)
     return lookup;
 }
 
+SectionLookup VMState::readBodySection(const BodyKey& key, SectionKind kind)
+{
+    using Kind = SectionLookup::Kind;
+    if (!activityOn())
+        return SectionLookup { Kind::Unusable, nullptr, nullptr, { } };
+#if ENABLE(JITCACHE_TWINS)
+    // The override's body, whose section no checksum covers, as the override's open gives it.
+    if (m_openBodyOverride) {
+        BodyLookup lookup = m_openBodyOverride(key);
+        switch (lookup.kind()) {
+        case BodyLookup::Kind::Missing:
+            return SectionLookup { Kind::Absent, nullptr, nullptr, { } };
+        case BodyLookup::Kind::Unusable:
+            return SectionLookup { Kind::Unusable, nullptr, nullptr, { } };
+        case BodyLookup::Kind::Found: {
+            RefPtr<ValidatedBody> body = lookup.body();
+            std::span<const uint8_t> bytes = body->section(kind);
+            return SectionLookup { Kind::Found, nullptr, WTF::move(body), bytes };
+        }
+        }
+        RELEASE_ASSERT_NOT_REACHED();
+    }
+#endif
+    OpenedArtifact* artifact = m_artifact.get();
+    ASSERT(artifact);
+
+    // One section, checksummed alone, in the mode openBody uses; the module's request opens the whole body later. It counts
+    // neither as a body open nor as a lookup: the UCB lane's module-analysis event times it.
+    SectionRead read = artifact->readSection(key, kind, strict() ? ValidationMode::Full : ValidationMode::Integrity);
+    switch (read.outcome) {
+    case StoreOutcome::Found:
+        return SectionLookup { Kind::Found, WTF::move(read.pack), nullptr, read.section };
+    case StoreOutcome::Absent:
+        return SectionLookup { Kind::Absent, nullptr, nullptr, { } };
+    case StoreOutcome::Unavailable:
+        // No fault hook reaches the read; a body it could not read is as good as none.
+        ASSERT_NOT_REACHED();
+        return SectionLookup { Kind::Absent, nullptr, nullptr, { } };
+    case StoreOutcome::Invalid:
+        // The UCB lane reads Unusable as "the integrator raised the fault", as for openBody.
+        raiseInvalidMaterial(read.failure.check, JITCacheVMStateInternal::invalidBodyDetail(key, read.failure));
+        return SectionLookup { Kind::Unusable, nullptr, nullptr, { } };
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+    return SectionLookup { Kind::Unusable, nullptr, nullptr, { } };
+}
+
 void VMState::raiseInvalidMaterial(ASCIILiteral step, String detail)
 {
     turnActivityOff(FaultReport { FaultClass::InvalidMaterial, { }, step, WTF::move(detail) });
@@ -359,7 +406,6 @@ Progress VMState::statusProgress()
         result.indexedBodies = artifact->indexedBodies();
     const UCBStatistics& statistics = m_registry->statistics();
     result.imports = statistics.imports;
-    result.seededDecodes = statistics.seededDecodes;
     result.attaches = statistics.attaches;
     result.gateDrops = statistics.gateDrops;
     result.misses = 0;

@@ -36,6 +36,7 @@ namespace Layout {
 class FloatingContext;
 class InlineFormattingContext;
 class InlineLevelBox;
+class LineBox;
 
 class InlineFormattingUtils {
 public:
@@ -46,8 +47,9 @@ public:
     enum class IsIntrinsicWidthMode : bool { No, Yes };
     enum class PreviousLineEndsParagraph : bool { No, Yes };
     InlineLayoutUnit computedTextIndent(IsIntrinsicWidthMode, IsFirstFormattedLine, std::optional<PreviousLineEndsParagraph>, InlineLayoutUnit availableWidth) const;
+    static InlineLayoutUnit computedTextIndentForFirstLine(const ElementBox& root, InlineLayoutUnit availableWidth);
 
-    bool inlineLevelBoxAffectsLineBox(const InlineLevelBox&) const;
+    bool inlineLevelBoxAffectsLineBox(const InlineLevelBox&, const LineBox&) const;
 
     InlineLayoutUnit initialLineHeight(bool isFirstLine) const;
 
@@ -57,7 +59,7 @@ public:
 
     static InlineLayoutUnit horizontalAlignmentOffset(const Style::ComputedStyle& rootStyle, InlineLayoutUnit contentLogicalRight, InlineLayoutUnit lineLogicalRight, InlineLayoutUnit hangingTrailingWidth, bool isLastLineOrLineEndsWithForcedLineBreak, std::optional<TextDirection> inlineBaseDirectionOverride = std::nullopt);
 
-    static InlineItemPosition leadingInlineItemPositionForNextLine(InlineItemPosition lineContentEnd, std::optional<InlineItemPosition> previousLineContentEnd, bool lineHasIntrusiveOrNewlyPlacedFloat, InlineItemPosition layoutRangeEnd);
+    static InlineItemPosition leadingInlineItemPositionForNextLine(const LineLayoutResult&, std::optional<InlineItemPosition> previousLineContentEnd, InlineItemPosition layoutRangeEnd);
 
     InlineLayoutUnit inlineItemWidth(const InlineItem&, InlineLayoutUnit contentLogicalLeft, bool useFirstLineStyle) const;
 
@@ -70,6 +72,8 @@ public:
     static std::optional<LineLayoutResult::InlineContentEnding> inlineContentEnding(const Line::Result&);
 
     bool NODELETE shouldDiscardRemainingContentInBlockDirection() const;
+
+    std::optional<BlockOverflowEllipsis> blockEllipsisForLine() const;
 
 private:
     bool isAtSoftWrapOpportunity(const InlineItem& previous, const InlineItem& next) const;

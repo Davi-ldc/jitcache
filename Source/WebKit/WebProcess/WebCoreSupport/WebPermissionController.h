@@ -59,7 +59,7 @@ private:
     explicit WebPermissionController(WebProcess&);
 
     // WebCore::PermissionController
-    void query(WebCore::ClientOrigin&&, WebCore::PermissionDescriptor, const WeakPtr<WebCore::Page>&, WebCore::PermissionQuerySource, CompletionHandler<void(std::optional<WebCore::PermissionState>)>&&) final;
+    void query(WebCore::ClientOrigin&&, WebCore::PermissionDescriptor, WebCore::Page*, WebCore::PermissionQuerySource, CompletionHandler<void(std::optional<WebCore::PermissionState>)>&&) final;
     void addObserver(WebCore::PermissionObserver&) final;
     void removeObserver(WebCore::PermissionObserver&) final;
     void storageAccessPermissionChanged(const WebCore::RegistrableDomain&, const WebCore::RegistrableDomain&) final;
@@ -68,7 +68,7 @@ private:
     void removeChangeListener(WebCore::PermissionName, const WebCore::RegistrableDomain& topFrameDomain, const WebCore::RegistrableDomain& subFrameDomain) final;
 
     template<typename ObserverFilter>
-    void notifyObserversIfNeeded(WebCore::PermissionName, ObserverFilter&&);
+    void notifyObserversIfNeeded(WebCore::PermissionName, NOESCAPE const ObserverFilter&);
 
     WeakHashSet<WebCore::PermissionObserver> m_observers;
 };

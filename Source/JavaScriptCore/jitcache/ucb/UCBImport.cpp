@@ -9,7 +9,9 @@
 #include "JITCacheBench.h"
 #include "JITCacheVMState.h"
 #include "JSCInlines.h"
+#include "JSModuleRecord.h"
 #include "LinkTimeConstant.h"
+#include "ModuleProgramExecutable.h"
 #include "RegExp.h"
 #include "SourceCode.h"
 #include "SourceProvider.h"
@@ -26,6 +28,7 @@
 #include "UnlinkedProgramCodeBlock.h"
 #include "VM.h"
 #include "ValidatedBody.h"
+#include "WeakInlines.h"
 #include <array>
 #include <utility>
 #include <wtf/MonotonicTime.h>
@@ -33,11 +36,11 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/MakeString.h>
 
-// The UCB lane's engine. Where the native path would generate, it imports a matching body; where the native path decoded
-// an embedder's bytecode cache, it seeds the decoded UCB before its holder publishes it; where the holder already has a
-// UCB, it attaches a pending import; and it records what every request produced and every root's identity. Each entry
-// point runs on the VM thread holding the API lock and heap access, re-reads the VM's JITCache state first, and counts
-// each outcome in the registry's statistics.
+// The UCB lane's engine. Where the native path would generate, it imports a matching body; where the holder already has
+// a UCB that a request recorded, it attaches a pending import; and it records what every request generated or imported
+// and every root's identity. What a native decode makes has no record, so nothing here acts on it. Each entry point runs
+// on the VM thread holding the API lock and heap access, re-reads the VM's JITCache state first, and counts each outcome
+// in the registry's statistics.
 
 namespace JSC::JITCache {
 
@@ -50,10 +53,10 @@ namespace UCBImportInternal {
 // ends. Strict's checks go to neither total, since the bound is measured with strict off. With no report open, each part
 // costs one test.
 //
-// Counted holds what the bound's accounting puts inside it: the section parses, matching, the butterfly rebuild,
-// atomization, seeding, parse fields and records. Apart holds the key and context digests, the holder digest a root's
-// context covers, each TDZ environment's first digest, reading the artifact, the decode and the extra-memory report that
-// stands in for generation's. Excluded holds strict's checks.
+// Counted holds what the bound's accounting puts inside it: the section parses, matching, the butterfly rebuild, seeding,
+// parse fields and records. Apart holds the key and context digests, the holder digest a root's context covers, each TDZ
+// environment's first digest, reading the artifact, the decode and the extra-memory report that stands in for
+// generation's. Excluded holds strict's checks.
 enum class CostAccount : uint8_t { Counted, Apart, Excluded };
 constexpr unsigned numberOfCostAccounts = 3;
 
@@ -69,11 +72,8 @@ enum class RequestPart : uint8_t {
     FeedbackParse,
     Decode,
     ClosureChecks,
-    CoreDigest,
-    AtomMap,
     StrictCore,
     ButterflyRebuild,
-    Atomization,
     Seeding,
     ParseFields,
     ExtraMemory,
@@ -180,12 +180,11 @@ void RequestTimer::record(ASCIILiteral action, const BodyKey& key, bool strict, 
         measurements.started = false;
     }
 
-    // The event's matching is the counted comparisons that choose a body: a decoded UCB's core digest, the check that its
-    // marked constants are atoms, and a child's holder digest beyond its environments' first digests. The section parses
-    // have their own fields.
+    // The event's matching: a child's holder digest beyond its environments' first digests, and, with strict on, the core
+    // digest a live UCB's encoding is held to. The section parses have their own fields.
     BenchValue matching = nullptr;
-    if (partRan(RequestPart::CoreDigest) || partRan(RequestPart::AtomMap) || partRan(RequestPart::HolderDigest))
-        matching = partNanoseconds(RequestPart::CoreDigest) + partNanoseconds(RequestPart::AtomMap) + partNanoseconds(RequestPart::HolderDigest);
+    if (partRan(RequestPart::HolderDigest) || partRan(RequestPart::StrictCore))
+        matching = partNanoseconds(RequestPart::HolderDigest) + partNanoseconds(RequestPart::StrictCore);
 
     measurements.report.record("request"_s, {
         { "key"_s, bodyKeyHex(key) },
@@ -205,11 +204,8 @@ void RequestTimer::record(ASCIILiteral action, const BodyKey& key, bool strict, 
         { "feedbackParse"_s, partValue(RequestPart::FeedbackParse) },
         { "decode"_s, partValue(RequestPart::Decode) },
         { "closureChecks"_s, partValue(RequestPart::ClosureChecks) },
-        { "coreDigest"_s, partValue(RequestPart::CoreDigest) },
-        { "atomMap"_s, partValue(RequestPart::AtomMap) },
         { "strictCore"_s, partValue(RequestPart::StrictCore) },
         { "butterflyRebuild"_s, partValue(RequestPart::ButterflyRebuild) },
-        { "atomization"_s, partValue(RequestPart::Atomization) },
         { "seeding"_s, partValue(RequestPart::Seeding) },
         { "parseFields"_s, partValue(RequestPart::ParseFields) },
         { "extraMemory"_s, partValue(RequestPart::ExtraMemory) },
@@ -272,6 +268,8 @@ static ASCIILiteral stepName(InvalidMaterialStep step)
         return "ucb.strict-core"_s;
     case InvalidMaterialStep::SuppliedDigest:
         return "ucb.supplied-digest"_s;
+    case InvalidMaterialStep::Analysis:
+        return "ucb.analysis"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
     return "ucb.identity"_s;
@@ -318,12 +316,6 @@ static LexicallyScopedFeatures keyFeaturesOf(const RequestState& state)
     if (!isGlobalRequest(state))
         return NoLexicallyScopedFeatures;
     return static_cast<LexicallyScopedFeatures>(state.requestFeatures & (StrictModeLexicallyScopedFeature | TaintedByWithScopeLexicallyScopedFeature));
-}
-
-// The decode's SourceCodeKey check ignores the with-scope bit, so a decoded root can carry the other bit.
-static bool withScopeBitDiffers(const RequestState& state, const UnlinkedGlobalCodeBlock& codeBlock)
-{
-    return !!((state.requestFeatures ^ codeBlock.lexicallyScopedFeatures()) & TaintedByWithScopeLexicallyScopedFeature);
 }
 
 // A root's source digest, counted in the statistics. In twins builds with a report open, the twin check holds a supplied
@@ -456,17 +448,16 @@ static const Digest256& requestHolderDigestMeasured(RequestState& state, Request
     return *state.holderDigest;
 }
 
-// The inputs a global's or a UFE body's context digest is computed from, which its record keeps.
+// The inputs a global's or a UFE body's context digest is computed from, which its record keeps. No context holds a line
+// or column: a UCB holds none, and deriving one would build the provider's line-start table from its whole text.
 static RecordedContext contextInputsOf(const RequestState& state)
 {
     auto providerOffset = static_cast<unsigned>(state.source.startOffset());
-    auto firstLine = static_cast<unsigned>(state.source.firstLine().oneBasedInt());
     if (state.kind == RequestKind::FunctionBody)
-        return BodyContextInputs { .providerOffset = providerOffset, .firstLine = firstLine };
+        return BodyContextInputs { .providerOffset = providerOffset };
     ASSERT(isGlobalRequest(state));
     return GlobalContextInputs {
         .providerOffset = providerOffset,
-        .firstLine = firstLine,
         .scriptMode = state.scriptMode,
         .derivedContextType = state.globalExecutable->derivedContextType(),
         .evalContextType = state.evalContextType,
@@ -481,10 +472,9 @@ static Digest256 directEvalContextOf(const RequestState& state)
     auto* executable = uncheckedDowncast<EvalExecutable>(state.globalExecutable);
     TDZEnvironment noVariables;
     PrivateNameEnvironment noPrivateNames;
-    return directEvalContextDigest(static_cast<unsigned>(state.source.startOffset()), static_cast<unsigned>(state.source.firstLine().oneBasedInt()), state.requestFeatures,
-        executable->derivedContextType(), executable->needsClassFieldInitializer(), executable->privateBrandRequirement(), executable->isArrowFunctionContext(),
-        executable->isInsideOrdinaryFunction(), state.evalContextType, state.variablesUnderTDZ ? *state.variablesUnderTDZ : noVariables,
-        state.privateNameEnvironment ? *state.privateNameEnvironment : noPrivateNames);
+    return directEvalContextDigest(static_cast<unsigned>(state.source.startOffset()), state.requestFeatures, executable->derivedContextType(),
+        executable->needsClassFieldInitializer(), executable->privateBrandRequirement(), executable->isArrowFunctionContext(), executable->isInsideOrdinaryFunction(),
+        state.evalContextType, state.variablesUnderTDZ ? *state.variablesUnderTDZ : noVariables, state.privateNameEnvironment ? *state.privateNameEnvironment : noPrivateNames);
 }
 
 // The request's context, computed at most once and only once a body at its key has passed the key comparison.
@@ -573,15 +563,6 @@ static bool addRecord(VMState& vmState, UnlinkedCodeBlock& codeBlock, UCBRecord&
     return true;
 }
 
-// A copy of a Generated body's butterfly map for the record of a decoded UCB, so that a later capture of it keeps the
-// body's provenance; none for a body of the other provenance or where nothing will capture.
-static std::optional<Vector<uint8_t>> generatedButterflyMapFor(VMState& vmState, const IdentitySection& identity)
-{
-    if (identity.provenance != CoreProvenance::Generated || !vmState.productionActive())
-        return std::nullopt;
-    return Vector<uint8_t>(identity.butterflyMap);
-}
-
 // With strict on, an identity section that breaks a rule of its layout is invalid material.
 static std::optional<IdentitySection> parseIdentity(VMState& vmState, const ValidatedBody& body, RequestTimer& timer)
 {
@@ -632,9 +613,10 @@ static ASCIILiteral decodeFailureDescription(CoreDecodeFailure failure)
     return "the core is malformed"_s;
 }
 
-// The decode checks the kind the key implies, takes the requesting UFE as the holder of a function core, validates the
-// core's structure with strict on and runs under its own DeferGC. The payload pins the body while the decoder reads it,
-// and the decoder lets the payload go when the decode returns, since no decoded UFE keeps it.
+// The decode checks the kind the key implies, takes the requesting UFE as the holder of a function core and the request's
+// source, which its children's sources are cut from, validates the core's structure with strict on and runs under its own
+// DeferGC. The payload pins the body while the decoder reads it, and the decoder lets the payload go when the decode
+// returns, since no decoded UFE keeps it.
 static UnlinkedCodeBlock* decodeCore(VMState& vmState, RequestState& state, ValidatedBody& body, const BodyKey& key, RequestTimer& timer)
 {
     std::span<const uint8_t> core = body.section(SectionKind::UCBCore);
@@ -647,9 +629,7 @@ static UnlinkedCodeBlock* decodeCore(VMState& vmState, RequestState& state, Vali
     UnlinkedCodeBlock* codeBlock = nullptr;
     {
         PartScope scope(&timer, RequestPart::Decode, CostAccount::Apart);
-        SourceProvider* provider = state.source.provider();
-        RELEASE_ASSERT(provider);
-        codeBlock = decodeUnlinkedCodeBlockCore(state.vm, WTF::move(payload), *provider, coreKindFor(key.identityKind()), state.functionExecutable, vmState.strict(), failure);
+        codeBlock = decodeUnlinkedCodeBlockCore(state.vm, WTF::move(payload), state.source, coreKindFor(key.identityKind()), state.functionExecutable, vmState.strict(), failure);
     }
     if (!codeBlock || failure != CoreDecodeFailure::None) {
         reportInvalidMaterial(vmState, InvalidMaterialStep::Decode, decodeFailureDescription(failure), key);
@@ -729,24 +709,24 @@ static bool constantsResolve(UnlinkedCodeBlock& codeBlock)
     return true;
 }
 
-// With strict on, the closure checks of a UCB decoded from the body's core: its class, its shape, the feedback's counts
-// and exit sites, its function kind, its constants, the constant maps, the singleton bits and the child holder digests.
-// What the first check that fails found, or null.
-static ASCIILiteral importedClosureFailure(const RequestState& state, UnlinkedCodeBlock& codeBlock, const BodyKey& key, const IdentitySection& identity, const FeedbackSection& feedback)
+// With strict on, the closure checks of a UCB decoded from the body's core: its class, its shape, the feedback's counts,
+// copies and exit sites, its function kind, its constants, the butterfly map, the singleton bits and the child holder
+// digests. What the first check that fails found, or null.
+static ASCIILiteral importedClosureFailure(const RequestState& state, UnlinkedCodeBlock& codeBlock, const BodyKey& key, const IdentitySection& identity, const FeedbackSection& feedback, BodyImage image)
 {
     UnlinkedCodeBlockCoreKind kind = coreKindFor(key.identityKind());
     if (!classFits(codeBlock, kind))
         return "the decoded UCB's class is not its core kind's"_s;
     if (!shapeFits(codeBlock, key, kind))
         return "the decoded UCB's mode, constructor bit or code type is not its key's"_s;
-    if (!feedbackFits(codeBlock, feedback))
-        return "ucb.feedback's counts or exit sites do not fit the decoded UCB"_s;
+    if (!feedbackFits(codeBlock, feedback, image))
+        return "ucb.feedback's counts, copies or exit sites do not fit the decoded UCB"_s;
     if (state.functionExecutable && !functionKindFits(codeBlock, *state.functionExecutable))
         return "the decoded UCB's function kind is not its UFE's"_s;
     if (!constantsResolve(codeBlock))
         return "the decoded UCB holds a link-time constant out of range or an invalid RegExp"_s;
     if (!constantMapsFit(codeBlock, identity))
-        return "the constant maps do not fit the decoded UCB's constants"_s;
+        return "the butterfly map does not fit the decoded UCB's constants"_s;
     if (!constantBitsFit(codeBlock, feedback))
         return "ucb.feedback marks a constant that is no SymbolTable"_s;
     if (!childHolderDigestsFit(codeBlock, identity))
@@ -754,16 +734,16 @@ static ASCIILiteral importedClosureFailure(const RequestState& state, UnlinkedCo
     return { };
 }
 
-// With strict on, the closure checks that apply to a UCB the native path produced: the feedback's counts and exit sites,
-// its function kind and the constant maps.
+// With strict on, the closure checks that apply to a live UCB: the feedback's counts, copies and exit sites, its function
+// kind and the butterfly map. Only a body with an image is matched to a live UCB.
 static ASCIILiteral matchedClosureFailure(UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder, const IdentitySection& identity, const FeedbackSection& feedback)
 {
-    if (!feedbackFits(codeBlock, feedback))
-        return "ucb.feedback's counts or exit sites do not fit the UCB"_s;
+    if (!feedbackFits(codeBlock, feedback, BodyImage::Present))
+        return "ucb.feedback's counts, copies or exit sites do not fit the UCB"_s;
     if (holder && !functionKindFits(codeBlock, *holder))
         return "the UCB's function kind is not its UFE's"_s;
     if (!constantMapsFit(codeBlock, identity))
-        return "the constant maps do not fit the UCB's constants"_s;
+        return "the butterfly map does not fit the UCB's constants"_s;
     return { };
 }
 
@@ -815,7 +795,8 @@ static void restoreParseFields(RequestState& state, UnlinkedCodeBlock& codeBlock
         state.functionExecutable->recordParse(fields.features, fields.lexicallyScopedFeatures, fields.hasCapturedVariables);
         return;
     }
-    // As a CodeCache hit does: the executable's features, last line and end column, and the directives back to the provider.
+    // As a CodeCache hit does: the executable's parse fields, and the directives back to the provider. The core carries no
+    // line starts, so the provider's stay as they are.
     recordParseFromUnlinkedCodeBlock(state.globalExecutable, state.source, uncheckedDowncast<UnlinkedGlobalCodeBlock>(&codeBlock));
 }
 
@@ -847,68 +828,47 @@ static bool suppliedDigestHolds(VMState& vmState, RequestState& state, const Bod
 enum class MatchResult : uint8_t {
     Matched,
     Missed, // stamped with the index token
-    MissedAtomMap, // only the marked constants are not all atoms: not stamped, and the record notes the file's commit identifier
     Stopped, // invalid material
 };
 
-struct MatchSubject {
-    UnlinkedCodeBlock& codeBlock;
-    UCBOrigin origin;
-    const RecordedContext* recordedContext; // a live UCB's record; null for a UCB being seeded, whose context is the request's
-    const UnlinkedFunctionExecutable* holder; // the UFE whose slot holds a function UCB; null for any other
-};
-
-// Matches the subject against the body opened at its key, once the body is found. Counts each miss; the caller stamps a
-// Missed result.
-static MatchResult matchBody(VMState& vmState, RequestState& state, RequestTimer& timer, const MatchSubject& subject, const BodyKey& key, ValidatedBody& body,
-    std::optional<IdentitySection>& identity, std::optional<FeedbackSection>& feedback)
+// Whether a live UCB, which the native path generated or the lane imported, is the UCB the body opened at its record's
+// key describes. It matches by its generation inputs: the key, the context its record's inputs give and, for a function
+// body, its holder UFE; from equal inputs the engine's generation makes the producer's UCB, which strict checks on the
+// content. holder is the UFE whose slot holds a function UCB, and null for any other. Counts each miss; the caller stamps
+// a Missed result.
+static MatchResult matchLive(VMState& vmState, RequestState& state, RequestTimer& timer, UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder,
+    const UCBRegistry::RecordView& record, ValidatedBody& body)
 {
     bool strict = vmState.strict();
-    bool live = !!subject.recordedContext;
+    const BodyKey& key = record.key;
 
     // The identity section: its key, then the context.
-    identity = parseIdentity(vmState, body, timer);
+    std::optional<IdentitySection> identity = parseIdentity(vmState, body, timer);
     if (!identity)
         return MatchResult::Stopped;
     if (identity->key != body.key()) {
         reportInvalidMaterial(vmState, InvalidMaterialStep::Identity, "ucb.identity holds another body's key"_s, body.key());
         return MatchResult::Stopped;
     }
-    std::optional<Digest256> context = live ? recordContextDigest(vmState, state, key, *subject.recordedContext, timer) : std::optional<Digest256> { requestContextMeasured(state, &timer) };
+    std::optional<Digest256> context = recordContextDigest(vmState, state, key, record.context, timer);
     if (!context || *context != identity->contextDigest) {
         countMiss(vmState, MissReason::Context);
         return MatchResult::Missed;
     }
 
     // The feedback section.
-    feedback = parseFeedback(vmState, body, *identity, timer);
+    std::optional<FeedbackSection> feedback = parseFeedback(vmState, body, *identity, timer);
     if (!feedback)
         return MatchResult::Stopped;
 
-    if (subject.origin == UCBOrigin::Decoded) {
-        // An embedder's payload is pinned by no key, so a natively decoded UCB matches only by its content, in both modes.
-        Digest256 digest = [&] {
-            PartScope scope(&timer, RequestPart::CoreDigest, CostAccount::Counted);
-            return coreDigestOf(state.vm, subject.codeBlock, subject.holder);
-        }();
-        if (digest != identity->coreDigest) {
-            countMiss(vmState, MissReason::CoreDigest);
+    // The holder check.
+    if (holder) {
+        HolderFit fit = holderFits(vmState, state, *identity, timer, key);
+        if (fit == HolderFit::Invalid)
+            return MatchResult::Stopped;
+        if (fit == HolderFit::Differs) {
+            countMiss(vmState, MissReason::Holder);
             return MatchResult::Missed;
-        }
-    } else {
-        // A generated or imported UCB matches by its generation inputs, which an embedder's payload does not pin.
-        if (identity->provenance != CoreProvenance::Generated) {
-            countMiss(vmState, MissReason::Provenance);
-            return MatchResult::Missed;
-        }
-        if (subject.holder) {
-            HolderFit fit = holderFits(vmState, state, *identity, timer, key);
-            if (fit == HolderFit::Invalid)
-                return MatchResult::Stopped;
-            if (fit == HolderFit::Differs) {
-                countMiss(vmState, MissReason::Holder);
-                return MatchResult::Missed;
-            }
         }
     }
 
@@ -916,7 +876,7 @@ static MatchResult matchBody(VMState& vmState, RequestState& state, RequestTimer
     if (strict) {
         ASCIILiteral failure = [&] {
             PartScope scope(&timer, RequestPart::ClosureChecks, CostAccount::Excluded);
-            return matchedClosureFailure(subject.codeBlock, subject.holder, *identity, *feedback);
+            return matchedClosureFailure(codeBlock, holder, *identity, *feedback);
         }();
         if (!failure.isNull()) {
             reportInvalidMaterial(vmState, InvalidMaterialStep::Closure, failure, key);
@@ -924,24 +884,11 @@ static MatchResult matchBody(VMState& vmState, RequestState& state, RequestTimer
         }
     }
 
-    // Atom-ness only grows, so this miss can turn into a match with the same file. A UCB being seeded has its marked
-    // constants atomized after the match instead.
-    if (subject.origin == UCBOrigin::Decoded && live) {
-        bool atoms = [&] {
-            PartScope scope(&timer, RequestPart::AtomMap, CostAccount::Counted);
-            return markedConstantsAreAtoms(subject.codeBlock, *identity);
-        }();
-        if (!atoms) {
-            countMiss(vmState, MissReason::AtomMap);
-            return MatchResult::MissedAtomMap;
-        }
-    }
-
-    // From equal inputs the engine's generation makes the producer's UCB, which strict checks on the content.
-    if (subject.origin != UCBOrigin::Decoded && strict) {
+    // With strict on, the content: the UCB's core encoding is the body's.
+    if (strict) {
         Digest256 digest = [&] {
             PartScope scope(&timer, RequestPart::StrictCore, CostAccount::Excluded);
-            return coreDigestOf(state.vm, subject.codeBlock, subject.holder);
+            return coreDigestOf(state.vm, codeBlock, holder);
         }();
         if (digest != identity->coreDigest) {
             reportInvalidMaterial(vmState, InvalidMaterialStep::StrictCore, "a reused UCB's core encoding is not the body's"_s, key);
@@ -972,14 +919,6 @@ const Digest256& requestHolderDigest(RequestState& state)
 RecordedContext recordedContext(RequestState& state)
 {
     return UCBImportInternal::recordedContextMeasured(state, nullptr);
-}
-
-std::optional<BodyKey> decodedRootKey(RequestState& state, const UnlinkedGlobalCodeBlock& codeBlock)
-{
-    // A decoded root whose with-scope bit differs from its request's has no key.
-    if (UCBImportInternal::withScopeBitDiffers(state, codeBlock))
-        return std::nullopt;
-    return UCBImportInternal::requestKeyMeasured(state, codeBlock.codeGenerationMode(), nullptr);
 }
 
 UnlinkedCodeBlock* importBody(RequestState& state)
@@ -1055,10 +994,6 @@ UnlinkedCodeBlock* importBody(RequestState& state)
         reportInvalidMaterial(*vmState, InvalidMaterialStep::Identity, "ucb.identity holds another body's key"_s, body->key());
         return nullptr;
     }
-    // Its provenance: an embedder's core was generated under option values no key records, with plain constant butterflies
-    // and, for a program or module, a decoder's declaration-map layout.
-    if (identity->provenance == CoreProvenance::EmbedderDecoded)
-        return miss(MissReason::Provenance);
     // Its context.
     if (identity->contextDigest != requestContextMeasured(state, &timer))
         return miss(MissReason::Context);
@@ -1084,12 +1019,15 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     if (!codeBlock)
         return nullptr;
 
+    // Whether the body holds an image, which decides whether its feedback carries the UCB's value and array copies.
+    BodyImage image = imageOf(body.get());
+
     // With strict on, the closure checks. With strict off the lane trusts the decoded core, and in neither mode does it
     // re-encode it.
     if (strict) {
         ASCIILiteral failure = [&] {
             PartScope scope(&timer, RequestPart::ClosureChecks, CostAccount::Excluded);
-            return importedClosureFailure(state, *codeBlock, *key, *identity, *feedback);
+            return importedClosureFailure(state, *codeBlock, *key, *identity, *feedback, image);
         }();
         if (!failure.isNull()) {
             reportInvalidMaterial(*vmState, InvalidMaterialStep::Closure, failure, *key);
@@ -1106,8 +1044,9 @@ UnlinkedCodeBlock* importBody(RequestState& state)
         rebuildAtomStringButterflies(vm, *codeBlock, *identity);
     }
 
-    // The feedback. A body without an image keeps its LLInt counter's progress only up to one invocation short of crossing.
-    BodyImage image = imageOf(body.get());
+    // The feedback. A body with an image allocates the UCB's value and array copies, which its install would otherwise
+    // skip, and seeds them; a body without one allocates none and keeps its LLInt counter's progress only up to one
+    // invocation short of crossing.
     {
         PartScope scope(&timer, RequestPart::Seeding, CostAccount::Counted);
         seedFeedback(vm, *codeBlock, *feedback, image);
@@ -1139,9 +1078,8 @@ UnlinkedCodeBlock* importBody(RequestState& state)
             .keyFeatures = keyFeaturesOf(state),
             .missedBodyVersion = hasImage ? std::nullopt : std::optional<uint64_t> { indexToken },
             .matchedBodyVersion = body->version(),
-            .pendingImport = hasImage ? RefPtr<PendingImport> { PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Seeded) } : nullptr,
+            .pendingImport = hasImage ? RefPtr<PendingImport> { PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Imported) } : nullptr,
             .suppliedDigestProvider = state.suppliedDigestProvider,
-            .generatedButterflyMap = std::nullopt,
             .holder = recordedHolder(*vmState, state),
         };
         // The children's holder digests the body lists, which the holder check then compares for the child UFEs this decode
@@ -1154,6 +1092,8 @@ UnlinkedCodeBlock* importBody(RequestState& state)
         // The UCB was just decoded, so nothing has recorded it, and nothing since the key has turned cache activity off.
         ASSERT_UNUSED(recorded, recorded);
     }
+    // A ConsumerProducer keeps the module's analysis source, which a later capture of the imported UCB encodes.
+    keepModuleAnalysisSource(state, *codeBlock);
     ++statisticsOf(*vmState).imports;
     state.settled = true;
     timer.record("import"_s, *key, strict, state.source.length());
@@ -1167,160 +1107,15 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     return codeBlock;
 }
 
-// No holder has published the UCB and no CodeBlock references it.
-void seedDecoded(RequestState& state, UnlinkedCodeBlock& codeBlock)
-{
-    using namespace UCBImportInternal;
-
-    VM& vm = state.vm;
-    VMState* vmState = vm.jitCacheState();
-    if (!vmState || !vmState->tracksKeys())
-        return;
-    RequestTimer timer(*vmState);
-
-    // The UCB's key, with its own mode; the request's context waits for the match's context check.
-    if (isGlobalRequest(state) && withScopeBitDiffers(state, uncheckedDowncast<UnlinkedGlobalCodeBlock>(codeBlock))) {
-        // No key, so no record, no identity for its children, and nothing in it imports or is captured.
-        countMiss(*vmState, MissReason::RequestKey);
-        state.settled = true;
-        return;
-    }
-    std::optional<BodyKey> key = requestKeyMeasured(state, codeBlock.codeGenerationMode(), &timer);
-    if (!key) {
-        countMiss(*vmState, MissReason::NoKey);
-        return;
-    }
-    const UnlinkedFunctionExecutable* holder = state.functionExecutable;
-
-    // The UCB's record when it is not seeded: origin Decoded, stamped with the index token of a body that did not fit. The
-    // request settles.
-    auto recordUnseeded = [&](std::optional<uint64_t> missedBodyVersion) {
-        UCBRecord record {
-            .key = *key,
-            .context = recordedContextMeasured(state, &timer),
-            .origin = UCBOrigin::Decoded,
-            .keyFeatures = keyFeaturesOf(state),
-            .missedBodyVersion = missedBodyVersion,
-            .matchedBodyVersion = std::nullopt,
-            .pendingImport = nullptr,
-            .suppliedDigestProvider = state.suppliedDigestProvider,
-            .generatedButterflyMap = std::nullopt,
-            .holder = recordedHolder(*vmState, state),
-        };
-        addRecord(*vmState, codeBlock, WTF::move(record));
-        state.settled = true;
-    };
-
-    // A VM that does not import records the UCB unseeded.
-    if (!vmState->importsEnabled()) {
-        recordUnseeded(std::nullopt);
-        return;
-    }
-
-    // The body at the key. The UCB has no record yet, so no stamp is compared.
-    uint64_t indexToken = 0;
-    std::optional<BodyLookup> lookup;
-    {
-        PartScope scope(&timer, RequestPart::Lookup, CostAccount::Apart);
-        indexToken = vmState->bodyVersion(*key);
-        if (indexToken)
-            lookup = vmState->openBody(*key);
-    }
-    if (!indexToken) {
-        countMiss(*vmState, MissReason::NoBody);
-        recordUnseeded(std::nullopt);
-        return;
-    }
-    // Unusable: cache activity is off, nothing is recorded, and the native path publishes the UCB without seeds.
-    if (lookup->kind() == BodyLookup::Kind::Unusable)
-        return;
-    if (lookup->kind() == BodyLookup::Kind::Missing) {
-        countMiss(*vmState, MissReason::NoBody);
-        recordUnseeded(indexToken);
-        return;
-    }
-    Ref<ValidatedBody> body = lookup->body().releaseNonNull();
-
-    std::optional<IdentitySection> identity;
-    std::optional<FeedbackSection> feedback;
-    switch (matchBody(*vmState, state, timer, MatchSubject { codeBlock, UCBOrigin::Decoded, nullptr, holder }, *key, body.get(), identity, feedback)) {
-    case MatchResult::Matched:
-        break;
-    case MatchResult::Missed:
-        recordUnseeded(indexToken);
-        return;
-    case MatchResult::MissedAtomMap:
-        // Only a live UCB checks that its marked constants are atoms.
-        ASSERT_NOT_REACHED();
-        return;
-    case MatchResult::Stopped:
-        // Invalid material: cache activity is off and nothing is recorded.
-        return;
-    }
-
-    bool strict = vmState->strict();
-    // With strict on, the singleton bits.
-    if (strict) {
-        bool fits = [&] {
-            PartScope scope(&timer, RequestPart::ClosureChecks, CostAccount::Excluded);
-            return constantBitsFit(codeBlock, *feedback);
-        }();
-        if (!fits) {
-            reportInvalidMaterial(*vmState, InvalidMaterialStep::Closure, "ucb.feedback marks a constant that is no SymbolTable"_s, *key);
-            return;
-        }
-    }
-
-    // The image compares these constants by pointer as atoms. One decoded from an embedder's string table is the VM-wide
-    // JSString that published UCBs share; swapping in its atom is the change a property-key use makes, and keeps the old
-    // StringImpl alive for concurrent readers.
-    {
-        PartScope scope(&timer, RequestPart::Atomization, CostAccount::Counted);
-        atomizeMarkedConstants(vm, codeBlock, *identity);
-    }
-
-    // The feedback. The parse fields stay the decode's own.
-    BodyImage image = imageOf(body.get());
-    {
-        PartScope scope(&timer, RequestPart::Seeding, CostAccount::Counted);
-        seedFeedback(vm, codeBlock, *feedback, image);
-    }
-
-    // The record. As at an import, a body without an image leaves no pending import and stamps the
-    // record with the index token.
-    {
-        PartScope scope(&timer, RequestPart::Records, CostAccount::Counted);
-        bool hasImage = image == BodyImage::Present;
-        UCBRecord record {
-            .key = *key,
-            .context = recordedContextMeasured(state, &timer),
-            .origin = UCBOrigin::Decoded,
-            .keyFeatures = keyFeaturesOf(state),
-            .missedBodyVersion = hasImage ? std::nullopt : std::optional<uint64_t> { indexToken },
-            .matchedBodyVersion = body->version(),
-            .pendingImport = hasImage ? RefPtr<PendingImport> { PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Seeded) } : nullptr,
-            .suppliedDigestProvider = state.suppliedDigestProvider,
-            .generatedButterflyMap = generatedButterflyMapFor(*vmState, *identity),
-            .holder = recordedHolder(*vmState, state),
-        };
-        bool recorded = addRecord(*vmState, codeBlock, WTF::move(record));
-        // The UCB is unpublished, so nothing has recorded it.
-        ASSERT_UNUSED(recorded, recorded);
-    }
-    ++statisticsOf(*vmState).seededDecodes;
-    state.settled = true;
-    timer.record("seed"_s, *key, strict, state.source.length());
-
-#if ENABLE(JITCACHE_TWINS)
-    if (TwinReportSink* sink = vmState->twinReportSink())
-        verifyMatched(codeBlock, holder, true, body.get(), *sink);
-#endif
-}
-
-// The UCB was published before, so nothing here writes to it, its UFE or its executable.
+// The UCB was published before, so nothing here writes to it, its UFE or its executable, apart from the value and array
+// copies the attach allocates, as the native baseline plan does on a published UCB.
 void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
 {
     using namespace UCBImportInternal;
+
+    // Before every check, since the first turns away each VM that does not import, a Producer included, and a Producer
+    // must still replace an analysis source that died.
+    keepModuleAnalysisSource(state, codeBlock);
 
     VMState* vmState = state.vm.jitCacheState();
     if (!vmState || !vmState->importsEnabled())
@@ -1348,20 +1143,15 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
     }
     RequestTimer timer(*vmState);
 
-    // The request's key. A UFE body's record was made for this UFE's identity, this slot's specialization and the UCB's own
-    // mode, so its key equals the request's by construction. A global request compares the bits first, which is where a
-    // CodeCache hit whose request differs in the with-scope bit misses, and only then computes its key, which differs only
-    // when the CodeCache served a block whose SourceCodeKey merely collided. Either miss belongs to the request rather than
-    // to the UCB, so neither is stamped.
-    if (state.kind != RequestKind::FunctionBody) {
-        if (keyFeaturesOf(state) != record->keyFeatures) {
-            countMiss(*vmState, MissReason::RequestKey);
-            return;
-        }
-        if (requestKeyMeasured(state, codeBlock.codeGenerationMode(), &timer) != record->key) {
-            countMiss(*vmState, MissReason::RequestKey);
-            return;
-        }
+    // The request's key, checked without computing it. A UFE body's record was made for this UFE's identity, this slot's
+    // specialization and the UCB's own mode, so its key equals the request's by construction. A global request's strict and
+    // with-scope bits must be the record's, which is where a CodeCache hit whose request differs in the with-scope bit
+    // misses; that miss belongs to the request rather than to the UCB, so it is not stamped. The rest of a global key follows
+    // from the hit: the CodeCache serves the UCB only to a source with its text, code type, script mode, strict bit and
+    // code-generation mode, so no source digest is computed.
+    if (state.kind != RequestKind::FunctionBody && keyFeaturesOf(state) != record->keyFeatures) {
+        countMiss(*vmState, MissReason::RequestKey);
+        return;
     }
 
     // The body, which the pending import needs anyway.
@@ -1382,49 +1172,33 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
     }
     const UnlinkedFunctionExecutable* holder = state.functionExecutable;
 
-    std::optional<IdentitySection> identity;
-    if (record->matchedBodyVersion == body->version()) {
-        // The UCB passed every check of matchBody against this very file, but perhaps the atom check of its marked
-        // constants. Nothing else the match read can have changed: the UCB's core encoding and its holder UFE are
-        // immutable, and a constant can only have become an atom.
-        if (record->origin == UCBOrigin::Decoded) {
-            identity = parseIdentity(*vmState, body.get(), timer);
-            if (!identity)
-                return;
-            bool atoms = [&] {
-                PartScope scope(&timer, RequestPart::AtomMap, CostAccount::Counted);
-                return markedConstantsAreAtoms(codeBlock, *identity);
-            }();
-            if (!atoms) {
-                countMiss(*vmState, MissReason::AtomMap);
-                return;
-            }
-        }
-    } else {
-        std::optional<FeedbackSection> feedback;
-        switch (matchBody(*vmState, state, timer, MatchSubject { codeBlock, record->origin, &record->context, holder }, record->key, body.get(), identity, feedback)) {
+    // At the commit identifier the UCB was matched at, it passed every check of the match against this very body, and
+    // nothing the match read can have changed since: the UCB's core encoding and its holder UFE are immutable, and the
+    // body's bytes never change.
+    if (record->matchedBodyVersion != body->version()) {
+        switch (matchLive(*vmState, state, timer, codeBlock, holder, *record, body.get())) {
         case MatchResult::Matched:
             break;
         case MatchResult::Missed:
             registry.setMissedBodyVersion(codeBlock, indexToken);
-            return;
-        case MatchResult::MissedAtomMap:
-            // The next request repeats only the atom check against this file.
-            registry.setMatchedBodyVersion(codeBlock, body->version());
             return;
         case MatchResult::Stopped:
             return;
         }
     }
 
-    // The pending import. A generated or imported UCB's own butterflies have generation's form, so only a decoded one keeps
-    // a map, and an attach to a body of the other provenance clears an earlier one.
-    std::optional<Vector<uint8_t>> generatedButterflyMap;
-    if (record->origin == UCBOrigin::Decoded)
-        generatedButterflyMap = generatedButterflyMapFor(*vmState, *identity);
+    // The body has an image, whose install skips the baseline plan that would allocate the UCB's value and array copies, so
+    // the attach allocates them, as the plan does on a published UCB. They stay as the native path leaves them, empty or
+    // already folded into; the body's feedback seeds a UCB only before publication.
+    {
+        PartScope scope(&timer, RequestPart::Seeding, CostAccount::Counted);
+        codeBlock.ensureValueAndArrayProfiles();
+    }
+
+    // The pending import.
     bool attached = [&] {
         PartScope scope(&timer, RequestPart::Records, CostAccount::Counted);
-        return registry.attachPendingImport(codeBlock, PendingImport::create(body.copyRef(), record->key, indexToken, PendingImport::Origin::Reused), WTF::move(generatedButterflyMap));
+        return registry.attachPendingImport(codeBlock, PendingImport::create(body.copyRef(), record->key, indexToken, PendingImport::Origin::Reused));
     }();
     // The record had no pending import above, and nothing since has attached one.
     if (!attached)
@@ -1435,7 +1209,7 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
 
 #if ENABLE(JITCACHE_TWINS)
     if (TwinReportSink* sink = vmState->twinReportSink())
-        verifyMatched(codeBlock, holder, false, body.get(), *sink);
+        verifyMatched(codeBlock, holder, body.get(), *sink);
 #endif
 }
 
@@ -1461,55 +1235,37 @@ void recordGenerated(RequestState& state, UnlinkedCodeBlock& codeBlock)
         .matchedBodyVersion = std::nullopt,
         .pendingImport = nullptr,
         .suppliedDigestProvider = state.suppliedDigestProvider,
-        .generatedButterflyMap = std::nullopt,
         .holder = recordedHolder(*vmState, state),
     };
-    addRecord(*vmState, codeBlock, WTF::move(record));
+    if (addRecord(*vmState, codeBlock, WTF::move(record)))
+        keepModuleAnalysisSource(state, codeBlock);
     state.settled = true;
 }
 
-// The slot of a lazily decoded UFE that the request did not ask for. It never settles the request, which goes on to
-// import or generate its own slot when the decode left that one empty.
-void recordDecodedSlot(RequestState& state, UnlinkedFunctionCodeBlock& codeBlock, CodeSpecializationKind specialization)
+// The record the module's analysis parse built stays the UCB's analysis source only through a weak handle, which goes
+// with the UCB's record. Only that parse's record is a source: a record Bun built from module info, the printer's or this
+// cache's, has a provider of type BunTranspiledModule, and an executable that vm.SourceTextModule or a test creates has no
+// linker.
+void keepModuleAnalysisSource(RequestState& state, UnlinkedCodeBlock& codeBlock)
 {
-    using namespace UCBImportInternal;
-
+    if (state.kind != RequestKind::Module)
+        return;
     VMState* vmState = state.vm.jitCacheState();
-    if (!vmState || !vmState->tracksKeys())
+    if (!vmState || !vmState->productionActive())
         return;
-    ASSERT(state.kind == RequestKind::FunctionBody && state.functionExecutable);
-    // The UFE's identity, this slot's specialization and the slot UCB's own mode; the request's key is the other slot's.
-    std::optional<ExecutableIdentity> identity = vmState->registry().identityOf(*state.functionExecutable);
-    if (!identity)
+    SourceProvider* provider = state.source.provider();
+    if (!provider || provider->sourceType() != SourceProviderSourceType::Module)
         return;
-    IdentityKind kind = IdentityKind::Child;
-    Digest256 identityDigest { };
-    RefPtr<SourceProvider> suppliedDigestProvider;
-    WTF::switchOn(*identity,
-        [&](const ChildIdentity& child) {
-            // The requested slot's key, when the request computed one, already holds this identity digest.
-            identityDigest = state.key && *state.key ? (*state.key)->identityDigest() : childIdentityDigest(child.parent->key(), child.table, child.index);
-            suppliedDigestProvider = child.parent->suppliedDigestProvider();
-        },
-        [&](const RootIdentity& root) {
-            kind = root.kind;
-            identityDigest = root.identityDigest;
-            suppliedDigestProvider = root.suppliedDigestProvider;
-        });
-    // Both slots of one UFE share its source, so the record takes the request's offset and first line.
-    UCBRecord record {
-        .key = BodyKey::make(kind, specialization, codeBlock.codeGenerationMode(), identityDigest),
-        .context = contextInputsOf(state),
-        .origin = UCBOrigin::Decoded,
-        .keyFeatures = NoLexicallyScopedFeatures,
-        .missedBodyVersion = std::nullopt,
-        .matchedBodyVersion = std::nullopt,
-        .pendingImport = nullptr,
-        .suppliedDigestProvider = WTF::move(suppliedDigestProvider),
-        .generatedButterflyMap = std::nullopt,
-        .holder = recordedHolder(*vmState, state),
-    };
-    addRecord(*vmState, codeBlock, WTF::move(record));
+    auto* executable = dynamicDowncast<ModuleProgramExecutable>(state.globalExecutable);
+    JSModuleRecord* linker = executable ? executable->linker() : nullptr;
+    if (!linker)
+        return;
+    UCBRegistry& registry = vmState->registry();
+    if (!registry.needsModuleAnalysisSource(codeBlock))
+        return;
+    // Making a Weak counts as a heap allocation, which can run incremental marking, so it is made with the registry's lock
+    // released; setModuleAnalysisSource destroys a handle it does not keep after unlocking.
+    registry.setModuleAnalysisSource(codeBlock, Weak<JSModuleRecord> { linker });
 }
 
 // The UFE does not keep the root source its identity covers, so the identity digest runs here, at the root's creation.

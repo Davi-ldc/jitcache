@@ -30,8 +30,8 @@
 #import <WebKit/WebPreferencesPrivate.h>
 #import <WebKit/WebScriptWorld.h>
 #import <JavaScriptCore/JSContextRef.h>
-#import <JavaScriptCore/JSRetainPtr.h>
 #import <JavaScriptCore/JSStringRef.h>
+#import <JavaScriptCore/JSStringRefCPP.h>
 #import <JavaScriptCore/JSValueRef.h>
 #import <wtf/RetainPtr.h>
 
@@ -82,14 +82,14 @@ TEST(WebKitLegacy, JSWrapperForNode)
     ASSERT_TRUE(JSValueIsObject(normalCtx, normalNodeJSValue));
     JSObjectRef normalNodeJSObject = JSValueToObject(normalCtx, normalNodeJSValue, 0);
 
-    auto isolatedPropertyJSString = adopt(JSStringCreateWithUTF8CString("isolatedProperty"));
+    RefPtr isolatedPropertyJSString = createJSString("isolatedProperty"_s);
 
     // Test for successful retrieval of the first property in the isolated script world
     EXPECT_TRUE(JSValueIsBoolean(isolatedCtx, JSObjectGetProperty(isolatedCtx, isolatedNodeJSObject, isolatedPropertyJSString.get(), 0)));
     // Test for failed retrieval of the first property in the standard script world
     EXPECT_TRUE(JSValueIsUndefined(normalCtx, JSObjectGetProperty(normalCtx, normalNodeJSObject, isolatedPropertyJSString.get(), 0)));
 
-    auto normalPropertyJSString = adopt(JSStringCreateWithUTF8CString("normalProperty"));
+    RefPtr normalPropertyJSString = createJSString("normalProperty"_s);
 
     // Test for successful retrieval of the second property in the standard script world
     EXPECT_TRUE(JSValueIsBoolean(normalCtx, JSObjectGetProperty(normalCtx, normalNodeJSObject, normalPropertyJSString.get(), 0)));

@@ -22,6 +22,7 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
+#include <wtf/posix/POSIXExtras.h>
 #else
 #include <wtf/CPUTime.h>
 #endif
@@ -92,7 +93,7 @@ static void writeOut(int fd, StringBuilder& buffer)
     UNUSED_PARAM(fd);
     buffer.clear();
 #else
-    CString bytes = buffer.toString().utf8();
+    UTF8CString bytes = buffer.toString().utf8();
     buffer.clear();
     auto remaining = bytes.span();
     while (!remaining.empty()) {
@@ -117,7 +118,7 @@ std::unique_ptr<BenchReport> BenchReport::open(const String& path)
     UNUSED_PARAM(path);
     return nullptr;
 #else
-    int fd = ::open(path.utf8().data(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    int fd = posixOpen(path.utf8(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0)
         return nullptr;
     unsigned vmOrdinal = JITCacheBenchInternal::nextVMOrdinal.fetch_add(1, std::memory_order_relaxed);
@@ -259,7 +260,7 @@ String bodyKeyHex(const BodyKey& key)
 {
     // One encoding serves the reports and the shell, which reads it back with bodyKeyFromHex.
     auto digits = bodyKeyHexDigits(key);
-    return String { std::span<const char> { digits } };
+    return String::fromLatin1(std::span<const char> { digits });
 }
 
 RelinkTimer::RelinkTimer(VM& vm)

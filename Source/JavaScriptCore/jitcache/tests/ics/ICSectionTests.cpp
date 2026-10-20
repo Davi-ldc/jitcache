@@ -2,12 +2,15 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
+#include "ArrayProfile.h"
 #include "BytecodeStructs.h"
 #include "ICRestore.h"
 #include "ICSection.h"
+#include "IndexingType.h"
 #include "JITCacheTest.h"
 #include "PropertyInlineCache.h"
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <limits>
 #include <optional>
@@ -19,8 +22,8 @@
 
 // Tests of ICSection and ICRestore (ics/ICSection.h, ics/ICRestore.h and their .cpp): the ICsBaseline format, its
 // structural checks (SectionSize to SummaryCount in parseSection; MoldPairing, MetadataLayout and MoldMegamorphicBit,
-// which prepare composes, on plain molds and site counts), the state a consumer's IC derives from each record, and the
-// round trip. None of these tests needs a VM.
+// which prepare composes, on plain molds and site counts), the opcode table, the state a consumer's IC and call site
+// derive from each record, and the round trip. None of these tests needs a VM.
 
 namespace JSC::JITCache::Tests {
 
@@ -69,10 +72,24 @@ static Vector<uint8_t> encode(const TestSection& section)
     for (auto& record : section.callLinks) {
         bytes.append(record.bits);
         bytes.append(record.maxArgumentCountIncludingThisForVarargs);
+        for (uint8_t byte : record.thisArrayModes)
+            bytes.append(byte);
+        for (uint8_t byte : record.thisArrayProfileFlags)
+            bytes.append(byte);
     }
     while (bytes.size() % 8)
         bytes.append(0);
     return bytes;
+}
+
+// A this word as the format stores it, least significant byte first, written without the lane's helpers.
+static void storeLittleEndian(uint8_t (&bytes)[4], uint32_t value)
+{
+    unsigned shift = 0;
+    for (uint8_t& byte : bytes) {
+        byte = static_cast<uint8_t>(value >> shift);
+        shift += 8;
+    }
 }
 
 static ICs::PropertyICRecord propertyIC(AccessType accessType, uint8_t learningBits, uint8_t repatchCount, uint8_t numberOfCoolDowns, uint8_t caseCount, uint8_t stateBits)
@@ -88,18 +105,31 @@ static ICs::PropertyICRecord propertyIC(AccessType accessType, uint8_t learningB
     };
 }
 
-static ICs::CallLinkRecord callLink(ICs::CallLinkModeCode mode, uint8_t historyBits, uint8_t maxArgumentCountIncludingThisForVarargs)
+static ICs::CallLinkRecord callLink(ICs::CallLinkModeCode mode, uint8_t historyBits, uint8_t maxArgumentCountIncludingThisForVarargs, uint32_t thisArrayModes = 0, uint32_t thisArrayProfileFlags = 0)
 {
-    return ICs::CallLinkRecord {
+    ICs::CallLinkRecord record {
         .bits = static_cast<uint8_t>(static_cast<uint8_t>(mode) | historyBits),
         .maxArgumentCountIncludingThisForVarargs = maxArgumentCountIncludingThisForVarargs,
+        .thisArrayModes = { },
+        .thisArrayProfileFlags = { },
     };
+    storeLittleEndian(record.thisArrayModes, thisArrayModes);
+    storeLittleEndian(record.thisArrayProfileFlags, thisArrayProfileFlags);
+    return record;
 }
 
-// Three property ICs (two with cases), and three call-link sites in two groups: 16 + 16 + 24 + 6 bytes, padded with two
-// zero bytes to 64.
-static constexpr size_t validSectionSize = 64;
-static constexpr size_t validSectionPaddingOffset = 62;
+// Modes and flags an array profile can hold, and the first bit of each it cannot.
+static constexpr uint32_t int32ArrayModes = asArrayModesIgnoringTypedArrays(ArrayWithInt32);
+static constexpr uint32_t outOfBoundsFlag = static_cast<uint32_t>(ArrayProfileFlag::OutOfBounds);
+static constexpr uint32_t pruningFlag = static_cast<uint32_t>(ArrayProfileFlag::DidPerformFirstRunPruning);
+static constexpr uint32_t modeBitOutsideAllArrayModes = 1u << std::countr_one(static_cast<uint32_t>(ALL_ARRAY_MODES));
+static_assert(!(modeBitOutsideAllArrayModes & static_cast<uint32_t>(ALL_ARRAY_MODES)));
+static constexpr uint32_t flagBitAboveArrayProfileFlags = 0x100;
+
+// Three property ICs (two with cases), and three call-link sites in two groups, the first of them with a this profile:
+// 16 + 16 + 24 + 30 bytes, padded with two zero bytes to 88.
+static constexpr size_t validSectionSize = 88;
+static constexpr size_t validSectionPaddingOffset = 86;
 
 static TestSection validSection()
 {
@@ -109,7 +139,7 @@ static TestSection validSection()
     section.propertyICs.append(propertyIC(AccessType::InstanceOf, ICs::LearningBit::everConsidered, 9, 2, 1, ICs::StateBit::megamorphicCaseListed | ICs::StateBit::holdsGaveUp));
     section.groups.append(ICs::CallLinkGroup { OpCall::opcodeID, 2 });
     section.groups.append(ICs::CallLinkGroup { OpConstruct::opcodeID, 1 });
-    section.callLinks.append(callLink(ICs::CallLinkModeCode::Monomorphic, ICs::CallLinkBit::seenOnce, 0));
+    section.callLinks.append(callLink(ICs::CallLinkModeCode::Monomorphic, ICs::CallLinkBit::seenOnce, 0, int32ArrayModes, pruningFlag));
     section.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0));
     section.callLinks.append(callLink(ICs::CallLinkModeCode::Virtual, ICs::CallLinkBit::clearedByVirtual, 0));
     section.propertyICCount = static_cast<uint32_t>(section.propertyICs.size());
@@ -119,23 +149,40 @@ static TestSection validSection()
     return section;
 }
 
-// The canonical call-link order, as the format lists the call opcodes.
-static constexpr std::array<OpcodeID, ICs::numberOfCallLinkOpcodes> canonicalCallLinkOrder {
-    OpCall::opcodeID,
-    OpTailCall::opcodeID,
-    OpCallDirectEval::opcodeID,
-    OpConstruct::opcodeID,
-    OpSuperConstruct::opcodeID,
-    OpIteratorOpen::opcodeID,
-    OpIteratorNext::opcodeID,
-    OpAsyncIteratorOpen::opcodeID,
-    OpAsyncIteratorNext::opcodeID,
-    OpCallVarargs::opcodeID,
-    OpTailCallVarargs::opcodeID,
-    OpConstructVarargs::opcodeID,
-    OpSuperConstructVarargs::opcodeID,
-    OpCallIgnoreResult::opcodeID,
+// The canonical call-link order, as the format lists the call opcodes, with each opcode's site shape and whether its
+// site's CallSiteData holds a this profile, written out apart from callLinkOpcodes.
+struct ExpectedCallLinkOpcode {
+    OpcodeID opcodeID;
+    ICs::CallLinkSiteKind kind;
+    bool hasThisProfile;
 };
+static constexpr std::array<ExpectedCallLinkOpcode, ICs::numberOfCallLinkOpcodes> expectedCallLinkOpcodes { {
+    { OpCall::opcodeID, ICs::CallLinkSiteKind::Lazy, true },
+    { OpTailCall::opcodeID, ICs::CallLinkSiteKind::LazyTailCall, true },
+    { OpCallDirectEval::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpConstruct::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpSuperConstruct::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpIteratorOpen::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpIteratorNext::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpAsyncIteratorOpen::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpAsyncIteratorNext::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpCallVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, false },
+    { OpTailCallVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, false },
+    { OpConstructVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, false },
+    { OpSuperConstructVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, false },
+    { OpCallIgnoreResult::opcodeID, ICs::CallLinkSiteKind::Lazy, true },
+} };
+
+// The opcodes the derivation tests take: one of each shape, with and without a this profile. An inline opcode with a this
+// profile does not exist, but the derivation reads only the two properties, and the tests cover every pair.
+static constexpr std::array<ICs::CallLinkOpcode, 6> derivationOpcodes { {
+    { OpCallVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, false },
+    { OpCallVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, true },
+    { OpConstruct::opcodeID, ICs::CallLinkSiteKind::Lazy, false },
+    { OpCall::opcodeID, ICs::CallLinkSiteKind::Lazy, true },
+    { OpTailCall::opcodeID, ICs::CallLinkSiteKind::LazyTailCall, false },
+    { OpTailCall::opcodeID, ICs::CallLinkSiteKind::LazyTailCall, true },
+} };
 
 template<typename Functor>
 static Vector<uint8_t> encodeValidSectionWith(const Functor& change)
@@ -143,33 +190,6 @@ static Vector<uint8_t> encodeValidSectionWith(const Functor& change)
     TestSection section = validSection();
     change(section);
     return encode(section);
-}
-
-static ASCIILiteral checkName(ICs::Check check)
-{
-    switch (check) {
-    case ICs::Check::SectionSize:
-        return "SectionSize"_s;
-    case ICs::Check::SummaryBound:
-        return "SummaryBound"_s;
-    case ICs::Check::CallLinkGroups:
-        return "CallLinkGroups"_s;
-    case ICs::Check::ReservedBits:
-        return "ReservedBits"_s;
-    case ICs::Check::EnumRange:
-        return "EnumRange"_s;
-    case ICs::Check::SummaryCount:
-        return "SummaryCount"_s;
-    case ICs::Check::MoldPairing:
-        return "MoldPairing"_s;
-    case ICs::Check::MetadataLayout:
-        return "MetadataLayout"_s;
-    case ICs::Check::MoldMegamorphicBit:
-        return "MoldMegamorphicBit"_s;
-    case ICs::Check::NewbornCallLinks:
-        return "NewbornCallLinks"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
 }
 
 static ASCIILiteral bit(bool value)
@@ -187,7 +207,41 @@ static String describe(const ICs::PropertyICRecord& record)
 
 static String describe(const ICs::CallLinkRecord& record)
 {
-    return makeString("{bits "_s, static_cast<unsigned>(record.bits), ", maxArgumentCountIncludingThisForVarargs "_s, static_cast<unsigned>(record.maxArgumentCountIncludingThisForVarargs), '}');
+    return makeString("{bits "_s, static_cast<unsigned>(record.bits), ", maxArgumentCountIncludingThisForVarargs "_s, static_cast<unsigned>(record.maxArgumentCountIncludingThisForVarargs),
+        ", thisArrayModes "_s, ICs::readThisArrayModes(record), ", thisArrayProfileFlags "_s, ICs::readThisArrayProfileFlags(record), '}');
+}
+
+static ASCIILiteral kindName(ICs::CallLinkSiteKind kind)
+{
+    switch (kind) {
+    case ICs::CallLinkSiteKind::Inline:
+        return "Inline"_s;
+    case ICs::CallLinkSiteKind::Lazy:
+        return "Lazy"_s;
+    case ICs::CallLinkSiteKind::LazyTailCall:
+        return "LazyTailCall"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+static ASCIILiteral dataName(ICs::CallSiteDataState data)
+{
+    switch (data) {
+    case ICs::CallSiteDataState::Inline:
+        return "Inline"_s;
+    case ICs::CallSiteDataState::NotExecuted:
+        return "NotExecuted"_s;
+    case ICs::CallSiteDataState::ExecutedOnce:
+        return "ExecutedOnce"_s;
+    case ICs::CallSiteDataState::Own:
+        return "Own"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+static String describe(const ICs::CallLinkOpcode& opcode)
+{
+    return makeString(opcodeNames[opcode.opcodeID], " ("_s, kindName(opcode.kind), opcode.hasThisProfile ? ", with a this profile)"_s : ")"_s);
 }
 
 static String describe(const ICs::RestoredPropertyIC& state)
@@ -200,9 +254,10 @@ static String describe(const ICs::RestoredPropertyIC& state)
 
 static String describe(const ICs::RestoredCallLink& state)
 {
-    return makeString("{isVirtual "_s, bit(state.isVirtual), ", seenOnce "_s, bit(state.seenOnce), ", hasSeenClosure "_s, bit(state.hasSeenClosure),
+    return makeString("{data "_s, dataName(state.data), ", isVirtual "_s, bit(state.isVirtual), ", seenOnce "_s, bit(state.seenOnce), ", hasSeenClosure "_s, bit(state.hasSeenClosure),
         ", clearedByGC "_s, bit(state.clearedByGC), ", clearedByVirtual "_s, bit(state.clearedByVirtual),
-        ", maxArgumentCountIncludingThisForVarargs "_s, static_cast<unsigned>(state.maxArgumentCountIncludingThisForVarargs), '}');
+        ", maxArgumentCountIncludingThisForVarargs "_s, static_cast<unsigned>(state.maxArgumentCountIncludingThisForVarargs),
+        ", thisArrayModes "_s, state.thisArrayModes, ", thisArrayProfileFlags "_s, state.thisArrayProfileFlags, '}');
 }
 
 static bool sameRecord(const ICs::PropertyICRecord& a, const ICs::PropertyICRecord& b)
@@ -220,12 +275,12 @@ template<typename T>
 static void expectInvalid(TestContext& context, ASCIILiteral what, const std::expected<T, ICs::Invalid>& result, ICs::Check check, uint32_t siteIndex = 0)
 {
     if (result) {
-        JITCACHE_FAIL(makeString(what, ": accepted, expected "_s, checkName(check), " at site "_s, siteIndex));
+        JITCACHE_FAIL(makeString(what, ": accepted, expected "_s, ICs::description(check), " at site "_s, siteIndex));
         return;
     }
     if (result.error().check != check || result.error().siteIndex != siteIndex) {
-        JITCACHE_FAIL(makeString(what, ": failed "_s, checkName(result.error().check), " at site "_s, result.error().siteIndex,
-            ", expected "_s, checkName(check), " at site "_s, siteIndex));
+        JITCACHE_FAIL(makeString(what, ": failed "_s, ICs::description(result.error().check), " at site "_s, result.error().siteIndex,
+            ", expected "_s, ICs::description(check), " at site "_s, siteIndex));
     }
 }
 
@@ -248,19 +303,19 @@ static void expectChangeInvalid(TestContext& context, ASCIILiteral what, ICs::Ch
 static void expectCheckFails(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& result, ICs::Check check, uint32_t siteIndex)
 {
     if (!result) {
-        JITCACHE_FAIL(makeString(what, ": passed, expected "_s, checkName(check), " at site "_s, siteIndex));
+        JITCACHE_FAIL(makeString(what, ": passed, expected "_s, ICs::description(check), " at site "_s, siteIndex));
         return;
     }
     if (result->check != check || result->siteIndex != siteIndex) {
-        JITCACHE_FAIL(makeString(what, ": failed "_s, checkName(result->check), " at site "_s, result->siteIndex,
-            ", expected "_s, checkName(check), " at site "_s, siteIndex));
+        JITCACHE_FAIL(makeString(what, ": failed "_s, ICs::description(result->check), " at site "_s, result->siteIndex,
+            ", expected "_s, ICs::description(check), " at site "_s, siteIndex));
     }
 }
 
 static void expectCheckPasses(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& result)
 {
     if (result)
-        JITCACHE_FAIL(makeString(what, ": failed "_s, checkName(result->check), " at site "_s, result->siteIndex));
+        JITCACHE_FAIL(makeString(what, ": failed "_s, ICs::description(result->check), " at site "_s, result->siteIndex));
 }
 
 // A mold as baseline emission leaves it for these checks: only its access type and fold bit matter to MoldPairing and
@@ -321,17 +376,52 @@ static ICs::RestoredPropertyIC expectedRestoredPropertyIC(const ICs::PropertyICR
     };
 }
 
-// The state a consumer's call-link IC takes from a record, restated here independently of ICRestore.
-static ICs::RestoredCallLink expectedRestoredCallLink(const ICs::CallLinkRecord& record)
+// A this word of a record, read byte by byte without the lane's helpers.
+static uint32_t loadLittleEndian(const uint8_t (&bytes)[4])
 {
-    bool isVirtual = (record.bits & ICs::CallLinkBit::modeMask) == static_cast<uint8_t>(ICs::CallLinkModeCode::Virtual);
+    uint32_t value = 0;
+    unsigned shift = 0;
+    for (uint8_t byte : bytes) {
+        value |= static_cast<uint32_t>(byte) << shift;
+        shift += 8;
+    }
+    return value;
+}
+
+// The state a consumer's call site takes from a record at a site of the opcode, restated here independently of
+// ICSection: a record holds something when it has what only a site's own data can hold, and is empty when it holds
+// nothing and the site neither linked nor was seen.
+static ICs::RestoredCallLink expectedRestoredCallLink(const ICs::CallLinkOpcode& opcode, const ICs::CallLinkRecord& record)
+{
+    uint8_t mode = record.bits & ICs::CallLinkBit::modeMask;
+    bool isVirtual = mode == static_cast<uint8_t>(ICs::CallLinkModeCode::Virtual);
+    uint32_t thisArrayModes = opcode.hasThisProfile ? loadLittleEndian(record.thisArrayModes) : 0;
+    uint32_t thisArrayProfileFlags = opcode.hasThisProfile ? loadLittleEndian(record.thisArrayProfileFlags) : 0;
+    uint8_t historyBits = ICs::CallLinkBit::hasSeenClosure | ICs::CallLinkBit::clearedByGC | ICs::CallLinkBit::clearedByVirtual;
+    bool holding = isVirtual || (record.bits & historyBits) || record.maxArgumentCountIncludingThisForVarargs || thisArrayModes || thisArrayProfileFlags;
+    bool empty = !holding && mode == static_cast<uint8_t>(ICs::CallLinkModeCode::Init) && !(record.bits & ICs::CallLinkBit::seenOnce);
+
+    auto data = ICs::CallSiteDataState::Inline;
+    switch (opcode.kind) {
+    case ICs::CallLinkSiteKind::Inline:
+        break;
+    case ICs::CallLinkSiteKind::Lazy:
+        data = empty ? ICs::CallSiteDataState::NotExecuted : holding ? ICs::CallSiteDataState::Own : ICs::CallSiteDataState::ExecutedOnce;
+        break;
+    case ICs::CallLinkSiteKind::LazyTailCall:
+        data = empty ? ICs::CallSiteDataState::NotExecuted : ICs::CallSiteDataState::Own;
+        break;
+    }
     return ICs::RestoredCallLink {
+        .data = data,
         .isVirtual = isVirtual,
-        .seenOnce = !isVirtual,
+        .seenOnce = !empty && !isVirtual,
         .hasSeenClosure = static_cast<bool>(record.bits & ICs::CallLinkBit::hasSeenClosure),
         .clearedByGC = static_cast<bool>(record.bits & ICs::CallLinkBit::clearedByGC),
         .clearedByVirtual = (record.bits & ICs::CallLinkBit::clearedByVirtual) || isVirtual,
         .maxArgumentCountIncludingThisForVarargs = record.maxArgumentCountIncludingThisForVarargs,
+        .thisArrayModes = thisArrayModes,
+        .thisArrayProfileFlags = thisArrayProfileFlags,
     };
 }
 
@@ -369,18 +459,28 @@ static void forEachSweptPropertyIC(const Functor& functor)
     }
 }
 
-// Calls functor(record) for every well-formed call-link record: every mode and history bit, every varargs maximum.
+// Calls functor(opcode, record) for each derivation opcode and every call-link record the derivation tests sweep: every
+// value of the six call-link bits, a zero and a nonzero varargs maximum, and this fields that are zero, hold modes alone
+// or hold flags alone. The this fields are swept at the opcodes without a this profile too, where the derivation
+// ignores them.
 template<typename Functor>
 static void forEachCallLinkRecord(const Functor& functor)
 {
-    for (unsigned bits = 0; bits <= static_cast<unsigned>(ICs::CallLinkBit::mask); ++bits) {
-        for (unsigned maximum = 0; maximum <= static_cast<unsigned>(std::numeric_limits<uint8_t>::max()); ++maximum) {
-            ICs::CallLinkRecord record {
-                .bits = static_cast<uint8_t>(bits),
-                .maxArgumentCountIncludingThisForVarargs = static_cast<uint8_t>(maximum),
-            };
-            if (!functor(record))
-                return;
+    struct ThisProfile {
+        uint32_t modes;
+        uint32_t flags;
+    };
+    constexpr std::array<ThisProfile, 3> thisProfiles { { { 0, 0 }, { int32ArrayModes, 0 }, { 0, outOfBoundsFlag } } };
+    constexpr std::array<uint8_t, 3> maxima { 0, 1, 255 };
+    for (const ICs::CallLinkOpcode& opcode : derivationOpcodes) {
+        for (unsigned bits = 0; bits <= static_cast<unsigned>(ICs::CallLinkBit::mask); ++bits) {
+            for (uint8_t maximum : maxima) {
+                for (const ThisProfile& thisProfile : thisProfiles) {
+                    ICs::CallLinkRecord record = callLink(ICs::CallLinkModeCode::Init, static_cast<uint8_t>(bits), maximum, thisProfile.modes, thisProfile.flags);
+                    if (!functor(opcode, record))
+                        return;
+                }
+            }
         }
     }
 }
@@ -393,46 +493,49 @@ JITCACHE_TEST(icsSectionSizeFormula, No)
 {
     JITCACHE_CHECK(ICs::sectionSize(0, 0, 0) == 16u);
     JITCACHE_CHECK(ICs::sectionSize(0, 1, 0) == 24u);
-    JITCACHE_CHECK(ICs::sectionSize(0, 0, 1) == 24u);
-    JITCACHE_CHECK(ICs::sectionSize(0, 0, 4) == 24u);
-    JITCACHE_CHECK(ICs::sectionSize(0, 0, 5) == 32u);
-    JITCACHE_CHECK(ICs::sectionSize(1, 0, 1) == 32u);
+    JITCACHE_CHECK(ICs::sectionSize(0, 0, 1) == 32u);
+    JITCACHE_CHECK(ICs::sectionSize(0, 0, 4) == 56u);
+    JITCACHE_CHECK(ICs::sectionSize(0, 0, 5) == 72u);
+    JITCACHE_CHECK(ICs::sectionSize(1, 0, 1) == 40u);
     JITCACHE_CHECK(ICs::sectionSize(2, 3, 3) == validSectionSize);
-    // 12 property ICs, five call sites and one construct site take 144 bytes.
-    JITCACHE_CHECK(ICs::sectionSize(2, 12, 6) == 144u);
-    JITCACHE_CHECK(ICs::sectionSize(ICs::numberOfCallLinkOpcodes, 0, ICs::numberOfCallLinkOpcodes) == 160u);
+    // 12 property ICs, five call sites and one construct site take 192 bytes.
+    JITCACHE_CHECK(ICs::sectionSize(2, 12, 6) == 192u);
+    JITCACHE_CHECK(ICs::sectionSize(ICs::numberOfCallLinkOpcodes, 0, ICs::numberOfCallLinkOpcodes) == 272u);
     JITCACHE_CHECK(!ICs::sectionSize(ICs::numberOfCallLinkOpcodes + 1, 0, ICs::numberOfCallLinkOpcodes + 1));
     JITCACHE_CHECK(!ICs::sectionSize(std::numeric_limits<size_t>::max(), 0, 0));
 
     constexpr size_t maximum = std::numeric_limits<size_t>::max();
     JITCACHE_CHECK(!ICs::sectionSize(0, maximum / 8 + 1, 0));
-    JITCACHE_CHECK(!ICs::sectionSize(0, 0, maximum / 2 + 1));
-    JITCACHE_CHECK(!ICs::sectionSize(0, maximum / 16, maximum / 4));
-    // The largest representable section: 16 + 8 * count is the largest multiple of 8 that fits. One or three call-link
-    // records more still fit unrounded but not rounded up.
+    JITCACHE_CHECK(!ICs::sectionSize(0, 0, maximum / 10 + 1));
+    JITCACHE_CHECK(!ICs::sectionSize(0, maximum / 16, maximum / 16));
+    // The largest representable section: 16 + 8 * count is the largest multiple of 8 that fits.
     constexpr size_t largestPropertyICCount = (maximum - 23) / 8;
     JITCACHE_CHECK(ICs::sectionSize(0, largestPropertyICCount, 0) == maximum - 7);
     JITCACHE_CHECK(!ICs::sectionSize(0, largestPropertyICCount, 1));
-    JITCACHE_CHECK(!ICs::sectionSize(0, largestPropertyICCount, 3));
+    // One call-link record more than these property ICs, 16 + 8 * count + 10 = maximum - 5, fits unrounded but not
+    // rounded up.
+    constexpr size_t propertyICCountBelowTheLimit = (maximum - 31) / 8;
+    JITCACHE_CHECK(ICs::sectionSize(0, propertyICCountBelowTheLimit, 0) == maximum - 15);
+    JITCACHE_CHECK(!ICs::sectionSize(0, propertyICCountBelowTheLimit, 1));
 }
 
 JITCACHE_TEST(icsCanonicalCallLinkPositions, No)
 {
     for (unsigned position = 0; position < ICs::numberOfCallLinkOpcodes; ++position) {
-        if (ICs::canonicalCallLinkPosition(canonicalCallLinkOrder[position]) != position)
-            JITCACHE_FAIL(makeString("canonicalCallLinkPosition("_s, opcodeNames[canonicalCallLinkOrder[position]], ") is not "_s, position));
+        const ExpectedCallLinkOpcode& expected = expectedCallLinkOpcodes[position];
+        if (ICs::canonicalCallLinkPosition(expected.opcodeID) != position)
+            JITCACHE_FAIL(makeString("canonicalCallLinkPosition("_s, opcodeNames[expected.opcodeID], ") is not "_s, position));
+        const ICs::CallLinkOpcode& actual = ICs::callLinkOpcodes[position];
+        if (actual.opcodeID != expected.opcodeID)
+            JITCACHE_FAIL(makeString("callLinkOpcodes["_s, position, "] is "_s, opcodeNames[actual.opcodeID], " instead of "_s, opcodeNames[expected.opcodeID]));
+        if (actual.kind != expected.kind)
+            JITCACHE_FAIL(makeString(opcodeNames[expected.opcodeID], " has kind "_s, kindName(actual.kind), " instead of "_s, kindName(expected.kind)));
+        if (actual.hasThisProfile != expected.hasThisProfile)
+            JITCACHE_FAIL(makeString(opcodeNames[expected.opcodeID], " has hasThisProfile "_s, bit(actual.hasThisProfile), " instead of "_s, bit(expected.hasThisProfile)));
     }
-    for (OpcodeID opcodeID : { OpEnter::opcodeID, OpRet::opcodeID, OpGetById::opcodeID, OpAdd::opcodeID, OpInById::opcodeID })
+    for (OpcodeID opcodeID : { OpEnter::opcodeID, OpRet::opcodeID, OpGetById::opcodeID, OpAdd::opcodeID, OpInById::opcodeID, OpGetByVal::opcodeID })
         JITCACHE_CHECK(!ICs::canonicalCallLinkPosition(opcodeID));
     JITCACHE_CHECK(!ICs::canonicalCallLinkPosition(static_cast<OpcodeID>(std::numeric_limits<uint32_t>::max())));
-
-    for (OpcodeID opcodeID : canonicalCallLinkOrder) {
-        bool isVarargs = opcodeID == OpCallVarargs::opcodeID || opcodeID == OpTailCallVarargs::opcodeID
-            || opcodeID == OpConstructVarargs::opcodeID || opcodeID == OpSuperConstructVarargs::opcodeID;
-        if (ICs::isVarargsCallLinkOpcode(opcodeID) != isVarargs)
-            JITCACHE_FAIL(makeString("isVarargsCallLinkOpcode("_s, opcodeNames[opcodeID], ") is not "_s, bit(isVarargs)));
-    }
-    JITCACHE_CHECK(!ICs::isVarargsCallLinkOpcode(OpEnter::opcodeID));
 }
 
 JITCACHE_TEST(icsRecordByteLayout, No)
@@ -446,12 +549,23 @@ JITCACHE_TEST(icsRecordByteLayout, No)
     static_assert(offsetof(ICs::PropertyICRecord, reserved) == 6);
     static_assert(!offsetof(ICs::CallLinkRecord, bits));
     static_assert(offsetof(ICs::CallLinkRecord, maxArgumentCountIncludingThisForVarargs) == 1);
+    static_assert(offsetof(ICs::CallLinkRecord, thisArrayModes) == 2);
+    static_assert(offsetof(ICs::CallLinkRecord, thisArrayProfileFlags) == 6);
     static_assert(ICs::LearningBit::mask == (ICs::LearningBit::everConsidered | ICs::LearningBit::sawNonCell | ICs::LearningBit::tookSlowPath | ICs::LearningBit::resetByGC));
     static_assert(ICs::StateBit::mask == (ICs::StateBit::megamorphicCaseListed | ICs::StateBit::canBeMegamorphic | ICs::StateBit::holdsGaveUp));
     static_assert(ICs::CallLinkBit::mask == (ICs::CallLinkBit::modeMask | ICs::CallLinkBit::seenOnce | ICs::CallLinkBit::hasSeenClosure | ICs::CallLinkBit::clearedByGC | ICs::CallLinkBit::clearedByVirtual));
 
+    // The lane's this-word helpers agree with the format's byte order.
+    ICs::CallLinkRecord helperRecord = callLink(ICs::CallLinkModeCode::Init, 0, 0);
+    ICs::writeThisProfile(helperRecord, 0x0a0b0c0d, 0x01020304);
+    JITCACHE_CHECK(loadLittleEndian(helperRecord.thisArrayModes) == 0x0a0b0c0d && loadLittleEndian(helperRecord.thisArrayProfileFlags) == 0x01020304);
+    JITCACHE_CHECK(helperRecord.thisArrayModes[0] == 0x0d && helperRecord.thisArrayProfileFlags[3] == 0x01);
+    JITCACHE_CHECK(ICs::readThisArrayModes(helperRecord) == 0x0a0b0c0d && ICs::readThisArrayProfileFlags(helperRecord) == 0x01020304);
+
     // Four property ICs, three of them with cases, and five call-link sites in two groups, with distinct values in every
-    // header word and record field, so a field read at the wrong offset shows. 16 + 16 + 32 + 10 bytes, padded to 80.
+    // header word and record field, the this words of the three op_call sites included, so a field read at the wrong
+    // offset shows. 16 + 16 + 32 + 50 bytes, padded to 120.
+    constexpr uint32_t doubleArrayModes = asArrayModesIgnoringTypedArrays(ArrayWithDouble) | asArrayModesIgnoringTypedArrays(NonArrayWithContiguous);
     TestSection section;
     section.propertyICs.append(propertyIC(AccessType::GetByVal, 0x0f, 0x21, 0x32, 0x43, 0x07));
     section.propertyICs.append(propertyIC(AccessType::PutByIdSloppy, 0x01, 0x02, 0x03, 0x00, 0x04));
@@ -459,9 +573,9 @@ JITCACHE_TEST(icsRecordByteLayout, No)
     section.propertyICs.append(propertyIC(AccessType::DeleteByValStrict, 0x05, 0x7d, 0x0e, 0x02, 0x02));
     section.groups.append(ICs::CallLinkGroup { OpCall::opcodeID, 3 });
     section.groups.append(ICs::CallLinkGroup { OpCallVarargs::opcodeID, 2 });
-    section.callLinks.append(callLink(ICs::CallLinkModeCode::Monomorphic, ICs::CallLinkBit::seenOnce, 0x11));
-    section.callLinks.append(callLink(ICs::CallLinkModeCode::Polymorphic, ICs::CallLinkBit::hasSeenClosure | ICs::CallLinkBit::clearedByGC, 0x5a));
-    section.callLinks.append(callLink(ICs::CallLinkModeCode::Init, ICs::CallLinkBit::clearedByVirtual, 0x22));
+    section.callLinks.append(callLink(ICs::CallLinkModeCode::Monomorphic, ICs::CallLinkBit::seenOnce, 0x11, int32ArrayModes, 0x01));
+    section.callLinks.append(callLink(ICs::CallLinkModeCode::Polymorphic, ICs::CallLinkBit::hasSeenClosure | ICs::CallLinkBit::clearedByGC, 0x5a, doubleArrayModes, 0x42));
+    section.callLinks.append(callLink(ICs::CallLinkModeCode::Init, ICs::CallLinkBit::clearedByVirtual, 0x22, Float64ArrayMode | BigUint64ArrayMode, 0x80));
     section.callLinks.append(callLink(ICs::CallLinkModeCode::Virtual, ICs::CallLinkBit::seenOnce | ICs::CallLinkBit::clearedByVirtual, 0x33));
     section.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0x44));
     section.propertyICCount = 4;
@@ -469,7 +583,7 @@ JITCACHE_TEST(icsRecordByteLayout, No)
     section.callLinkGroupCount = 2;
     section.callLinkSiteCount = 5;
     Vector<uint8_t> bytes = encode(section);
-    JITCACHE_CHECK(bytes.size() == 80);
+    JITCACHE_CHECK(bytes.size() == 120);
     JITCACHE_CHECK(ICs::sectionSize(2, 4, 5) == bytes.size());
 
     // The section start needs no alignment: parse it at every offset modulo 8.
@@ -479,7 +593,7 @@ JITCACHE_TEST(icsRecordByteLayout, No)
         std::span<const uint8_t> sectionBytes = buffer.span().subspan(offset);
         auto parsed = parseStrict(sectionBytes);
         if (!parsed) {
-            JITCACHE_FAIL(makeString("the layout section at offset "_s, offset, " failed "_s, checkName(parsed.error().check)));
+            JITCACHE_FAIL(makeString("the layout section at offset "_s, offset, " failed "_s, ICs::description(parsed.error().check)));
             continue;
         }
         const ICs::SectionView& view = *parsed;
@@ -500,6 +614,8 @@ JITCACHE_TEST(icsRecordByteLayout, No)
             if (!sameRecord(view.callLinks[index], section.callLinks[index]))
                 JITCACHE_FAIL(makeString("call-link record "_s, index, " reads "_s, describe(view.callLinks[index]), " instead of "_s, describe(section.callLinks[index])));
         }
+        JITCACHE_CHECK(ICs::readThisArrayModes(view.callLinks[1]) == doubleArrayModes && ICs::readThisArrayProfileFlags(view.callLinks[1]) == 0x42);
+        JITCACHE_CHECK(ICs::readThisArrayModes(view.callLinks[2]) == (Float64ArrayMode | BigUint64ArrayMode) && ICs::readThisArrayProfileFlags(view.callLinks[2]) == 0x80);
     }
 
     // Header and group words are little-endian: counts above 255 read back from their low byte first.
@@ -628,8 +744,8 @@ JITCACHE_TEST(icsParseSectionCallLinkGroups, No)
 
     // A group for every canonical opcode, in canonical order, passes.
     TestSection everyOpcode;
-    for (OpcodeID opcodeID : canonicalCallLinkOrder) {
-        everyOpcode.groups.append(ICs::CallLinkGroup { opcodeID, 1 });
+    for (const ExpectedCallLinkOpcode& opcode : expectedCallLinkOpcodes) {
+        everyOpcode.groups.append(ICs::CallLinkGroup { opcode.opcodeID, 1 });
         everyOpcode.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0));
     }
     everyOpcode.callLinkGroupCount = ICs::numberOfCallLinkOpcodes;
@@ -665,6 +781,28 @@ JITCACHE_TEST(icsParseSectionReservedBits, No)
             section.callLinks[2].bits |= 1 << unusedBit;
         });
     }
+
+    // The this words: the valid section's first op_call record holds a this profile, and its construct record, the
+    // third, belongs to an opcode without one.
+    expectChangeInvalid(context, "this modes at a construct site"_s, ICs::Check::ReservedBits, 2, [](TestSection& section) {
+        storeLittleEndian(section.callLinks[2].thisArrayModes, int32ArrayModes);
+    });
+    expectChangeInvalid(context, "this flags at a construct site"_s, ICs::Check::ReservedBits, 2, [](TestSection& section) {
+        storeLittleEndian(section.callLinks[2].thisArrayProfileFlags, outOfBoundsFlag);
+    });
+    expectChangeInvalid(context, "a this mode bit outside ALL_ARRAY_MODES"_s, ICs::Check::ReservedBits, 0, [](TestSection& section) {
+        storeLittleEndian(section.callLinks[0].thisArrayModes, int32ArrayModes | modeBitOutsideAllArrayModes);
+    });
+    expectChangeInvalid(context, "a this flag bit above the eight array-profile flags"_s, ICs::Check::ReservedBits, 1, [](TestSection& section) {
+        storeLittleEndian(section.callLinks[1].thisArrayProfileFlags, flagBitAboveArrayProfileFlags);
+    });
+
+    // Every mode an array profile can hold and every flag, the pruning mark included, pass at an op_call site.
+    Vector<uint8_t> fullThisProfile = encodeValidSectionWith([](TestSection& section) {
+        storeLittleEndian(section.callLinks[1].thisArrayModes, static_cast<uint32_t>(ALL_ARRAY_MODES));
+        storeLittleEndian(section.callLinks[1].thisArrayProfileFlags, 0xff);
+    });
+    JITCACHE_CHECK(parseStrict(fullThisProfile.span()).has_value());
 }
 
 // EnumRange.
@@ -862,41 +1000,68 @@ JITCACHE_TEST(icsRestoredPropertyICRepatchCount, No)
 JITCACHE_TEST(icsRestoredCallLinkTable, No)
 {
     using namespace ICs::CallLinkBit;
+    using Mode = ICs::CallLinkModeCode;
+    using Data = ICs::CallSiteDataState;
+    const ICs::CallLinkOpcode inlineOpcode { OpCallVarargs::opcodeID, ICs::CallLinkSiteKind::Inline, false };
+    const ICs::CallLinkOpcode lazyOpcode { OpConstruct::opcodeID, ICs::CallLinkSiteKind::Lazy, false };
+    const ICs::CallLinkOpcode thisOpcode { OpCall::opcodeID, ICs::CallLinkSiteKind::Lazy, true };
+    const ICs::CallLinkOpcode tailCallOpcode { OpTailCall::opcodeID, ICs::CallLinkSiteKind::LazyTailCall, true };
+
+    // The data state of each kind of record, with the fields that matter to it written out; the sweep below checks every
+    // other field.
     struct NamedState {
         ASCIILiteral name;
+        ICs::CallLinkOpcode opcode;
         ICs::CallLinkRecord record;
-        ICs::RestoredCallLink expected;
+        Data data;
+        bool seenOnce;
+        uint32_t thisArrayModes;
     };
     const NamedState states[] = {
-        { "a site never reached"_s, callLink(ICs::CallLinkModeCode::Init, 0, 0),
-            { .isVirtual = false, .seenOnce = true, .hasSeenClosure = false, .clearedByGC = false, .clearedByVirtual = false, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a site called once"_s, callLink(ICs::CallLinkModeCode::Init, seenOnce, 0),
-            { .isVirtual = false, .seenOnce = true, .hasSeenClosure = false, .clearedByGC = false, .clearedByVirtual = false, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a monomorphic site"_s, callLink(ICs::CallLinkModeCode::Monomorphic, seenOnce, 0),
-            { .isVirtual = false, .seenOnce = true, .hasSeenClosure = false, .clearedByGC = false, .clearedByVirtual = false, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a polymorphic site of closures"_s, callLink(ICs::CallLinkModeCode::Polymorphic, seenOnce | hasSeenClosure, 0),
-            { .isVirtual = false, .seenOnce = true, .hasSeenClosure = true, .clearedByGC = false, .clearedByVirtual = false, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a site whose callee died"_s, callLink(ICs::CallLinkModeCode::Init, clearedByGC, 0),
-            { .isVirtual = false, .seenOnce = true, .hasSeenClosure = false, .clearedByGC = true, .clearedByVirtual = false, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a virtual construct site"_s, callLink(ICs::CallLinkModeCode::Virtual, clearedByVirtual, 0),
-            { .isVirtual = true, .seenOnce = false, .hasSeenClosure = false, .clearedByGC = false, .clearedByVirtual = true, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a virtual site without its history bit"_s, callLink(ICs::CallLinkModeCode::Virtual, seenOnce, 0),
-            { .isVirtual = true, .seenOnce = false, .hasSeenClosure = false, .clearedByGC = false, .clearedByVirtual = true, .maxArgumentCountIncludingThisForVarargs = 0 } },
-        { "a varargs site"_s, callLink(ICs::CallLinkModeCode::Monomorphic, seenOnce, 7),
-            { .isVirtual = false, .seenOnce = true, .hasSeenClosure = false, .clearedByGC = false, .clearedByVirtual = false, .maxArgumentCountIncludingThisForVarargs = 7 } },
+        { "an empty lazy site"_s, lazyOpcode, callLink(Mode::Init, 0, 0), Data::NotExecuted, false, 0 },
+        { "an empty tail call"_s, tailCallOpcode, callLink(Mode::Init, 0, 0), Data::NotExecuted, false, 0 },
+        { "an empty inline site"_s, inlineOpcode, callLink(Mode::Init, 0, 0), Data::Inline, false, 0 },
+        { "a lazy site called once"_s, thisOpcode, callLink(Mode::Init, seenOnce, 0), Data::ExecutedOnce, true, 0 },
+        { "a monomorphic lazy site that holds nothing"_s, thisOpcode, callLink(Mode::Monomorphic, seenOnce, 0), Data::ExecutedOnce, true, 0 },
+        { "a tail call that ran"_s, tailCallOpcode, callLink(Mode::Init, seenOnce, 0), Data::Own, true, 0 },
+        { "an inline site called once"_s, inlineOpcode, callLink(Mode::Init, seenOnce, 0), Data::Inline, true, 0 },
+        { "a lazy site whose only fact is the virtual mode"_s, lazyOpcode, callLink(Mode::Virtual, 0, 0), Data::Own, false, 0 },
+        { "a lazy site gone virtual"_s, lazyOpcode, callLink(Mode::Virtual, clearedByVirtual, 0), Data::Own, false, 0 },
+        { "a lazy site whose only fact is hasSeenClosure"_s, thisOpcode, callLink(Mode::Init, hasSeenClosure, 0), Data::Own, true, 0 },
+        { "a polymorphic lazy site with closures"_s, thisOpcode, callLink(Mode::Polymorphic, seenOnce | hasSeenClosure, 0), Data::Own, true, 0 },
+        { "a lazy site whose callee died, unseen"_s, thisOpcode, callLink(Mode::Init, clearedByGC, 0), Data::Own, true, 0 },
+        { "a lazy site once virtual"_s, lazyOpcode, callLink(Mode::Init, clearedByVirtual, 0), Data::Own, true, 0 },
+        { "a lazy site with a varargs maximum"_s, lazyOpcode, callLink(Mode::Init, 0, 3), Data::Own, true, 0 },
+        { "an unseen site whose only fact is its this modes"_s, thisOpcode, callLink(Mode::Init, 0, 0, int32ArrayModes, 0), Data::Own, true, int32ArrayModes },
+        { "an unseen site whose only fact is its this flags"_s, thisOpcode, callLink(Mode::Init, 0, 0, 0, outOfBoundsFlag), Data::Own, true, 0 },
+        { "a this profile at an opcode without one"_s, lazyOpcode, callLink(Mode::Init, 0, 0, int32ArrayModes, outOfBoundsFlag), Data::NotExecuted, false, 0 },
+        { "a seen site with this modes at an opcode without one"_s, lazyOpcode, callLink(Mode::Monomorphic, seenOnce, 0, int32ArrayModes, 0), Data::ExecutedOnce, true, 0 },
+        { "a tail call with a this profile"_s, tailCallOpcode, callLink(Mode::Monomorphic, seenOnce, 0, int32ArrayModes, pruningFlag), Data::Own, true, int32ArrayModes },
+        { "an inline site with this modes"_s, inlineOpcode, callLink(Mode::Monomorphic, seenOnce, 7, int32ArrayModes, 0), Data::Inline, true, 0 },
     };
     for (auto& state : states) {
-        ICs::RestoredCallLink restored = ICs::restoredCallLink(state.record);
-        if (!(restored == state.expected))
-            JITCACHE_FAIL(makeString(state.name, ": restores "_s, describe(restored), " instead of "_s, describe(state.expected)));
+        ICs::RestoredCallLink restored = ICs::restoredCallLink(state.opcode, state.record);
+        if (restored.data != state.data || restored.seenOnce != state.seenOnce || restored.thisArrayModes != state.thisArrayModes) {
+            JITCACHE_FAIL(makeString(state.name, " at "_s, describe(state.opcode), ": restores "_s, describe(restored), " instead of data "_s, dataName(state.data),
+                ", seenOnce "_s, bit(state.seenOnce), ", thisArrayModes "_s, state.thisArrayModes));
+        }
     }
 
-    forEachCallLinkRecord([&](const ICs::CallLinkRecord& record) {
-        ICs::RestoredCallLink restored = ICs::restoredCallLink(record);
-        ICs::RestoredCallLink expected = expectedRestoredCallLink(record);
+    // The derived this fields are the record's at an opcode with a this profile and zero elsewhere, whatever it holds.
+    ICs::CallLinkRecord withThisProfile = callLink(Mode::Monomorphic, seenOnce, 0, int32ArrayModes, outOfBoundsFlag | pruningFlag);
+    ICs::RestoredCallLink atThisOpcode = ICs::restoredCallLink(thisOpcode, withThisProfile);
+    JITCACHE_CHECK(atThisOpcode.thisArrayModes == int32ArrayModes && atThisOpcode.thisArrayProfileFlags == (outOfBoundsFlag | pruningFlag));
+    for (const ICs::CallLinkOpcode& opcode : { inlineOpcode, lazyOpcode }) {
+        ICs::RestoredCallLink elsewhere = ICs::restoredCallLink(opcode, withThisProfile);
+        JITCACHE_CHECK(!elsewhere.thisArrayModes && !elsewhere.thisArrayProfileFlags);
+    }
+
+    forEachCallLinkRecord([&](const ICs::CallLinkOpcode& opcode, const ICs::CallLinkRecord& record) {
+        ICs::RestoredCallLink restored = ICs::restoredCallLink(opcode, record);
+        ICs::RestoredCallLink expected = expectedRestoredCallLink(opcode, record);
         if (restored == expected)
             return true;
-        JITCACHE_FAIL(makeString(describe(record), " restores "_s, describe(restored), " instead of "_s, describe(expected)));
+        JITCACHE_FAIL(makeString(describe(record), " at "_s, describe(opcode), " restores "_s, describe(restored), " instead of "_s, describe(expected)));
         return false;
     });
 }
@@ -936,40 +1101,66 @@ JITCACHE_TEST(icsPropertyICRoundTrip, No)
         return true;
     });
 
-    // A section of recaptured records is well formed, with no IC site with cases.
+    // A section of recaptured records is well formed, with no IC site with cases. The valid section's call-link records
+    // are two op_call sites and a construct site.
     TestSection recapturedSection = validSection();
     for (auto& record : recapturedSection.propertyICs)
         record = ICs::recapturedPropertyIC(record);
-    for (auto& record : recapturedSection.callLinks)
-        record = ICs::recapturedCallLink(record);
+    const ICs::CallLinkOpcode& callOpcode = ICs::callLinkOpcodes[callLinkPosition(OpCall::opcodeID)];
+    const ICs::CallLinkOpcode& constructOpcode = ICs::callLinkOpcodes[callLinkPosition(OpConstruct::opcodeID)];
+    recapturedSection.callLinks[0] = ICs::recapturedCallLink(callOpcode, recapturedSection.callLinks[0]);
+    recapturedSection.callLinks[1] = ICs::recapturedCallLink(callOpcode, recapturedSection.callLinks[1]);
+    recapturedSection.callLinks[2] = ICs::recapturedCallLink(constructOpcode, recapturedSection.callLinks[2]);
     recapturedSection.icSitesWithCases = 0;
     JITCACHE_CHECK(parseStrict(encode(recapturedSection).span()).has_value());
 }
 
 JITCACHE_TEST(icsCallLinkRoundTrip, No)
 {
-    forEachCallLinkRecord([&](const ICs::CallLinkRecord& record) {
-        ICs::RestoredCallLink restored = ICs::restoredCallLink(record);
-        ICs::CallLinkRecord recaptured = ICs::recapturedCallLink(record);
-        ICs::RestoredCallLink restoredAgain = ICs::restoredCallLink(recaptured);
+    forEachCallLinkRecord([&](const ICs::CallLinkOpcode& opcode, const ICs::CallLinkRecord& record) {
+        ICs::RestoredCallLink restored = ICs::restoredCallLink(opcode, record);
+        ICs::CallLinkRecord recaptured = ICs::recapturedCallLink(opcode, record);
+        ICs::RestoredCallLink restoredAgain = ICs::restoredCallLink(opcode, recaptured);
         if (!(restoredAgain == restored)) {
-            JITCACHE_FAIL(makeString(describe(record), " recaptures as "_s, describe(recaptured), ", which restores "_s, describe(restoredAgain), " instead of "_s, describe(restored)));
+            JITCACHE_FAIL(makeString(describe(record), " at "_s, describe(opcode), " recaptures as "_s, describe(recaptured), ", which restores "_s, describe(restoredAgain), " instead of "_s, describe(restored)));
             return false;
         }
 
-        // Seeding leaves a site in Init or, through setVirtualCall, Virtual.
+        // A capture of a site on what linking gave it reads nothing, of a site on the executed-once data only the seen
+        // bit, and of a site with a CallLinkInfo of its own the mode seeding leaves (Init or, through setVirtualCall,
+        // Virtual), its bits, its varargs maximum and its this fields.
         auto mode = static_cast<ICs::CallLinkModeCode>(recaptured.bits & ICs::CallLinkBit::modeMask);
-        bool shapeHolds = mode == (restored.isVirtual ? ICs::CallLinkModeCode::Virtual : ICs::CallLinkModeCode::Init)
-            && !(recaptured.bits & ~ICs::CallLinkBit::mask)
-            && recaptured.maxArgumentCountIncludingThisForVarargs == record.maxArgumentCountIncludingThisForVarargs;
+        bool shapeHolds = false;
+        switch (restored.data) {
+        case ICs::CallSiteDataState::NotExecuted:
+            shapeHolds = sameRecord(recaptured, callLink(ICs::CallLinkModeCode::Init, 0, 0));
+            break;
+        case ICs::CallSiteDataState::ExecutedOnce:
+            shapeHolds = sameRecord(recaptured, callLink(ICs::CallLinkModeCode::Init, ICs::CallLinkBit::seenOnce, 0));
+            break;
+        case ICs::CallSiteDataState::Inline:
+        case ICs::CallSiteDataState::Own:
+            shapeHolds = mode == (restored.isVirtual ? ICs::CallLinkModeCode::Virtual : ICs::CallLinkModeCode::Init)
+                && !(recaptured.bits & ~ICs::CallLinkBit::mask)
+                && recaptured.maxArgumentCountIncludingThisForVarargs == record.maxArgumentCountIncludingThisForVarargs
+                && loadLittleEndian(recaptured.thisArrayModes) == restored.thisArrayModes
+                && loadLittleEndian(recaptured.thisArrayProfileFlags) == restored.thisArrayProfileFlags;
+            break;
+        }
         if (!shapeHolds) {
-            JITCACHE_FAIL(makeString(describe(record), " recaptures as "_s, describe(recaptured)));
+            JITCACHE_FAIL(makeString(describe(record), " at "_s, describe(opcode), " recaptures as "_s, describe(recaptured)));
             return false;
         }
 
-        ICs::CallLinkRecord recapturedAgain = ICs::recapturedCallLink(recaptured);
+        // A recaptured record is empty exactly when the record is, and holds something exactly when it does.
+        if ((restored.data == ICs::CallSiteDataState::NotExecuted) != (restoredAgain.data == ICs::CallSiteDataState::NotExecuted)) {
+            JITCACHE_FAIL(makeString(describe(record), " at "_s, describe(opcode), " changes its emptiness when recaptured"_s));
+            return false;
+        }
+
+        ICs::CallLinkRecord recapturedAgain = ICs::recapturedCallLink(opcode, recaptured);
         if (!sameRecord(recapturedAgain, recaptured)) {
-            JITCACHE_FAIL(makeString(describe(record), " recaptures as "_s, describe(recaptured), " and then as "_s, describe(recapturedAgain)));
+            JITCACHE_FAIL(makeString(describe(record), " at "_s, describe(opcode), " recaptures as "_s, describe(recaptured), " and then as "_s, describe(recapturedAgain)));
             return false;
         }
         return true;
@@ -983,7 +1174,7 @@ JITCACHE_TEST(icsRestoreCheckMoldPairing, No)
     Vector<uint8_t> bytes = encode(validSection());
     auto view = parseStrict(bytes.span());
     if (!view) {
-        JITCACHE_FAIL(makeString("the valid section failed "_s, checkName(view.error().check)));
+        JITCACHE_FAIL(makeString("the valid section failed "_s, ICs::description(view.error().check)));
         return;
     }
     Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
@@ -1025,7 +1216,7 @@ JITCACHE_TEST(icsRestoreCheckMoldPairing, No)
     Vector<uint8_t> emptyBytes = encode(TestSection { });
     auto emptyView = parseStrict(emptyBytes.span());
     if (!emptyView) {
-        JITCACHE_FAIL(makeString("the empty section failed "_s, checkName(emptyView.error().check)));
+        JITCACHE_FAIL(makeString("the empty section failed "_s, ICs::description(emptyView.error().check)));
         return;
     }
     expectCheckPasses(context, "no record and no mold"_s, ICs::checkMoldPairing(*emptyView, { }));
@@ -1041,7 +1232,7 @@ JITCACHE_TEST(icsRestoreCheckMoldPairing, No)
     Vector<uint8_t> extremesBytes = encode(extremes);
     auto extremesView = parseStrict(extremesBytes.span());
     if (!extremesView) {
-        JITCACHE_FAIL(makeString("the extreme access types failed "_s, checkName(extremesView.error().check)));
+        JITCACHE_FAIL(makeString("the extreme access types failed "_s, ICs::description(extremesView.error().check)));
         return;
     }
     Vector<BaselineUnlinkedPropertyInlineCache> extremeMolds;
@@ -1060,7 +1251,7 @@ JITCACHE_TEST(icsRestoreCheckMetadataLayout, No)
     Vector<uint8_t> bytes = encode(validSection());
     auto view = parseStrict(bytes.span());
     if (!view) {
-        JITCACHE_FAIL(makeString("the valid section failed "_s, checkName(view.error().check)));
+        JITCACHE_FAIL(makeString("the valid section failed "_s, ICs::description(view.error().check)));
         return;
     }
     Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
@@ -1104,7 +1295,7 @@ JITCACHE_TEST(icsRestoreCheckMetadataLayout, No)
     Vector<uint8_t> emptyBytes = encode(TestSection { });
     auto emptyView = parseStrict(emptyBytes.span());
     if (!emptyView) {
-        JITCACHE_FAIL(makeString("the empty section failed "_s, checkName(emptyView.error().check)));
+        JITCACHE_FAIL(makeString("the empty section failed "_s, ICs::description(emptyView.error().check)));
         return;
     }
     expectCheckPasses(context, "no group and no site"_s, ICs::checkMetadataLayout(*emptyView, ICs::CallLinkSiteCounts { }));
@@ -1115,17 +1306,17 @@ JITCACHE_TEST(icsRestoreCheckMetadataLayout, No)
     // A group for every canonical opcode matches one site of each.
     TestSection everyOpcode;
     ICs::CallLinkSiteCounts everyCount { };
-    for (OpcodeID opcodeID : canonicalCallLinkOrder) {
-        everyOpcode.groups.append(ICs::CallLinkGroup { opcodeID, 1 });
+    for (const ExpectedCallLinkOpcode& opcode : expectedCallLinkOpcodes) {
+        everyOpcode.groups.append(ICs::CallLinkGroup { opcode.opcodeID, 1 });
         everyOpcode.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0));
-        everyCount[callLinkPosition(opcodeID)] = 1;
+        everyCount[callLinkPosition(opcode.opcodeID)] = 1;
     }
     everyOpcode.callLinkGroupCount = ICs::numberOfCallLinkOpcodes;
     everyOpcode.callLinkSiteCount = ICs::numberOfCallLinkOpcodes;
     Vector<uint8_t> everyBytes = encode(everyOpcode);
     auto everyView = parseStrict(everyBytes.span());
     if (!everyView) {
-        JITCACHE_FAIL(makeString("the section with every opcode failed "_s, checkName(everyView.error().check)));
+        JITCACHE_FAIL(makeString("the section with every opcode failed "_s, ICs::description(everyView.error().check)));
         return;
     }
     expectCheckPasses(context, "one site of every opcode"_s, ICs::checkMetadataLayout(*everyView, everyCount));
@@ -1144,7 +1335,7 @@ JITCACHE_TEST(icsRestoreCheckMolds, No)
     Vector<uint8_t> bytes = encode(validSection());
     auto view = parseStrict(bytes.span());
     if (!view) {
-        JITCACHE_FAIL(makeString("the valid section failed "_s, checkName(view.error().check)));
+        JITCACHE_FAIL(makeString("the valid section failed "_s, ICs::description(view.error().check)));
         return;
     }
     expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));

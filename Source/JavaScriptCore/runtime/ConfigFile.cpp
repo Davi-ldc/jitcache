@@ -240,13 +240,13 @@ private:
     char* m_bufferEnd;
 };
 
-ConfigFile::ConfigFile(const char* filename)
+ConfigFile::ConfigFile(const char8_t* filename)
 {
     if (!filename)
         m_filename[0] = '\0';
     else {
         IGNORE_WARNINGS_BEGIN("stringop-truncation")
-        strncpy(m_filename, filename, s_maxPathLength);
+        strncpy(m_filename, byteCast<char>(filename), s_maxPathLength);
         IGNORE_WARNINGS_END
         m_filename[s_maxPathLength] = '\0';
     }
@@ -254,14 +254,14 @@ ConfigFile::ConfigFile(const char* filename)
     m_configDirectory[0] = '\0';
 }
 
-void ConfigFile::setProcessName(const char* processName)
+void ConfigFile::setProcessName(UTF8CStringView processName)
 {
-    strncpy(s_processName, processName, s_processNameMax);
+    strncpy(s_processName, processName.utf8(), s_processNameMax);
 }
 
-void ConfigFile::setParentProcessName(const char* parentProcessName)
+void ConfigFile::setParentProcessName(UTF8CStringView parentProcessName)
 {
-    strncpy(s_parentProcessName, parentProcessName, s_processNameMax);
+    strncpy(s_parentProcessName, parentProcessName.utf8(), s_processNameMax);
 }
 
 void ConfigFile::parse()
@@ -468,7 +468,7 @@ void ConfigFile::parse()
 
         if (!jscOptionsBuilder.isEmpty()) {
             JSC::Config::enableRestrictedOptions();
-            Options::setOptions(jscOptionsBuilder.toString().utf8().data());
+            Options::setOptions(jscOptionsBuilder.toString().utf8().legacyCStringPointer());
         }
     } else
         WTF::dataLogF("Error in JSC Config file on or near line %u, parsing '%s'\n", scanner.lineNumber(), scanner.currentBuffer());
@@ -512,11 +512,11 @@ void ConfigFile::canonicalizePaths()
     }
 }
 
-void processConfigFile(const char* configFilename, const char* processName, const char* parentProcessName)
+void processConfigFile(const char8_t* configFilename, UTF8CStringView processName, UTF8CStringView parentProcessName)
 {
     static std::once_flag processConfigFileOnceFlag;
-    
-    if (!configFilename || !strlen(configFilename))
+
+    if (!configFilename || !*configFilename)
         return;
 
     std::call_once(processConfigFileOnceFlag, [&]{

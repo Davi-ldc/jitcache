@@ -36,7 +36,8 @@
 #include <glib/gi18n-lib.h>
 #include <pal/SessionID.h>
 #include <wtf/FileSystem.h>
-#include <wtf/glib/GUniquePtr.h>
+#include <wtf/glib/GLibExtras.h>
+#include <wtf/glib/GMallocString.h>
 #include <wtf/glib/WTFGType.h>
 
 #if PLATFORM(GTK) || ENABLE(2022_GLIB_API)
@@ -53,7 +54,7 @@ using namespace WebKit;
  *
  * You can use WebKitWebsiteDataManager to configure the local directories
  * where website data will be stored. Use #WebKitWebsiteDataManager:base-data-directory
- * and #WebKitWebsiteDataManager:base-cache-directory set a common base directory for all
+ * and #WebKitWebsiteDataManager:base-cache-directory to set a common base directory for all
  * website data and caches.
  *
  * A WebKitWebsiteDataManager can be ephemeral, in which case all the directory configuration
@@ -92,8 +93,8 @@ enum {
 
 struct _WebKitWebsiteDataManagerPrivate {
     RefPtr<WebKit::WebsiteDataStore> websiteDataStore;
-    CString baseDataDirectory;
-    CString baseCacheDirectory;
+    UTF8CString baseDataDirectory;
+    UTF8CString baseCacheDirectory;
 
 #if PLATFORM(GTK) || ENABLE(2022_GLIB_API)
     GRefPtr<WebKitFaviconDatabase> faviconDatabase;
@@ -105,15 +106,15 @@ struct _WebKitWebsiteDataManagerPrivate {
     GRefPtr<WebKitCookieManager> cookieManager;
 
     // These manual directory overrides are deprecated. Please don't add more.
-    GUniquePtr<char> localStorageDirectory;
-    GUniquePtr<char> diskCacheDirectory;
-    GUniquePtr<char> applicationCacheDirectory;
-    GUniquePtr<char> indexedDBDirectory;
-    GUniquePtr<char> webSQLDirectory;
-    GUniquePtr<char> hstsCacheDirectory;
-    GUniquePtr<char> itpDirectory;
-    GUniquePtr<char> swRegistrationsDirectory;
-    GUniquePtr<char> domCacheDirectory;
+    GMallocString localStorageDirectory;
+    GMallocString diskCacheDirectory;
+    GMallocString applicationCacheDirectory;
+    GMallocString indexedDBDirectory;
+    GMallocString webSQLDirectory;
+    GMallocString hstsCacheDirectory;
+    GMallocString itpDirectory;
+    GMallocString swRegistrationsDirectory;
+    GMallocString domCacheDirectory;
 #endif
 
     gdouble originStorageRatio;
@@ -182,38 +183,38 @@ static void webkitWebsiteDataManagerSetProperty(GObject* object, guint propID, c
 
     switch (propID) {
     case PROP_BASE_DATA_DIRECTORY:
-        manager->priv->baseDataDirectory = g_value_get_string(value);
+        manager->priv->baseDataDirectory = UTF8CString::unsafeFromUTF8(g_value_get_string(value));
         break;
     case PROP_BASE_CACHE_DIRECTORY:
-        manager->priv->baseCacheDirectory = g_value_get_string(value);
+        manager->priv->baseCacheDirectory = UTF8CString::unsafeFromUTF8(g_value_get_string(value));
         break;
 #if !ENABLE(2022_GLIB_API)
     case PROP_LOCAL_STORAGE_DIRECTORY:
-        manager->priv->localStorageDirectory.reset(g_value_dup_string(value));
+        manager->priv->localStorageDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_DISK_CACHE_DIRECTORY:
-        manager->priv->diskCacheDirectory.reset(g_value_dup_string(value));
+        manager->priv->diskCacheDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_APPLICATION_CACHE_DIRECTORY:
-        manager->priv->applicationCacheDirectory.reset(g_value_dup_string(value));
+        manager->priv->applicationCacheDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_INDEXEDDB_DIRECTORY:
-        manager->priv->indexedDBDirectory.reset(g_value_dup_string(value));
+        manager->priv->indexedDBDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_WEBSQL_DIRECTORY:
-        manager->priv->webSQLDirectory.reset(g_value_dup_string(value));
+        manager->priv->webSQLDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_HSTS_CACHE_DIRECTORY:
-        manager->priv->hstsCacheDirectory.reset(g_value_dup_string(value));
+        manager->priv->hstsCacheDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_ITP_DIRECTORY:
-        manager->priv->itpDirectory.reset(g_value_dup_string(value));
+        manager->priv->itpDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_SERVICE_WORKER_REGISTRATIONS_DIRECTORY:
-        manager->priv->swRegistrationsDirectory.reset(g_value_dup_string(value));
+        manager->priv->swRegistrationsDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
     case PROP_DOM_CACHE_DIRECTORY:
-        manager->priv->domCacheDirectory.reset(g_value_dup_string(value));
+        manager->priv->domCacheDirectory = GMallocString::unsafeAdoptFromUTF8(g_value_dup_string(value));
         break;
 #endif
     case PROP_IS_EPHEMERAL:
@@ -238,27 +239,27 @@ static void webkitWebsiteDataManagerConstructed(GObject* object)
 
     WebKitWebsiteDataManagerPrivate* priv = WEBKIT_WEBSITE_DATA_MANAGER(object)->priv;
     if (!priv->baseDataDirectory.isNull()) {
-        if (!priv->localStorageDirectory)
-            priv->localStorageDirectory.reset(g_build_filename(priv->baseDataDirectory.data(), "localstorage", nullptr));
-        if (!priv->indexedDBDirectory)
-            priv->indexedDBDirectory.reset(g_build_filename(priv->baseDataDirectory.data(), "databases", "indexeddb", nullptr));
-        if (!priv->webSQLDirectory)
-            priv->webSQLDirectory.reset(g_build_filename(priv->baseDataDirectory.data(), "databases", nullptr));
-        if (!priv->itpDirectory)
-            priv->itpDirectory.reset(g_build_filename(priv->baseDataDirectory.data(), "itp", nullptr));
-        if (!priv->swRegistrationsDirectory)
-            priv->swRegistrationsDirectory.reset(g_build_filename(priv->baseDataDirectory.data(), "serviceworkers", nullptr));
+        if (priv->localStorageDirectory.isNull())
+            priv->localStorageDirectory = gBuildFilename(priv->baseDataDirectory, "localstorage");
+        if (priv->indexedDBDirectory.isNull())
+            priv->indexedDBDirectory = gBuildFilename(priv->baseDataDirectory, "databases", "indexeddb");
+        if (priv->webSQLDirectory.isNull())
+            priv->webSQLDirectory = gBuildFilename(priv->baseDataDirectory, "databases");
+        if (priv->itpDirectory.isNull())
+            priv->itpDirectory = gBuildFilename(priv->baseDataDirectory, "itp");
+        if (priv->swRegistrationsDirectory.isNull())
+            priv->swRegistrationsDirectory = gBuildFilename(priv->baseDataDirectory, "serviceworkers");
     }
 
     if (!priv->baseCacheDirectory.isNull()) {
-        if (!priv->diskCacheDirectory)
-            priv->diskCacheDirectory.reset(g_strdup(priv->baseCacheDirectory.data()));
-        if (!priv->applicationCacheDirectory)
-            priv->applicationCacheDirectory.reset(g_build_filename(priv->baseCacheDirectory.data(), "applications", nullptr));
-        if (!priv->hstsCacheDirectory)
-            priv->hstsCacheDirectory.reset(g_strdup(priv->baseCacheDirectory.data()));
-        if (!priv->domCacheDirectory)
-            priv->domCacheDirectory.reset(g_build_filename(priv->baseCacheDirectory.data(), "CacheStorage", nullptr));
+        if (priv->diskCacheDirectory.isNull())
+            priv->diskCacheDirectory = GMallocString { priv->baseCacheDirectory };
+        if (priv->applicationCacheDirectory.isNull())
+            priv->applicationCacheDirectory = gBuildFilename(priv->baseCacheDirectory, "applications");
+        if (priv->hstsCacheDirectory.isNull())
+            priv->hstsCacheDirectory = GMallocString { priv->baseCacheDirectory };
+        if (priv->domCacheDirectory.isNull())
+            priv->domCacheDirectory = gBuildFilename(priv->baseCacheDirectory, "CacheStorage");
     }
 
     priv->tlsErrorsPolicy = WEBKIT_TLS_ERRORS_POLICY_FAIL;
@@ -318,7 +319,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.10
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-data-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-data-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -336,7 +337,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.10
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-cache-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-cache-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -354,7 +355,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.10
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-cache-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-cache-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -372,7 +373,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.10
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-data-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-data-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -390,7 +391,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.10
      *
-     * Deprecated: 2.24. WebSQL is no longer supported. Use IndexedDB instead.
+     * Deprecated: 2.24: WebSQL is no longer supported. Use IndexedDB instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -408,7 +409,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.26
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-cache-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-cache-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -426,7 +427,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.30
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-data-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-data-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -440,11 +441,11 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
     /**
      * WebKitWebsiteDataManager:service-worker-registrations-directory:
      *
-     * The directory where service workers registrations will be stored.
+     * The directory where service worker registrations will be stored.
      *
      * Since: 2.30
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-data-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-data-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -462,7 +463,7 @@ static void webkit_website_data_manager_class_init(WebKitWebsiteDataManagerClass
      *
      * Since: 2.30
      *
-     * Deprecated: 2.40. Use WebKitWebsiteDataManager:base-cache-directory instead.
+     * Deprecated: 2.40: Use WebKitWebsiteDataManager:base-cache-directory instead.
      */
     g_object_class_install_property(
         gObjectClass,
@@ -534,24 +535,24 @@ WebKit::WebsiteDataStore& webkitWebsiteDataManagerGetDataStore(WebKitWebsiteData
 {
     WebKitWebsiteDataManagerPrivate* priv = manager->priv;
     if (!priv->websiteDataStore) {
-        auto configuration = WebsiteDataStoreConfiguration::createWithBaseDirectories(String::fromUTF8(priv->baseCacheDirectory.span()), String::fromUTF8(priv->baseDataDirectory.span()));
+        auto configuration = WebsiteDataStoreConfiguration::createWithBaseDirectories(String { priv->baseCacheDirectory }, String { priv->baseDataDirectory });
 #if !ENABLE(2022_GLIB_API)
-        if (priv->localStorageDirectory)
-            configuration->setLocalStorageDirectory(FileSystem::stringFromFileSystemRepresentation(priv->localStorageDirectory.get()));
-        if (priv->diskCacheDirectory)
-            configuration->setNetworkCacheDirectory(FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(priv->diskCacheDirectory.get()), networkCacheSubdirectory));
-        if (priv->indexedDBDirectory)
-            configuration->setIndexedDBDatabaseDirectory(FileSystem::stringFromFileSystemRepresentation(priv->indexedDBDirectory.get()));
-        if (priv->webSQLDirectory)
-            configuration->setWebSQLDatabaseDirectory(FileSystem::stringFromFileSystemRepresentation(priv->webSQLDirectory.get()));
-        if (priv->hstsCacheDirectory)
-            configuration->setHSTSStorageDirectory(FileSystem::stringFromFileSystemRepresentation(priv->hstsCacheDirectory.get()));
-        if (priv->itpDirectory)
-            configuration->setResourceLoadStatisticsDirectory(FileSystem::stringFromFileSystemRepresentation(priv->itpDirectory.get()));
-        if (priv->swRegistrationsDirectory)
-            configuration->setServiceWorkerRegistrationDirectory(FileSystem::stringFromFileSystemRepresentation(priv->swRegistrationsDirectory.get()));
-        if (priv->domCacheDirectory)
-            configuration->setCacheStorageDirectory(FileSystem::stringFromFileSystemRepresentation(priv->domCacheDirectory.get()));
+        if (!priv->localStorageDirectory.isNull())
+            configuration->setLocalStorageDirectory(FileSystem::stringFromFileSystemRepresentation(priv->localStorageDirectory.utf8()));
+        if (!priv->diskCacheDirectory.isNull())
+            configuration->setNetworkCacheDirectory(FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(priv->diskCacheDirectory.utf8()), networkCacheSubdirectory));
+        if (!priv->indexedDBDirectory.isNull())
+            configuration->setIndexedDBDatabaseDirectory(FileSystem::stringFromFileSystemRepresentation(priv->indexedDBDirectory.utf8()));
+        if (!priv->webSQLDirectory.isNull())
+            configuration->setWebSQLDatabaseDirectory(FileSystem::stringFromFileSystemRepresentation(priv->webSQLDirectory.utf8()));
+        if (!priv->hstsCacheDirectory.isNull())
+            configuration->setHSTSStorageDirectory(FileSystem::stringFromFileSystemRepresentation(priv->hstsCacheDirectory.utf8()));
+        if (!priv->itpDirectory.isNull())
+            configuration->setResourceLoadStatisticsDirectory(FileSystem::stringFromFileSystemRepresentation(priv->itpDirectory.utf8()));
+        if (!priv->swRegistrationsDirectory.isNull())
+            configuration->setServiceWorkerRegistrationDirectory(FileSystem::stringFromFileSystemRepresentation(priv->swRegistrationsDirectory.utf8()));
+        if (!priv->domCacheDirectory.isNull())
+            configuration->setCacheStorageDirectory(FileSystem::stringFromFileSystemRepresentation(priv->domCacheDirectory.utf8()));
 #endif
         if (priv->originStorageRatio >= 0.0)
             configuration->setOriginQuotaRatio(priv->originStorageRatio);
@@ -569,7 +570,7 @@ WebKit::WebsiteDataStore& webkitWebsiteDataManagerGetDataStore(WebKitWebsiteData
 }
 
 #if ENABLE(2022_GLIB_API)
-WebKitWebsiteDataManager* webkitWebsiteDataManagerCreate(CString&& baseDataDirectory, CString&& baseCacheDirectory)
+WebKitWebsiteDataManager* webkitWebsiteDataManagerCreate(UTF8CString&& baseDataDirectory, UTF8CString&& baseCacheDirectory)
 {
     auto* manager = WEBKIT_WEBSITE_DATA_MANAGER(g_object_new(WEBKIT_TYPE_WEBSITE_DATA_MANAGER, nullptr));
     manager->priv->baseDataDirectory = WTF::move(baseDataDirectory);
@@ -654,7 +655,7 @@ const gchar* webkit_website_data_manager_get_base_data_directory(WebKitWebsiteDa
     if (manager->priv->websiteDataStore && !manager->priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    return manager->priv->baseDataDirectory.data();
+    return manager->priv->baseDataDirectory.legacyCStringPointer();
 }
 
 /**
@@ -675,7 +676,7 @@ const gchar* webkit_website_data_manager_get_base_cache_directory(WebKitWebsiteD
     if (manager->priv->websiteDataStore && !manager->priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    return manager->priv->baseCacheDirectory.data();
+    return manager->priv->baseCacheDirectory.legacyCStringPointer();
 }
 
 #if !ENABLE(2022_GLIB_API)
@@ -689,7 +690,7 @@ const gchar* webkit_website_data_manager_get_base_cache_directory(WebKitWebsiteD
  *
  * Since: 2.10
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_data_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_data_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_local_storage_directory(WebKitWebsiteDataManager* manager)
 {
@@ -699,9 +700,9 @@ const gchar* webkit_website_data_manager_get_local_storage_directory(WebKitWebsi
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->localStorageDirectory)
-        priv->localStorageDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultLocalStorageDirectory().utf8().data()));
-    return priv->localStorageDirectory.get();
+    if (priv->localStorageDirectory.isNull())
+        priv->localStorageDirectory = GMallocString { WebKit::WebsiteDataStore::defaultLocalStorageDirectory().utf8() };
+    return priv->localStorageDirectory.utf8();
 }
 
 /**
@@ -714,7 +715,7 @@ const gchar* webkit_website_data_manager_get_local_storage_directory(WebKitWebsi
  *
  * Since: 2.10
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_cache_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_cache_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_disk_cache_directory(WebKitWebsiteDataManager* manager)
 {
@@ -724,7 +725,7 @@ const gchar* webkit_website_data_manager_get_disk_cache_directory(WebKitWebsiteD
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    return priv->diskCacheDirectory.get();
+    return priv->diskCacheDirectory.utf8();
 }
 
 /**
@@ -737,7 +738,7 @@ const gchar* webkit_website_data_manager_get_disk_cache_directory(WebKitWebsiteD
  *
  * Since: 2.10
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_cache_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_cache_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_offline_application_cache_directory(WebKitWebsiteDataManager* manager)
 {
@@ -747,7 +748,7 @@ const gchar* webkit_website_data_manager_get_offline_application_cache_directory
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    return priv->applicationCacheDirectory.get();
+    return priv->applicationCacheDirectory.utf8();
 }
 
 /**
@@ -760,7 +761,7 @@ const gchar* webkit_website_data_manager_get_offline_application_cache_directory
  *
  * Since: 2.10
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_data_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_data_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_indexeddb_directory(WebKitWebsiteDataManager* manager)
 {
@@ -770,9 +771,9 @@ const gchar* webkit_website_data_manager_get_indexeddb_directory(WebKitWebsiteDa
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->indexedDBDirectory)
-        priv->indexedDBDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultIndexedDBDatabaseDirectory().utf8().data()));
-    return priv->indexedDBDirectory.get();
+    if (priv->indexedDBDirectory.isNull())
+        priv->indexedDBDirectory = GMallocString { WebKit::WebsiteDataStore::defaultIndexedDBDatabaseDirectory().utf8() };
+    return priv->indexedDBDirectory.utf8();
 }
 
 /**
@@ -785,7 +786,7 @@ const gchar* webkit_website_data_manager_get_indexeddb_directory(WebKitWebsiteDa
  *
  * Since: 2.10
  *
- * Deprecated: 2.24. WebSQL is no longer supported. Use IndexedDB instead.
+ * Deprecated: 2.24: WebSQL is no longer supported. Use IndexedDB instead.
  */
 const gchar* webkit_website_data_manager_get_websql_directory(WebKitWebsiteDataManager* manager)
 {
@@ -795,9 +796,9 @@ const gchar* webkit_website_data_manager_get_websql_directory(WebKitWebsiteDataM
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->webSQLDirectory)
-        priv->webSQLDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultWebSQLDatabaseDirectory().utf8().data()));
-    return priv->webSQLDirectory.get();
+    if (priv->webSQLDirectory.isNull())
+        priv->webSQLDirectory = GMallocString { WebKit::WebsiteDataStore::defaultWebSQLDatabaseDirectory().utf8() };
+    return priv->webSQLDirectory.utf8();
 }
 
 /**
@@ -810,7 +811,7 @@ const gchar* webkit_website_data_manager_get_websql_directory(WebKitWebsiteDataM
  *
  * Since: 2.26
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_cache_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_cache_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_hsts_cache_directory(WebKitWebsiteDataManager* manager)
 {
@@ -820,9 +821,9 @@ const gchar* webkit_website_data_manager_get_hsts_cache_directory(WebKitWebsiteD
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->hstsCacheDirectory)
-        priv->hstsCacheDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultHSTSStorageDirectory().utf8().data()));
-    return priv->hstsCacheDirectory.get();
+    if (priv->hstsCacheDirectory.isNull())
+        priv->hstsCacheDirectory = GMallocString { WebKit::WebsiteDataStore::defaultHSTSStorageDirectory().utf8() };
+    return priv->hstsCacheDirectory.utf8();
 }
 
 /**
@@ -835,7 +836,7 @@ const gchar* webkit_website_data_manager_get_hsts_cache_directory(WebKitWebsiteD
  *
  * Since: 2.30
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_data_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_data_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_itp_directory(WebKitWebsiteDataManager* manager)
 {
@@ -845,9 +846,9 @@ const gchar* webkit_website_data_manager_get_itp_directory(WebKitWebsiteDataMana
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->itpDirectory)
-        priv->itpDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultResourceLoadStatisticsDirectory().utf8().data()));
-    return priv->itpDirectory.get();
+    if (priv->itpDirectory.isNull())
+        priv->itpDirectory = GMallocString { WebKit::WebsiteDataStore::defaultResourceLoadStatisticsDirectory().utf8() };
+    return priv->itpDirectory.utf8();
 }
 
 /**
@@ -860,7 +861,7 @@ const gchar* webkit_website_data_manager_get_itp_directory(WebKitWebsiteDataMana
  *
  * Since: 2.30
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_data_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_data_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_service_worker_registrations_directory(WebKitWebsiteDataManager* manager)
 {
@@ -870,9 +871,9 @@ const gchar* webkit_website_data_manager_get_service_worker_registrations_direct
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->swRegistrationsDirectory)
-        priv->swRegistrationsDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultServiceWorkerRegistrationDirectory().utf8().data()));
-    return priv->swRegistrationsDirectory.get();
+    if (priv->swRegistrationsDirectory.isNull())
+        priv->swRegistrationsDirectory = GMallocString { WebKit::WebsiteDataStore::defaultServiceWorkerRegistrationDirectory().utf8() };
+    return priv->swRegistrationsDirectory.utf8();
 }
 
 /**
@@ -885,7 +886,7 @@ const gchar* webkit_website_data_manager_get_service_worker_registrations_direct
  *
  * Since: 2.30
  *
- * Deprecated: 2.40, use webkit_website_data_manager_get_base_cache_directory() instead.
+ * Deprecated: 2.40: Use webkit_website_data_manager_get_base_cache_directory() instead.
  */
 const gchar* webkit_website_data_manager_get_dom_cache_directory(WebKitWebsiteDataManager* manager)
 {
@@ -895,9 +896,9 @@ const gchar* webkit_website_data_manager_get_dom_cache_directory(WebKitWebsiteDa
     if (priv->websiteDataStore && !priv->websiteDataStore->isPersistent())
         return nullptr;
 
-    if (!priv->domCacheDirectory)
-        priv->domCacheDirectory.reset(g_strdup(WebKit::WebsiteDataStore::defaultCacheStorageDirectory().utf8().data()));
-    return priv->domCacheDirectory.get();
+    if (priv->domCacheDirectory.isNull())
+        priv->domCacheDirectory = GMallocString { WebKit::WebsiteDataStore::defaultCacheStorageDirectory().utf8() };
+    return priv->domCacheDirectory.utf8();
 }
 
 /**
@@ -966,7 +967,7 @@ gboolean webkit_website_data_manager_get_itp_enabled(WebKitWebsiteDataManager* m
  * Enable or disable persistent credential storage.
  *
  * When enabled, which is the default for
- * non-ephemeral sessions, the network process will try to read and write HTTP authentiacation
+ * non-ephemeral sessions, the network process will try to read and write HTTP authentication
  * credentials from persistent storage.
  *
  * Since: 2.30
@@ -1084,7 +1085,7 @@ static String webkitWebsiteDataManagerGetFaviconDatabasePath(WebKitWebsiteDataMa
         return { };
 
     if (!manager->priv->baseCacheDirectory.isNull())
-        return FileSystem::pathByAppendingComponents(FileSystem::stringFromFileSystemRepresentation(manager->priv->baseCacheDirectory.data()), std::initializer_list<StringView>({ "icondatabase"_s, "WebpageIcons.db"_s }));
+        return FileSystem::pathByAppendingComponents(FileSystem::stringFromFileSystemRepresentation(manager->priv->baseCacheDirectory), std::initializer_list<StringView>({ "icondatabase"_s, "WebpageIcons.db"_s }));
 
     return FileSystem::pathByAppendingComponents(WebsiteDataStore::defaultBaseCacheDirectory(), std::initializer_list<StringView>({ "icondatabase"_s, "WebpageIcons.db"_s }));
 }
@@ -1228,7 +1229,7 @@ void webkit_website_data_manager_fetch(WebKitWebsiteDataManager* manager, WebKit
  * Finish an asynchronous operation started with webkit_website_data_manager_fetch().
  *
  * Returns: (element-type WebKitWebsiteData) (transfer full): a #GList of #WebKitWebsiteData. You must free the #GList with
- *    g_list_free() and unref the #WebKitWebsiteData<!-- -->s with webkit_website_data_unref() when you're done with them.
+ *    g_list_free() and unref the #WebKitWebsiteData objects with webkit_website_data_unref() when you're done with them.
  *
  * Since: 2.16
  */
@@ -1375,7 +1376,7 @@ struct _WebKitITPFirstParty {
     {
     }
 
-    CString domain;
+    UTF8CString domain;
     bool storageAccessGranted { false };
     GRefPtr<GDateTime> lastUpdated;
     int referenceCount { 1 };
@@ -1475,7 +1476,7 @@ const char* webkit_itp_first_party_get_domain(WebKitITPFirstParty* firstParty)
 {
     g_return_val_if_fail(firstParty, nullptr);
 
-    return firstParty->domain.data();
+    return firstParty->domain.legacyCStringPointer();
 }
 
 /**
@@ -1484,7 +1485,7 @@ const char* webkit_itp_first_party_get_domain(WebKitITPFirstParty* firstParty)
  *
  * Get whether @itp_first_party has granted website data access to its #WebKitITPThirdParty.
  *
- * Each @WebKitITPFirstParty is created by webkit_itp_third_party_get_first_parties() and
+ * Each #WebKitITPFirstParty is created by webkit_itp_third_party_get_first_parties() and
  * therefore corresponds to exactly one #WebKitITPThirdParty.
  *
  * Returns: %TRUE if website data access has been granted, or %FALSE otherwise
@@ -1504,7 +1505,7 @@ gboolean webkit_itp_first_party_get_website_data_access_allowed(WebKitITPFirstPa
  *
  * Get the last time a #WebKitITPThirdParty has been seen under @itp_first_party.
  *
- * Each @WebKitITPFirstParty is created by webkit_itp_third_party_get_first_parties() and
+ * Each #WebKitITPFirstParty is created by webkit_itp_third_party_get_first_parties() and
  * therefore corresponds to exactly one #WebKitITPThirdParty.
  *
  * Returns: (transfer none): the last update time as a #GDateTime
@@ -1519,7 +1520,7 @@ GDateTime* webkit_itp_first_party_get_last_update_time(WebKitITPFirstParty* firs
 }
 
 /**
- * WebKitITPThirdParty: (ref-func webkit_itp_first_party_ref) (unref-func webkit_itp_first_party_unref)
+ * WebKitITPThirdParty: (ref-func webkit_itp_third_party_ref) (unref-func webkit_itp_third_party_unref)
  *
  * Describes a third party origin.
  *
@@ -1539,7 +1540,7 @@ struct _WebKitITPThirdParty {
         g_list_free_full(firstParties, reinterpret_cast<GDestroyNotify>(webkit_itp_first_party_unref));
     }
 
-    CString domain;
+    UTF8CString domain;
     GList* firstParties { nullptr };
     int referenceCount { 1 };
 };
@@ -1609,7 +1610,7 @@ const char* webkit_itp_third_party_get_domain(WebKitITPThirdParty* thirdParty)
 {
     g_return_val_if_fail(thirdParty, nullptr);
 
-    return thirdParty->domain.data();
+    return thirdParty->domain.legacyCStringPointer();
 }
 
 /**
@@ -1670,7 +1671,7 @@ void webkit_website_data_manager_get_itp_summary(WebKitWebsiteDataManager* manag
  * Finish an asynchronous operation started with webkit_website_data_manager_get_itp_summary().
  *
  * Returns: (transfer full) (element-type WebKitITPThirdParty): a #GList of #WebKitITPThirdParty.
- *    You must free the #GList with g_list_free() and unref the #WebKitITPThirdParty<!-- -->s with
+ *    You must free the #GList with g_list_free() and unref the #WebKitITPThirdParty objects with
  *    webkit_itp_third_party_unref() when you're done with them.
  *
  * Since: 2.30

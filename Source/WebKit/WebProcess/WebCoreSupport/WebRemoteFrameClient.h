@@ -25,12 +25,14 @@
 
 #pragma once
 
+#include "PendingPostMessages.h"
 #include "WebFrame.h"
 #include "WebFrameLoaderClient.h"
 #include <WebCore/MessageWithMessagePorts.h>
 #include <WebCore/ProcessIdentifier.h>
 #include <WebCore/RemoteFrameClient.h>
 #include <WebCore/SecurityOriginData.h>
+#include <wtf/RefCounted.h>
 
 namespace WebKit {
 
@@ -72,10 +74,12 @@ private:
     void dispatchCrossOriginBeforeUnloadCheck(const WebCore::SecurityOriginData& navigatingFrameOrigin) final;
 
     void broadcastAllFrameTreeSyncDataToOtherProcesses(WebCore::FrameTreeSyncData&) final;
-    void broadcastFrameTreeSyncDataToOtherProcesses(const WebCore::FrameTreeSyncSerializationData&) final;
+    void broadcastFrameTreeSyncDataToOtherProcesses(WebCore::FrameTreeSyncSerializationData&&) final;
 
     void didNotifyUserActivation(MonotonicTime) final;
     void didConsumeUserActivation() final;
+
+    const RefPtr<PendingPostMessages> m_pendingPostMessages;
 };
 
 }

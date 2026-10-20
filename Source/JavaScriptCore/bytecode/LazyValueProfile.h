@@ -49,7 +49,7 @@ public:
 
     // JITCache: visits each operand profile in the holder's order. The functor reads key() and m_prediction only,
     // never the buckets.
-    template<typename Functor> void forEachOperandValueProfile(const Functor& functor)
+    template<typename Functor> void forEachOperandValueProfile(NOESCAPE const Functor& functor)
     {
         if (!m_data)
             return;

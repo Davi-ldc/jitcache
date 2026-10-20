@@ -42,6 +42,7 @@ list(APPEND PAL_PUBLIC_HEADERS
     cocoa/UsageTrackingSoftLink.h
     cocoa/VisionKitCoreSoftLink.h
     cocoa/VisionSoftLink.h
+    cocoa/WebContentAnalysisSoftLink.h
     cocoa/WebContentRestrictionsSoftLink.h
     cocoa/WebPrivacySoftLink.h
     cocoa/WritingToolsUISoftLink.h
@@ -96,6 +97,7 @@ list(APPEND PAL_PUBLIC_HEADERS
     spi/cocoa/CoreServicesSPI.h
     spi/cocoa/CoreTelephonySPI.h
     spi/cocoa/CryptoKitPrivateSPI.h
+    spi/cocoa/DataDetectorsCoreDFASPI.h
     spi/cocoa/DataDetectorsCoreSPI.h
     spi/cocoa/FeatureFlagsSPI.h
     spi/cocoa/FilePortSPI.h

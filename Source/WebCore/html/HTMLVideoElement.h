@@ -146,6 +146,8 @@ public:
     WEBCORE_EXPORT void didEnterExternalPlayback();
     WEBCORE_EXPORT void didExitExternalPlayback();
     bool isInExternalPlayback() const { return m_isInExternalPlayback; };
+#else
+    bool isInExternalPlayback() const { return false; }
 #endif
 
     // ActiveDOMObject
@@ -153,7 +155,12 @@ public:
     void stop() final;
 
     bool isIntersectingViewport() const final { return m_isIntersectingViewport; }
-    void viewportIntersectionChanged(bool isIntersecting);
+    void lazyLoadIntersectionCallbackInvoked(bool isIntersecting);
+
+    double cameraYaw() const { return m_cameraYaw; }
+    double cameraPitch() const { return m_cameraPitch; }
+    double cameraFieldOfView() const { return m_cameraFieldOfView; }
+    void spatialCameraDidMove(double yaw, double pitch, double fieldOfView);
 
 private:
     friend class HTMLVideoElementPictureInPicture;
@@ -161,6 +168,9 @@ private:
 
     void scheduleResizeEvent(const FloatSize&) final;
     void scheduleResizeEventIfSizeChanged(const FloatSize&) final;
+#if ENABLE(LINEAR_MEDIA_PLAYER)
+    void scheduleExternalPlaybackChangedEventIfNeeded();
+#endif
     bool rendererIsNeeded(const Style::ComputedStyle&) final;
     void didAttachRenderers() final;
     void attributeChanged(const QualifiedName&, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason) final;
@@ -193,6 +203,10 @@ private:
     AtomString m_defaultPosterURL;
 
     FloatSize m_lastReportedNaturalSize { };
+
+    double m_cameraYaw { 0 };
+    double m_cameraPitch { 0 };
+    double m_cameraFieldOfView { 0 };
 
     bool m_renderingCanBeAccelerated { false };
 

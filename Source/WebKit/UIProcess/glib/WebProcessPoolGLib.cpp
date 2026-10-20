@@ -40,7 +40,7 @@
 #include <wtf/NeverDestroyed.h>
 #include <wtf/glib/Application.h>
 #include <wtf/glib/Sandbox.h>
-#include <wtf/text/CStringView.h>
+#include <wtf/text/UTF8CStringView.h>
 
 #if USE(ATSPI)
 #include <wtf/UUID.h>
@@ -144,11 +144,11 @@ static void seatDevicesChangedCallback(GdkSeat* seat, GdkDevice*, WebProcessPool
 
 void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization)
 {
-    if (const auto forceComplexText = CStringView::unsafeFromUTF8(getenv("WEBKIT_FORCE_COMPLEX_TEXT")))
+    if (const auto forceComplexText = UTF8CStringView::unsafeFromUTF8(getenv("WEBKIT_FORCE_COMPLEX_TEXT")))
         m_alwaysUsesComplexTextCodePath = forceComplexText == "1"_s;
 
 #if !ENABLE(2022_GLIB_API)
-    if (const auto forceSandbox = CStringView::unsafeFromUTF8(getenv("WEBKIT_FORCE_SANDBOX"))) {
+    if (const auto forceSandbox = UTF8CStringView::unsafeFromUTF8(getenv("WEBKIT_FORCE_SANDBOX"))) {
         if (forceSandbox == "1"_s)
             setSandboxEnabled(true);
         else {
@@ -292,7 +292,7 @@ void WebProcessPool::setSandboxEnabled(bool enabled)
 
     if (!enabled) {
 #if !ENABLE(2022_GLIB_API)
-        if (const auto forceSandbox = CStringView::unsafeFromUTF8(getenv("WEBKIT_FORCE_SANDBOX"))) {
+        if (const auto forceSandbox = UTF8CStringView::unsafeFromUTF8(getenv("WEBKIT_FORCE_SANDBOX"))) {
             if (forceSandbox == "1"_s)
                 return;
         }
@@ -311,7 +311,7 @@ void WebProcessPool::setSandboxEnabled(bool enabled)
     WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #endif
 
-    if (const auto disableSandbox = CStringView::unsafeFromUTF8(getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"))) {
+    if (const auto disableSandbox = UTF8CStringView::unsafeFromUTF8(getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"))) {
         if (disableSandbox != "0"_s)
             return;
     }
@@ -319,7 +319,7 @@ void WebProcessPool::setSandboxEnabled(bool enabled)
     m_sandboxEnabled = true;
 #if USE(ATSPI)
     if (shouldUseBubblewrap())
-        m_sandboxedAccessibilityBusAddress = makeString("unix:path="_s, FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(sandboxedUserRuntimeDirectory().data()), "at-spi-bus"_s));
+        m_sandboxedAccessibilityBusAddress = makeString("unix:path="_s, FileSystem::pathByAppendingComponent(String { sandboxedUserRuntimeDirectory() }, "at-spi-bus"_s));
 #endif
 }
 
@@ -382,8 +382,8 @@ const String& WebProcessPool::sandboxedAccessibilityBusAddress() const
 const String& WebProcessPool::generateNextAccessibilityBusName()
 {
     m_accessibilityBusName = makeString(String::fromUTF8(WTF::applicationID().span()), ".Sandboxed.WebProcess-"_s, WTF::UUID::createVersion4());
-    RELEASE_ASSERT(g_dbus_is_name(m_accessibilityBusName.value().utf8().data()));
-    RELEASE_ASSERT(!g_dbus_is_unique_name(m_accessibilityBusName.value().utf8().data()));
+    RELEASE_ASSERT(g_dbus_is_name(m_accessibilityBusName.value().utf8().legacyCStringPointer()));
+    RELEASE_ASSERT(!g_dbus_is_unique_name(m_accessibilityBusName.value().utf8().legacyCStringPointer()));
 
     return accessibilityBusName();
 }

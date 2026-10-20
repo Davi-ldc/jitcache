@@ -73,6 +73,7 @@
 #import <wtf/darwin/DispatchExtras.h>
 #import <wtf/text/MakeString.h>
 #import <wtf/text/StringHash.h>
+#import <wtf/text/UTF8CStringView.h>
 #import <wtf/text/WTFString.h>
 
 static NSString *serviceWorkerRegistrationFilename = @"ServiceWorkerRegistrations-8.sqlite3";
@@ -3640,7 +3641,7 @@ static bool didStartURLSchemeTaskForImportedScript = false;
     HashMap<String, RetainPtr<NSData>> _dataMappings;
 }
 - (instancetype)initWithBytes:(const char*)bytes;
-- (void)addMappingFromURLString:(NSString *)urlString toData:(const char*)data;
+- (void)addMappingFromURLString:(NSString *)urlString toData:(UTF8CStringView)data;
 @end
 
 @implementation ServiceWorkerSchemeHandler
@@ -3652,9 +3653,9 @@ static bool didStartURLSchemeTaskForImportedScript = false;
     return self;
 }
 
-- (void)addMappingFromURLString:(NSString *)urlString toData:(const char*)data
+- (void)addMappingFromURLString:(NSString *)urlString toData:(UTF8CStringView)data
 {
-    _dataMappings.set(urlString, [NSData dataWithBytes:(void*)data length:strlen(data)]);
+    _dataMappings.set(urlString, toNSData(byteCast<uint8_t>(data.span())));
 }
 
 - (void)webView:(WKWebView *)webView startURLSchemeTask:(id <WKURLSchemeTask>)task
@@ -3726,10 +3727,10 @@ TEST(ServiceWorker, ExtensionServiceWorker)
     [[WKWebsiteDataStore defaultDataStore] _setResourceLoadStatisticsEnabled:NO];
 
     RetainPtr schemeHandler = adoptNS([ServiceWorkerSchemeHandler new]);
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/other.html" toData:"foo"];
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:"importScripts('sw-ext://ABC/importedScript.js');"];
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/bar.xml" toData:"bar"];
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/importedScript.js" toData:"fetch('sw-ext://ABC/bar.xml');"];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/other.html" toData:"foo"_s];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:"importScripts('sw-ext://ABC/importedScript.js');"_s];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/bar.xml" toData:"bar"_s];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/importedScript.js" toData:"fetch('sw-ext://ABC/bar.xml');"_s];
 
     WKWebViewConfiguration *webViewConfiguration = [WKWebViewConfiguration _test_configurationWithTestPlugInClassName:@"ServiceWorkerPagePlugIn"];
 
@@ -3814,7 +3815,7 @@ TEST(ServiceWorker, ExtensionServiceWorkerDisableCORS)
     String filenameRequestedOverHTTP;
     HTTPServer server([&] (Connection connection) {
         connection.receiveHTTPRequest([&, connection](Vector<char>&& bytes) mutable {
-            String requestString(bytes.span());
+            String requestString = String::fromLatin1(bytes.span());
             if (requestString.startsWithIgnoringASCIICase("OPTIONS"_s)) {
                 madeHTTPOptionsRequest = true;
                 connection.send(
@@ -3836,7 +3837,7 @@ TEST(ServiceWorker, ExtensionServiceWorkerDisableCORS)
     auto testJS = makeString("fetch('http://127.0.0.1:"_s, server.port(), "/bar.xml', { headers: { 'Custom-Header': 'CustomHeaderValue' } });"_s);
 
     RetainPtr schemeHandler = adoptNS([ServiceWorkerSchemeHandler new]);
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:testJS.utf8().data()];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:testJS.utf8()];
 
     WKWebViewConfiguration *webViewConfiguration = [WKWebViewConfiguration _test_configurationWithTestPlugInClassName:@"ServiceWorkerPagePlugIn"];
     [webViewConfiguration setURLSchemeHandler:schemeHandler.get() forURLScheme:@"sw-ext"];
@@ -3862,7 +3863,7 @@ TEST(ServiceWorker, ExtensionServiceWorkerDisableCORS)
 
     // It should load bar.xml.
     Util::run(&madeHTTPGetRequest);
-    EXPECT_STREQ(filenameRequestedOverHTTP.utf8().data(), "/bar.xml");
+    EXPECT_EQ(filenameRequestedOverHTTP, "/bar.xml"_s);
 
     // It shouldn't have done a CORS preflight.
     EXPECT_FALSE(madeHTTPOptionsRequest);
@@ -3884,8 +3885,8 @@ TEST(ServiceWorker, ExtensionServiceWorkerWithModules)
 
     RetainPtr schemeHandler = adoptNS([ServiceWorkerSchemeHandler new]);
 
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/exports.js" toData:"const x = 805; export { x };"];
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:"import { x } from './exports.js'; x;"];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/exports.js" toData:"const x = 805; export { x };"_s];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:"import { x } from './exports.js'; x;"_s];
 
     WKWebViewConfiguration *webViewConfiguration = [WKWebViewConfiguration _test_configurationWithTestPlugInClassName:@"ServiceWorkerPagePlugIn"];
     webViewConfiguration.websiteDataStore = [adoptNS([WKWebViewConfiguration new]) websiteDataStore];
@@ -3921,8 +3922,8 @@ TEST(ServiceWorker, ExtensionServiceWorkerNotPersistedToDisk)
     RetainPtr dataStore = adoptNS([[WKWebsiteDataStore alloc] _initWithConfiguration:websiteDataStoreConfiguration.get()]);
 
     RetainPtr schemeHandler = adoptNS([ServiceWorkerSchemeHandler new]);
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/other.html" toData:"foo"];
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:"// Extension service worker"];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/other.html" toData:"foo"_s];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/sw.js" toData:"// Extension service worker"_s];
 
     WKWebViewConfiguration *webViewConfiguration = [WKWebViewConfiguration _test_configurationWithTestPlugInClassName:@"ServiceWorkerPagePlugIn"];
 
@@ -3981,7 +3982,7 @@ TEST(ServiceWorker, ExtensionServiceWorkerFailureBadScript)
     [[WKWebsiteDataStore defaultDataStore] _setResourceLoadStatisticsEnabled:NO];
 
     RetainPtr schemeHandler = adoptNS([ServiceWorkerSchemeHandler new]);
-    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/bad-sw.js" toData:"1 = 1;"];
+    [schemeHandler addMappingFromURLString:@"sw-ext://ABC/bad-sw.js" toData:"1 = 1;"_s];
 
     WKWebViewConfiguration *webViewConfiguration = [WKWebViewConfiguration _test_configurationWithTestPlugInClassName:@"ServiceWorkerPagePlugIn"];
     [webViewConfiguration setURLSchemeHandler:schemeHandler.get() forURLScheme:@"sw-ext"];
@@ -5139,9 +5140,9 @@ TEST(ServiceWorkers, ServiceWorkerStorageTiming)
     [webView1 loadRequest:server.request()];
     TestWebKitAPI::Util::run(&done);
 
-    HashMap<String, String> sourceHeaders;
-    sourceHeaders.add("Cache-Control"_s, "no-cache"_s);
-    sourceHeaders.add("Content-Type"_s, "application/javascript"_s);
+    Vector<WTF::KeyValuePair<String, String>> sourceHeaders;
+    sourceHeaders.append({ "Cache-Control"_s, "no-cache"_s });
+    sourceHeaders.append({ "Content-Type"_s, "application/javascript"_s });
     server.setResponse("/sw.js"_s, TestWebKitAPI::HTTPResponse { WTF::move(sourceHeaders), serviceWorkerStorageTimingScriptBytesV2 });
 
     done = false;

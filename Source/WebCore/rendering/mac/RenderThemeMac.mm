@@ -92,6 +92,8 @@
 #import <wtf/ObjCRuntimeExtras.h>
 #import <wtf/RetainPtr.h>
 #import <wtf/StdLibExtras.h>
+#import <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
+#import <wtf/text/CString.h>
 
 #if ENABLE(SERVICE_CONTROLS)
 #include "ImageControlsMac.h"
@@ -445,7 +447,12 @@ static Color activeButtonTextColor()
 
 #endif
 
-static SRGBA<uint8_t> menuBackgroundColor()
+static bool usesLegacyDeprecatedSystemColors()
+{
+    return !linkedOnOrAfterSDKWithBehavior(SDKAlignedBehavior::DeprecatedSystemColorsUseCSSColor4Mappings);
+}
+
+static SRGBA<uint8_t> legacyMenuBackgroundColor()
 {
     RetainPtr offscreenRep = adoptNS([[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nil pixelsWide:1 pixelsHigh:1
         bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:4 bitsPerPixel:32]);
@@ -466,6 +473,74 @@ ALLOW_DEPRECATED_DECLARATIONS_END
     [offscreenRep getPixel:pixel.data() atX:0 y:0];
 
     return makeFromComponentsClamping<SRGBA<uint8_t>>(pixel[0], pixel[1], pixel[2], pixel[3]);
+}
+
+static std::optional<Color> legacyDeprecatedSystemColor(CSSValueID cssValueID, OptionSet<StyleColorOptions> options)
+{
+    auto selectCocoaColor = [cssValueID, useDarkAppearance = options.contains(StyleColorOptions::UseDarkAppearance)] () -> SEL {
+        switch (cssValueID) {
+        case CSSValueActivecaption:
+            return @selector(windowFrameTextColor);
+        case CSSValueAppworkspace:
+            return @selector(headerColor);
+        case CSSValueThreedface:
+            // Fallback to hardcoded color below in light mode.
+            return useDarkAppearance ? @selector(controlColor) : nullptr;
+        case CSSValueButtonhighlight:
+            return @selector(controlHighlightColor);
+        case CSSValueButtonshadow:
+            return @selector(controlShadowColor);
+        case CSSValueCaptiontext:
+            return @selector(textColor);
+        case CSSValueInactiveborder:
+            return @selector(controlBackgroundColor);
+        case CSSValueInactivecaption:
+            return @selector(controlBackgroundColor);
+        case CSSValueInactivecaptiontext:
+            return @selector(textColor);
+        case CSSValueInfotext:
+            return @selector(textColor);
+        case CSSValueMenutext:
+            return @selector(labelColor);
+        case CSSValueScrollbar:
+            return @selector(scrollBarColor);
+        case CSSValueThreeddarkshadow:
+            return @selector(controlDarkShadowColor);
+        case CSSValueThreedshadow:
+            return @selector(shadowColor);
+        case CSSValueThreedhighlight:
+            return @selector(highlightColor);
+        case CSSValueThreedlightshadow:
+            return @selector(controlLightHighlightColor);
+        case CSSValueWindow:
+            return @selector(windowBackgroundColor);
+        case CSSValueWindowframe:
+            return @selector(windowFrameColor);
+        case CSSValueWindowtext:
+            return @selector(windowFrameTextColor);
+        default:
+            return nullptr;
+        }
+    };
+
+    if (auto selector = selectCocoaColor()) {
+        if (RetainPtr color = wtfObjCMsgSend<NSColor *>([NSColor class], selector))
+            return semanticColorFromNSColor(color.get());
+    }
+
+    switch (cssValueID) {
+    case CSSValueActiveborder:
+        return defaultFocusRingColor(options);
+    case CSSValueThreedface:
+        return Color::lightGray;
+    case CSSValueInfobackground:
+        // No corresponding NSColor for this so we use a hard coded value.
+        return SRGBA<uint8_t> { 251, 252, 197 };
+    case CSSValueMenu:
+        return legacyMenuBackgroundColor();
+    default:
+        return std::nullopt;
+    }
 }
 
 Color RenderThemeMac::systemColor(CSSValueID cssValueID, OptionSet<StyleColorOptions> options) const
@@ -507,8 +582,12 @@ Color RenderThemeMac::systemColor(CSSValueID cssValueID, OptionSet<StyleColorOpt
         // The following colors would expose user appearance preferences to the web, and could be used for fingerprinting.
         // These are available only when the web view opts into the system appearance.
         case CSSValueWebkitFocusRingColor:
-        case CSSValueActiveborder:
             return focusRingColor(options);
+
+        case CSSValueActiveborder:
+            if (usesLegacyDeprecatedSystemColors())
+                return focusRingColor(options);
+            break;
 
         case CSSValueAppleSystemControlAccent:
             return systemAppearanceColor(cache.systemControlAccentColor, @selector(controlAccentColor));
@@ -539,27 +618,21 @@ Color RenderThemeMac::systemColor(CSSValueID cssValueID, OptionSet<StyleColorOpt
     auto color = [this, cssValueID, options, useDarkAppearance]() -> Color {
         LocalDefaultSystemAppearance localAppearance(useDarkAppearance);
 
+        if (usesLegacyDeprecatedSystemColors()) {
+            if (auto color = legacyDeprecatedSystemColor(cssValueID, options))
+                return *color;
+        }
+
         auto selectCocoaColor = [cssValueID, useDarkAppearance] () -> SEL {
             switch (cssValueID) {
-            case CSSValueActivecaption:
-                return @selector(windowFrameTextColor);
-            case CSSValueAppworkspace:
-                return @selector(headerColor);
             case CSSValueButtonface:
-            case CSSValueThreedface:
                 // Fallback to hardcoded color below in light mode.
                 return useDarkAppearance ? @selector(controlColor) : nullptr;
-            case CSSValueButtonhighlight:
-                return @selector(controlHighlightColor);
-            case CSSValueButtonshadow:
-                return @selector(controlShadowColor);
             case CSSValueButtontext:
                 return @selector(controlTextColor);
             case CSSValueCanvas:
                 return @selector(textBackgroundColor);
             case CSSValueCanvastext:
-                return @selector(textColor);
-            case CSSValueCaptiontext:
                 return @selector(textColor);
             case CSSValueField:
                 return @selector(controlColor);
@@ -569,34 +642,8 @@ Color RenderThemeMac::systemColor(CSSValueID cssValueID, OptionSet<StyleColorOpt
                 return @selector(disabledControlTextColor);
             case CSSValueHighlighttext:
                 return @selector(selectedTextColor);
-            case CSSValueInactiveborder:
-                return @selector(controlBackgroundColor);
-            case CSSValueInactivecaption:
-                return @selector(controlBackgroundColor);
-            case CSSValueInactivecaptiontext:
-                return @selector(textColor);
-            case CSSValueInfotext:
-                return @selector(textColor);
-            case CSSValueMenutext:
-                return @selector(labelColor);
-            case CSSValueScrollbar:
-                return @selector(scrollBarColor);
             case CSSValueText:
                 return @selector(textColor);
-            case CSSValueThreeddarkshadow:
-                return @selector(controlDarkShadowColor);
-            case CSSValueThreedshadow:
-                return @selector(shadowColor);
-            case CSSValueThreedhighlight:
-                return @selector(highlightColor);
-            case CSSValueThreedlightshadow:
-                return @selector(controlLightHighlightColor);
-            case CSSValueWindow:
-                return @selector(windowBackgroundColor);
-            case CSSValueWindowframe:
-                return @selector(windowFrameColor);
-            case CSSValueWindowtext:
-                return @selector(windowFrameTextColor);
             case CSSValueAppleSystemHeaderText:
                 return @selector(headerTextColor);
             case CSSValueAppleSystemBackground:
@@ -690,22 +737,13 @@ Color RenderThemeMac::systemColor(CSSValueID cssValueID, OptionSet<StyleColorOpt
             return textColorForActiveButton();
 
         case CSSValueButtonface:
-        case CSSValueThreedface:
             // Dark mode uses [NSColor controlColor].
             // We selected this value instead of [NSColor controlColor] to avoid website incompatibilities.
             // We may want to consider changing to [NSColor controlColor] some day.
             ASSERT(!localAppearance.usingDarkAppearance());
             return Color::lightGray;
 
-        case CSSValueInfobackground:
-            // No corresponding NSColor for this so we use a hard coded value.
-            return SRGBA<uint8_t> { 251, 252, 197 };
-
-        case CSSValueMenu:
-            return menuBackgroundColor();
-
         case CSSValueWebkitFocusRingColor:
-        case CSSValueActiveborder:
             return defaultFocusRingColor(options);
 
         case CSSValueAppleSystemControlAccent:
@@ -1229,6 +1267,8 @@ static void setFontFromControlSize(Style::ComputedStyle& style, NSControlSize co
 
     // Reset line height
     style.setLineHeight(Style::ComputedStyle::initialLineHeight());
+    style.setTextAutosizingAdjustedLineHeight(Style::ComputedStyle::initialLineHeight());
+
     style.setFontDescription(WTF::move(fontDescription));
 }
 
@@ -1423,6 +1463,7 @@ void RenderThemeMac::adjustMenuListButtonStyle(Style::ComputedStyle& style, cons
     style.setMinHeight(18_css_px);
 
     style.setLineHeight(Style::ComputedStyle::initialLineHeight());
+    style.setTextAutosizingAdjustedLineHeight(Style::ComputedStyle::initialLineHeight());
 }
 
 std::span<const IntSize, 4> RenderThemeMac::menuListSizes() const
@@ -1771,7 +1812,7 @@ LayoutSize RenderThemeMac::attachmentIntrinsicSize(const RenderAttachment& attac
 static RefPtr<Icon> iconForAttachment(const String& fileName, const String& attachmentType, const String& title)
 {
 // FIXME: Remove after rdar://136373445 is fixed.
-#define LOG_ATTACHMENT(fmt, ...) RELEASE_LOG(Editing, "iconForAttachment(type='%s') " fmt, attachmentType.utf8().data(), ##__VA_ARGS__);
+#define LOG_ATTACHMENT(fmt, ...) RELEASE_LOG(Editing, "iconForAttachment(type='%s') " fmt, attachmentType.utf8(), ##__VA_ARGS__);
 
     if (!attachmentType.isEmpty() && !equalLettersIgnoringASCIICase(attachmentType, "public.data"_s)) {
         if (equalLettersIgnoringASCIICase(attachmentType, "public.directory"_s) || equalLettersIgnoringASCIICase(attachmentType, "multipart/x-folder"_s) || equalLettersIgnoringASCIICase(attachmentType, "application/vnd.apple.folder"_s)) {
@@ -1788,10 +1829,10 @@ static RefPtr<Icon> iconForAttachment(const String& fileName, const String& atta
                 type = UTIFromMIMEType(attachmentType);
 
             if (auto icon = Icon::createIconForUTI(type)) {
-                LOG_ATTACHMENT("-> Got icon for %s '%s'", type == attachmentType ? "declared UTI" : "UTI-from-MIMEtype", type.utf8().data());
+                LOG_ATTACHMENT("-> Got icon for %s '%s'", type == attachmentType ? "declared UTI" : "UTI-from-MIMEtype", type.utf8());
                 return icon;
             }
-            LOG_ATTACHMENT("-> No icon for %s '%s'! Will fallback to filename or title...", type == attachmentType ? "declared UTI" : "UTI-from-MIMEtype", type.utf8().data());
+            LOG_ATTACHMENT("-> No icon for %s '%s'! Will fallback to filename or title...", type == attachmentType ? "declared UTI" : "UTI-from-MIMEtype", type.utf8());
         }
     }
 
@@ -1806,10 +1847,10 @@ static RefPtr<Icon> iconForAttachment(const String& fileName, const String& atta
     RetainPtr nsTitle = title.createNSString();
     if (RetainPtr<NSString> fileExtension = nsTitle.get().pathExtension; fileExtension.get().length) {
         if (auto icon = Icon::createIconForFileExtension(fileExtension.get())) {
-            LOG_ATTACHMENT("-> Got icon for title file extension '%s'", String(fileExtension.get()).utf8().data());
+            LOG_ATTACHMENT("-> Got icon for title file extension '%s'", UTF8CString { fileExtension });
             return icon;
         }
-        LOG_ATTACHMENT("-> No icon for title file extension '%s'! Will fallback to public.data icon", String(fileExtension.get()).utf8().data());
+        LOG_ATTACHMENT("-> No icon for title file extension '%s'! Will fallback to public.data icon", UTF8CString { fileExtension });
     } else
         LOG_ATTACHMENT("-> No file extension in title! Will fallback to public.data icon");
 
@@ -1874,10 +1915,10 @@ static void paintAttachmentIcon(const RenderAttachment& attachment, GraphicsCont
     if (!icon)
         return;
 
-    context.drawImage(*icon, layout.iconRect);
+    context.drawBitmapImage(*icon, layout.iconRect);
 }
 
-static std::pair<RefPtr<Image>, float> createAttachmentPlaceholderImage(float deviceScaleFactor, const AttachmentLayout& layout)
+static std::pair<RefPtr<BitmapImage>, float> createAttachmentPlaceholderImage(float deviceScaleFactor, const AttachmentLayout& layout)
 {
     RetainPtr configuration = [NSImageSymbolConfiguration configurationWithPointSize:32 weight:NSFontWeightRegular scale:NSImageSymbolScaleMedium];
     RetainPtr image = [[NSImage imageWithSystemSymbolName:@"arrow.down.circle" accessibilityDescription:nil] imageWithSymbolConfiguration:configuration.get()];
@@ -1898,7 +1939,7 @@ static void paintAttachmentIconPlaceholder(const RenderAttachment& attachment, G
     placeholderRect.setX(layout.iconRect.x() + (layout.iconRect.width() - placeholderRect.width()) / 2);
     placeholderRect.setY(layout.iconRect.y() + (layout.iconRect.height() - placeholderRect.height()) / 2);
 
-    context.drawImage(*placeholderImage, placeholderRect);
+    context.drawBitmapImage(*placeholderImage, placeholderRect);
 }
 
 static void paintAttachmentTitleBackground(const RenderAttachment& attachment, GraphicsContext& context, AttachmentLayout& layout)

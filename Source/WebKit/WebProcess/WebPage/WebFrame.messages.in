@@ -29,6 +29,7 @@ messages -> WebFrame {
     GetFrameInfo() -> (struct std::optional<WebKit::FrameInfoData> data)
     CreateProvisionalFrame(struct WebKit::ProvisionalFrameCreationParameters creationParameters)
     DestroyProvisionalFrame();
+    UpdateSandboxFlags(WebCore::SandboxFlags sandboxFlags)
     FindFocusableElementDescendingIntoRemoteFrame(enum:uint8_t WebCore::FocusDirection direction, struct WebCore::FocusEventData focusEventData, enum:bool WebCore::ShouldFocusElement shouldFocusElement) -> (enum:bool WebCore::FoundElementInRemoteFrame foundElement)
     FindFocusableElementContinuingFromFrame(enum:uint8_t WebCore::FocusDirection direction, WebCore::FrameIdentifier frameIdentifer, struct WebCore::FocusEventData focusEventData, enum:bool WebCore::ShouldFocusElement shouldFocusElement)
     TakeSnapshotOfNode(WebCore::JSHandleIdentifier identifier) -> (std::optional<WebCore::ShareableBitmapHandle> snapshot);
@@ -46,6 +47,7 @@ messages -> WebFrame {
     RequestContainerJSHandleForExtractedText(struct WebCore::TextExtraction::ExtractedText text) -> (struct std::optional<WebKit::JSHandleInfo> handle)
     RequestContainerJSHandleForSearchTexts(Vector<String> texts, std::optional<WebCore::NodeIdentifier> fallbackNodeIdentifier) -> (struct std::optional<WebKit::JSHandleInfo> handle)
     RequestContentFrameIdentifierForNode(WebCore::NodeIdentifier nodeIdentifier) -> (std::optional<WebCore::FrameIdentifier> frameIdentifier)
+    FindFirstConnectedNode(Vector<WebCore::NodeIdentifier> candidates) -> (std::optional<WebCore::NodeIdentifier> nodeIdentifier)
 
     # Element targeting support
     GetSelectorPathsForNode(struct WebKit::JSHandleInfo handle) -> (Vector<HashSet<String>> selectors)

@@ -15,6 +15,7 @@
 
 namespace JSC {
 
+class JSModuleRecord;
 class VM;
 
 } // namespace JSC
@@ -36,16 +37,23 @@ JS_EXPORT_PRIVATE void recordLayout(const String& path);
 JS_EXPORT_PRIVATE void recordVMLayout(VM&, const String& path, HeapProbes = HeapProbes::Live);
 
 // The host functions bun:jsc registers under the names the jsc shell gives them: jitcacheStatus, jitcacheProgress,
-// jitcacheUCBStatistics, jitcacheDescribeHeap and jitcacheBodyEvents.
+// jitcacheUCBStatistics, jitcacheDescribeHeap, jitcacheBodyEvents and jitcacheRewriteSection. Bun needs the last because
+// only Bun imports a module's analysis, so the tests that damage ucb.analysis run there.
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheStatus);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheProgress);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheUCBStatistics);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheDescribeHeap);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheBodyEvents);
+JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheRewriteSection);
 
 // The body-event dump at the end of a run, one JSON line per keyed body with events and one with the VM's totals; it
 // needs no JITCache configuration.
 JS_EXPORT_PRIVATE void writeBodyEvents(VM&, const String& path);
+
+// Bun's fallbackParse calls it for a module record it built from the module info JITCache imported, with the record the
+// analysis parse built from the same text. While the VM's twin report is open, the first field in which the two differ,
+// if any, is reported as a UCB difference named analysis, with the record's module key; without a report it does nothing.
+JS_EXPORT_PRIVATE void verifyModuleAnalysisTwin(VM&, JSModuleRecord& fromArtifact, JSModuleRecord& fromParse);
 
 } // namespace JSC::JITCache
 

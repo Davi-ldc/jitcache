@@ -818,23 +818,12 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
         if (excludes(entry.key))
             continue;
         // Each body passes the full checks before it moves, so the new pack holds only what a strict reader accepts.
-        auto header = decodePackRecordHeader(source.pack.bytes(entry.offset, packRecordHeaderBytes).first<packRecordHeaderBytes>());
-        ASCIILiteral check = ContainerChecks::pack;
-        bool sound = header && header->key == entry.key && header->size == entry.size && header->version == entry.version;
-        if (sound) {
-            auto layout = validateBody(source.pack.bytes(entry.offset + packRecordHeaderBytes, entry.size), entry.key, target.headerDigest, ValidationMode::Full);
-            if (!layout) {
-                sound = false;
-                check = layout.error();
-            } else
-                sound = packEntryRepeatsEnvelope(entry, *layout);
-        }
-        if (!sound) {
+        if (auto check = checkPackedBody(source.pack, entry, target.headerDigest)) {
             if (target.dropsDamagedBodies) {
-                result.droppedBodies.append({ entry.key, check });
+                result.droppedBodies.append({ entry.key, *check });
                 continue;
             }
-            return std::unexpected(CompactionFailure { Kind::Damaged, check, makeString("body "_s, String { std::span<const char> { bodyKeyHexDigits(entry.key) } }, " in cache/pack"_s) });
+            return std::unexpected(CompactionFailure { Kind::Damaged, *check, makeString("body "_s, String::fromLatin1(std::span<const char> { bodyKeyHexDigits(entry.key) }), " in cache/pack"_s) });
         }
         uint64_t recordBytes = packRecordHeaderBytes + entry.size;
         uint64_t extent = *packRecordExtent(entry.size);
@@ -913,6 +902,19 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
 #endif
 }
 
+std::optional<ContainerCheck> ArtifactWriter::checkPackedBody(const MappedPack& pack, const PackIndexEntry& entry, std::span<const uint8_t, 16> headerDigest)
+{
+    auto header = decodePackRecordHeader(pack.bytes(entry.offset, packRecordHeaderBytes).first<packRecordHeaderBytes>());
+    if (!header || header->key != entry.key || header->size != entry.size || header->version != entry.version)
+        return ContainerChecks::pack;
+    auto layout = validateBody(pack.bytes(entry.offset + packRecordHeaderBytes, entry.size), entry.key, headerDigest, ValidationMode::Full);
+    if (!layout)
+        return layout.error();
+    if (!packEntryRepeatsEnvelope(entry, *layout))
+        return ContainerChecks::pack;
+    return std::nullopt;
+}
+
 #if ENABLE(JITCACHE_TWINS)
 
 void ArtifactWriter::setFaultForTesting(std::optional<FaultForTesting> fault)
@@ -965,8 +967,13 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::rewriteSection(const 
 
     CommitStamp stamp { body->key(), body->llintThreshold(), body->counterProgress(), body->highestTier() };
     uint8_t highestTier = stamp.highestTier;
+    // The Full open checked that the body holds every kind its highest tier requires, an empty section included, and no
+    // other kind except ucb.analysis. A capture stores ucb.analysis only when it built one, and one is never empty.
+    auto holds = [&](SectionKind sectionKind) {
+        return isSectionRequired(sectionKind, highestTier) || !body->section(sectionKind).empty();
+    };
     ASCIILiteral sectionName = sectionKindDescription(kind).name;
-    if (!isSectionRequired(kind, highestTier))
+    if (!holds(kind))
         return failure(WriterChecks::rewrite, makeString("the body holds no "_s, sectionName, " section"_s));
     uint64_t sectionSize = body->section(kind).size();
     if (offset > sectionSize || bytes.size() > sectionSize - offset)
@@ -975,7 +982,7 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::rewriteSection(const 
     size_t copyBytes = 0;
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
         auto sectionKind = static_cast<SectionKind>(index);
-        if (isSectionRequired(sectionKind, highestTier))
+        if (holds(sectionKind))
             copyBytes += body->section(sectionKind).size();
     }
     if (!m_budget.tryCharge(copyBytes))
@@ -990,7 +997,7 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::rewriteSection(const 
     size_t copied = 0;
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
         auto sectionKind = static_cast<SectionKind>(index);
-        if (!isSectionRequired(sectionKind, highestTier))
+        if (!holds(sectionKind))
             continue;
         auto section = body->section(sectionKind);
         auto destination = copy.mutableSpan().subspan(copied, section.size());

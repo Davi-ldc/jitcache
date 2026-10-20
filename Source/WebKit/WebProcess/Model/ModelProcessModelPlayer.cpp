@@ -138,7 +138,7 @@ void ModelProcessModelPlayer::didFinishLoading(WebCore::NodeIdentifier nodeID, c
 
 void ModelProcessModelPlayer::didConvertModelData(Ref<WebCore::SharedBuffer>&& convertedData, const String& convertedMIMEType)
 {
-    RELEASE_LOG(ModelElement, "%p - ModelProcessModelPlayer didConvertModelData mimeType=%s id=%" PRIu64, this, convertedMIMEType.utf8().data(), m_id.toUInt64());
+    RELEASE_LOG(ModelElement, "%p - ModelProcessModelPlayer didConvertModelData mimeType=%s id=%" PRIu64, this, convertedMIMEType.utf8(), m_id.toUInt64());
     RELEASE_ASSERT(modelProcessEnabled());
 
     protect(client())->didConvertModelData(*this, WTF::move(convertedData), convertedMIMEType);
@@ -225,7 +225,7 @@ void ModelProcessModelPlayer::load(WebCore::NodeIdentifier nodeID, WebCore::Mode
     RELEASE_LOG(ModelElement, "%p - ModelProcessModelPlayer load model id=%" PRIu64, this, m_id.toUInt64());
 
     if (!WebCore::MIMETypeRegistry::isUSDMIMEType(model.mimeType())) {
-        RELEASE_LOG(ModelElement, "%p - ModelProcessModelPlayer::load: Found unexpected model mimetype: %s", this, model.mimeType().utf8().data());
+        RELEASE_LOG(ModelElement, "%p - ModelProcessModelPlayer::load: Found unexpected model mimetype: %s", this, model.mimeType().utf8());
         if (RefPtr client = m_client.get())
             client->logWarning(*this, makeString("Unexpected USDZ MIME type \""_s, model.mimeType(), "\" in <model> element. Expected \"model/vnd.usdz+zip\". Some features of <model> may not work properly. The model may fail to render in a future release."_s));
     }
@@ -286,8 +286,10 @@ void ModelProcessModelPlayer::sizeDidChange(WebCore::LayoutSize size)
 
 void ModelProcessModelPlayer::configureGraphicsLayer(WebCore::GraphicsLayer& graphicsLayer, WebCore::ModelPlayerGraphicsLayerConfiguration&& configuration)
 {
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-    if (configuration.detachedForImmersive)
+    // A hosting context can only be hosted in one place, so the page must drop its copy while the content is
+    // hosted elsewhere.
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (configuration.presentationMode != WebCore::ModelPresentationMode::Inline)
         return graphicsLayer.removeModelContents();
 #endif
 
@@ -491,10 +493,41 @@ void ModelProcessModelPlayer::setCurrentTime(WebCore::NodeIdentifier nodeID, Sec
     });
 }
 
-void ModelProcessModelPlayer::setEnvironmentMap(Ref<WebCore::SharedBuffer>&& data)
+void ModelProcessModelPlayer::setEnvironmentMap(Ref<WebCore::SharedBuffer>&& data, const URL& sourceURL)
 {
-    send(Messages::ModelProcessModelPlayerProxy::SetEnvironmentMap(WTF::move(data)));
+    m_environmentMapKind = WebCore::EnvironmentMapKind::Custom;
+    m_environmentMapURL = sourceURL;
+    send(Messages::ModelProcessModelPlayerProxy::SetEnvironmentMapData(WTF::move(data)));
 }
+
+String ModelProcessModelPlayer::environmentMapForTesting() const
+{
+    switch (m_environmentMapKind) {
+    case WebCore::EnvironmentMapKind::None:
+        return "none"_s;
+    case WebCore::EnvironmentMapKind::Default:
+        return "auto"_s;
+    case WebCore::EnvironmentMapKind::Custom:
+        return m_environmentMapURL.string();
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+#if ENABLE(SPATIAL_PORTAL)
+
+void ModelProcessModelPlayer::disableEnvironmentMap()
+{
+    m_environmentMapKind = WebCore::EnvironmentMapKind::None;
+    send(Messages::ModelProcessModelPlayerProxy::DisableEnvironmentMap());
+}
+
+void ModelProcessModelPlayer::enableSystemEnvironmentMap()
+{
+    m_environmentMapKind = WebCore::EnvironmentMapKind::Default;
+    send(Messages::ModelProcessModelPlayerProxy::EnableSystemEnvironmentMap());
+}
+
+#endif
 
 void ModelProcessModelPlayer::setHasPortal(bool hasPortal)
 {
@@ -507,12 +540,12 @@ void ModelProcessModelPlayer::setHasPortal(bool hasPortal)
 
 #if ENABLE(SPATIAL_PORTAL)
 
-void ModelProcessModelPlayer::setPortalTransform(WebCore::PortalTransformKind kind)
+void ModelProcessModelPlayer::setPortalTransform(const WebCore::UsedPortalTransform& portalTransform)
 {
     // Deliberately unconditional. Skipping the send when the value matches the default
     // would leave a portal whose portal-transform is the initial `auto` indistinguishable
     // from a standalone <model>.
-    m_portalTransform = kind;
+    m_portalTransform = portalTransform;
     send(Messages::ModelProcessModelPlayerProxy::SetPortalTransform(m_portalTransform));
 }
 
@@ -523,6 +556,11 @@ void ModelProcessModelPlayer::setPortalAction(WebCore::PortalActionKind kind)
 
     m_portalAction = kind;
     send(Messages::ModelProcessModelPlayerProxy::SetPortalAction(m_portalAction));
+}
+
+void ModelProcessModelPlayer::setAnchor(WebCore::NodeIdentifier nodeID, std::optional<WebCore::NodeIdentifier> anchorNode, const String& placement)
+{
+    send(Messages::ModelProcessModelPlayerProxy::SetAnchor(nodeID, anchorNode, placement));
 }
 
 #endif
@@ -579,6 +617,30 @@ void ModelProcessModelPlayer::exitImmersivePresentation(CompletionHandler<void()
 }
 
 #endif
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+
+void ModelProcessModelPlayer::enterVolumetricPresentation(CompletionHandler<void(std::optional<WebCore::LayerHostingContextIdentifier>)>&& completion)
+{
+    sendWithAsyncReply(Messages::ModelProcessModelPlayerProxy::EnterVolumetricPresentation(), WTF::move(completion));
+}
+
+void ModelProcessModelPlayer::exitVolumetricPresentation()
+{
+    send(Messages::ModelProcessModelPlayerProxy::ExitVolumetricPresentation());
+}
+
+void ModelProcessModelPlayer::updateVolumetricPresentationSize(const WebCore::FloatSize& volumeSizeInMeters)
+{
+    send(Messages::ModelProcessModelPlayerProxy::UpdateVolumetricPresentationSize(volumeSizeInMeters));
+}
+
+#endif
+
+void ModelProcessModelPlayer::sceneGraphAsTextForTesting(std::optional<WebCore::NodeIdentifier> rootNode, Vector<std::pair<WebCore::NodeIdentifier, String>>&& modelLabels, const WebCore::ModelSceneGraphAsTextOptions& options, CompletionHandler<void(String&&)>&& completionHandler)
+{
+    sendWithAsyncReply(Messages::ModelProcessModelPlayerProxy::SceneGraphAsTextForTesting(rootNode, modelLabels, options), WTF::move(completionHandler));
+}
 
 }
 

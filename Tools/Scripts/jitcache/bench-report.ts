@@ -24,7 +24,8 @@ const cpuTimeFields: Record<string, (field: string) => boolean> = {
   install: field => field === "total" || field === "bodyRelease",
   compile: field => field === "compileNanoseconds" || field === "finalizeNanoseconds",
   capture: field => /^(scoring|build)\./.test(field) || /^writer\.(.+\.stream|reread|publish)$/.test(field),
-  delta: field => field === "phase1Nanoseconds" || field === "phase2Nanoseconds",
+  delta: field => field === "phase1Nanoseconds" || field === "phase2Nanoseconds" || field === "phase3Nanoseconds",
+  pack: field => field === "compactionNanoseconds",
 };
 
 export const isCPUTime = (span: string) => {
@@ -115,7 +116,7 @@ export function spansByCopy(copies: (Map<string, number> | null)[]): Map<string,
 // ---------------------------------------------------------------------------------------------------------------------
 // The installation bound
 
-// A body's import cost is its import or seed request's counted total plus its install's total, joined by key with a
+// A body's import cost is its import request's counted total plus its install's total, joined by key with a
 // request that came before the install in its process; its native cost is its compile event's compilation plus
 // finalization in processes whose artifact holds no body and whose role records nothing. An import takes the place of a
 // body's first compilation, so a process gives a body at most one sample per side: on the import side its first
@@ -126,7 +127,7 @@ interface ImportSample {
   nanoseconds: number; // request + install
   request: number; // the request event's counted total
   install: number; // the install event's total, the install function's thread CPU time
-  action: string; // import or seed
+  action: string; // the request's action, import
   imageCodeSize: number; // the image's linked size
   allocation: number; // the installed code's executable allocation, the install event's codeSize
   fixups: number; // the image's fixup count
@@ -145,7 +146,7 @@ export interface BodyTally {
   importSamples: ImportSample[];
   nativeSamples: NativeSample[];
   installSupportGenerated: number;
-  installWithoutRequest: number; // installs that no import or seed request of the key preceded in their process
+  installWithoutRequest: number; // installs that no import request of the key preceded in their process
   compileSupportGenerated: number;
   supportGeneratedNanoseconds: number[]; // the native compiles that generated support, which only the whole native cost counts
   requestedWithoutInstall: number; // import-side processes that imported the body and never installed it
@@ -188,12 +189,12 @@ function firstByKey(events: BenchEvent[], test: (event: BenchEvent) => boolean):
 // One import-side process. Its events come in the order the process wrote them, so an install joins only a request
 // written before it.
 export function addImportSide(tallies: Map<string, BodyTally>, events: BenchEvent[]) {
-  const requests = new Map<string, BenchEvent>(); // each key's first import or seed request so far
+  const requests = new Map<string, BenchEvent>(); // each key's first import request so far
   const installed = new Set<string>();
   for (const event of events) {
     const key = event.key;
     if (typeof key !== "string") continue;
-    if (event.event === "request" && (event.action === "import" || event.action === "seed")) {
+    if (event.event === "request" && event.action === "import") {
       if (!requests.has(key)) requests.set(key, event);
       continue;
     }
@@ -255,8 +256,8 @@ export function addNativeSide(tallies: Map<string, BodyTally>, events: BenchEven
 
 export type BodyStatus = "joined" | "set aside" | "native only" | "import only";
 
-// Why a side has no counting sample: per-VM support generated in each of its samples, or installs that no import or seed
-// request preceded, as an attach's.
+// Why a side has no counting sample: per-VM support generated in each of its samples, or installs that no import request
+// preceded, as an attach's.
 interface SetAside {
   side: "import" | "native";
   reason: "supportGenerated" | "installWithoutImportRequest";

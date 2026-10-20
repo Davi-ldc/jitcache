@@ -7,10 +7,11 @@
 // Producer, roSmall runs three times and roArrow twice, neither compiles, and roDead runs twice and loses its CodeBlock to
 // a full collection before the capture (sequence 0, which jettisons every CodeBlock old enough at each collection).
 // roHot compiles, so its body has an image.
-// - Sequence 0: delta captures roSmall, roArrow and roDead without an image, roDead through the UCB registry; in the
-//   Consumer each imports at its first call (statistics) with no install, its CodeBlocks start in the LLInt, and roSmall's
-//   counter keeps the 45 points the Producer left: its baseline compile comes at the call that the carried progress
-//   gives, earlier than a JITCache-off run's.
+// - Sequence 0: delta captures roSmall, roArrow and roDead without an image and without UCB copies, roDead through the
+//   UCB registry, while roHot's body keeps its image and copies; in the Consumer each imports at its first call
+//   (statistics) with no install and no copies, which the twin check compares, its CodeBlocks start in the LLInt, and
+//   roSmall's counter keeps the 45 points the Producer left: its baseline compile comes at the call that the carried
+//   progress gives, earlier than a JITCache-off run's.
 // - Sequence 1, with the delta capture compiled: none of them has a body, and the Consumer generates them.
 // - Sequence 2, with jitCacheImportLLIntProgress off in the Consumer: roSmall imports, and its counter arms from zero, so
 //   it compiles at the JITCache-off run's call.
@@ -59,8 +60,12 @@ load("./resources/sections.js", "caller relative");
                 const feedback = t.readSection(keys[name], "ucb.feedback");
                 t.check(imageless ? feedback !== null : feedback === null, `${name}'s body after the delta: ${feedback === null ? "none" : "one"}`);
                 t.check(t.readSection(keys[name], "image.baseline") === null, `${name}'s body holds an image`);
+                // A body without an image carries no UCB value or array copies.
+                if (feedback)
+                    t.check(!ucbSections.feedback(feedback).copies, `${name}'s body without an image carries UCB copies`);
             }
             t.check(t.readSection(keys.roHot, "image.baseline") !== null, "roHot's body holds no image");
+            t.check(ucbSections.feedback(t.readSection(keys.roHot, "ucb.feedback")).copies === 1, "roHot's body with an image carries no UCB copies");
         }
         print(`run-once ran in every role`);
         t.finish();

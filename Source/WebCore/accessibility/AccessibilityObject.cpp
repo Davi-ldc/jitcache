@@ -99,6 +99,8 @@
 #include "ProgressTracker.h"
 #include "Range.h"
 #include "RemoteFrame.h"
+#include "RenderBlockFlow.h"
+#include "RenderDescendantIterator.h"
 #include "RenderElementInlines.h"
 #include "RenderImage.h"
 #include "RenderImageResource.h"
@@ -106,7 +108,7 @@
 #include "RenderLayer.h"
 #include "RenderLayerInlines.h"
 #include "RenderListItem.h"
-#include "RenderListMarker.h"
+#include "RenderListOutsideMarker.h"
 #include "RenderObjectInlines.h"
 #include "RenderText.h"
 #include "RenderTextControl.h"
@@ -151,9 +153,9 @@ AccessibilityObject::~AccessibilityObject()
 {
     AX_ASSERT(isDetached());
 
-    if (!cachedIsIgnored()) {
-        if (auto* cache = m_axObjectCache.get())
-            cache->decrementUnignoredContentObjectCount(role());
+    if (CheckedPtr cache = axObjectCache()) {
+        if (cache->isCounted(*this))
+            cache->uncount(*this);
     }
 }
 
@@ -437,11 +439,12 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
     if (!node)
         return { };
 
-    RefPtr frame = node->document().frame();
+    RefPtr frame = protect(node->document())->frame();
     if (!frame)
         return { };
 
-    auto* textChecker = protect(frame->editor())->textChecker();
+    Ref editor = frame->editor();
+    auto* textChecker = editor->textChecker();
     if (!textChecker)
         return { };
 
@@ -451,7 +454,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
     auto originalSelection = frame->selection().selection();
     if (auto range = simpleRange()) {
         // Passing UserTriggered::No, which is the default value, guaranties that accessibility is not notified of text selection changes.
-        frame->selection().setSelectedRange(SimpleRange { range->start, range->start }, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes, UserTriggered::No);
+        protect(frame->selection())->setSelectedRange(SimpleRange { range->start, range->start }, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes, UserTriggered::No);
     }
 
     Vector<AXTextMarkerRange> ranges;
@@ -459,7 +462,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
         Vector<TextCheckingResult> misspellings;
         checkTextOfParagraph(*textChecker, stringValue(), TextCheckingType::Spelling, misspellings, frame->selection().selection());
         for (auto& misspelling : misspellings) {
-            if (auto range = protect(frame->editor())->rangeForTextCheckingResult(misspelling))
+            if (auto range = editor->rangeForTextCheckingResult(misspelling))
                 ranges.append(range);
         }
     } else {
@@ -470,7 +473,7 @@ Vector<AXTextMarkerRange> AccessibilityObject::misspellingRanges() const
             ranges = { { treeID(), objectID(), static_cast<unsigned>(location), static_cast<unsigned>(length) } };
     }
 
-    frame->selection().setSelectedRange(originalSelection.range(), Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes, UserTriggered::No);
+    protect(frame->selection())->setSelectedRange(originalSelection.range(), Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes, UserTriggered::No);
     return ranges;
 }
 
@@ -480,7 +483,7 @@ std::optional<SimpleRange> AccessibilityObject::misspellingRange(const SimpleRan
     if (!node)
         return std::nullopt;
 
-    RefPtr frame = node->document().frame();
+    RefPtr frame = protect(node->document())->frame();
     if (!frame)
         return std::nullopt;
 
@@ -520,7 +523,7 @@ AXTextMarkerRange AccessibilityObject::textInputMarkedTextMarkerRange() const
     if (!node)
         return { };
 
-    RefPtr frame = node->document().frame();
+    RefPtr frame = protect(node->document())->frame();
     if (!frame)
         return { };
 
@@ -1338,7 +1341,7 @@ Vector<String> AccessibilityObject::performTextOperation(const AccessibilityText
         else if (i < replacementStringsCount)
             replacementString = operation.replacementStrings[i];
 
-        if (!frame->selection().setSelectedRange(textRange, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes))
+        if (!protect(frame->selection())->setSelectedRange(textRange, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes))
             continue;
 
         String text = plainText(textRange);
@@ -1383,10 +1386,11 @@ Vector<String> AccessibilityObject::performTextOperation(const AccessibilityText
             // Insert text instead of replacing when the selection length is zero, because replacements
             // aren't performed correctly in certain edge cases like at the the boundary between nodes
             // separated by spaces <p> foo <i>bar</i>[insert here] baz </p>.
+            Ref editor = frame->editor();
             if (textOperationRange.characterRange.length)
-                protect(frame->editor())->replaceSelectionWithText(replacementString, Editor::SelectReplacement::Yes, operation.smartReplace == AccessibilityTextOperationSmartReplace::No ? Editor::SmartReplace::No : Editor::SmartReplace::Yes);
+                editor->replaceSelectionWithText(replacementString, Editor::SelectReplacement::Yes, operation.smartReplace == AccessibilityTextOperationSmartReplace::No ? Editor::SmartReplace::No : Editor::SmartReplace::Yes);
             else
-                protect(frame->editor())->insertText(replacementString, /* triggeringEvent */ nullptr);
+                editor->insertText(replacementString, /* triggeringEvent */ nullptr);
 
             result.append(replacementString);
         } else
@@ -1606,7 +1610,7 @@ bool AccessibilityObject::press()
     RefPtr actionElement = this->actionElement();
     if (!actionElement)
         return false;
-    if (RefPtr frame = actionElement->document().frame())
+    if (RefPtr frame = protect(actionElement->document())->frame())
         frame->loader().resetMultipleFormSubmissionProtection();
 
     // Hit test at this location to determine if there is a sub-node element that should act
@@ -1706,7 +1710,7 @@ bool AccessibilityObject::pressPreservingFocus()
     // as assistive technology is concerned, focus never left where it was before the action.
     cache->beginSuppressingFocusChange(originalFocusedElement.get());
     if (originalFocusedElement)
-        originalFocusedElement->focus();
+        originalFocusedElement->focus({ .preventInputViewPresentation = true });
     else
         document->setFocusedElement(nullptr);
 
@@ -1868,7 +1872,7 @@ VisiblePosition AccessibilityObject::visiblePositionForPoint(const IntPoint& poi
 #endif
     }
 
-    return innerNode->renderer()->visiblePositionForPoint(pointResult, HitTestSource::User);
+    return protect(innerNode->renderer())->visiblePositionForPoint(pointResult, HitTestSource::User);
 }
 
 VisiblePositionRange AccessibilityObject::visiblePositionRangeForUnorderedPositions(const VisiblePosition& visiblePos1, const VisiblePosition& visiblePos2) const
@@ -2098,12 +2102,25 @@ VisiblePositionRange AccessibilityObject::lineRangeForPosition(const VisiblePosi
         return { };
     }
 
-    // Move from the given visiblePosition forward until it hits the start of the next line or cross over a line break.
+    // Walk forward to the first position that is no longer on this line. Start the search
+    // one position back because with line-break: after-white-space, the start of the next line
+    // could be the same offset with downstream affinity.
     auto end = visiblePosition;
-    while (end.isNotNull() && inSameLine(end, visiblePosition)) {
+    if (auto previous = visiblePosition.previous(); inSameLine(previous, visiblePosition))
+        end = WTF::move(previous);
+    while (end.isNotNull() && startOfLine(end) == start) {
         auto next = end.next();
         if (next == end) {
             // Without this break, we would loop infinitely.
+            break;
+        }
+
+        if (!inSameBlock(next, visiblePosition)) {
+            // A line that ends its block has no next line to run into, so this position is already in
+            // whatever follows the block, and the newline between the two is synthesized to separate
+            // them rather than being a line break that terminates this line. End the range at the
+            // line. Reaching outside it would, for the last line of an editable element, hand out a
+            // range that leaves the field and counts a character the field's text doesn't have.
             break;
         }
 
@@ -2135,7 +2152,7 @@ bool AccessibilityObject::replacedNodeNeedsCharacter(Node& replacedNode)
 {
     // we should always be given a rendered node and a replaced node, but be safe
     // replaced nodes are either attachments (widgets) or images
-    if (!isRendererReplacedElement(replacedNode.renderer()) || replacedNode.isTextNode())
+    if (!isRendererReplacedElement(protect(replacedNode.renderer())) || replacedNode.isTextNode())
         return false;
 
     // create an AX object, but skip it if it is not supposed to be seen
@@ -2154,7 +2171,7 @@ bool AccessibilityObject::isReplacedElementForTextEmission() const
     // can apply the ignored check themselves: an ignored replaced element (e.g. a <legend>) emits
     // no U+FFFC, but its block boundaries still don't emit newlines.
     RefPtr node = this->node();
-    return node && !node->isTextNode() && isRendererReplacedElement(node->renderer());
+    return node && !node->isTextNode() && isRendererReplacedElement(protect(node->renderer()));
 }
 
 bool AccessibilityObject::isInUserAgentShadowTree() const
@@ -2288,7 +2305,7 @@ String AccessibilityObject::stringForVisiblePositionRange(const VisiblePositionR
         // non-zero length means textual node, zero length means replaced node (AKA "attachments" in AX)
         if (it.text().length()) {
             // Add a textual representation for list marker text.
-            builder.append(lineStartListMarkerText(renderListItemContainer(it.node()), visiblePositionRange.start));
+            builder.append(lineStartListMarkerText(protect(renderListItemContainer(it.node())), visiblePositionRange.start));
             it.appendTextToStringBuilder(builder);
         } else {
             // locate the node and starting offset for this replaced range
@@ -2480,6 +2497,26 @@ bool AccessibilityObject::contentEditableAttributeIsEnabled(Element& element)
     return contentEditableValue.isEmpty() || equalLettersIgnoringASCIICase(contentEditableValue, "true"_s) || equalLettersIgnoringASCIICase(contentEditableValue, "plaintext-only"_s);
 }
 
+// How many lines |laterPosition| sits below |earlierPosition|. Answers nothing when they are on
+// lines of different blocks, whose line boxes can't be reached from one another.
+static std::optional<int> lineCountBetween(const VisiblePosition& earlierPosition, const VisiblePosition& laterPosition)
+{
+    auto earlierLineBox = RenderedPosition(earlierPosition).lineBox();
+    auto laterLineBox = RenderedPosition(laterPosition).lineBox();
+    if (!earlierLineBox || !laterLineBox)
+        return std::nullopt;
+    if (earlierLineBox == laterLineBox)
+        return 0;
+
+    int lineCount = 0;
+    for (auto lineBox = laterLineBox; lineBox; lineBox = lineBox->previous()) {
+        ++lineCount;
+        if (lineBox->previous() == earlierLineBox)
+            return lineCount;
+    }
+    return std::nullopt;
+}
+
 int AccessibilityObject::lineForPosition(const VisiblePosition& visiblePos) const
 {
     if (visiblePos.isNull() || !node())
@@ -2490,18 +2527,28 @@ int AccessibilityObject::lineForPosition(const VisiblePosition& visiblePos) cons
     if (!containerNode->isShadowIncludingInclusiveAncestorOf(node()) && !node()->isShadowIncludingInclusiveAncestorOf(containerNode.get()))
         return -1;
 
-    int lineCount = -1;
+    int lineCount = 0;
     VisiblePosition currentVisiblePos = visiblePos;
     VisiblePosition savedVisiblePos;
 
     // move up until we get to the top
     // FIXME: This only takes us to the top of the rootEditableElement, not the top of the
     // top document.
-    do {
+    while (true) {
         savedVisiblePos = currentVisiblePos;
         currentVisiblePos = previousLinePosition(currentVisiblePos, 0, HasEditableAXRole);
-        ++lineCount;
-    } while (currentVisiblePos.isNotNull() && !(inSameLine(currentVisiblePos, savedVisiblePos)));
+        if (currentVisiblePos.isNull() || inSameLine(currentVisiblePos, savedVisiblePos))
+            break;
+        // Count lines rather than steps, because one step can cross more than one. The start of a
+        // line following an inline replaced element is the very same VisiblePosition as the one
+        // after that element, so it resolves onto the element's line:
+        //   ABCDE
+        //   [img]
+        //   |FGHIJ
+        // Stepping up from "FGHIJ" lands on the image's line, skipping the line "F" is on.
+        // A step into another block counts as the one line it moved.
+        lineCount += lineCountBetween(currentVisiblePos, savedVisiblePos).value_or(1);
+    }
 
     return lineCount;
 }
@@ -2635,7 +2682,17 @@ void AccessibilityObject::updateChildrenIfNecessary()
     if (!childrenInitialized()) {
         // Enable the cache in case we end up adding a lot of children, we don't want to recompute axIsIgnored each time.
         AXAttributeCacheScope enableCache(axObjectCache());
+
+        // setIsIgnoredFromParentDataForChild() derives each child's data from ours when we have any.
+        // Compute and set it now so each child doesn't repeat unnecessary work.
+        bool didSetIsIgnoredFromParentData = m_isIgnoredFromParentData.isNull();
+        if (didSetIsIgnoredFromParentData)
+            setIsIgnoredFromParentData(computeIsIgnoredFromParentData());
+
         addChildren();
+
+        if (didSetIsIgnoredFromParentData)
+            clearIsIgnoredFromParentData();
     }
 }
 
@@ -2670,7 +2727,7 @@ AccessibilityObject* AccessibilityObject::headingElementForNode(Node* node)
     if (!renderObject)
         return nullptr;
 
-    RefPtr axObject = protect(renderObject->document())->axObjectCache()->getOrCreate(*node);
+    RefPtr axObject = protect(protect(renderObject->document())->axObjectCache())->getOrCreate(*node);
 
     return Accessibility::findAncestor<AccessibilityObject>(*axObject, true, [] (const AccessibilityObject& object) {
         return object.role() == AccessibilityRole::Heading;
@@ -2764,6 +2821,17 @@ String AccessibilityObject::actionVerb() const
     return { };
 }
 
+RefPtr<AXCoreObject> AccessibilityObject::formOwnerObject() const
+{
+    if (CheckedPtr cache = axObjectCache()) {
+        RefPtr element = this->element();
+        return cache->formOwnerObject(element.get());
+    }
+
+    return nullptr;
+}
+
+// What an author explicitly noted is the invalid status of the element (e.g. via aria-invalid).
 String AccessibilityObject::explicitInvalidStatus() const
 {
     static NeverDestroyed<String> grammarValue = "grammar"_s;
@@ -2774,18 +2842,10 @@ String AccessibilityObject::explicitInvalidStatus() const
 
     // aria-invalid can return false (default), grammar, spelling, or true.
     auto ariaInvalid = getAttributeTrimmed(aria_invalidAttr);
-
-    if (ariaInvalid.isEmpty()) {
-        auto* htmlElement = dynamicDowncast<HTMLElement>(this->node());
-        if (RefPtr validatedFormListedElement = htmlElement ? htmlElement->asValidatedFormListedElement() : nullptr) {
-            // "willValidate" is true if the element is able to be validated.
-            if (validatedFormListedElement->willValidate() && !validatedFormListedElement->isValidFormControlElement())
-                return trueValue;
-        }
+    if (ariaInvalid.isEmpty())
         return { };
-    }
 
-    // If "false", "undefined" [sic, string value], empty, or missing, return "false".
+    // If "false" or "undefined" [sic, string value], return "false".
     if (ariaInvalid == falseValue || ariaInvalid == undefinedValue)
         return falseValue;
     // Besides true/false/undefined, the only tokens defined by WAI-ARIA 1.0...
@@ -2796,6 +2856,45 @@ String AccessibilityObject::explicitInvalidStatus() const
         return spellingValue;
     // Any other non empty string should be treated as "true".
     return trueValue;
+}
+
+String AccessibilityObject::invalidStatusIncludingInferred() const
+{
+    static NeverDestroyed<String> falseValue = "false"_s;
+    static NeverDestroyed<String> trueValue = "true"_s;
+
+    auto explicitStatus = explicitInvalidStatus();
+    if (!explicitStatus.isEmpty() && explicitStatus != falseValue)
+        return explicitStatus;
+
+    // HTML constraint validation, which the author opted into with required, type or pattern.
+    if (explicitStatus.isEmpty()) {
+        auto* htmlElement = dynamicDowncast<HTMLElement>(this->node());
+        if (RefPtr validatedFormListedElement = htmlElement ? htmlElement->asValidatedFormListedElement() : nullptr) {
+            // "willValidate" is true if the element is able to be validated.
+            if (validatedFormListedElement->willValidate() && !validatedFormListedElement->isValidFormControlElement()) {
+                // Being empty is the one kind of invalid that is not yet a statement about this page, since it
+                // is true of every required field from first paint. A value that is present but wrong, or one
+                // the page rejected itself through setCustomValidity, is the author saying something really is
+                // wrong, so those count straight away. Waiting for the user to work on the form or try to
+                // submit it is what :user-invalid does, and this is the same bit it is built on.
+                bool invalidOnlyBecauseEmpty = validatedFormListedElement->valueMissing() && !validatedFormListedElement->customError();
+                RefPtr document = this->document();
+                if (!invalidOnlyBecauseEmpty || !document || !document->settings().accessibilityFormErrorDetectionEnabled()
+                    || validatedFormListedElement->wasInteractedWithSinceLastFormSubmitEvent())
+                    return trueValue;
+            }
+        }
+    }
+
+    if (RefPtr element = this->element()) {
+        // Trust our field error-detection more than the author keeping their aria-invalid
+        // state up-to-date (this staleness was observed on a popular flight booking webpage).
+        if (CheckedPtr cache = axObjectCache(); cache && cache->fieldHasDetectedError(*element))
+            return trueValue;
+    }
+
+    return falseValue;
 }
 
 AccessibilityCurrentState AccessibilityObject::currentState() const
@@ -2879,7 +2978,7 @@ bool AccessibilityObject::ignoredFromModalPresence() const
         return false;
 
     // We only want to ignore the objects within the same frame as the modal dialog.
-    if (modalNode->document().frame() != this->frame())
+    if (protect(modalNode->document())->frame() != this->frame())
         return false;
 
     // Some objects might be outside of a modal, but are linked to elements inside of it. Don't ignore those.
@@ -2946,7 +3045,7 @@ bool AccessibilityObject::replaceTextInRange(const String& replacementString, co
 {
     // If this is being called on the web area, redirect it to be on the body, which will have a renderer associated with it.
     if (RefPtr document = dynamicDowncast<Document>(node())) {
-        if (RefPtr bodyObject = axObjectCache()->getOrCreate(protect(document->body())))
+        if (RefPtr bodyObject = protect(axObjectCache())->getOrCreate(protect(document->body())))
             return bodyObject->replaceTextInRange(replacementString, range);
         return false;
     }
@@ -2961,9 +3060,14 @@ bool AccessibilityObject::replaceTextInRange(const String& replacementString, co
     // Also only do this when the field is in editing mode.
     Ref frame = renderer()->frame();
     if (element->shouldUseInputMethod()) {
-        uint64_t textLength = getLengthForTextRange();
-        uint64_t startIndex = std::min(range.location, textLength);
-        uint64_t endIndex = startIndex + std::min(range.length, textLength - startIndex);
+        // Don't clamp to getLengthForTextRange() here. It reports the value of a text control, and
+        // an editing host need not be one: a design-mode body carries no contenteditable attribute,
+        // so it measures as empty and every index would collapse to 0. visiblePositionForIndex()
+        // already lands an index past the end of the content at the end of it, so the only bound
+        // needed is the one the call itself can represent.
+        constexpr uint64_t maxIndex = std::numeric_limits<int>::max();
+        uint64_t startIndex = std::min<uint64_t>(range.location, maxIndex);
+        uint64_t endIndex = startIndex + std::min<uint64_t>(range.length, maxIndex - startIndex);
 
         auto start = visiblePositionForIndex(static_cast<int>(startIndex));
         std::optional insertionRange = makeSimpleRange(start, endIndex == startIndex ? start : visiblePositionForIndex(static_cast<int>(endIndex)));
@@ -2971,7 +3075,7 @@ bool AccessibilityObject::replaceTextInRange(const String& replacementString, co
             return false;
 
         // Fail if the selection can't be set, otherwise the wrong text would be replaced.
-        if (!frame->selection().setSelectedRange(*insertionRange, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes))
+        if (!protect(frame->selection())->setSelectedRange(*insertionRange, Affinity::Downstream, FrameSelection::ShouldCloseTyping::Yes))
             return false;
 
         protect(frame->editor())->replaceSelectionWithText(replacementString, Editor::SelectReplacement::No, Editor::SmartReplace::No);
@@ -3006,7 +3110,7 @@ bool AccessibilityObject::insertText(const String& text)
         return false;
 
     // Use Editor::insertText to mimic typing into the field.
-    Ref editor = protect(renderer())->frame().editor();
+    Ref editor = protect(protect(renderer())->frame())->editor();
     return editor->insertText(text, nullptr);
 }
 
@@ -3284,7 +3388,7 @@ String AccessibilityObject::embeddedImageDescription() const
 static RefPtr<Image> imageFromRenderer(RenderObject* renderer)
 {
     CheckedPtr renderImage = dynamicDowncast<RenderImage>(renderer);
-    auto* cachedImage = renderImage ? renderImage->cachedImage() : nullptr;
+    RefPtr cachedImage = renderImage ? renderImage->cachedImage() : nullptr;
     return cachedImage ? cachedImage->image() : nullptr;
 }
 
@@ -3324,7 +3428,7 @@ RefPtr<SharedBuffer> AccessibilityObject::imageData(const AXImageDataParameters&
         return nullptr;
 
     // Draw the source image scaled into the buffer.
-    imageBuffer->context().drawImage(*image, FloatRect({ }, bufferSize), FloatRect({ }, nativeSize));
+    imageBuffer->context().drawImage(*image, ConcreteObjectSize::fixed(nativeSize), FloatRect({ }, bufferSize), FloatRect({ }, nativeSize));
 
     // Determine the extraction rect from subrect parameters or full image.
     IntRect extractionRect;
@@ -3405,14 +3509,38 @@ bool AccessibilityObject::isSelected() const
         return option->selected();
     }
 
+#if USE(ATSPI)
+    // ATSPI reports the focused or active menu item as selected, and announces it with a selected state change
+    // when it gets focus. ARIA menu items have no selected state otherwise, so other platforms don't do this.
     if (isMenuItem()) {
         if (isFocused())
             return true;
         WeakPtr parent = parentObjectUnignored();
         return parent && parent->activeDescendant() == this;
     }
+#endif // USE(ATSPI)
 
     return false;
+}
+
+String AccessibilityObject::selectedOptionCheckmark() const
+{
+    // Options in a base-appearance select render a ::checkmark, which the UA stylesheet hides unless the option is selected.
+    RefPtr option = dynamicDowncast<HTMLOptionElement>(node());
+    CheckedPtr renderer = option ? option->renderer() : nullptr;
+    CheckedPtr checkmark = renderer ? renderer->pseudoElementRenderer(PseudoElementType::Checkmark).get() : nullptr;
+    if (!checkmark || checkmark->style().usedVisibility() != Visibility::Visible || !option->selected())
+        return { };
+
+    StringBuilder glyph;
+    for (CheckedRef text : descendantsOfType<RenderText>(*checkmark))
+        glyph.append(text->text());
+    String trimmedGlyph = glyph.toString().trim(isASCIIWhitespace);
+    if (!trimmedGlyph.isEmpty())
+        return trimmedGlyph;
+
+    // A checkmark without text is drawn some other way, like with an image or borders.
+    return String { span(checkMarkCharacter) };
 }
 
 bool AccessibilityObject::isTabItemSelected() const
@@ -3591,7 +3719,7 @@ void AccessibilityObject::setFocused(bool focus)
 {
     if (focus) {
         // Ensure that the view is focused and active, otherwise, any attempt to set focus to an object inside it will fail.
-        RefPtr frame = document() ? document()->frame() : nullptr;
+        RefPtr frame = document() ? protect(document())->frame() : nullptr;
         if (frame && frame->selection().isFocusedAndActive())
             return; // Nothing to do, already focused and active.
 
@@ -3627,7 +3755,7 @@ void AccessibilityObject::setFocused(bool focus)
 
         // Legacy WebKit1 case.
         if (frameView->platformWidget())
-            page->chrome().client().makeFirstResponder((NSResponder *)frameView->platformWidget());
+            makeFirstResponderForPlatformWidget(page->chrome().client(), *frameView);
 #endif
 #if PLATFORM(MAC)
         else
@@ -3843,7 +3971,7 @@ bool AccessibilityObject::isExpanded() const
 
     if (supportsExpanded()) {
         if (RefPtr select = dynamicDowncast<HTMLSelectElement>(node()); select && select->usesMenuList())
-            return select->popupIsVisible();
+            return select->isOpen();
         if (RefPtr commandForElement = this->commandForElement())
             return commandForElement->isPopoverShowing();
         if (RefPtr popoverTargetElement = this->popoverTargetElement())
@@ -4010,7 +4138,7 @@ bool AccessibilityObject::isOnScreen() const
         Ref outer = objects[i];
         Ref inner = objects[i - 1];
         // FIXME: unclear if we need LegacyIOSDocumentVisibleRect.
-        const IntRect outerRect = i < levels ? snappedIntRect(outer->boundingBoxRect()) : outer->getScrollableAreaIfScrollable()->visibleContentRect(ScrollableArea::LegacyIOSDocumentVisibleRect);
+        const IntRect outerRect = i < levels ? snappedIntRect(outer->boundingBoxRect()) : protect(outer->getScrollableAreaIfScrollable())->visibleContentRect(ScrollableArea::LegacyIOSDocumentVisibleRect);
 
         IntRect innerRect = snappedIntRect(inner->boundingBoxRect());
         if (RefPtr scrollView = !outer->isRoot() ? outer->scrollView() : nullptr)
@@ -4154,9 +4282,11 @@ void AccessibilityObject::scrollAreaAndAncestor(std::pair<ScrollableArea*, Acces
 {
     // Search up the parent chain until we find the first one that's scrollable.
     scrollers.first = nullptr;
-    for (scrollers.second = parentObject(); scrollers.second; scrollers.second = protect(scrollers.second)->parentObject()) {
-        if ((scrollers.first = protect(scrollers.second)->getScrollableAreaIfScrollable()))
+    for (scrollers.second = parentObject(); scrollers.second; ) {
+        Ref current = *scrollers.second;
+        if ((scrollers.first = current->getScrollableAreaIfScrollable()))
             break;
+        scrollers.second = current->parentObject();
     }
 }
 
@@ -4293,14 +4423,24 @@ std::optional<InputType::Type> AccessibilityObject::inputType() const
 
 bool AccessibilityObject::isARIAHidden() const
 {
-    if (isFocused())
-        return false;
-
     if (shouldIgnoreARIAHidden())
         return false;
 
     RefPtr node = this->node();
     RefPtr element = dynamicDowncast<Element>(node);
+
+    // Check whether aria-hidden="true" is specified before doing anything else. Every remaining condition
+    // below can only turn a true result into false, so the vast majority of objects, which don't
+    // specify aria-hidden at all, can bail out here without paying for the focus and tag name checks.
+    bool isHiddenByAssignedSlot = false;
+    if (RefPtr assignedSlot = node ? node->assignedSlot() : nullptr)
+        isHiddenByAssignedSlot = equalLettersIgnoringASCIICase(assignedSlot->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s);
+    if (!isHiddenByAssignedSlot && !(element && equalLettersIgnoringASCIICase(element->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s)))
+        return false;
+
+    if (isFocused())
+        return false;
+
     AtomString tag = element ? element->localName() : nullAtom();
     // https://github.com/w3c/aria/pull/1880
     // To prevent authors from hiding all content from assistive technology users, do not respect
@@ -4309,11 +4449,7 @@ bool AccessibilityObject::isARIAHidden() const
     if (bodyTag->hasLocalName(tag) || htmlTag->hasLocalName(tag) || (SVGNames::svgTag->hasLocalName(tag) && !element->parentNode()))
         return false;
 
-    if (RefPtr assignedSlot = node ? node->assignedSlot() : nullptr) {
-        if (equalLettersIgnoringASCIICase(assignedSlot->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s))
-            return true;
-    }
-    return element && equalLettersIgnoringASCIICase(element->attributeWithDefaultARIA(aria_hiddenAttr), "true"_s);
+    return true;
 }
 
 bool AccessibilityObject::isShowingValidationMessage() const
@@ -4469,14 +4605,11 @@ bool AccessibilityObject::isIgnoredWithoutCache(AXObjectCache* cache) const
         ignored = computeIsIgnored();
 
     auto previousLastKnownIsIgnoredValue = m_lastKnownIsIgnoredValue;
+    bool wasCounted = cache && cache->isCounted(*this);
     const_cast<AccessibilityObject*>(this)->setLastKnownIsIgnoredValue(ignored);
 
     if (cache) {
-        bool wasCountedAsUnignored = previousLastKnownIsIgnoredValue == AccessibilityObjectInclusion::IncludeObject;
-        if (!wasCountedAsUnignored && !ignored)
-            cache->incrementUnignoredContentObjectCount(role());
-        else if (wasCountedAsUnignored && ignored)
-            cache->decrementUnignoredContentObjectCount(role());
+        cache->reconcileCount(*this, wasCounted);
 
         bool becameUnignored = previousLastKnownIsIgnoredValue == AccessibilityObjectInclusion::IgnoreObject && !ignored;
         bool becameIgnored = !becameUnignored && previousLastKnownIsIgnoredValue == AccessibilityObjectInclusion::IncludeObject && ignored;
@@ -4632,6 +4765,33 @@ bool AccessibilityObject::ariaRoleHasPresentationalChildren() const
     }
 }
 
+AccessibilityIsIgnoredFromParentData AccessibilityObject::computeIsIgnoredFromParentData()
+{
+    AccessibilityIsIgnoredFromParentData result = AccessibilityIsIgnoredFromParentData(this);
+
+    if (isARIAHidden())
+        result.isAXHidden = true;
+
+    bool ignoreARIAHidden = isFocused();
+    for (RefPtr object = parentObject(); object; object = object->parentObject()) {
+        if (!result.isAXHidden && !ignoreARIAHidden && object->isARIAHidden())
+            result.isAXHidden = true;
+
+        if (!result.isPresentationalChildOfAriaRole && object->ariaRoleHasPresentationalChildren())
+            result.isPresentationalChildOfAriaRole = true;
+
+        if (!result.isDescendantOfBarrenParent && !object->canHaveChildren())
+            result.isDescendantOfBarrenParent = true;
+
+        if (result.isAXHidden && result.isPresentationalChildOfAriaRole && result.isDescendantOfBarrenParent) {
+            // Every field is set, and none of them can be un-set by an ancestor further up.
+            break;
+        }
+    }
+
+    return result;
+}
+
 void AccessibilityObject::setIsIgnoredFromParentDataForChild(AccessibilityObject& child)
 {
     AccessibilityIsIgnoredFromParentData result = AccessibilityIsIgnoredFromParentData(this);
@@ -4640,20 +4800,8 @@ void AccessibilityObject::setIsIgnoredFromParentDataForChild(AccessibilityObject
         result.isPresentationalChildOfAriaRole = m_isIgnoredFromParentData.isPresentationalChildOfAriaRole || ariaRoleHasPresentationalChildren();
         result.isDescendantOfBarrenParent = m_isIgnoredFromParentData.isDescendantOfBarrenParent || !canHaveChildren();
     } else {
-        if (child.isARIAHidden())
-            result.isAXHidden = true;
-
-        bool ignoreARIAHidden = child.isFocused();
-        for (auto* object = child.parentObject(); object; object = object->parentObject()) {
-            if (!result.isAXHidden && !ignoreARIAHidden && object->isARIAHidden())
-                result.isAXHidden = true;
-
-            if (!result.isPresentationalChildOfAriaRole && object->ariaRoleHasPresentationalChildren())
-                result.isPresentationalChildOfAriaRole = true;
-
-            if (!result.isDescendantOfBarrenParent && !object->canHaveChildren())
-                result.isDescendantOfBarrenParent = true;
-        }
+        // We have nothing to inherit from, so |child| has to compute its own data.
+        result = child.computeIsIgnoredFromParentData();
     }
 
     child.setIsIgnoredFromParentData(result);

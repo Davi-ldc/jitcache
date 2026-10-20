@@ -100,15 +100,15 @@ NSString * const WebScriptErrorLineNumberKey = @"WebScriptErrorLineNumber";
     if (value == [globalObject.get() _imp])
         return globalObject.autorelease();
 
-    JSC::Bindings::RootObject* root1 = [globalObject.get() _originRootObject];
+    RefPtr root1 = [globalObject.get() _originRootObject];
     if (!root1)
         return nil;
 
-    JSC::Bindings::RootObject* root2 = [globalObject.get() _rootObject];
+    RefPtr root2 = [globalObject.get() _rootObject];
     if (!root2)
         return nil;
 
-    return [WebScriptObject _convertValueToObjcValue:value originRootObject:root1 rootObject:root2];
+    return [WebScriptObject _convertValueToObjcValue:value originRootObject:root1.get() rootObject:root2.get()];
 }
 
 @end
@@ -119,15 +119,16 @@ NSString * const WebScriptErrorLineNumberKey = @"WebScriptErrorLineNumber";
 
 - (void) dealloc
 {
-    [_userInfo release];
-    [_private release];
+    // Retaining the member just to release it would be pointless.
+    SUPPRESS_UNRETAINED_ARG [_userInfo release];
+    SUPPRESS_UNRETAINED_ARG [_private release];
     [super dealloc];
 }
 
 - (void)setUserInfo:(id)userInfo
 {
     if (userInfo != _userInfo) {
-        [_userInfo release];
+        SUPPRESS_UNRETAINED_ARG [_userInfo release];
         _userInfo = [userInfo retain];
     }
 }

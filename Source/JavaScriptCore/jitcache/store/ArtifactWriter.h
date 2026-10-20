@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BodyKey.h"
+#include "JITCacheContainer.h"
 #include "ValidatedBody.h"
 #include <array>
 #include <expected>
@@ -22,7 +23,6 @@ class MappedPack;
 class OpenedArtifact;
 class ProducerBudget;
 class ProducerLock;
-struct PackIndexEntry;
 
 // The checks a commit fails at: the budget's own fault for a refused charge, and the writer's steps. The capture glue
 // raises each as a recording fault with the failure's detail.
@@ -35,8 +35,8 @@ inline constexpr ASCIILiteral reread = "writer.reread"_s; // the record read bac
 // The opened artifact cannot follow the root the commit stored. The store itself cannot fail, so no fault hook names it.
 inline constexpr ASCIILiteral publish = "writer.publish"_s;
 #if ENABLE(JITCACHE_TWINS)
-// rewriteSection had nothing it could rewrite: open did not answer Found, the kind names no section the body's highest
-// tier requires, or the range does not lie inside that section. Nothing is written when it fails.
+// rewriteSection had nothing it could rewrite: open did not answer Found, the body holds no section of the kind, or the
+// range does not lie inside that section. Nothing is written when it fails.
 inline constexpr ASCIILiteral rewrite = "writer.rewrite"_s;
 #endif
 } // namespace WriterChecks
@@ -78,9 +78,10 @@ private:
 
 struct CommitStamp {
     BodyKey key;
-    uint32_t llintThreshold; // L
-    uint32_t counterProgress; // P, 0 when the counter does not travel
-    uint8_t highestTier;
+    // L: the LLInt threshold the import of a body with an image skips, or the LLInt progress a body without one carries.
+    uint32_t llintThreshold;
+    uint32_t counterProgress; // P: the baseline counter's progress; 0 when the counter does not travel or there is no image
+    uint8_t highestTier; // 0 without an image, 1 with one
 };
 struct CommitResult {
     uint64_t version;
@@ -167,6 +168,10 @@ public:
     // before the mark leaves the artifact as it was and no temporary.
     static std::expected<CompactionResult, CompactionFailure> compactPack(const CompactionTarget&, const CompactionSource&,
         const ScopedLambda<bool(const BodyKey&)>& excludes, bool timed);
+    // What a live body must pass before a compaction keeps it: its record header repeats its index entry, the body passes
+    // validateBody in Full mode under headerDigest, and the entry repeats the envelope. Nothing when it passes, otherwise
+    // the first check it failed. Reads the body through the mapping and allocates nothing.
+    static std::optional<ContainerCheck> checkPackedBody(const MappedPack&, const PackIndexEntry&, std::span<const uint8_t, 16> headerDigest);
 
     // The points of a commit or compaction where a test build can kill the process. Every build names them, so the
     // commit path marks each point once; only test builds act on the mark.
@@ -190,9 +195,10 @@ public:
     // compaction-before-rename and compaction-after-rename.
     static ASCIILiteral name(KillPoint);
     static std::optional<KillPoint> killPointNamed(StringView);
-    // Opens the key's current body in Full mode through OpenedArtifact::open, copies its sections into a buffer charged
-    // to the budget, overwrites bytes.size() bytes of the kind's section at offset, and commits the copy under the opened
-    // body's key, tier, L and P, which recomputes every checksum and draws a fresh commit identifier.
+    // Opens the key's current body in Full mode through OpenedArtifact::open, copies every section it holds, a module's
+    // ucb.analysis included, into a buffer charged to the budget, overwrites bytes.size() bytes of the kind's section at
+    // offset, and commits the copy under the opened body's key, tier, L and P, which recomputes every checksum and draws a
+    // fresh commit identifier.
     std::expected<CommitResult, CommitFailure> rewriteSection(const BodyKey&, SectionKind, uint64_t offset, std::span<const uint8_t> bytes);
 #endif
 

@@ -472,6 +472,7 @@ list(APPEND WebKit_PRIVATE_FRAMEWORK_HEADERS
     UIProcess/API/Cocoa/_WKWebExtensionMatchPatternPrivate.h
     UIProcess/API/Cocoa/_WKWebExtensionMessagePort.h
     UIProcess/API/Cocoa/_WKWebExtensionMessagePortPrivate.h
+    UIProcess/API/Cocoa/_WKWebExtensionNotification.h
     UIProcess/API/Cocoa/_WKWebExtensionPrivate.h
     UIProcess/API/Cocoa/_WKWebExtensionSidebar.h
     UIProcess/API/Cocoa/_WKWebExtensionTab.h
@@ -508,7 +509,6 @@ list(APPEND WebKit_PRIVATE_FRAMEWORK_HEADERS
 
     WebProcess/InjectedBundle/API/Cocoa/WKWebProcessPlugInCSSStyleDeclarationHandle.h
     WebProcess/InjectedBundle/API/Cocoa/WKWebProcessPlugInEditingDelegate.h
-    WebProcess/InjectedBundle/API/Cocoa/WKWebProcessPlugInFormDelegatePrivate.h
     WebProcess/InjectedBundle/API/Cocoa/WKWebProcessPlugInFrame.h
     WebProcess/InjectedBundle/API/Cocoa/WKWebProcessPlugInFramePrivate.h
     WebProcess/InjectedBundle/API/Cocoa/WKWebProcessPlugInHitTestResult.h
@@ -544,6 +544,8 @@ set(WebKit_PROJECT_HEADERS
     GPUProcess/graphics/Model/Float3.h
     GPUProcess/graphics/Model/Float4x4.h
     GPUProcess/graphics/Model/ModelTypes.h
+
+    Platform/Logging.h
 
     Shared/mac/SecItemRequestData.h
 

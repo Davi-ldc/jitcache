@@ -65,13 +65,7 @@
         {
             "name": "cocoa-embedded",
             "hidden": true,
-            "inherits": ["cocoa"],
-            "cacheVariables": {
-                "ENABLE_TOOLS": {
-                    "type": "BOOL",
-                    "value": "OFF"
-                }
-            }
+            "inherits": ["cocoa"]
         },
         {
             "name": "gtk",
@@ -275,6 +269,38 @@
                     "value": "OFF"
                 }
             }
+        },
+        {
+            "name": "mac-rosetta",
+            "hidden": true,
+            "cacheVariables": {
+                "CMAKE_OSX_ARCHITECTURES": {
+                    "type": "STRING",
+                    "value": "x86_64"
+                }
+            }
+        },
+        {
+            "name": "mac-rosetta-release",
+            "displayName": "macOS x86_64/Rosetta Release",
+            "inherits": ["mac-rosetta", "mac-release"],
+            "binaryDir": "WebKitBuild/cmake-mac-rosetta/Release"
+        },
+        {
+            "name": "mac-rosetta-debug",
+            "displayName": "macOS x86_64/Rosetta Debug",
+            "inherits": ["mac-rosetta", "mac-debug"],
+            "binaryDir": "WebKitBuild/cmake-mac-rosetta/Debug"
+        },
+        {
+            "name": "mac-rosetta-dev-release",
+            "displayName": "macOS x86_64/Rosetta Development (Release, ccache, compile_commands)",
+            "inherits": ["mac-rosetta-release", "dev"]
+        },
+        {
+            "name": "mac-rosetta-dev-debug",
+            "displayName": "macOS x86_64/Rosetta Development (Debug, ccache, compile_commands)",
+            "inherits": ["mac-rosetta-debug", "dev"]
         },
         {
             "name": "ios",
@@ -565,6 +591,26 @@
             "name": "mac-tsan",
             "displayName": "macOS TSan",
             "configurePreset": "mac-tsan"
+        },
+        {
+            "name": "mac-rosetta-release",
+            "displayName": "macOS x86_64/Rosetta Release",
+            "configurePreset": "mac-rosetta-release"
+        },
+        {
+            "name": "mac-rosetta-debug",
+            "displayName": "macOS x86_64/Rosetta Debug",
+            "configurePreset": "mac-rosetta-debug"
+        },
+        {
+            "name": "mac-rosetta-dev-release",
+            "displayName": "macOS x86_64/Rosetta Development Release",
+            "configurePreset": "mac-rosetta-dev-release"
+        },
+        {
+            "name": "mac-rosetta-dev-debug",
+            "displayName": "macOS x86_64/Rosetta Development Debug",
+            "configurePreset": "mac-rosetta-dev-debug"
         },
         {
             "name": "gtk-release",

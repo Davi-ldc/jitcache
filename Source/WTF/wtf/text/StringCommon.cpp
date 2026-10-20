@@ -32,6 +32,21 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace WTF {
 
+SUPPRESS_NODELETE
+const uint8_t* find8VectorizedImpl(const uint8_t* pointer, uint8_t character, size_t length)
+{
+    constexpr size_t thresholdLength = 64;
+
+    size_t runway = std::min(thresholdLength, length);
+    if (auto* result = findImpl(pointer, character, runway))
+        return result;
+    if (runway == length)
+        return nullptr;
+
+    // We rely on memchr already having SIMD optimization, so we don’t have to write our own.
+    return static_cast<const uint8_t*>(memchr(pointer + runway, character, length - runway)); // NOLINT
+}
+
 SUPPRESS_NODELETE SUPPRESS_ASAN
 const float* findFloatAlignedImpl(const float* pointer, float target, size_t length)
 {
@@ -53,37 +68,6 @@ const float* findFloatAlignedImpl(const float* pointer, float target, size_t len
         if (simde_vget_lane_u64(simde_vreinterpret_u64_u16(simde_vmovn_u32(mask)), 0)) {
             simde_uint32x4_t ranked = simde_vornq_u32(indexMask, mask);
             uint32_t index = simde_vminvq_u32(ranked);
-            return (index < length) ? cursor + index : nullptr;
-        }
-        if (length <= stride)
-            return nullptr;
-        length -= stride;
-        cursor += stride;
-    }
-}
-
-SUPPRESS_NODELETE SUPPRESS_ASAN
-const double* findDoubleAlignedImpl(const double* pointer, double target, size_t length)
-{
-    ASSERT(!(reinterpret_cast<uintptr_t>(pointer) & 0b111));
-
-    constexpr simde_uint32x2_t indexMask { 0, 1 };
-
-    ASSERT(length);
-    ASSERT(!(reinterpret_cast<uintptr_t>(pointer) & 0xf));
-    ASSERT((reinterpret_cast<uintptr_t>(pointer) & ~static_cast<uintptr_t>(0xf)) == reinterpret_cast<uintptr_t>(pointer));
-    const double* cursor = pointer;
-    constexpr size_t stride = SIMD::stride<double>;
-
-    simde_float64x2_t targetsVector = simde_vdupq_n_f64(target);
-
-    while (true) {
-        simde_float64x2_t value = simde_vld1q_f64(cursor);
-        simde_uint64x2_t mask = simde_vceqq_f64(value, targetsVector);
-        simde_uint32x2_t reducedMask = simde_vmovn_u64(mask);
-        if (simde_vget_lane_u64(simde_vreinterpret_u64_u32(reducedMask), 0)) {
-            simde_uint32x2_t ranked = simde_vorn_u32(indexMask, reducedMask);
-            uint32_t index = simde_vminv_u32(ranked);
             return (index < length) ? cursor + index : nullptr;
         }
         if (length <= stride)

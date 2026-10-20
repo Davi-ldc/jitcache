@@ -43,6 +43,7 @@ public:
 
 private:
     void platformWorkQueueInitialize(WebCore::GraphicsContextGLAttributes&&) final;
+    void didRunOutOfMessages() final;
     void prepareForDisplay(CompletionHandler<void(uint64_t, std::optional<WebCore::DMABufBuffer::Attributes>&&, UnixFileDescriptor&&)>&&) final;
 };
 
@@ -52,10 +53,17 @@ RemoteGraphicsContextGLGBM::RemoteGraphicsContextGLGBM(GPUConnectionToWebProcess
     : RemoteGraphicsContextGL(connection, identifier, renderingBackend, WTF::move(streamConnection))
 { }
 
+void RemoteGraphicsContextGLGBM::didRunOutOfMessages()
+{
+    assertIsCurrent(workQueue());
+    if (RefPtr context = m_context)
+        context->flush();
+}
+
 void RemoteGraphicsContextGLGBM::platformWorkQueueInitialize(WebCore::GraphicsContextGLAttributes&& attributes)
 {
     assertIsCurrent(workQueue());
-    m_context = WebCore::GraphicsContextGLTextureMapperGBM::create(WTF::move(attributes));
+    m_context = WebCore::GraphicsContextGLGBM::create(WTF::move(attributes));
 }
 
 void RemoteGraphicsContextGLGBM::prepareForDisplay(CompletionHandler<void(uint64_t, std::optional<WebCore::DMABufBuffer::Attributes>&&, UnixFileDescriptor&&)>&& completionHandler)

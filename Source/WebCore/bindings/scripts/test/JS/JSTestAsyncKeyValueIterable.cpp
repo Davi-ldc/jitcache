@@ -256,7 +256,7 @@ static inline EncodedJSValue jsTestAsyncKeyValueIterablePrototypeFunction_entrie
 
 JSC_DEFINE_HOST_FUNCTION(jsTestAsyncKeyValueIterablePrototypeFunction_entries, (JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame))
 {
-    return IDLOperation<JSTestAsyncKeyValueIterable>::call<jsTestAsyncKeyValueIterablePrototypeFunction_entriesCaller>(*lexicalGlobalObject, *callFrame, "entries");
+    return IDLOperation<JSTestAsyncKeyValueIterable>::call<jsTestAsyncKeyValueIterablePrototypeFunction_entriesCaller>(*lexicalGlobalObject, *callFrame, "entries"_s);
 }
 
 static inline EncodedJSValue jsTestAsyncKeyValueIterablePrototypeFunction_keysCaller(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame, JSTestAsyncKeyValueIterable* thisObject)
@@ -270,7 +270,7 @@ static inline EncodedJSValue jsTestAsyncKeyValueIterablePrototypeFunction_keysCa
 
 JSC_DEFINE_HOST_FUNCTION(jsTestAsyncKeyValueIterablePrototypeFunction_keys, (JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame))
 {
-    return IDLOperation<JSTestAsyncKeyValueIterable>::call<jsTestAsyncKeyValueIterablePrototypeFunction_keysCaller>(*lexicalGlobalObject, *callFrame, "keys");
+    return IDLOperation<JSTestAsyncKeyValueIterable>::call<jsTestAsyncKeyValueIterablePrototypeFunction_keysCaller>(*lexicalGlobalObject, *callFrame, "keys"_s);
 }
 
 static inline EncodedJSValue jsTestAsyncKeyValueIterablePrototypeFunction_valuesCaller(JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame, JSTestAsyncKeyValueIterable* thisObject)
@@ -284,7 +284,7 @@ static inline EncodedJSValue jsTestAsyncKeyValueIterablePrototypeFunction_values
 
 JSC_DEFINE_HOST_FUNCTION(jsTestAsyncKeyValueIterablePrototypeFunction_values, (JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame))
 {
-    return IDLOperation<JSTestAsyncKeyValueIterable>::call<jsTestAsyncKeyValueIterablePrototypeFunction_valuesCaller>(*lexicalGlobalObject, *callFrame, "values");
+    return IDLOperation<JSTestAsyncKeyValueIterable>::call<jsTestAsyncKeyValueIterablePrototypeFunction_valuesCaller>(*lexicalGlobalObject, *callFrame, "values"_s);
 }
 
 JSC_ANNOTATE_HOST_FUNCTION(TestAsyncKeyValueIterableIteratorBaseOnPromiseSettled, TestAsyncKeyValueIterableIteratorBase::onPromiseSettled);
@@ -349,7 +349,7 @@ static inline void verifyVTable(TestAsyncKeyValueIterable* ptr)
         // TestAsyncKeyValueIterable has subclasses. If TestAsyncKeyValueIterable has subclasses that get passed
         // to toJS() we currently require TestAsyncKeyValueIterable you to opt out of binding hardening
         // by adding the SkipVTableValidation attribute to the interface IDL definition
-        RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
+        RELEASE_ASSERT_WITH_UNQUALIFIED_FUNCTION_NAME(actualVTablePointer == expectedVTablePointer);
     }
 }
 #endif

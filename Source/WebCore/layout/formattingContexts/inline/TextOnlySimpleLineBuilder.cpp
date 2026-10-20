@@ -28,6 +28,7 @@
 
 #include "InlineContentCache.h"
 #include "InlineFormattingContext.h"
+#include "LayoutIntegrationUtils.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleComputedStyle+InitialInlines.h"
 
@@ -490,13 +491,15 @@ InlineLayoutUnit TextOnlySimpleLineBuilder::availableWidth() const
     return (m_lineLogicalRect.width() + epsilon) - (!std::isnan(contentLogicalRight) ? contentLogicalRight : 0.f);
 }
 
-bool TextOnlySimpleLineBuilder::isEligibleForSimplifiedTextOnlyInlineLayoutByContent(const InlineContentCache::InlineItems& inlineItems, const PlacedFloats& placedFloats)
+bool TextOnlySimpleLineBuilder::isEligibleForSimplifiedTextOnlyInlineLayoutByContent(const InlineContentCache::InlineItems& inlineItems, const InlineLayoutState& inlineLayoutState)
 {
     if (inlineItems.isEmpty())
         return false;
     if (!inlineItems.hasTextAndLineBreakOnlyContent() || inlineItems.hasInlineBoxes() || inlineItems.requiresVisualReordering() || inlineItems.hasTextAutospace())
         return false;
-    if (!placedFloats.isEmpty())
+    if (!inlineLayoutState.placedFloats().isEmpty())
+        return false;
+    if (auto lineClamp = inlineLayoutState.parentBlockLayoutState().lineClamp(); lineClamp && !lineClamp->isLegacy)
         return false;
     return true;
 }
@@ -545,7 +548,8 @@ bool TextOnlySimpleLineBuilder::isEligibleForSimplifiedDisplayBuild(const Elemen
         return false;
 
     auto& rootStyle = rootBlockContainer.style();
-    if (rootStyle.textOverflow() != Style::ComputedStyle::initialTextOverflow())
+    CheckedRef styleForTruncation = rootBlockContainer.isAnonymous() ? IntegrationUtils::firstNonAnonymousAncestorStyle(rootBlockContainer) : rootStyle;
+    if (styleForTruncation->textOverflow() != Style::ComputedStyle::initialTextOverflow())
         return false;
     if (!rootStyle.writingMode().isHorizontal())
         return false;

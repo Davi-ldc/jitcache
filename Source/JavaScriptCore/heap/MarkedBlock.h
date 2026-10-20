@@ -157,16 +157,17 @@ public:
         
         // This is to be called by Subspace.
         template<typename DestroyFunc>
-        void finishSweepKnowingHeapCellType(FreeList*, const DestroyFunc&);
+        void finishSweepKnowingHeapCellType(FreeList*, NOESCAPE const DestroyFunc&);
         
         void unsweepWithNoNewlyAllocated();
         
         inline void shrink();
         // Return interior OS pages that hold no live cell to the OS (after a sweep-only sweep); re-commit them
         // before the block is handed to an allocator or freed. No-op when an OS page is not smaller than a block.
-        void decommitUnusedPages();
+        void decommitUnusedPages(bool isFirstSweepSinceFullCollection);
         void recommitPages();
-            
+        unsigned numberOfDecommittedPages() const { return std::popcount(m_decommittedPages); }
+
         // While allocating from a free list, MarkedBlock temporarily has bogus
         // cell liveness data. To restore accurate cell liveness data, call one
         // of these functions:
@@ -198,10 +199,10 @@ public:
         bool isLive(const HeapCell*);
         bool isLiveCell(const void*);
 
-        template <typename Functor> IterationStatus forEachCell(const Functor&);
-        template <typename Functor> inline IterationStatus forEachLiveCell(const Functor&);
-        template <typename Functor> inline IterationStatus forEachDeadCell(const Functor&);
-        template <typename Functor> inline IterationStatus forEachMarkedCell(const Functor&);
+        template <typename Functor> IterationStatus forEachCell(NOESCAPE const Functor&);
+        template <typename Functor> inline IterationStatus forEachLiveCell(NOESCAPE const Functor&);
+        template <typename Functor> inline IterationStatus forEachDeadCell(NOESCAPE const Functor&);
+        template <typename Functor> inline IterationStatus forEachMarkedCell(NOESCAPE const Functor&);
             
         JS_EXPORT_PRIVATE bool NODELETE areMarksStale();
         bool areMarksStaleForSweep();
@@ -240,8 +241,11 @@ public:
         NewlyAllocatedMode newlyAllocatedMode();
         MarksMode marksMode();
         
+        static void poisonDecommittedPages(void*, size_t);
+        void unpoisonDecommittedPages();
+
         template<bool, EmptyMode, SweepMode, SweepDestructionMode, ScribbleMode, NewlyAllocatedMode, MarksMode, typename DestroyFunc>
-        void specializedSweep(FreeList*, EmptyMode, SweepMode, SweepDestructionMode, ScribbleMode, NewlyAllocatedMode, MarksMode, const DestroyFunc&);
+        void specializedSweep(FreeList*, EmptyMode, SweepMode, SweepDestructionMode, ScribbleMode, NewlyAllocatedMode, MarksMode, NOESCAPE const DestroyFunc&);
         
         unsigned m_atomsPerCell { std::numeric_limits<unsigned>::max() };
         unsigned m_startAtom { std::numeric_limits<unsigned>::max() }; // Exact location of the first allocatable atom.
@@ -249,13 +253,16 @@ public:
         CellAttributes m_attributes;
         bool m_isFreeListed { false };
         uint16_t m_decommittedPages { 0 }; // bit i set: OS page i of the block is decommitted
+        uint16_t m_zeroPagesDuringSweep { 0 }; // The pages that were decommitted, and so all zero, when the sweep in progress began.
+        HeapVersion m_markingVersionAtLastSweep; // A full collection is what moves MarkedSpace::markingVersion() on.
         unsigned m_index { std::numeric_limits<unsigned>::max() };
 
         AlignedMemoryAllocator* m_alignedMemoryAllocator { nullptr };
         BlockDirectory* m_directory { nullptr };
-        WeakSet m_weakSet;
-        
         MarkedBlock* const m_block { nullptr };
+
+        // WeakSet is rarely accessed so keep it after the other members.
+        WeakSet m_weakSet;
     };
 
 private:    
@@ -675,7 +682,7 @@ inline bool MarkedBlock::isAtom(const void* p)
 }
 
 template <typename Functor>
-inline IterationStatus MarkedBlock::Handle::forEachCell(const Functor& functor)
+inline IterationStatus MarkedBlock::Handle::forEachCell(NOESCAPE const Functor& functor)
 {
     HeapCell::Kind kind = m_attributes.cellKind;
     for (size_t i = m_startAtom; i < endAtom; i += m_atomsPerCell) {

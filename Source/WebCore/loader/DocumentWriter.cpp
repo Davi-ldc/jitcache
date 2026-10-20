@@ -215,6 +215,8 @@ bool DocumentWriter::begin(const URL& urlReference, bool dispatch, Document* own
         document->setCookieURL(ownerDocument->cookieURL());
         document->setSecurityOriginPolicy(ownerDocument->securityOriginPolicy());
         document->setCrossOriginEmbedderPolicy(ownerDocument->crossOriginEmbedderPolicy());
+        document->setDocumentIsolationPolicy(ownerDocument->documentIsolationPolicy());
+        document->setIPAddressSpace(ownerDocument->ipAddressSpace());
 
         document->setContentSecurityPolicy(makeUnique<ContentSecurityPolicy>(URL { url }, document));
         CheckedRef contentSecurityPolicy = *document->contentSecurityPolicy();
@@ -250,7 +252,7 @@ bool DocumentWriter::begin(const URL& urlReference, bool dispatch, Document* own
     }
 
     if (existingDocument && existingDocument->contentSecurityPolicy() && document->contentSecurityPolicy())
-        document->contentSecurityPolicy()->setInsecureNavigationRequestsToUpgrade(existingDocument->contentSecurityPolicy()->takeNavigationRequestsToUpgrade());
+        protect(document->contentSecurityPolicy())->setInsecureNavigationRequestsToUpgrade(existingDocument->contentSecurityPolicy()->takeNavigationRequestsToUpgrade());
 
     frameLoader->didBeginDocument(dispatch, previousWindow);
 
@@ -287,7 +289,8 @@ TextResourceDecoder& DocumentWriter::decoder()
         if (canReferToParentFrameEncoding(frame.ptr(), parentFrame))
             decoder->setHintEncoding(parentFrame->document()->decoder());
         if (m_encoding.isEmpty()) {
-            if (canReferToParentFrameEncoding(frame.ptr(), parentFrame))
+            // Don't let a non-UTF-8 parent frame override JSON's UTF-8 default (RFC 8259).
+            if (canReferToParentFrameEncoding(frame.ptr(), parentFrame) && decoder->contentType() != TextResourceDecoder::JSON)
                 decoder->setEncoding(protect(parentFrame->document())->textEncoding(), TextResourceDecoder::EncodingFromParentFrame);
         } else {
             decoder->setEncoding(m_encoding,

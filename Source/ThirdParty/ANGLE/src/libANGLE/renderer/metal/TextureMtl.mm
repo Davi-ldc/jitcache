@@ -1371,15 +1371,12 @@ angle::Result TextureMtl::getRenderTarget(ContextMtl *context,
             : static_cast<gl::RenderToTextureImageIndex>(PackSampleCount(implicitSamples));
 
     RenderTargetMtl &rtt = mRenderTargets[imageIndex][renderToTextureIndex];
-    if (!rtt.getTexture())
-    {
-        auto &imageDef = getImageDefinition(imageIndex);
-        ANGLE_CHECK_ASSERT(context, imageDef.image && imageDef.image->valid());
-        // Cube map is special, the image is already the view of its layer.
-        GLuint layer = imageIndex.getType() == gl::TextureType::CubeMap ? 0 : GetImageLayerIndexFrom(imageIndex);
-        const mtl::Format &mtlFormat = context->getPixelFormat(imageDef.formatID);
-        rtt.set(imageDef.image, mtl::kZeroNativeMipLevel, layer, mtlFormat);
-    }
+    auto &imageDef = getImageDefinition(imageIndex);
+    ANGLE_CHECK_ASSERT(context, imageDef.image && imageDef.image->valid());
+    // Cube map is special, the image is already the view of its layer.
+    GLuint layer = imageIndex.getType() == gl::TextureType::CubeMap ? 0 : GetImageLayerIndexFrom(imageIndex);
+    const mtl::Format &mtlFormat = context->getPixelFormat(imageDef.formatID);
+    rtt.set(imageDef.image, mtl::kZeroNativeMipLevel, layer, mtlFormat);
 
     if (implicitSamples > 1 && !rtt.getImplicitMSTexture())
     {
@@ -2050,6 +2047,24 @@ angle::Result TextureMtl::redefineImage(const gl::Context *context,
     GLuint cubeFaceOrZero        = GetImageCubeFaceIndexOrZeroFrom(index);
     GLuint glLevel               = index.getLevelIndex();
     ImageDefinitionMtl &imageDef = mTexImageDefs[cubeFaceOrZero][glLevel];
+
+    // Discarding the image below leaves the render targets that point at it holding an expired
+    // weak reference. A framebuffer can also keep the discarded image alive through its cached
+    // render pass, which hides the expiry. Clear those render targets so that the next use
+    // recreates them from the new image.
+    for (auto &samplesMapRenderTargets : mRenderTargets)
+    {
+        const gl::ImageIndex &rttIndex = samplesMapRenderTargets.first;
+        if (rttIndex.getLevelIndex() != static_cast<GLint>(glLevel) ||
+            GetImageCubeFaceIndexOrZeroFrom(rttIndex) != cubeFaceOrZero)
+        {
+            continue;
+        }
+        for (RenderTargetMtl &perSampleCountRenderTarget : samplesMapRenderTargets.second)
+        {
+            perSampleCountRenderTarget.reset();
+        }
+    }
 
     if (mNativeTextureStorage && mNativeTextureStorage->isGLLevelSupported(glLevel))
     {

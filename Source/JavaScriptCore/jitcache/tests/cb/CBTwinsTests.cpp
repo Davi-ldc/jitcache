@@ -226,8 +226,8 @@ static constexpr auto elementSource = "function element(array, index) { return a
 
 // The import validation test's subject, which has an entry in nearly every family: it is sloppy, so `this` gives a
 // to_this; `array.length` a get_length; Array(n) a jneq_ptr and a new_array_with_size; the nested literals new_array
-// and new_array_buffer of each copy-on-write type; for-of an iterator_open and an iterator_next; for-in the enumerator
-// opcodes.
+// and new_array_buffer of each copy-on-write type; for-of an iterator_open, an iterator_next and an
+// iterator_close_check; for-in the enumerator opcodes; and the calls of helper two call sites.
 #define CB_TWINS_TESTS_SUBJECT_BODY \
     "(array, object, n) {\n" \
     "    var sum = 0;\n" \
@@ -337,7 +337,7 @@ static void checkBodyWithoutMetadataTable(TestContext& context, JSGlobalObject* 
         return;
     }
     unsigned walkerCalls = 0;
-    CBFormat::forEachMetadataValueProfile(*newborn, [&](unsigned, ValueProfile&) {
+    CBFormat::forEachMetadataValueProfile(*newborn, [&](unsigned, const ValueProfileRef&) {
         ++walkerCalls;
     });
     CBFormat::forEachFamily([&](auto family) {
@@ -365,12 +365,13 @@ static void checkBodyWithoutMetadataTable(TestContext& context, JSGlobalObject* 
 using namespace CBTwinsTestsInternal;
 
 // verifyTwins passes on the counter tests' CBs, each a newborn CB taken through prepare, seedLinkedState, setup and
-// finishCounter with its own section, and reports each counter finishCounter must never leave: a threshold that
-// differs from its record, an aging sample that is not the restored count, a native slice above C, a crossed record
-// whose P is below T - min(T, C) / 2, an infinite threshold that lost its captured slice, and a counter that did not
-// travel whose threshold differs from setup's arming. Each fabricated result comes with a counter that holds its slice,
-// so it breaks one rule only. The test keeps the default options, concurrent JIT included, since the check calls
-// nothing that reads the executable pool.
+// finishCounter with its own section, at startup deferral scales of 1 and 4, and reports each counter finishCounter must
+// never leave: a threshold that differs from its record, an aging sample that is not the restored count, a native slice
+// above C at a scale of 1, a crossed record whose P is below s * T - min(T, C) / 2, a scale other than the VM's, an
+// infinite threshold that lost its captured slice, and a counter that did not travel whose threshold differs from
+// setup's arming; a native slice above C at a scale of 4 is no difference. Each fabricated result comes with a counter
+// that holds its slice, so it breaks one rule only. The test keeps the default options, concurrent JIT included, since
+// the check calls nothing that reads the executable pool.
 JITCACHE_TEST(cbTwinsCheckTheRestoredCounter, Yes)
 {
     VM& vm = *context.vm();
@@ -416,28 +417,35 @@ JITCACHE_TEST(cbTwinsCheckTheRestoredCounter, Yes)
         { "an infinite counter already crossed"_s, { 10, 990, infinite } },
         { "one split of P = 500.5"_s, { -500, 1000.5f, 2000 } },
         { "another split of P = 500.5"_s, { -1000, 1500.5f, 2000 } },
+        { "P = 2 * T"_s, { -1000, 3000, 1000 } },
     };
-    for (const auto& carriedCase : carriedCases) {
-        auto words = sectionWith(CBFormat::CounterMode::Carried, carriedCase.record, 0);
-        if (!words)
-            return;
-        restoreOnNewborn(context, twin, bytesOf(*words), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore& restore) {
-            expectTwinChecks(context, carriedCase.name, imported, codeBlock, restore, { });
-        });
-    }
-    for (uint16_t reoptimizations : { 0, 3 }) {
-        for (bool quickDFGTierUp : { false, true }) {
-            auto words = sectionWith(CBFormat::CounterMode::NotCarried, { }, reoptimizations);
+    constexpr double scaled = 4;
+    for (double scale : { 1.0, scaled }) {
+        vm.setStartupJITDeferralScale(scale);
+        for (const auto& carriedCase : carriedCases) {
+            auto words = sectionWith(CBFormat::CounterMode::Carried, carriedCase.record, 0);
             if (!words)
                 return;
-            String what = makeString("NotCarried with "_s, reoptimizations, " reoptimizations and the quick DFG bit "_s, quickDFGTierUp ? "set"_s : "clear"_s);
-            restoreOnNewborn(context, twin, bytesOf(*words), code.get(), [&](CodeBlock& codeBlock) {
-                codeBlock.unlinkedCodeBlock()->setQuickDFGTierUp(quickDFGTierUp ? TriState::True : TriState::False);
-            }, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore& restore) {
+            String what = makeString(carriedCase.name, " at a startup deferral scale of "_s, scale);
+            restoreOnNewborn(context, twin, bytesOf(*words), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore& restore) {
                 expectTwinChecks(context, what, imported, codeBlock, restore, { });
             });
         }
+        for (uint16_t reoptimizations : { 0, 3 }) {
+            for (bool quickDFGTierUp : { false, true }) {
+                auto words = sectionWith(CBFormat::CounterMode::NotCarried, { }, reoptimizations);
+                if (!words)
+                    return;
+                String what = makeString("NotCarried with "_s, reoptimizations, " reoptimizations and the quick DFG bit "_s, quickDFGTierUp ? "set"_s : "clear"_s, " at a startup deferral scale of "_s, scale);
+                restoreOnNewborn(context, twin, bytesOf(*words), code.get(), [&](CodeBlock& codeBlock) {
+                    codeBlock.unlinkedCodeBlock()->setQuickDFGTierUp(quickDFGTierUp ? TriState::True : TriState::False);
+                }, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore& restore) {
+                    expectTwinChecks(context, what, imported, codeBlock, restore, { });
+                });
+            }
+        }
     }
+    vm.setStartupJITDeferralScale(1);
 
     // The records the reports start from: P = 10 under T = 1000, far below T - min(T, C) / 2 for any ceiling, and an
     // infinite threshold whose captured slice is 1000.
@@ -479,6 +487,32 @@ JITCACHE_TEST(cbTwinsCheckTheRestoredCounter, Yes)
         codeBlock.baselineJITData()->executeCounter().m_activeThreshold += 1;
         expectTwinChecks(context, "a counter that did not travel, armed above setup's threshold"_s, imported, codeBlock, restore, { "counter-arming"_s });
     });
+
+    // At a scale of 4, where P = 2 * T lies below 4 * T - min(T, C) / 2: a crossing of that record, a result that reports
+    // a scale of 1, and a native slice above C, which a scaled slice may pass.
+    constexpr CounterTriple twiceThreshold { -1000, 3000, 1000 };
+    auto carriedTwice = sectionWith(CBFormat::CounterMode::Carried, twiceThreshold, 0);
+    if (!carriedTwice)
+        return;
+    vm.setStartupJITDeferralScale(scaled);
+    restoreOnNewborn(context, twin, bytesOf(*carriedTwice), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore&) {
+        CBCounterRestore earlyCrossing { .carried = true, .crossed = true, .nativeSlice = 0, .slice = floorSlice, .startupDeferralScale = scaled };
+        holdSlice(codeBlock, twiceThreshold, earlyCrossing.slice);
+        expectTwinChecks(context, "a crossing whose P is below 4 * T - min(T, C) / 2 at a scale of 4"_s, imported, codeBlock, earlyCrossing, { "counter-early-crossing"_s });
+    });
+    restoreOnNewborn(context, twin, bytesOf(*carriedShort), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore&) {
+        int64_t ceiling = maximumExecutionCountsBetweenCheckpoints(CountingForBaseline, &codeBlock);
+        CBCounterRestore unscaled { .carried = true, .crossed = false, .nativeSlice = ceiling, .slice = std::max(ceiling, floorSlice), .startupDeferralScale = 1 };
+        holdSlice(codeBlock, shortOfThreshold, unscaled.slice);
+        expectTwinChecks(context, "a result that reports a scale of 1 at a scale of 4"_s, imported, codeBlock, unscaled, { "counter-scale"_s });
+    });
+    restoreOnNewborn(context, twin, bytesOf(*carriedShort), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore&) {
+        int64_t ceiling = maximumExecutionCountsBetweenCheckpoints(CountingForBaseline, &codeBlock);
+        CBCounterRestore aboveCeiling { .carried = true, .crossed = false, .nativeSlice = ceiling + 1, .slice = std::max(ceiling + 1, floorSlice), .startupDeferralScale = scaled };
+        holdSlice(codeBlock, shortOfThreshold, aboveCeiling.slice);
+        expectTwinChecks(context, "a native slice above C at a scale of 4"_s, imported, codeBlock, aboveCeiling, { });
+    });
+    vm.setStartupJITDeferralScale(1);
 }
 
 // `function id(x) { return x; }` gets no metadata table, and `function has(o) { return "x" in o; }` has a
@@ -575,10 +609,12 @@ JITCACHE_TEST(cbTwinsCheckEverySeededField, Yes)
 
     expectReported("a value prediction"_s, "value-prediction"_s, [](CodeBlock& codeBlock) {
         bool changed = false;
-        CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, ValueProfile& profile) {
+        // A ValueProfileRef only merges into its prediction, so the bit is flipped in the table's predictions, which the
+        // walker visits only when the table exists.
+        CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, const ValueProfileRef&) {
             if (offset != 1)
                 return;
-            profile.m_prediction ^= SpecInt32Only;
+            codeBlock.metadataTable()->ensureValueProfilePredictions()[offset - 1] ^= SpecInt32Only;
             changed = true;
         });
         return changed;
@@ -601,7 +637,7 @@ JITCACHE_TEST(cbTwinsCheckEverySeededField, Yes)
         bool changed = false;
         CBFormat::forEachFamily([&](auto family) {
             using FamilyType = decltype(family);
-            if constexpr (FamilyType::kind == CBFormat::FamilyKind::ArrayProfile) {
+            if constexpr (FamilyType::kind == CBFormat::FamilyKind::ArrayProfile && FamilyType::hasField) {
                 CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](ArrayProfile& profile) {
                     if (changed)
                         return;
@@ -659,6 +695,24 @@ JITCACHE_TEST(cbTwinsCheckEverySeededField, Yes)
             changed = true;
         });
         return changed;
+    });
+
+    // A section whose value records are all SpecNone seeds no prediction, so the metadata table gets none; predictions
+    // allocated anyway are reported, since no record asked for them.
+    if (image->valuePredictions.isEmpty() || !Options::useLazyValueProfilePredictions()) {
+        JITCACHE_FAIL("the subject has no value profile, or every metadata table allocates its predictions when it is linked"_s);
+        return;
+    }
+    StateImage withoutPredictions = *image;
+    for (auto& prediction : withoutPredictions.valuePredictions)
+        prediction = SpecNone;
+    auto withoutPredictionsWords = encodeState(context, withoutPredictions);
+    if (!withoutPredictionsWords)
+        return;
+    restoreOnNewborn(context, twin, bytesOf(*withoutPredictionsWords), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CBStateImport& imported, const CBCounterRestore& restore) {
+        expectTwinChecks(context, "a section whose value records are all SpecNone"_s, imported, codeBlock, restore, { });
+        codeBlock.metadataTable()->ensureValueProfilePredictions();
+        expectTwinChecks(context, "predictions no value record asked for"_s, imported, codeBlock, restore, { "value-predictions-array"_s });
     });
 }
 

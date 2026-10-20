@@ -26,6 +26,7 @@
 #pragma once
 
 #import <WebGPU/WebGPU.h>
+#import <WebGPU/WebGPUCpp.h>
 #import <WebGPU/WebGPUExt.h>
 #import <wtf/CompletionHandler.h>
 #import <wtf/Deque.h>
@@ -35,7 +36,6 @@
 #import <wtf/MachSendRight.h>
 #import <wtf/Ref.h>
 #import <wtf/TZoneMalloc.h>
-#import <wtf/ThreadSafeRefCounted.h>
 #import <wtf/ThreadSafeWeakPtr.h>
 #import <wtf/ThreadSafetyAnalysis.h>
 #import <wtf/WeakObjCPtr.h>
@@ -48,15 +48,16 @@ namespace WTF {
 class MachSendRight;
 }
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class Adapter;
+class CommandBuffer;
 class Device;
 class PresentationContext;
 class Texture;
 
 // https://gpuweb.github.io/gpuweb/#gpu
-class Instance : public WGPUInstanceImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Instance> {
+class Instance final : public WebGPU::Instance, public WGPUInstanceImpl {
     WTF_MAKE_TZONE_ALLOCATED(Instance);
 public:
     static Ref<Instance> create(const WGPUInstanceDescriptor&);
@@ -71,8 +72,11 @@ public:
     void processEvents();
     void requestAdapter(const WGPURequestAdapterOptions&, CompletionHandler<void(WGPURequestAdapterStatus, Ref<Adapter>&&, String&&)>&& callback);
 
-    bool isValid() const { return m_isValid; }
+    void setLabel(String&&) final { }
+    bool isValid() const final { return m_isValid; }
     void retainDevice(Device&, id<MTLCommandBuffer>);
+    void retainCommandBuffer(CommandBuffer&, id<MTLCommandBuffer>);
+    void waitForCommandBufferCompletions();
 
     // This can be called on a background thread.
     using WorkItem = Function<void()>;
@@ -90,11 +94,12 @@ private:
     // This can be used on a background thread.
     Deque<WGPUWorkItem> m_pendingWork WTF_GUARDED_BY_LOCK(m_lock);
     using CommandBufferContainer = Vector<WeakObjCPtr<id<MTLCommandBuffer>>>;
-    HashMap<Ref<Device>, CommandBufferContainer> retainedDeviceInstances WTF_GUARDED_BY_LOCK(m_lock);
+    HashMap<Ref<Device>, CommandBufferContainer> retainedDeviceInstances;
+    Vector<std::pair<Ref<CommandBuffer>, WeakObjCPtr<id<MTLCommandBuffer>>>> m_retainedCommandBufferInstances;
     const std::optional<const MachSendRight> m_webProcessID;
     const WGPUScheduleWorkBlock m_scheduleWorkBlock;
     Lock m_lock;
     bool m_isValid { true };
 };
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal

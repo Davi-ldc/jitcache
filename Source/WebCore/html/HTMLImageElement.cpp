@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
- * Copyright (C) 2004-2022 Apple Inc. All rights reserved.
+ * Copyright (C) 2004-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2010-2015 Google Inc. All rights reserved.
  *
  * This library is free software; you can redistribute it and/or
@@ -41,14 +41,17 @@
 #include "HTMLAttachmentElement.h"
 #include "HTMLDocument.h"
 #include "HTMLFormElement.h"
+#include "HTMLImageDensityCorrectedSizing.h"
 #include "HTMLImageLoader.h"
 #include "HTMLMapElement.h"
 #include "HTMLParserIdioms.h"
 #include "HTMLPictureElement.h"
 #include "HTMLSourceElement.h"
 #include "HTMLSrcsetParser.h"
+#include "ImageOrientation.h"
+#include "ImageRequestState.h"
 #include "JSRequestPriority.h"
-#include "LazyLoadImageObserver.h"
+#include "LazyLoadElementObserver.h"
 #include "LocalFrameView.h"
 #include "Logging.h"
 #include "MIMETypeRegistry.h"
@@ -61,12 +64,15 @@
 #include "RenderBoxInlines.h"
 #include "RenderElementStyleInlines.h"
 #include "RenderImage.h"
+#include "RenderImageResource.h"
 #include "RenderView.h"
 #include "RequestPriority.h"
 #include "ScriptController.h"
 #include "Settings.h"
 #include "ShadowRoot.h"
 #include "SizesAttributeParser.h"
+#include "StyleComputedStyle.h"
+#include "StyleImageOrientation.h"
 #include "StyleZoomPrimitivesInlines.h"
 #include <wtf/TZoneMallocInlines.h>
 #include "DocumentPage.h"
@@ -462,9 +468,13 @@ void HTMLImageElement::attributeChanged(const QualifiedName& name, const AtomStr
         break;
     }
     case AttributeNames::loadingAttr:
-        // No action needed for eager to lazy transition.
         if (!hasLazyLoadableAttributeValue(newValue))
             loadDeferredImage();
+        else if (!isConnected() && !m_imageLoader->image()) {
+            // An eager-to-lazy transition before the element is connected may need to defer a
+            // pending error queued for an empty/whitespace source. Re-run to re-evaluate deferral.
+            m_imageLoader->updateFromElementIgnoringPreviousError();
+        }
         break;
     case AttributeNames::referrerpolicyAttr: {
         auto oldReferrerPolicy = parseReferrerPolicy(oldValue, ReferrerPolicySource::ReferrerPolicyAttribute).value_or(ReferrerPolicy::EmptyString);
@@ -519,6 +529,14 @@ std::optional<float> HTMLImageElement::autoSizesLayoutWidth() const
     if (!box)
         return { };
     return box->contentBoxWidth().toFloat();
+}
+
+void HTMLImageElement::lazyLoadIntersectionCallbackInvoked(bool isIntersecting)
+{
+    if (!isIntersecting)
+        return;
+    loadDeferredImage();
+    LazyLoadElementObserver::unobserve(*this, protect(document()));
 }
 
 const AtomString& HTMLImageElement::altText() const
@@ -631,11 +649,18 @@ void HTMLImageElement::removingSteps(RemovalType removalType, ContainerNode& old
     FormAssociatedElement::elementRemovedFromAncestor(*this, removalType);
 }
 
-void HTMLImageElement::movingSteps(IsSubtreeRoot isSubtreeRoot, ContainerNode& oldParent)
+void HTMLImageElement::movingSteps(MovingType movingType, ContainerNode& oldParent)
 {
-    HTMLElement::movingSteps(isSubtreeRoot, oldParent);
+    HTMLElement::movingSteps(movingType, oldParent);
 
-    if (isSubtreeRoot == IsSubtreeRoot::No)
+    if (!m_parsedUsemap.isNull()) {
+        if (movingType.didRemoveFromOldTreeScope)
+            protect(oldParent.treeScope())->removeImageElementByUsemap(m_parsedUsemap, *this);
+        if (movingType.didInsertIntoNewTreeScope)
+            protect(treeScope())->addImageElementByUsemap(m_parsedUsemap, *this);
+    }
+
+    if (!movingType.isSubtreeRoot)
         return;
 
     if (RefPtr parentPicture = dynamicDowncast<HTMLPictureElement>(parentElement())) {
@@ -651,12 +676,24 @@ HTMLPictureElement* HTMLImageElement::pictureElement() const
 {
     return m_pictureElement.get();
 }
-    
+
 void HTMLImageElement::setPictureElement(HTMLPictureElement* pictureElement)
 {
     m_pictureElement = pictureElement;
 }
-    
+
+LayoutSize HTMLImageElement::densityCorrectedNaturalSize() const
+{
+    // https://html.spec.whatwg.org/multipage/images.html#density-corrected-intrinsic-width-and-height
+
+    RefPtr image = m_imageLoader->image();
+    if (!image || !image->hasImage())
+        return { };
+
+    auto naturalDimensions = image->naturalDimensions(ImageOrientation::Orientation::FromImage);
+    return LayoutSize(HTMLImageDensityCorrectedSizing { m_imageDevicePixelRatio }.resolve(naturalDimensions).size());
+}
+
 unsigned HTMLImageElement::width()
 {
     if (inRenderedDocument())
@@ -664,13 +701,11 @@ unsigned HTMLImageElement::width()
 
     if (!renderer()) {
         // check the attribute first for an explicit pixel value
-        auto optionalWidth = parseHTMLNonNegativeInteger(attributeWithoutSynchronization(widthAttr));
-        if (optionalWidth)
+        if (auto optionalWidth = parseHTMLNonNegativeInteger(attributeWithoutSynchronization(widthAttr)))
             return optionalWidth.value();
 
-        // if the image is available, use its width
-        if (RefPtr image = m_imageLoader->image())
-            return image->imageSizeForRenderer(nullptr, 1.0f, CachedImage::IntrinsicSize).width().toUnsigned();
+        // otherwise fall back to what naturalWidth returns
+        return densityCorrectedNaturalSize().width().toUnsigned();
     }
 
     CheckedPtr box = renderBox();
@@ -687,13 +722,11 @@ unsigned HTMLImageElement::height()
 
     if (!renderer()) {
         // check the attribute first for an explicit pixel value
-        auto optionalHeight = parseHTMLNonNegativeInteger(attributeWithoutSynchronization(heightAttr));
-        if (optionalHeight)
+        if (auto optionalHeight = parseHTMLNonNegativeInteger(attributeWithoutSynchronization(heightAttr)))
             return optionalHeight.value();
 
-        // if the image is available, use its height
-        if (RefPtr image = m_imageLoader->image())
-            return image->imageSizeForRenderer(nullptr, 1.0f, CachedImage::IntrinsicSize).height().toUnsigned();
+        // otherwise fall back to what naturalHeight returns
+        return densityCorrectedNaturalSize().height().toUnsigned();
     }
 
     CheckedPtr box = renderBox();
@@ -705,18 +738,12 @@ unsigned HTMLImageElement::height()
 
 unsigned HTMLImageElement::naturalWidth() const
 {
-    RefPtr image = m_imageLoader->image();
-    if (!image)
-        return 0;
-    return image->unclampedImageSizeForRenderer(protect(renderer()).get(), 1.0f, CachedImage::IntrinsicSize, m_imageDevicePixelRatio).width().toUnsigned();
+    return densityCorrectedNaturalSize().width().toUnsigned();
 }
 
 unsigned HTMLImageElement::naturalHeight() const
 {
-    RefPtr image = m_imageLoader->image();
-    if (!image)
-        return 0;
-    return image->unclampedImageSizeForRenderer(protect(renderer()).get(), 1.0f, CachedImage::IntrinsicSize, m_imageDevicePixelRatio).height().toUnsigned();
+    return densityCorrectedNaturalSize().height().toUnsigned();
 }
 
 bool HTMLImageElement::isURLAttribute(const Attribute& attribute) const
@@ -906,6 +933,27 @@ bool HTMLImageElement::allowsOrientationOverride() const
     if (auto* cachedImage = this->cachedImage())
         return cachedImage->allowsOrientationOverride();
     return true;
+}
+
+ImageOrientation HTMLImageElement::orientationForSourceImage()
+{
+    if (!allowsOrientationOverride())
+        return ImageOrientation::Orientation::FromImage;
+    if (CheckedPtr renderer = this->renderer())
+        return Style::toPlatform(renderer->style().imageOrientationOutOfLine()).orientation();
+    if (CheckedPtr computedStyle = this->computedStyle())
+        return Style::toPlatform(computedStyle->imageOrientationOutOfLine()).orientation();
+    return ImageOrientation::Orientation::FromImage;
+}
+
+ImageRequestState HTMLImageElement::currentRequestState() const
+{
+    return m_imageLoader->currentRequestState();
+}
+
+RefPtr<Image> HTMLImageElement::sourceImage() const
+{
+    return image();
 }
 
 Image* HTMLImageElement::image() const
@@ -1140,7 +1188,7 @@ bool HTMLImageElement::originClean(const SecurityOrigin& origin) const
 IntersectionObserverData& HTMLImageElement::ensureIntersectionObserverData()
 {
     if (!m_intersectionObserverData)
-        m_intersectionObserverData = makeUnique<IntersectionObserverData>();
+        lazyInitialize(m_intersectionObserverData, makeUnique<IntersectionObserverData>());
     return *m_intersectionObserverData;
 }
 

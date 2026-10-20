@@ -4,7 +4,9 @@
 // each access type: get, put, in and delete by id and by value, get_length, get_by_id_with_this and get_by_val_with_this
 // through super, private names, accessors and brands, and instanceof. Object literals with accessors pass their names'
 // impls to put_getter_by_id, put_setter_by_id and put_getter_setter_by_id (UCBIdentifier); regexp literals pass their
-// RegExp cells (UCBConstantCell); stores of cells go through the write barrier; object literals and constructors fence
+// RegExp cells (UCBConstantCell), through new_reg_exp in matches and through new_reg_exp_shared in sharedMatches, whose
+// literals have neither g nor y and are the receivers of .test and .exec; stores of cells go through the write barrier;
+// object literals and constructors fence
 // on ARM64; typeof, == null and != null as values and as branches, and super's get_prototype_of decode structure IDs.
 // Gets and puts on a proxy cache cases that call the ProxyHelpers builtins, which run often enough to compile, so their
 // @mustValidateResultOfProxyGetAndSetTraps emits has_structure_with_flags, the one opcode decoding structure IDs that
@@ -95,6 +97,11 @@
         return /jit(cache)+/g.test(text) ? text.replace(/a/g, "A").length : -text.length;
     }
 
+    function sharedMatches(text) {
+        const found = /ban(an)+a/.exec(text);
+        return (/jit(cache)+/.test(text) ? 1 : 0) + (found ? found[0].length : 0);
+    }
+
     function lengths(array, text) {
         return array.length + text.length;
     }
@@ -166,6 +173,7 @@
             text += point.inherited(i % 3 ? "reveal" : "missing")[0];
         total += useAccessors(i);
         total += matches(i % 3 ? "jitcachecache-banana" : "plain-banana");
+        total += sharedMatches(i % 3 ? "jitcachecache-banana" : "plain-bandana");
         total += lengths(array, "length " + i);
         total += indexed(array, (i % 3) + 1, i);
         const object = { x: i, temporary: true, [`key${i % 4}`]: i };
@@ -178,10 +186,9 @@
     print(text);
     print(Point.created());
 
-    // The case happened (HARNESS.md, Tests): every function below runs at least 40 times, so the producer compiled it and
-    // it ran its import here. Point3D's constructor and inherited run for every other point, which is why the loop runs 80
-    // times. The private methods and the object literal's accessors are compiled too, but no reference to them outlives
-    // their calls.
+    // The case happened: every function below runs at least 40 times, so the producer compiled it and it ran its import
+    // here. Point3D's constructor and inherited run for every other point, which is why the loop runs 80 times. The
+    // private methods and the object literal's accessors are compiled too, but no reference to them outlives their calls.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const accessor = (object, name) => Object.getOwnPropertyDescriptor(object, name);
@@ -190,19 +197,29 @@
             "Point's sum getter": accessor(Point.prototype, "sum").get, "Point3D's sum getter": accessor(Point3D.prototype, "sum").get,
             "Point's both setter": accessor(Point.prototype, "both").set, "Shape's hasInstance": Shape[Symbol.hasInstance],
             "the proxy's get trap": handler.get, "the proxy's set trap": handler.set,
-            accessors, useAccessors, matches, lengths, indexed, membership, link, shapes, kinds, viaProxy,
+            accessors, useAccessors, matches, sharedMatches, lengths, indexed, membership, link, shapes, kinds, viaProxy,
         };
         const constructors = { Point, Point3D };
         sections.expectImports(role, bodies);
         sections.expectImports(role, constructors, "construct");
         sections.expectTargets(role, { call: bodies, construct: constructors }, [
-            { site: "D1", kind: "InlineCacheSlowPathThunk", form: "Call", eachMoldAccessType: true },
-            { site: "D2", kind: "UCBIdentifier", form: "Pointer" },
-            { site: "C21", kind: "UCBConstantCell", form: "Pointer" },
-            { site: "A4, D5, D7", kind: "VMAddress", a: "BarrierThreshold", form: "Pointer" },
-            { site: "D7, C3", kind: "VMAddress", a: "VM", form: "Pointer" },
-            { site: "A5, C2, C22", kind: "VMAddress", a: "MutatorShouldBeFenced", form: "Pointer", arch: "arm64" },
-            { site: "A6, C27", kind: "StructureIDBase", form: "Pointer" },
+            {
+                site: "a slow case's call to its inline cache's slow-path code",
+                kind: "InlineCacheSlowPathThunk", form: "Call", eachMoldAccessType: true,
+            },
+            { site: "the accessor definitions' property name argument", kind: "UCBIdentifier", form: "Pointer" },
+            { site: "new_reg_exp's RegExp argument", kind: "UCBConstantCell", form: "Pointer" },
+            { site: "a write barrier's threshold compare", kind: "VMAddress", a: "BarrierThreshold", form: "Pointer" },
+            { site: "a write barrier's or new_object's slow-path VM argument", kind: "VMAddress", a: "VM", form: "Pointer" },
+            {
+                site: "new_object's and create_this's mutator fence test",
+                kind: "VMAddress", a: "MutatorShouldBeFenced", form: "Pointer", arch: "arm64",
+            },
+            { site: "emitLoadStructure's structure ID decode", kind: "StructureIDBase", form: "Pointer" },
+        ]);
+        // sharedMatches holds no other constant cell, so its image's UCBConstantCell is new_reg_exp_shared's RegExp.
+        sections.expectTargets(role, { call: { sharedMatches } }, [
+            { site: "new_reg_exp_shared's RegExp argument", kind: "UCBConstantCell", form: "Pointer" },
         ]);
     }
 })(...arguments);

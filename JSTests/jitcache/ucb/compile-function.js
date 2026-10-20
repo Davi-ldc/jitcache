@@ -9,18 +9,16 @@
 //   The user function and its construct body import at their first call and first `new` in the Consumer (statistics).
 // - With cachedData, Bun decodes the wrapper itself, outside the CodeCache: the wrapper and the user function get no
 //   record, nothing in them imports or is captured, and cachedDataRejected is the same in every run. The user function's
-//   body is decoded from the cachedData span, which Bun has freed by then, so the case calls it only in release
-//   builds, which AddressSanitizer does not instrument.
+//   body is decoded at its first call from a copy of the cachedData that the payload owns, so every run calls it.
 // Sequence 0 runs both cases; sequence 1 runs the cachedData case alone, so its Consumer has nothing to install.
 // The cachedData comes from one compile with produceCachedData, made by the first run that needs it and kept in the
 // sequence's scratch directory, so every later run, the oracle's included, decodes the same bytes. Every run prints the
 // same output, which the oracle compares with the JITCache-off run.
 const fs = require("node:fs");
 const vm = require("node:vm");
-const { context, isASAN } = require("./resources/ucb-bun.js");
+const { context } = require("./resources/ucb-bun.js");
 
 const t = context();
-const callsDecodedFunction = !isASAN();
 
 const generatedBody = "if (new.target) { this.value = (a * 3 + 1) | 0; return; } let total = a; for (let i = 0; i < 4; ++i) total = (total * 5 + i) | 0; return total;";
 const cachedBody = "if (new.target) { this.value = (a * 7 + 2) | 0; return; } let total = a; for (let i = 0; i < 4; ++i) total = (total * 11 + i) | 0; return total;";
@@ -55,21 +53,21 @@ const before = t.statistics();
 const decoded = vm.compileFunction(cachedBody, ["a"], { cachedData });
 const compiled = t.statistics();
 t.expect("compileFunction with cachedData", t.delta(before, compiled), {
-    "records.Generated": 0, "records.Decoded": 0, "records.Imported": 0, imports: 0, seededDecodes: 0, attaches: 0,
+    "records.Generated": 0, "records.Imported": 0, imports: 0, attaches: 0,
 });
 console.log(`cachedDataRejected ${decoded.cachedDataRejected}`);
-if (callsDecodedFunction) {
-    let called = 0;
-    let constructed = 0;
-    for (let i = 0; i < 400; ++i) {
-        called = (called + decoded(i)) | 0;
-        constructed = (constructed + new decoded(i).value) | 0;
-    }
-    const after = t.statistics();
-    t.expect("the decoded user function's calls", t.delta(compiled, after), {
-        "records.Generated": 0, "records.Decoded": 0, "records.Imported": 0, imports: 0, seededDecodes: 0, attaches: 0,
-        "misses.NoKey": [">=", 1],
-    });
-    console.log(`with cachedData: ${called} ${constructed}`);
+// The window holds the calls alone: the helpers' first calls above (t.delta, t.expect) and console.log's first use
+// generate bodies of their own.
+let called = 0;
+let constructed = 0;
+const calling = t.statistics();
+for (let i = 0; i < 400; ++i) {
+    called = (called + decoded(i)) | 0;
+    constructed = (constructed + new decoded(i).value) | 0;
 }
+const after = t.statistics();
+t.expect("the decoded user function's calls", t.delta(calling, after), {
+    "records.Generated": 0, "records.Imported": 0, imports: 0, attaches: 0,
+});
+console.log(`with cachedData: ${called} ${constructed}`);
 t.finish();

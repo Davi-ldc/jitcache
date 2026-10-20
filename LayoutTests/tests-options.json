@@ -1703,6 +1703,9 @@
     "imported/w3c/web-platform-tests/css/css-transforms/animation/translate-interpolation.html": [
         "slow"
     ],
+    "imported/w3c/web-platform-tests/css/css-transitions/events-008.html": [
+        "slow"
+    ],
     "imported/w3c/web-platform-tests/css/css-transitions/properties-value-001.html": [
         "slow"
     ],
@@ -3206,9 +3209,6 @@
     "imported/w3c/web-platform-tests/html/canvas/offscreen/compositing/2d.composite.uncovered.fill.destination-in.html": [
         "slow"
     ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/anonymous-iframe/anonymous-iframe-popup.tentative.https.html": [
-        "slow"
-    ],
     "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/cache-storage-reporting-dedicated-worker.https.html": [
         "slow"
     ],
@@ -3216,30 +3216,6 @@
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/cache-storage-reporting-shared-worker.https.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/cache-storage.tentative.https.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/dedicated-worker.tentative.https.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/iframe.tentative.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/redirect.tentative.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/reporting-navigation.tentative.https.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/reporting-subresource-corp.tentative.https.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/service-worker.tentative.https.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/credentialless/shared-worker.tentative.https.html": [
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/cross-origin-embedder-policy/header-parsing.https.html": [
@@ -3513,6 +3489,18 @@
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/cross-origin-opener-policy/tentative/noopener/coop-noopener-allow-popups-restrict-properties.https.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/document-isolation-policy/isolate-and-require-corp.tentative.https.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/document-isolation-policy/reporting-cache-storage-corp.tentative.https.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/document-isolation-policy/reporting-subresource-corp.tentative.https.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/document-isolation-policy/shared-workers.tentative.https.html": [
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/dom/documents/resource-metadata-management/document-lastModified-01.html": [
@@ -4392,6 +4380,24 @@
         "slow"
     ],
     "imported/w3c/web-platform-tests/import-maps/import-maps-base-url.sub.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/input-events/input-events-get-target-ranges-backspace.tentative.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/input-events/input-events-get-target-ranges-deleting-in-list-items.tentative.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/input-events/input-events-get-target-ranges-forwarddelete.tentative.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/input-events/input-events-get-target-ranges-joining-dl-element-and-another-list.tentative.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/input-events/input-events-get-target-ranges-joining-dl-elements.tentative.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/input-events/input-events-get-target-ranges-non-collapsed-selection.tentative.html": [
         "slow"
     ],
     "imported/w3c/web-platform-tests/intersection-observer/scroll-margin-propagation.html": [
@@ -5423,6 +5429,9 @@
     "imported/w3c/web-platform-tests/selection/collapse-45.html": [
         "slow"
     ],
+    "imported/w3c/web-platform-tests/selection/crashtests/selection-modify-around-details-not-having-summary.html": [
+        "slow"
+    ],
     "imported/w3c/web-platform-tests/selection/extend-00.html": [
         "slow"
     ],
@@ -5778,6 +5787,12 @@
         "slow"
     ],
     "imported/w3c/web-platform-tests/svg/interact/scripted/module-02.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/svg/interact/scripted/pointer-events-fill-stroke-hittest.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/svg/interact/scripted/pointer-events-getBoundingClientRect.html": [
         "slow"
     ],
     "imported/w3c/web-platform-tests/svg/linking/scripted/a.rel-noopener-policy.html": [

@@ -177,6 +177,8 @@ WTF_EXPORT_PRIVATE size_t fastMallocGoodSize(size_t);
 
 WTF_EXPORT_PRIVATE void releaseFastMallocFreeMemory();
 WTF_EXPORT_PRIVATE void releaseFastMallocFreeMemoryForThisThread();
+// For a thread that is idle and about to block for a while. See bmalloc::api::scavengeThisThreadOnIdle.
+WTF_EXPORT_PRIVATE void releaseFastMallocFreeMemoryForIdleThread();
 
 WTF_EXPORT_PRIVATE void fastCommitAlignedMemory(void*, size_t);
 WTF_EXPORT_PRIVATE void fastDecommitAlignedMemory(void*, size_t);
@@ -270,6 +272,10 @@ struct FastMalloc {
         return nullptr;
     }
     
+    static void* alignedMalloc(size_t alignment, size_t size) { return fastAlignedMalloc(alignment, size); }
+
+    static void* tryAlignedMalloc(size_t alignment, size_t size) { return tryFastAlignedMalloc(alignment, size); }
+
     static void free(void* p) { fastFree(p); }
 
     static void fastFree(void* p) { ::WTF::fastFree(p); }
@@ -321,6 +327,10 @@ struct FastCompactMalloc {
             return realResult;
         return nullptr;
     }
+
+    static void* alignedMalloc(size_t alignment, size_t size) { return fastCompactAlignedMalloc(alignment, size); }
+
+    static void* tryAlignedMalloc(size_t alignment, size_t size) { return tryFastCompactAlignedMalloc(alignment, size); }
 
     static void free(void* p) { fastFree(p); }
 

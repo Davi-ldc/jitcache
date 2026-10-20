@@ -32,12 +32,11 @@
 #include "Helpers/PlatformUtilities.h"
 #include "Helpers/Test.h"
 #include <JavaScriptCore/JSContextRef.h>
-#include <JavaScriptCore/JSRetainPtr.h>
+#include <JavaScriptCore/JSStringRefCPP.h>
 #include <WebKit/WKRetainPtr.h>
 #include <WebKit/WKSerializedScriptValue.h>
 #include <WebKit/WKStringPrivate.h>
 #include <wtf/StdLibExtras.h>
-#include <wtf/UniqueArray.h>
 #include <wtf/text/MakeString.h>
 
 namespace TestWebKitAPI {
@@ -46,7 +45,7 @@ struct JavaScriptCallbackContext {
     JavaScriptCallbackContext() : didFinish(false) { }
 
     bool didFinish;
-    JSRetainPtr<JSStringRef> actualString;
+    RefPtr<OpaqueJSString> actualString;
 };
 
 static void javaScriptCallback(WKTypeRef result, WKErrorRef error, void* ctx)
@@ -55,15 +54,15 @@ static void javaScriptCallback(WKTypeRef result, WKErrorRef error, void* ctx)
     JavaScriptCallbackContext* context = static_cast<JavaScriptCallbackContext*>(ctx);
 
     if (!result)
-        context->actualString = adopt(JSStringCreateWithUTF8CString("undefined"));
+        context->actualString = createJSString("undefined"_s);
     else if (WKBooleanGetTypeID() == WKGetTypeID(result))
-        context->actualString = adopt(JSStringCreateWithUTF8CString(WKBooleanGetValue((WKBooleanRef)result) ? "true" : "false"));
+        context->actualString = createJSString(WKBooleanGetValue((WKBooleanRef)result) ? "true"_s : "false"_s);
     else if (WKStringGetTypeID() == WKGetTypeID(result))
-        context->actualString = adopt(WKStringCopyJSString((WKStringRef)result));
+        context->actualString = adoptRef(WKStringCopyJSString((WKStringRef)result));
     else if (WKDoubleGetTypeID() == WKGetTypeID(result)) {
         double value = WKDoubleGetValue((WKDoubleRef)result);
         String s = makeString(value);
-        context->actualString = adopt(JSStringCreateWithUTF8CString(s.utf8().data()));
+        context->actualString = createJSString(s);
     } else
         WTFLogAlways("Unexpected type %d", WKGetTypeID(result));
 
@@ -76,21 +75,18 @@ static void javaScriptCallback(WKTypeRef result, WKErrorRef error, void* ctx)
     WKPageEvaluateJavaScriptInMainFrame(page, Util::toWK(script).get(), &context, javaScriptCallback);
     Util::run(&context.didFinish);
 
-    size_t bufferSize = JSStringGetMaximumUTF8CStringSize(context.actualString.get());
-    auto buffer = makeUniqueArray<char>(bufferSize);
-    JSStringGetUTF8CString(context.actualString.get(), buffer.get(), bufferSize);
-
-    return compareJSResult(script, buffer.get(), expectedResult);
+    auto actualResult = utf8CString(context.actualString.get());
+    return compareJSResult(script, actualResult, expectedResult);
 }
     
-::testing::AssertionResult compareJSResult(const char* script, const char* actualResult, const char* expectedResult)
+::testing::AssertionResult compareJSResult(const char* script, UTF8CStringView actualResult, const char* expectedResult)
 {
-    if (!strcmp(actualResult, expectedResult))
+    if (actualResult == UTF8CStringView::unsafeFromUTF8(expectedResult))
         return ::testing::AssertionSuccess();
 
     return ::testing::AssertionFailure()
         << "JS expression: " << script << "\n"
-        << "       Actual: " << actualResult << "\n"
+        << "       Actual: " << actualResult.utf8() << "\n"
         << "     Expected: " << expectedResult;
 }
 

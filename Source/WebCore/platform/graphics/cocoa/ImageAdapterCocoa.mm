@@ -54,7 +54,7 @@
 
 namespace WebCore {
 
-Ref<Image> ImageAdapter::loadPlatformResource(const char *name)
+Ref<BitmapImage> ImageAdapter::loadPlatformResource(const char *name)
 {
     NSBundle *bundle = [NSBundle bundleForClass:[WebCoreBundleFinder class]];
     NSString *imagePath = [bundle pathForResource:[NSString stringWithUTF8String:name] ofType:@"png"];
@@ -69,7 +69,7 @@ Ref<Image> ImageAdapter::loadPlatformResource(const char *name)
     // Two theories are bad installs (image files are missing), and too-many-open-files.
     // See rdar://5607381
     ASSERT_NOT_REACHED();
-    return Image::nullImage();
+    return BitmapImage::nullImage();
 }
 
 RetainPtr<CFDataRef> ImageAdapter::tiffRepresentation(const Vector<Ref<NativeImage>>& nativeImages)
@@ -99,7 +99,7 @@ NSAdaptiveImageGlyph *ImageAdapter::multiRepresentationHEIC()
     if (m_multiRepHEIC)
         return m_multiRepHEIC.get();
 
-    auto buffer = image().data();
+    RefPtr buffer = image().data();
     if (!buffer)
         return nullptr;
 
@@ -142,17 +142,18 @@ NSImage* ImageAdapter::nsImage()
     if (m_nsImage)
         return m_nsImage.get();
 
-    CFDataRef data = tiffRepresentation();
+    RetainPtr data = tiffRepresentation();
     if (!data)
         return nullptr;
 
-    m_nsImage = adoptNS([[NSImage alloc] initWithData:(__bridge NSData *)data]);
+    m_nsImage = adoptNS([[NSImage alloc] initWithData:(__bridge NSData *)data.get()]);
     return m_nsImage.get();
 }
 
 RetainPtr<NSImage> ImageAdapter::snapshotNSImage()
 {
-    RefPtr nativeImage =  image().currentNativeImage();
+    Ref image = this->image();
+    RefPtr nativeImage =  image->currentNativeImage(ConcreteObjectSize::fixed(image->size()));
     if (!nativeImage)
         return nullptr;
 

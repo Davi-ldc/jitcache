@@ -38,7 +38,7 @@
 namespace JSC { namespace B3 {
 
 struct VariableLivenessAdapter {
-    static constexpr const char* name = "VariableLiveness";
+    static constexpr ASCIILiteral name = "VariableLiveness"_s;
     typedef B3::CFG CFG;
     typedef Variable* Thing;
     
@@ -63,9 +63,41 @@ struct VariableLivenessAdapter {
     {
         return block->size();
     }
+
+    // Any value boundary can be a Get or a Set, so all of them are visited and a group is just the
+    // boundary itself.
+    struct ActionGroup {
+        BasicBlock* block { nullptr };
+        unsigned boundary { 0 };
+    };
+
+    template<typename Func>
+    void forEachActionGroupDescending(BasicBlock* block, NOESCAPE const Func& func)
+    {
+        for (unsigned boundary = block->size() + 1; boundary--;)
+            func(boundary, ActionGroup { block, boundary });
+    }
+
+    template<typename Func>
+    void forEachUseInGroup(ActionGroup group, NOESCAPE const Func& func)
+    {
+        forEachUse(group.block, group.boundary, func);
+    }
+
+    template<typename Func>
+    void forEachDefInGroup(ActionGroup group, NOESCAPE const Func& func)
+    {
+        forEachDef(group.block, group.boundary, func);
+    }
+
+    template<typename Func>
+    void forEachUseAtTail(BasicBlock* block, NOESCAPE const Func& func)
+    {
+        forEachUse(block, block->size(), func);
+    }
     
     template<typename Func>
-    void forEachUse(BasicBlock* block, unsigned valueBoundaryIndex, const Func& func)
+    void forEachUse(BasicBlock* block, unsigned valueBoundaryIndex, NOESCAPE const Func& func)
     {
         // We want all of the uses that happen between valueBoundaryIndex-1 and
         // valueBoundaryIndex. Since the Get opcode is the only value that has a use and since
@@ -79,7 +111,7 @@ struct VariableLivenessAdapter {
     }
     
     template<typename Func>
-    void forEachDef(BasicBlock* block, unsigned valueBoundaryIndex, const Func& func)
+    void forEachDef(BasicBlock* block, unsigned valueBoundaryIndex, NOESCAPE const Func& func)
     {
         // We want all of the defs that happen between valueBoundaryIndex-1 and
         // valueBoundaryIndex. Since the Set opcode is the only value that has a def and since

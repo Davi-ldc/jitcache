@@ -40,29 +40,29 @@ namespace JSC {
 
 // JITCache: the support keys the baseline emitters link through the helpers of ImageEmission.h, with every field their
 // kind does not use zero.
-namespace JITCacheSupportKey {
+namespace JITCache::SupportKey {
 
-constexpr JITCache::ImageTarget baselineThunk(JITCache::BaselineThunk thunk)
+constexpr ImageTarget baselineThunk(BaselineThunk thunk)
 {
-    return JITCache::ImageTarget { .kind = JITCache::TargetKind::BaselineThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+    return ImageTarget { .kind = TargetKind::BaselineThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
 }
 
-constexpr JITCache::ImageTarget commonThunk(CommonJITThunkID thunk)
+constexpr ImageTarget commonThunk(CommonJITThunkID thunk)
 {
-    return JITCache::ImageTarget { .kind = JITCache::TargetKind::CommonThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+    return ImageTarget { .kind = TargetKind::CommonThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
 }
 
-constexpr JITCache::ImageTarget inlineCacheSlowPathThunk(AccessType accessType)
+constexpr ImageTarget inlineCacheSlowPathThunk(AccessType accessType)
 {
-    return JITCache::ImageTarget { .kind = JITCache::TargetKind::InlineCacheSlowPathThunk, .a = static_cast<uint32_t>(accessType), .b = 0, .payload = 0 };
+    return ImageTarget { .kind = TargetKind::InlineCacheSlowPathThunk, .a = static_cast<uint32_t>(accessType), .b = 0, .payload = 0 };
 }
 
-constexpr JITCache::ImageTarget processThunk(JITCache::ProcessThunk thunk)
+constexpr ImageTarget processThunk(ProcessThunk thunk)
 {
-    return JITCache::ImageTarget { .kind = JITCache::TargetKind::ProcessThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+    return ImageTarget { .kind = TargetKind::ProcessThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
 }
 
-} // namespace JITCacheSupportKey
+} // namespace JITCache::SupportKey
 
 ALWAYS_INLINE bool JIT::isOperandConstantDouble(VirtualRegister src)
 {
@@ -345,7 +345,7 @@ inline void JIT::emitValueProfilingSite(const Bytecode& bytecode, BytecodeIndex 
     if (!shouldEmitProfiling())
         return;
 
-    ptrdiff_t offset = -static_cast<ptrdiff_t>(valueProfileOffsetFor<Bytecode>(bytecode, bytecodeIndex.checkpoint())) * sizeof(ValueProfile) + ValueProfile::offsetOfFirstBucket() - sizeof(UnlinkedMetadataTable::LinkingData);
+    ptrdiff_t offset = -static_cast<ptrdiff_t>(valueProfileOffsetFor<Bytecode>(bytecode, bytecodeIndex.checkpoint())) * sizeof(EncodedJSValue) - sizeof(UnlinkedMetadataTable::LinkingData);
     storeValue(value, Address(GPRInfo::metadataTableRegister, offset));
 }
 

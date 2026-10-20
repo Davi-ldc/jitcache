@@ -9,13 +9,15 @@
 #include "JSCInlines.h"
 #include "Options.h"
 #include "ProducerBudget.h"
+#include "UCBAnalysis.h"
 #include "UCBFeedback.h"
 #include "UCBSections.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
-#include "UnlinkedMetadataTable.h"
 #include "VM.h"
+#include "ValidatedBody.h"
 #include <algorithm>
+#include <expected>
 #include <utility>
 #include <wtf/Noncopyable.h>
 
@@ -85,12 +87,6 @@ private:
     size_t m_bytes { 0 };
 };
 
-// ceil(N / 8): the size of one constant map of ucb.identity.
-static size_t ucbConstantMapSize(uint32_t constantCount)
-{
-    return (static_cast<size_t>(constantCount) + 7) / 8;
-}
-
 // A strict check of what the capture builds from: every child UFE of the UCB's two tables has the identity (key, table,
 // index) its parent's record gave it.
 static bool ucbChildrenHaveIdentities(UCBRegistry& registry, UnlinkedCodeBlock& ucb, const BodyKey& key)
@@ -119,19 +115,75 @@ static bool ucbChildrenHaveIdentities(UCBRegistry& registry, UnlinkedCodeBlock& 
     return true;
 }
 
-// The other strict check: the UCB's value profiles are its argument profiles followed by its metadata's, the positional
-// pairing the CB lane's summary relies on.
-static bool ucbValueProfileCountsAgree(UnlinkedCodeBlock& ucb)
+// The other strict check: a UCB with value and array copies has numberOfValueProfiles() and numberOfArrayProfiles() of
+// them, the counts the feedback section writes and the CB lane's summary pairs its profiles with by position.
+static bool ucbCopiesNumberTheProfiles(UnlinkedCodeBlock& ucb)
 {
-    return static_cast<uint64_t>(ucb.numberOfValueProfiles()) == static_cast<uint64_t>(ucb.numParameters()) + ucb.metadata().numValueProfiles();
+    auto* profiles = ucb.valueAndArrayProfiles();
+    return !profiles || (profiles->valueProfiles().size() == ucb.numberOfValueProfiles() && profiles->arrayProfiles().size() == ucb.numberOfArrayProfiles());
+}
+
+// A module's analysis: the encoding of its live analysis source, the record JSC's analysis parse built; or else a copy of
+// the saved body's ucb.analysis at the same key, which keeps the analysis of a module whose record Bun built from that
+// section and of one whose source died; or nothing. The bytes it returns stay charged in `charges`.
+static std::expected<Vector<uint8_t>, UCBCaptureError> ucbCaptureModuleAnalysis(VM& vm, VMState& state, UnlinkedCodeBlock& ucb, const BodyKey& key,
+    ProducerBudget& budget, UCBCaptureCharges& charges)
+{
+    UCBRegistry& registry = state.registry();
+    UCBStatistics& statistics = registry.statistics();
+    if (JSModuleRecord* source = registry.moduleAnalysisSource(ucb)) {
+        auto encoded = encodeModuleAnalysis(vm, *source, budget);
+        if (!encoded) {
+            if (encoded.error() == AnalysisEncodeFailure::BudgetRefused)
+                return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+            // A record this form cannot carry exactly; the body goes without the section and the module is parsed.
+            ++statistics.analysisUnrepresentable;
+            return Vector<uint8_t> { };
+        }
+        charges.adopt(encoded->size());
+        ++statistics.analysisCaptured;
+        // With strict on, what the encoder built from the producer's own record is held to the rules a reader checks.
+        String failure;
+        if (state.strict() && !validateModuleAnalysis(encoded->span(), failure))
+            return std::unexpected(UCBCaptureError { UCBCaptureFailure::StrictCheckFailed, { } });
+        return WTF::move(*encoded);
+    }
+
+    // The section alone, without checksumming the saved body's others.
+    SectionLookup saved = state.readBodySection(key, SectionKind::UCBAnalysis);
+    switch (saved.kind()) {
+    case SectionLookup::Kind::Absent:
+        return Vector<uint8_t> { };
+    case SectionLookup::Kind::Unusable:
+        // The read found the saved body damaged and raised the fault, which ended production.
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::SavedAnalysisUnusable, { } });
+    case SectionLookup::Kind::Found:
+        break;
+    }
+    std::span<const uint8_t> bytes = saved.bytes();
+    if (bytes.empty())
+        return Vector<uint8_t> { };
+    if (!charges.tryCharge(bytes.size()))
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+    Vector<uint8_t> copy { bytes };
+    ++statistics.analysisCopied;
+    // With strict on, bytes read from the artifact are checked before they travel again; the failure carries what the
+    // check found, for the fault the glue raises.
+    String failure;
+    if (state.strict() && !validateModuleAnalysis(copy.span(), failure)) {
+        ++statistics.invalidMaterial[static_cast<size_t>(InvalidMaterialStep::Analysis)];
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::SavedAnalysisInvalid, WTF::move(failure) });
+    }
+    return copy;
 }
 
 } // namespace UCBCaptureInternal
 
-UCBSections::UCBSections(Vector<uint8_t>&& identity, Ref<CachedBytecode>&& core, Vector<uint8_t>&& feedback, Ref<ProducerBudget>&& budget, size_t chargedBytes)
+UCBSections::UCBSections(Vector<uint8_t>&& identity, Ref<CachedBytecode>&& core, Vector<uint8_t>&& feedback, Vector<uint8_t>&& analysis, Ref<ProducerBudget>&& budget, size_t chargedBytes)
     : identity(WTF::move(identity))
     , core(WTF::move(core))
     , feedback(WTF::move(feedback))
+    , analysis(WTF::move(analysis))
     , budget(WTF::move(budget))
     , chargedBytes(chargedBytes)
 {
@@ -141,6 +193,7 @@ UCBSections::UCBSections(UCBSections&& other)
     : identity(WTF::move(other.identity))
     , core(WTF::move(other.core))
     , feedback(WTF::move(other.feedback))
+    , analysis(WTF::move(other.analysis))
     , budget(WTF::move(other.budget))
     , chargedBytes(std::exchange(other.chargedBytes, 0))
 {
@@ -183,7 +236,7 @@ const UnlinkedFunctionExecutable* holderOf(const CodeBlock& codeBlock)
     return uncheckedDowncast<FunctionExecutable>(codeBlock.ownerExecutable())->unlinkedExecutable();
 }
 
-std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, ProducerBudget& budget)
+std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, BodyImage image, ProducerBudget& budget)
 {
     using namespace UCBCaptureInternal;
 
@@ -206,17 +259,18 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
     // The strict checks. They check what the capture builds from the producer's own state, so a failure is a recording
     // fault.
     if (state->strict()) {
-        if (!ucbChildrenHaveIdentities(registry, ucb, record->key) || !ucbValueProfileCountsAgree(ucb))
-            return std::unexpected(UCBCaptureFailure::StrictCheckFailed);
+        if (!ucbChildrenHaveIdentities(registry, ucb, record->key) || !ucbCopiesNumberTheProfiles(ucb))
+            return std::unexpected(UCBCaptureError { UCBCaptureFailure::StrictCheckFailed, { } });
     }
 
     UCBCaptureCharges charges(budget);
 
-    // The feedback section. The exit sites cannot change between the count and the write.
-    FeedbackCounts counts = liveFeedbackCounts(ucb);
+    // The feedback section, with the UCB's copies exactly when the body has an image and the UCB has them. The exit sites
+    // cannot change between the count and the write.
+    FeedbackCounts counts = liveFeedbackCounts(ucb, image);
     size_t feedbackSize = feedbackSectionSize(counts);
     if (!charges.tryCharge(feedbackSize))
-        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
     Vector<uint8_t> feedback(feedbackSize);
     writeFeedbackSection(feedback.mutableSpan(), ucb, counts);
 
@@ -226,7 +280,7 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
     RefPtr<CachedBytecode> core = encodeUnlinkedCodeBlockCore(vm, ucb, holder, &encodingBudget, encodeFailure);
     if (!core) {
         ASSERT(encodeFailure == CoreEncodeFailure::BudgetRefused);
-        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
     }
     charges.adopt(core->size());
 
@@ -243,7 +297,7 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
         // An environment digested before a refusal keeps its digest, so it counts either way.
         statistics.tdzEnvironmentDigests += environmentsDigested;
         if (!holderDigestValue)
-            return std::unexpected(UCBCaptureFailure::BudgetExceeded);
+            return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
         ++statistics.holderDigests;
         parseFields = FunctionParseFields { holder->features(), holder->lexicallyScopedFeatures(), holder->hasCapturedVariables() };
     }
@@ -265,7 +319,7 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
     size_t childCount = declarationCount + ucb.numberOfFunctionExprs();
     size_t childDigestsBytes = childCount * sizeof(Digest256);
     if (childDigestsBytes && !charges.tryCharge(childDigestsBytes))
-        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
     Vector<Digest256> childHolderDigests(childCount);
     for (size_t i = 0; i < childCount; ++i) {
         UnlinkedFunctionExecutable* child = i < declarationCount ? ucb.functionDecl(i) : ucb.functionExpr(i - declarationCount);
@@ -277,46 +331,30 @@ std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCode
             ++statistics.childHolderDigests;
     }
 
-    // The identity section.
+    // The identity section. A recorded UCB was generated or imported, and its butterflies keep the structure they were
+    // created with, so the butterfly map the writer reads from its constants records generation's form.
     uint32_t constantCount = static_cast<uint32_t>(ucb.constantRegisters().size());
     size_t identitySize = identitySectionSize(constantCount, childCount);
     if (!charges.tryCharge(identitySize))
-        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
+        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
     Vector<uint8_t> identity(identitySize);
-
-    // Provenance. A generated or imported UCB has generation's form, since an import takes only a body of provenance
-    // Generated and rebuilds its butterflies. A decoded one is the embedder's, unless its record keeps the butterfly map of
-    // the Generated body it was last seeded or attached from: its core matched that body's coreDigest and a core never
-    // changes, so it is still that body's UCB, written with the kept map in place of its own plain butterflies. Only a
-    // Decoded record keeps a map.
-    CoreProvenance provenance = record->origin == UCBOrigin::Decoded ? CoreProvenance::EmbedderDecoded : CoreProvenance::Generated;
-    size_t keptMapSize = 0;
-    {
-        Vector<uint8_t> keptButterflyMap;
-        bool keepsButterflyMap = false;
-        if (record->origin == UCBOrigin::Decoded) {
-            keptMapSize = ucbConstantMapSize(constantCount);
-            if (!charges.tryCharge(keptMapSize))
-                return std::unexpected(UCBCaptureFailure::BudgetExceeded);
-            keptButterflyMap = Vector<uint8_t>(keptMapSize);
-            keepsButterflyMap = registry.copyGeneratedButterflyMap(ucb, keptButterflyMap.mutableSpan());
-            if (keepsButterflyMap)
-                provenance = CoreProvenance::Generated;
-        }
-        std::optional<std::span<const uint8_t>> keptMap;
-        if (keepsButterflyMap)
-            keptMap = keptButterflyMap.span();
-        writeIdentitySection(identity.mutableSpan(), vm, record->key, *contextDigest, provenance, coreDigest, holderDigestValue, coreKind, parseFields, ucb, keptMap, childHolderDigests.span());
-    }
-    // The kept map's copy is freed with the scope above, and the digests now live in the section; neither copy travels.
-    if (keptMapSize)
-        charges.release(keptMapSize);
+    writeIdentitySection(identity.mutableSpan(), vm, record->key, *contextDigest, coreDigest, holderDigestValue, coreKind, parseFields, ucb, childHolderDigests.span());
+    // The digests now live in the section; their buffer does not travel.
     childHolderDigests.clear();
     if (childDigestsBytes)
         charges.release(childDigestsBytes);
 
+    // A module's analysis, with an image or without one.
+    Vector<uint8_t> analysis;
+    if (identityKind == IdentityKind::Module) {
+        auto moduleAnalysis = ucbCaptureModuleAnalysis(vm, *state, ucb, record->key, budget, charges);
+        if (!moduleAnalysis)
+            return std::unexpected(WTF::move(moduleAnalysis.error()));
+        analysis = WTF::move(*moduleAnalysis);
+    }
+
     size_t chargedBytes = charges.handOff();
-    return UCBSections { WTF::move(identity), core.releaseNonNull(), WTF::move(feedback), Ref<ProducerBudget> { budget }, chargedBytes };
+    return UCBSections { WTF::move(identity), core.releaseNonNull(), WTF::move(feedback), WTF::move(analysis), Ref<ProducerBudget> { budget }, chargedBytes };
 }
 
 } // namespace JSC::JITCache

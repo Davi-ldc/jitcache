@@ -177,7 +177,6 @@ enum class AXProperty : uint16_t {
     ElementName,
     EmbeddedImageDescription,
     ExplicitAutoCompleteValue,
-    ExplicitInvalidStatus,
     ExplicitLiveRegionRelevant,
     ExplicitLiveRegionStatus,
     ExplicitOrientation,
@@ -193,6 +192,7 @@ enum class AXProperty : uint16_t {
     HasRemoteFrameChild,
     HeadingLevel,
     InputType,
+    InvalidStatus,
     IsEditableWebArea,
     IsSubscript,
     IsSuperscript,
@@ -212,7 +212,6 @@ enum class AXProperty : uint16_t {
     IsColumnHeader,
     IsExpanded,
     IsExposableTable,
-    IsFieldset,
     IsIndeterminate,
     IsInsideNativeTextControl,
     IsInUserAgentShadowTree,
@@ -247,7 +246,6 @@ enum class AXProperty : uint16_t {
     KeyShortcuts,
     Language,
     LinethroughColor,
-    ListMarkerLineID,
     ListMarkerText,
     LiveRegionAtomic,
     LocalizedActionVerb,
@@ -292,6 +290,7 @@ enum class AXProperty : uint16_t {
     RowIndex,
     RowIndexRange,
     ScreenRelativePosition,
+    SelectedOptionCheckmark,
     SelectedTextRange,
     SetSize,
     SortDirection,
@@ -343,7 +342,6 @@ using AXPropertyValueVariant = Variant<std::nullptr_t, Markable<AXID>, String, b
     , RetainPtr<CTFontRef>
     , FontOrientation
     , std::unique_ptr<AXTextRuns>
-    , AXTextRunLineID
     , FrameIdentifier
 >;
 using AXPropertyVector = Vector<std::pair<AXProperty, AXPropertyValueVariant>>;

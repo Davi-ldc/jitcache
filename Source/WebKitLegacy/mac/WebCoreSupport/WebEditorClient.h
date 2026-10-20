@@ -187,7 +187,7 @@ private:
 #if PLATFORM(MAC)
     void requestCandidatesForSelection(const WebCore::VisibleSelection&) final;
     void handleRequestedCandidates(NSInteger, NSArray<NSTextCheckingResult *> *);
-    void handleAcceptedCandidateWithSoftSpaces(WebCore::TextCheckingResult) final;
+    void handleAcceptedCandidateWithSoftSpaces(const WebCore::TextCheckingResult&) final;
 #endif
 
     void registerUndoOrRedoStep(WebCore::UndoStep&, bool isRedo);
@@ -196,8 +196,8 @@ private:
     bool shouldAllowSingleClickToChangeSelection(WebCore::Node& targetNode, const WebCore::VisibleSelection& newSelection, WebCore::MouseEventInputSource) const;
 #endif
 
-    WebView *m_webView;
-    RetainPtr<WebEditorUndoTarget> m_undoTarget;
+    __weak WebView *m_webView;
+    const RetainPtr<WebEditorUndoTarget> m_undoTarget;
     bool m_haveUndoRedoOperations { false };
     
     HashMap<WebCore::TextCheckingRequestIdentifier, Ref<WebCore::TextCheckingRequest>> m_requestsInFlight;

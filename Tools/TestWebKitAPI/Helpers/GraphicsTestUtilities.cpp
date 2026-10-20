@@ -28,7 +28,6 @@
 
 #include "Helpers/WebCoreTestUtilities.h"
 #include <WebCore/GraphicsContext.h>
-#include <WebCore/Image.h>
 #include <WebCore/ImageBuffer.h>
 #include <WebCore/NativeImage.h>
 #include <WebCore/PixelBuffer.h>
@@ -53,22 +52,13 @@ static Color imageBufferPixelAt(const ImageBuffer& imageBuffer, FloatPoint point
     };
     if (differs(gotRed, expectedRed) || differs(gotGreen, expectedGreen) || differs(gotBlue, expectedBlue) || differs(gotAlpha, expectedAlpha)) {
         // Use this to debug the contents in the browser.
-        // WTFLogAlways("%s", imageBuffer.toDataURL("image/png"_s).latin1().data());
+        // SAFE_WTFLOGALWAYS("%s", imageBuffer.toDataURL("image/png"_s).utf8());
         return ::testing::AssertionFailure() << "color is not expected at " << point << ". Got: " << got << ", expected: " << expected << " with tolerance " << tolerance << ".";
     }
     return ::testing::AssertionSuccess();
 }
 
-::testing::AssertionResult imagePixelIs(Color expected, Image& image, FloatPoint point, unsigned tolerance)
-{
-    RefPtr buffer = ImageBuffer::create({ 1, 1 }, RenderingMode::Unaccelerated, RenderingPurpose::Unspecified, 1.0f, ColorSpace::SRGB(),PixelFormat::BGRA8); // NOLINT
-    if (!buffer)
-        return ::testing::AssertionFailure() << "failed to allocate temp buffer";
-    buffer->context().drawImage(image, { 0, 0, 1, 1 }, { point, FloatSize { 1, 1 } });
-    return imageBufferPixelIs(expected, *buffer, { 0, 0 }, tolerance);
-}
-
-::testing::AssertionResult imagePixelIs(Color expected, NativeImage& image, FloatPoint point, unsigned tolerance)
+::testing::AssertionResult nativeImagePixelsIs(Color expected, NativeImage& image, FloatPoint point, unsigned tolerance)
 {
     RefPtr buffer = ImageBuffer::create({ 1, 1 }, RenderingMode::Unaccelerated, RenderingPurpose::Unspecified, 1.0f, ColorSpace::SRGB(),PixelFormat::BGRA8); // NOLINT
     if (!buffer)

@@ -49,6 +49,9 @@ void GraphicsContextState::repurpose(Purpose purpose)
         m_style = std::nullopt;
         m_dropShadow = std::nullopt;
         m_compositeMode = { CompositeOperator::SourceOver, BlendMode::Normal };
+        // A context this state is being recorded for performs the same reset when it begins the
+        // transparency layer, so these properties are no longer unknown inside the layer.
+        m_indeterminateProperties.remove({ Change::Alpha, Change::Style, Change::DropShadow, Change::CompositeMode });
     }
 #endif
 
@@ -80,7 +83,6 @@ constexpr void GraphicsContextState::forEachProperty(NOESCAPE const Functor& fun
     functor(Change::ShouldSmoothFonts, &GraphicsContextState::m_shouldSmoothFonts);
     functor(Change::ShouldSubpixelQuantizeFonts, &GraphicsContextState::m_shouldSubpixelQuantizeFonts);
     functor(Change::ShadowsIgnoreTransforms, &GraphicsContextState::m_shadowsIgnoreTransforms);
-    functor(Change::DrawLuminanceMask, &GraphicsContextState::m_drawLuminanceMask);
 }
 
 void GraphicsContextState::mergeLastChanges(const GraphicsContextState& state)
@@ -89,7 +91,9 @@ void GraphicsContextState::mergeLastChanges(const GraphicsContextState& state)
     if (!changes)
         return;
     forEachProperty([&](Change change, auto property) {
-        if (!changes.contains(change) || this->*property == state.*property)
+        if (!changes.contains(change))
+            return;
+        if (this->*property == state.*property && !m_indeterminateProperties.contains(change))
             return;
         this->*property = state.*property;
         m_changeFlags.add(change);
@@ -99,7 +103,7 @@ void GraphicsContextState::mergeLastChanges(const GraphicsContextState& state)
 void GraphicsContextState::mergeAllChanges(const GraphicsContextState& state)
 {
     forEachProperty([&](Change change, auto property) {
-        if (this->*property == state.*property)
+        if (this->*property == state.*property && !m_indeterminateProperties.contains(change))
             return;
         this->*property = state.*property;
         m_changeFlags.add(change);
@@ -108,10 +112,13 @@ void GraphicsContextState::mergeAllChanges(const GraphicsContextState& state)
 
 void GraphicsContextState::filterLastChangesForMatching(const GraphicsContextState& state)
 {
-    if (!m_changeFlags)
+    // A property whose value in the other state is unknown cannot be filtered out by comparing
+    // against that state.
+    auto candidates = m_changeFlags - m_indeterminateProperties;
+    if (!candidates)
         return;
     forEachProperty([&](Change change, auto property) {
-        if (m_changeFlags.contains(change) && this->*property == state.*property)
+        if (candidates.contains(change) && this->*property == state.*property)
             m_changeFlags.remove(change);
     });
 }
@@ -126,10 +133,12 @@ void GraphicsContextState::copyPropertiesFrom(const GraphicsContextState& state,
     });
 }
 
-bool GraphicsContextState::propertiesEqual(const GraphicsContextState& other) const
+bool GraphicsContextState::propertiesEqualIgnoring(const GraphicsContextState& other, ChangeFlags ignoredProperties) const
 {
     bool equal = true;
-    forEachProperty([&](Change, auto property) {
+    forEachProperty([&](Change change, auto property) {
+        if (ignoredProperties.contains(change))
+            return;
         if (!(this->*property == other.*property))
             equal = false;
     });
@@ -183,9 +192,6 @@ static ASCIILiteral stateChangeName(GraphicsContextState::Change change)
 
     case GraphicsContextState::Change::ShadowsIgnoreTransforms:
         return "shadows-ignore-transforms"_s;
-
-    case GraphicsContextState::Change::DrawLuminanceMask:
-        return "draw-luminance-mask"_s;
     }
 
     RELEASE_ASSERT_NOT_REACHED();
@@ -198,8 +204,8 @@ TextStream& GraphicsContextState::dump(TextStream& ts) const
         forEachProperty([&](Change, auto) { ++count; });
         return count;
     };
-    // DrawLuminanceMask is the highest Change bit, so its index plus one is the number of changes.
-    static_assert(numberOfProperties() == WTF::ctz(std::to_underlying(Change::DrawLuminanceMask)) + 1,
+    // ShadowsIgnoreTransforms is the highest Change bit, so its index plus one is the number of changes.
+    static_assert(numberOfProperties() == WTF::ctz(std::to_underlying(Change::ShadowsIgnoreTransforms)) + 1,
         "forEachProperty() must list every Change enumerator");
 
     ts.dumpProperty("change-flags"_s, m_changeFlags);

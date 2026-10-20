@@ -7,8 +7,11 @@
 #include "CCallHelpers.h"
 #include "ImageTypes.h"
 #include "VirtualRegister.h"
+#include <bit>
 #include <optional>
+#include <type_traits>
 #include <wtf/Noncopyable.h>
+#include <wtf/PtrTag.h>
 
 // The helpers every baseline emitter uses for a reference: a value that depends on the process, the VM, a UCB or another
 // allocation. Each finds the recorder through the assembler's jitCacheRecorder(). Without one it emits exactly the
@@ -32,6 +35,14 @@ public:
     static ImageReference vmAddress(VM&, VMAddress);
     static ImageReference vmCell(VM&, VMCell);
     static ImageReference processThunk(ProcessThunk); // DefaultCall only.
+    // An operation that code calls outside JIT::appendCall. Its value is what native code moves, tagCFunction<tag>, and
+    // its target the function's Operation CodeSymbol. A function outside the engine's text segment has no CodeSymbol,
+    // and a recorder that meets the reference marks its record Unrecordable(ForeignCodeSymbol), as for such a far call.
+    template<PtrTag tag, typename Function> requires std::is_function_v<Function>
+    static ImageReference operation(Function* function)
+    {
+        return operationAt(std::bit_cast<const void*>(function), std::bit_cast<const void*>(tagCFunction<tag>(function)));
+    }
     static ImageReference ucbConstantCell(VM&, UnlinkedCodeBlock&, VirtualRegister);
     static ImageReference ucbConstantAtom(VM&, UnlinkedCodeBlock&, VirtualRegister);
     static ImageReference ucbIdentifier(VM&, UnlinkedCodeBlock&, unsigned identifierIndex);
@@ -46,12 +57,17 @@ public:
     const ImageTarget& target() const { return m_target; }
 
     // The target recorder records for this reference: the MathIC index it noted for a MathIC reference, and nullopt for
-    // a profile outside its UCB's vectors, a programming error that makes the record unrecordable.
+    // an operation without a CodeSymbol or a profile outside its UCB's vectors, a programming error. Either makes the
+    // record unrecordable.
     std::optional<ImageTarget> recordedTarget(const ImageRecorder&) const;
+    // Whether this is an operation outside the engine's text segment, which makes the record
+    // Unrecordable(ForeignCodeSymbol).
+    bool isForeignOperation() const { return m_targetState == TargetState::ForeignCodeSymbol; }
 
 private:
-    enum class TargetState : uint8_t { Known, MathICIndexFromRecorder, Unknown };
+    enum class TargetState : uint8_t { Known, MathICIndexFromRecorder, ForeignCodeSymbol, Unknown };
     ImageReference(const ImageTarget&, const void* value, TargetState);
+    static ImageReference operationAt(const void* function, const void* value);
     static ImageReference arithProfileIn(VM&, UnlinkedCodeBlock&, const void* profile, TargetKind);
 
     ImageTarget m_target;

@@ -121,19 +121,17 @@ static WebCore::Color mixColorComponentsUsingColorInterpolationMethod(Interpolat
 
 static WebCore::Color convertToColorMixResultRepresentation(const ColorInterpolationMethod& method, const WebCore::Color& color)
 {
-    return WTF::switchOn(method.colorSpace,
+    // `UseColorFunctionSerialization` is set unconditionally due to `color-mix()` serialization
+    // always using the modern serialization formats.
+    auto flags = OptionSet { WebCore::Color::Flags::UseColorFunctionSerialization };
+    if (color.isSemantic())
+        flags.add(WebCore::Color::Flags::Semantic);
+
+    return WTF::switchOn(method.value.colorSpace,
         [&]<typename MethodColorSpace>(const MethodColorSpace&) -> WebCore::Color {
             using ColorType = typename MethodColorSpace::ColorType;
 
-            auto convertedColor = color.template toColorTypeLossyCarryingForwardMissing<ColorType>();
-
-            // `UseColorFunctionSerialization` is set unconditionally due to `color-mix()` serialization
-            // always using the modern serialization formats.
-            auto flags = OptionSet { WebCore::Color::Flags::UseColorFunctionSerialization };
-            if (color.isSemantic())
-                flags.add(WebCore::Color::Flags::Semantic);
-
-            return { convertedColor, flags };
+            return { color.template toColorTypeLossyCarryingForwardMissing<ColorType>(), flags };
         }
     );
 }
@@ -172,7 +170,7 @@ WebCore::Color mix(const ColorMixResolver& colorMix)
             // 2. Interpolate a and b’s colors as described in CSS Color 4 §  13. Color Interpolation, with a progress percentage equal to (b’s percentage) / combined percentage), if combined percentage is greater than 0, and 0.5 otherwise. If the specified color space is a cylindrical polar color space, then the <hue-interpolation-method> controls the interpolation of hue, as described in CSS Color 4 § 13.4 Hue Interpolation. If no <hue-interpolation-method> is specified, assume shorter.
 
             auto progressPercentage = combinedPercentage > 0 ? b.percentage / combinedPercentage : 0.5;
-            auto mixedColor = WTF::switchOn(colorMix.colorInterpolationMethod.colorSpace,
+            auto mixedColor = WTF::switchOn(colorMix.colorInterpolationMethod.value.colorSpace,
                 [&](const auto& methodColorSpace) {
                     return mixColorComponentsUsingColorInterpolationMethod(
                         methodColorSpace,

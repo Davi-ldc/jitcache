@@ -41,7 +41,7 @@ class CSSFrontendDispatcher;
 
 namespace WebCore {
 
-class CSSStyleRule;
+class CSSRule;
 class CSSStyleSheet;
 class Document;
 class Element;
@@ -60,6 +60,8 @@ class FrameCSSAgent final : public InspectorAgentBase, public Inspector::CSSBack
     WTF_MAKE_TZONE_ALLOCATED(FrameCSSAgent);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(FrameCSSAgent);
 public:
+    OVERRIDE_ABSTRACT_CAN_MAKE_CHECKEDPTR(CanMakeCheckedPtr);
+
     FrameCSSAgent(FrameAgentContext&);
     ~FrameCSSAgent();
 
@@ -106,7 +108,7 @@ private:
     InspectorStyleSheetForInlineStyle& asInspectorStyleSheet(StyledElement&);
     RefPtr<Inspector::Protocol::CSS::CSSStyle> buildObjectForAttributesStyle(StyledElement&);
     RefPtr<Inspector::Protocol::CSS::CSSRule> buildObjectForRule(const StyleRule*, Style::Resolver&, Element&);
-    RefPtr<Inspector::Protocol::CSS::CSSRule> buildObjectForRule(CSSStyleRule*);
+    RefPtr<Inspector::Protocol::CSS::CSSRule> buildObjectForRule(CSSRule*);
     Ref<JSON::ArrayOf<Inspector::Protocol::CSS::RuleMatch>> buildArrayForMatchedRuleList(const Vector<Ref<const StyleRule>>&, Style::Resolver&, Element&, std::optional<Style::PseudoElementIdentifier>);
     void collectAllDocumentStyleSheets(Document&, Vector<CSSStyleSheet*>&);
     void collectStyleSheets(CSSStyleSheet*, Vector<CSSStyleSheet*>&);
@@ -114,8 +116,8 @@ private:
     InspectorStyleSheet* createInspectorStyleSheetForDocument(Document&);
     Inspector::Protocol::CSS::StyleSheetOrigin detectOrigin(CSSStyleSheet*, Document*);
 
-    UniqueRef<Inspector::CSSFrontendDispatcher> m_frontendDispatcher;
-    Ref<Inspector::CSSBackendDispatcher> m_backendDispatcher;
+    const UniqueRef<Inspector::CSSFrontendDispatcher> m_frontendDispatcher;
+    const Ref<Inspector::CSSBackendDispatcher> m_backendDispatcher;
     WeakRef<LocalFrame> m_inspectedFrame;
 
     HashMap<Inspector::Protocol::CSS::StyleSheetId, Ref<InspectorStyleSheet>> m_idToInspectorStyleSheet;

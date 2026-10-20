@@ -34,6 +34,7 @@
 #include <WebCore/RepaintRectCalculation.h>
 #include <wtf/CheckedPtr.h>
 #include <wtf/EnumSet.h>
+#include <wtf/Forward.h>
 #include <wtf/Platform.h>
 #include <wtf/TZoneMalloc.h>
 
@@ -49,6 +50,7 @@ class ControlPart;
 class Cursor;
 class Document;
 class FloatQuad;
+class Frame;
 class HitTestLocation;
 class HitTestRequest;
 class HitTestResult;
@@ -101,6 +103,8 @@ class ComputedStyle;
 class PseudoElementRequest;
 }
 
+using ClipRectAdjuster = ScopedLambda<std::optional<LayoutRect>(const Frame&, const LayoutRect& clipRect)>;
+
 enum class Affinity : bool;
 enum class HitTestSource : bool;
 enum class RepaintOutlineBounds : bool { No, Yes };
@@ -131,12 +135,12 @@ public:
         CombineText,
         Counter,
         DeprecatedFlexibleBox,
-        DetailsMarker,
         EmbeddedObject,
         FileUploadControl,
         FlexibleBox,
         Frame,
         FrameSet,
+        Glyph,
         Grid,
         HTMLCanvas,
         IFrame,
@@ -145,7 +149,7 @@ public:
         LineBreak,
         ListBox,
         ListItem,
-        ListMarker,
+        ListOutsideMarker,
         Media,
         MenuList,
         Meter,
@@ -243,7 +247,7 @@ public:
         IsBox = 1 << 2,
         IsBoxModelObject = 1 << 3,
         IsLayerModelObject = 1 << 4,
-        IsRenderInline = 1 << 5,
+        IsInlineBox = 1 << 5,
         IsRenderBlock = 1 << 6,
         IsFlexibleBox = 1 << 7,
     };
@@ -378,7 +382,6 @@ public:
 
     RenderElement* NODELETE firstNonAnonymousAncestor() const;
 
-#if ENABLE(TEXT_AUTOSIZING)
     // Minimal distance between the block with fixed height and overflowing content and the text block to apply text autosizing.
     // The greater this constant is the more potential places we have where autosizing is turned off.
     // So it should be as low as possible. There are sites that break at 2.
@@ -392,7 +395,6 @@ public:
 
     typedef BlockContentHeightType (*HeightTypeTraverseNextInclusionFunction)(const RenderObject&);
     RenderObject* traverseNext(const RenderObject* stayWithin, HeightTypeTraverseNextInclusionFunction, int& currentDepth, int& newFixedDepth) const;
-#endif
 
     WEBCORE_EXPORT RenderLayer* NODELETE enclosingLayer() const;
 
@@ -434,16 +436,16 @@ public:
     bool isRenderBoxModelObject() const { return m_typeFlags.contains(TypeFlag::IsBoxModelObject); }
     bool isRenderBlock() const { return m_typeFlags.contains(TypeFlag::IsRenderBlock); }
     bool isRenderBlockFlow() const { return m_typeSpecificFlags.kind() == TypeSpecificFlags::Kind::BlockFlow; }
-    bool isRenderInline() const { return m_typeFlags.contains(TypeFlag::IsRenderInline); }
+    bool isInlineBox() const { return m_typeFlags.contains(TypeFlag::IsInlineBox); }
     bool isRenderLayerModelObject() const { return m_typeFlags.contains(TypeFlag::IsLayerModelObject); }
 
     inline bool isAtomicInlineLevelBox() const; // Defined in RenderObjectStyle.h
     inline bool isNonReplacedAtomicInlineLevelBox() const;
 
     bool isRenderCounter() const { return type() == Type::Counter; }
+    bool isRenderGlyph() const { return type() == Type::Glyph; }
     bool isRenderQuote() const { return type() == Type::Quote; }
 
-    bool isRenderDetailsMarker() const { return type() == Type::DetailsMarker; }
     bool isRenderEmbeddedObject() const { return type() == Type::EmbeddedObject; }
     bool NODELETE isFieldset() const;
     bool isRenderFileUploadControl() const { return type() == Type::FileUploadControl; }
@@ -452,7 +454,7 @@ public:
     virtual bool isImage() const { return false; }
     bool isRenderListBox() const { return type() == Type::ListBox; }
     bool isRenderListItem() const { return type() == Type::ListItem; }
-    bool isRenderListMarker() const { return type() == Type::ListMarker; }
+    bool isRenderListOutsideMarker() const { return type() == Type::ListOutsideMarker; }
     bool isRenderMedia() const { return isRenderReplaced() && m_typeSpecificFlags.replacedFlags().contains(ReplacedFlag::IsMedia); }
     bool isRenderMenuList() const { return type() == Type::MenuList; }
     bool isRenderMeter() const { return type() == Type::Meter; }
@@ -1008,6 +1010,14 @@ public:
     // rather than an empty rect if the rect is completely clipped out in container space.
     virtual std::optional<RepaintRects> computeVisibleRectsInContainer(const RepaintRects&, const RenderLayerModelObject* repaintContainer, const VisibleRectContext&, VisibleRectState) const;
     virtual std::optional<FloatRect> computeFloatVisibleRectInContainer(const FloatRect&, const RenderLayerModelObject* repaintContainer, const VisibleRectContext&, VisibleRectState) const;
+
+    LayoutRect localBoundsForIntersection() const;
+
+    // The local intersection rect mapped out to *this* element's frame's contents coordinates, with clips and scrolls applied.
+    std::optional<LayoutRect> computeClippedRectInContentCoordinates(const LayoutRect& localRect) const;
+
+    // The local intersection rect mapped out to the root frame's contents coordinates, with clips and scrolls applied.
+    std::optional<LayoutRect> computeClippedRectInMainFrameContentCoordinates(const LayoutRect& localRect, NOESCAPE const ClipRectAdjuster&) const;
 
     WEBCORE_EXPORT bool hasEmptyVisibleRectRespectingParentFrames() const;
 

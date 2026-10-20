@@ -357,10 +357,10 @@ int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved)
         return 0;
     };
     // Names are collected first and removed after the listing, so no entry goes while the directory is read.
-    Vector<CString> temporaries;
+    Vector<ASCIICString> temporaries;
     int error = listDirectory(replacedFd, [&](std::span<const char> name, uint64_t) {
         if (temporaryKindOfFileName(name))
-            temporaries.append(CString { name });
+            temporaries.append(ASCIICString { name });
     });
     for (auto& name : temporaries) {
         if (error)
@@ -406,6 +406,25 @@ int createEmptyPack(int cacheFd, std::span<const uint8_t, 16> headerDigest)
         error = errno;
     if (error)
         ::unlinkat(cacheFd, temporary.data(), 0);
+    return error;
+#endif
+}
+
+int retirePack(int cacheFd)
+{
+#if !OS(LINUX)
+    UNUSED_PARAM(cacheFd);
+    return ENOSYS;
+#else
+    // O_NONBLOCK, so a FIFO at the name fails at once instead of waiting for a reader; O_NOFOLLOW, as packHoldsBodies
+    // reads it, so the mark lands only in the file the name holds.
+    int fd = openAt(cacheFd, ArtifactNames::pack.characters(), O_WRONLY | O_NONBLOCK | O_NOFOLLOW);
+    if (fd < 0)
+        return errno == ENOENT ? 0 : errno;
+    uint64_t retired = 1;
+    int error = writeExactly(fd, asByteSpan(retired), packRetiredOffset);
+    if (::close(fd) && !error && errno != EINTR)
+        error = errno;
     return error;
 #endif
 }
@@ -630,13 +649,19 @@ std::expected<PackMapping, ArtifactReadFailure> MappedPack::map(int cacheFd, std
     using namespace ArtifactStoreInternal;
     if (int error = injectedError(StoreCall::PackMap))
         return std::unexpected(ArtifactReadFailure { error, { } });
-    int fd = openAt(cacheFd, ArtifactNames::pack.characters(), O_RDONLY);
+    // O_NONBLOCK, so a FIFO at the name opens at once, without waiting for a writer, and then fails as damage below; it
+    // changes nothing for a regular file.
+    int fd = openAt(cacheFd, ArtifactNames::pack.characters(), O_RDONLY | O_NONBLOCK);
     if (fd < 0)
         return std::unexpected(ArtifactReadFailure { errno, { } });
     struct stat status;
     if (fstat(fd, &status)) {
         closeKeepingErrno(fd);
         return std::unexpected(ArtifactReadFailure { errno, { } });
+    }
+    if (!S_ISREG(status.st_mode)) {
+        ::close(fd);
+        return std::unexpected(ArtifactReadFailure { 0, "the name holds no regular file"_s });
     }
     uint64_t fileSize = static_cast<uint64_t>(status.st_size);
     if (fileSize < packPrefixBytes) {
@@ -884,23 +909,29 @@ std::optional<StoreFailure> OpenedArtifact::follow()
             return std::nullopt;
         MonotonicTime start = now;
         struct stat status;
-        if (fstatat(m_cacheFd, ArtifactNames::pack.characters(), &status, 0)) {
-            if (errno == ENOENT) {
-                m_gone = true;
-                m_index.clear();
-                m_liveBytes = packPrefixBytes;
-                return std::nullopt;
-            }
-        } else if (static_cast<uint64_t>(status.st_ino) != m_pack->inode()) {
+        bool gone = false;
+        if (fstatat(m_cacheFd, ArtifactNames::pack.characters(), &status, 0))
+            gone = errno == ENOENT;
+        else if (static_cast<uint64_t>(status.st_ino) != m_pack->inode()) {
             auto failure = reopen(0);
             ++m_statistics.refreshes;
             m_statistics.refreshNanoseconds += (MonotonicTime::now() - start).nanosecondsAs<uint64_t>();
             if (!failure)
                 return std::nullopt;
-            if (!failure->error) {
+            // A sound pack under another header is an artifact created here after this one was deleted, so the artifact
+            // this object checked is gone, as when the path holds no pack.
+            if (!failure->error && failure->packRejection == packOfAnotherHeader)
+                gone = true;
+            else if (!failure->error) {
                 m_damage = StoreFailure { ContainerChecks::pack, 0, failure->packRejection };
                 return m_damage;
             }
+        }
+        if (gone) {
+            m_gone = true;
+            m_index.clear();
+            m_liveBytes = packPrefixBytes;
+            return std::nullopt;
         }
         // The rename has not happened yet, or a compaction died between its mark and its rename, which the next producer
         // or compact repairs: the mapped pack stays current until then. A rename follows its mark within microseconds, so
@@ -971,6 +1002,15 @@ int OpenedArtifact::cacheFd() const
     return m_cacheFd;
 }
 
+bool OpenedArtifact::isGone()
+{
+    Locker locker { m_indexLock };
+    // An object that has not read since its pack was retired learns here whether the path still holds a pack: one whose
+    // cache/ was removed would otherwise be shared and go gone at its first read.
+    follow();
+    return m_gone;
+}
+
 BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
 {
     using namespace ArtifactStoreInternal;
@@ -1038,6 +1078,32 @@ SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, Validati
 #endif
 }
 
+SectionRead OpenedArtifact::readSection(const BodyKey& key, SectionKind kind, ValidationMode mode)
+{
+    using namespace ArtifactStoreInternal;
+    // No fault hook reaches this read, so it never answers Unavailable.
+    RefPtr<MappedPack> pack;
+    PackIndexEntry entry;
+    {
+        Locker locker { m_indexLock };
+        if (auto damage = follow())
+            return { StoreOutcome::Invalid, nullptr, { }, *damage };
+        auto iterator = m_index.find(key);
+        if (m_gone || iterator == m_index.end())
+            return { StoreOutcome::Absent, nullptr, { }, { } };
+        entry = iterator->value;
+        pack = m_pack;
+        ++m_statistics.opens;
+    }
+
+    std::array<SectionKind, 1> checksummedKinds { kind };
+    auto read = readBody(*pack, entry, headerDigest(), mode, std::span<const SectionKind> { checksummedKinds });
+    if (!read)
+        return { StoreOutcome::Invalid, nullptr, { }, read.error() };
+    std::span<const uint8_t> section = sectionIn(read->bytes, read->layout, kind);
+    return { StoreOutcome::Found, WTF::move(pack), section, { } };
+}
+
 // The registry.
 
 ArtifactRegistry& ArtifactRegistry::singleton()
@@ -1065,6 +1131,12 @@ std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> ArtifactRegistry::take(i
     ArtifactRegistry& registry = singleton();
     bool shares = ArtifactStoreInternal::registryShares();
 
+    // cache/ keeps its inode when its header changes under a live object: a Producer that reuses the remnant a whole
+    // deletion left writes a new header there, and a host may rename another artifact's files into it. The app record makes
+    // the header depend on the config, so the object registered for the directory may have been built from another header.
+    // A VM shares it only when it was built from the bytes this VM checked and still follows a pack.
+    HeaderDigest digest = artifactHeaderDigest(headerBytes);
+    RefPtr<OpenedArtifact> stale;
     if (shares) {
         RefPtr<OpenedArtifact> existing;
         {
@@ -1074,11 +1146,9 @@ std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> ArtifactRegistry::take(i
                 existing = iterator->value.get();
         }
         if (existing) {
-#if ASSERT_ENABLED
-            HeaderDigest digest = artifactHeaderDigest(headerBytes);
-            ASSERT(equalSpans(existing->headerDigest(), std::span { digest }));
-#endif
-            return existing.releaseNonNull();
+            if (equalSpans(existing->headerDigest(), std::span { digest }) && !existing->isGone())
+                return existing.releaseNonNull();
+            stale = WTF::move(existing);
         }
     }
 
@@ -1086,12 +1156,14 @@ std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> ArtifactRegistry::take(i
     if (!created || !shares)
         return created;
 
+    // Another VM may have registered an object for these bytes meanwhile; the stale one is replaced, and its holders keep it
+    // and read the pack they pinned.
     RefPtr<OpenedArtifact> registered;
     {
         Locker locker { registry.m_lock };
         auto& entry = registry.m_artifacts.add(identity, nullptr).iterator->value;
         registered = entry.get();
-        if (!registered) {
+        if (!registered || registered == stale || !equalSpans(registered->headerDigest(), std::span { digest })) {
             entry = created->get();
             registered = created->ptr();
         }

@@ -154,17 +154,11 @@
 namespace WebKit {
 using namespace WebCore;
 
-static uint64_t NODELETE generateListenerID()
-{
-    static uint64_t uniqueListenerID = 1;
-    return uniqueListenerID++;
-}
-
 void WebFrame::initWithCoreMainFrame(WebPage& page, Frame& coreFrame)
 {
     m_coreFrame = coreFrame;
     m_coreFrame->tree().setSpecifiedName(nullAtom());
-    if (auto* localFrame = dynamicDowncast<LocalFrame>(coreFrame))
+    if (RefPtr localFrame = dynamicDowncast<LocalFrame>(coreFrame))
         localFrame->init();
 }
 
@@ -299,10 +293,10 @@ WebCore::Frame* WebFrame::coreFrame() const
 
 Awaitable<std::optional<FrameInfoData>> WebFrame::getFrameInfo()
 {
-    co_return info(WithCertificateInfo::Yes);
+    co_return info();
 }
 
-FrameInfoData WebFrame::info(WithCertificateInfo withCertificateInfo) const
+FrameInfoData WebFrame::info() const
 {
     RefPtr parent = parentFrame();
     RefPtr coreFrame = this->coreFrame();
@@ -326,7 +320,6 @@ FrameInfoData WebFrame::info(WithCertificateInfo withCertificateInfo) const
     }
 
     return {
-        isMainFrame(),
         frameType,
         // FIXME: This should use the full request.
         ResourceRequest(url()),
@@ -335,9 +328,7 @@ FrameInfoData WebFrame::info(WithCertificateInfo withCertificateInfo) const
         coreFrame ? coreFrame->tree().specifiedName().string() : String(),
         frameID(),
         page ? std::optional { page->webPageProxyIdentifier() } : std::nullopt,
-        parent ? std::optional { parent->frameID() } : std::nullopt,
         document ? std::optional { document->identifier() } : std::nullopt,
-        withCertificateInfo == WithCertificateInfo::Yes ? certificateInfo() : CertificateInfo(),
         getCurrentProcessID(),
         isFocused(),
         loadingFrame && loadingFrame->loader().errorOccurredInLoading(),
@@ -393,9 +384,9 @@ ScopeExit<Function<void()>> WebFrame::makeInvalidator()
     });
 }
 
-uint64_t WebFrame::setUpPolicyListener(WebCore::FramePolicyFunction&& policyFunction, ForNavigationAction forNavigationAction, PolicyCheckKind kind, Markable<WebCore::ScriptExecutionContextIdentifier> initiatingDocument, SingleThreadWeakPtr<WebCore::DocumentLoader>&& downloadAttributePolicyDocumentLoader)
+PolicyListenerIdentifier WebFrame::setUpPolicyListener(WebCore::FramePolicyFunction&& policyFunction, ForNavigationAction forNavigationAction, PolicyCheckKind kind, Markable<WebCore::ScriptExecutionContextIdentifier> initiatingDocument, SingleThreadWeakPtr<WebCore::DocumentLoader>&& downloadAttributePolicyDocumentLoader)
 {
-    auto policyListenerID = generateListenerID();
+    auto policyListenerID = PolicyListenerIdentifier::generate();
     m_pendingPolicyChecks.add(policyListenerID, PolicyCheck {
         forNavigationAction,
         kind,
@@ -521,7 +512,7 @@ void WebFrame::createProvisionalFrame(ProvisionalFrameCreationParameters&& param
     auto clientCreator = [this, protectedThis = Ref { *this }] (auto& localFrame, auto& frameLoader) mutable {
         return makeUniqueRefWithoutRefCountedCheck<WebLocalFrameLoaderClient>(localFrame, frameLoader, WTF::move(protectedThis), makeInvalidator());
     };
-    auto localFrame = parent ? LocalFrame::createProvisionalSubframe(*corePage, WTF::move(clientCreator), m_frameID, parameters.effectiveSandboxFlags, parameters.effectiveReferrerPolicy, parameters.scrollingMode, *parent, Ref { remoteFrame->frameTreeSyncData() }) : LocalFrame::createMainFrame(*corePage, WTF::move(clientCreator), m_frameID, parameters.effectiveSandboxFlags, parameters.effectiveReferrerPolicy, nullptr, Ref { remoteFrame->frameTreeSyncData() });
+    auto localFrame = parent ? LocalFrame::createProvisionalSubframe(*corePage, WTF::move(clientCreator), m_frameID, parameters.effectiveSandboxFlags, parameters.effectiveReferrerPolicy, parameters.scrollingMode, *parent, Ref { remoteFrame->frameTreeSyncData() }, parameters.pageZoomFactor, parameters.textZoomFactor) : LocalFrame::createMainFrame(*corePage, WTF::move(clientCreator), m_frameID, parameters.effectiveSandboxFlags, parameters.effectiveReferrerPolicy, nullptr, Ref { remoteFrame->frameTreeSyncData() }, parameters.pageZoomFactor, parameters.textZoomFactor);
     ASSERT(!m_provisionalFrame);
     m_provisionalFrame = localFrame.ptr();
     m_frameIDBeforeProvisionalNavigation = parameters.frameIDBeforeProvisionalNavigation;
@@ -559,6 +550,14 @@ void WebFrame::destroyProvisionalFrame()
         frame->setView(nullptr);
         m_frameIDBeforeProvisionalNavigation = std::nullopt;
     }
+}
+
+void WebFrame::updateSandboxFlags(SandboxFlags sandboxFlags)
+{
+    if (RefPtr localFrame = coreLocalFrame())
+        localFrame->updateSandboxFlags(sandboxFlags, Frame::NotifyUIProcess::No);
+    if (RefPtr provisionalFrame = m_provisionalFrame)
+        provisionalFrame->updateSandboxFlags(sandboxFlags, Frame::NotifyUIProcess::No);
 }
 
 void WebFrame::commitProvisionalFrame()
@@ -637,6 +636,9 @@ void WebFrame::removeFromTree()
     if (RefPtr client = localFrameLoaderClient())
         client->removeStorageAccess();
 
+    if (RefPtr localFrame = dynamicDowncast<LocalFrame>(*coreFrame))
+        localFrame->loader().closeURL();
+
     // Instrumentation is added in createSubframe()/createProvisionalFrame() and normally removed in
     // detachedFromParent2(). This removal path (a remote parent removing the frame ->
     // frameWasRemovedInAnotherProcess -> removeFromTree) skips detachedFromParent2(), so tear the
@@ -664,7 +666,7 @@ void WebFrame::invalidatePolicyListeners()
     // download: https://html.spec.whatwg.org/multipage/links.html#downloading-hyperlinks
     m_policyDownloadID = { };
 
-    HashMap<uint64_t, PolicyCheck> policyChecksToCancel;
+    HashMap<PolicyListenerIdentifier, PolicyCheck> policyChecksToCancel;
     for (auto& [listenerID, policyCheck] : std::exchange(m_pendingPolicyChecks, { })) {
         if (policyCheck.kind != PolicyCheckKind::Navigation && initiatingDocumentIsStillCurrent(policyCheck))
             m_pendingPolicyChecks.add(listenerID, WTF::move(policyCheck));
@@ -677,7 +679,16 @@ void WebFrame::invalidatePolicyListeners()
         policyCheck.policyFunction(PolicyAction::Ignore);
 }
 
-void WebFrame::didReceivePolicyDecision(uint64_t listenerID, PolicyDecision&& policyDecision)
+bool WebFrame::dispatchPendingNavigateEventAfterNavigationPolicy(WebCore::PendingNavigateEventIdentifier identifier)
+{
+    RefPtr coreFrame = coreLocalFrame();
+    if (!coreFrame)
+        return true;
+
+    return coreFrame->loader().dispatchPendingNavigateEventAfterNavigationPolicy(identifier);
+}
+
+void WebFrame::didReceivePolicyDecision(PolicyListenerIdentifier listenerID, PolicyDecision&& policyDecision)
 {
     if (RefPtr page = m_page.get()) {
 #if ENABLE(APP_BOUND_DOMAINS)
@@ -726,19 +737,24 @@ void WebFrame::didReceivePolicyDecision(uint64_t listenerID, PolicyDecision&& po
     // any other, and m_policyDocumentLoader is its own. A new window skips it too, since its navigation state
     // belongs to the window being opened rather than to this frame.
     if (policyDecision.policyAction != PolicyAction::Download && policyCheck.kind != PolicyCheckKind::NewWindow) {
-        if (RefPtr localFrame = dynamicDowncast<LocalFrame>(m_coreFrame.get())) {
+        if (RefPtr localFrame = m_provisionalFrame ? m_provisionalFrame.get() : coreLocalFrame()) {
             auto& loader = localFrame->loader();
             if (RefPtr policyDocumentLoader = loader.policyDocumentLoader()) {
                 if (policyDecision.navigationID)
                     policyDocumentLoader->setNavigationID(*policyDecision.navigationID);
                 policyDocumentLoader->setIsOriginKeyedFromUIProcess(policyDecision.isOriginKeyed);
-            } else if (RefPtr provisionalDocumentLoader = loader.provisionalDocumentLoader())
+                if (forNavigationAction)
+                    policyDocumentLoader->setUnpartitionedStorageSite(WTF::move(policyDecision.unpartitionedStorageSite));
+            } else if (RefPtr provisionalDocumentLoader = loader.provisionalDocumentLoader()) {
                 provisionalDocumentLoader->setIsOriginKeyedFromUIProcess(policyDecision.isOriginKeyed);
+                if (forNavigationAction)
+                    provisionalDocumentLoader->setUnpartitionedStorageSite(WTF::move(policyDecision.unpartitionedStorageSite));
+            }
         }
     }
 
     if (policyDecision.backForwardFrameState) {
-        RELEASE_LOG(Loading, "didReceivePolicyDecision: Received FrameState for child frame, URL=%" SENSITIVE_LOG_STRING, policyDecision.backForwardFrameState->urlString.utf8().data());
+        RELEASE_LOG(Loading, "didReceivePolicyDecision: Received FrameState for child frame, URL=%" SENSITIVE_LOG_STRING, policyDecision.backForwardFrameState->urlString.utf8());
         setHistoryItemForBackForwardNavigation(protect(*policyDecision.backForwardFrameState));
     }
 
@@ -807,7 +823,7 @@ void WebFrame::convertMainResourceLoadToDownload(DocumentLoader* documentLoader,
 
     std::optional<NavigatingToAppBoundDomain> isAppBound = NavigatingToAppBoundDomain::No;
     isAppBound = m_isNavigatingToAppBoundDomain;
-    webProcess.ensureNetworkProcessConnection().connection().send(Messages::NetworkConnectionToWebProcess::ConvertMainResourceLoadToDownload(mainResourceLoadIdentifier, policyDownloadID, request, topOrigin, response, isAppBound), 0);
+    protect(webProcess.ensureNetworkProcessConnection().connection())->send(Messages::NetworkConnectionToWebProcess::ConvertMainResourceLoadToDownload(mainResourceLoadIdentifier, policyDownloadID, request, topOrigin, response, isAppBound), 0);
 }
 
 void WebFrame::addConsoleMessage(MessageSource messageSource, MessageLevel messageLevel, const String& message, uint64_t requestID)
@@ -1393,7 +1409,7 @@ void WebFrame::updateLocalFrameRect(WebCore::LocalFrame& localFrame, WebCore::In
         frameView->setExposedContentRect(FloatRect { { }, frameView->size() });
 #endif
 
-    if (!rectChanged)
+    if (oldRect.size() == newRect.size())
         return;
 
     if (RefPtr drawingArea = m_page ? m_page->drawingArea() : nullptr) {
@@ -1870,7 +1886,7 @@ void WebFrame::takeSnapshotOfNode(JSHandleIdentifier identifier, CompletionHandl
 CheckedRef<FrameInspectorTarget> WebFrame::ensureInspectorTarget()
 {
     if (!m_inspectorTarget)
-        m_inspectorTarget = makeUnique<FrameInspectorTarget>(*this);
+        lazyInitialize(m_inspectorTarget, makeUnique<FrameInspectorTarget>(*this));
     return *m_inspectorTarget;
 }
 
@@ -2001,7 +2017,7 @@ void WebFrame::describeTextExtractionInteraction(TextExtraction::Interaction&& i
 {
     RefPtr frame = coreLocalFrame();
     if (!frame)
-        return completion({ { }, { }, false });
+        return completion({ { }, { }, false, false });
 
     auto resolvedInteraction = interactionWithResolvedTargetNode(WTF::move(interaction));
     completion(TextExtraction::interactionDescription(resolvedInteraction, *frame));
@@ -2077,6 +2093,17 @@ void WebFrame::requestContainerJSHandleForSearchTexts(Vector<String>&& searchTex
 void WebFrame::requestContentFrameIdentifierForNode(NodeIdentifier nodeIdentifier, CompletionHandler<void(std::optional<WebCore::FrameIdentifier>&&)>&& completion)
 {
     completion(TextExtraction::contentFrameIdentifierForNode(nodeIdentifier));
+}
+
+void WebFrame::findFirstConnectedNode(Vector<NodeIdentifier>&& candidates, CompletionHandler<void(std::optional<NodeIdentifier>)>&& completion)
+{
+    for (auto& candidate : candidates) {
+        RefPtr node = Node::fromIdentifier(candidate);
+        if (node && node->isConnected())
+            return completion(candidate);
+    }
+
+    completion({ });
 }
 
 void WebFrame::getSelectorPathsForNode(JSHandleInfo&& handle, CompletionHandler<void(Vector<HashSet<String>>&&)>&& completion)

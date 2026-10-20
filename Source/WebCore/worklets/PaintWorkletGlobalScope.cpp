@@ -61,9 +61,10 @@ PaintWorkletGlobalScope::PaintWorkletGlobalScope(Document& document, Ref<VM>&& v
 
 double PaintWorkletGlobalScope::devicePixelRatio() const
 {
-    if (!responsibleDocument() || !responsibleDocument()->window())
+    RefPtr document = responsibleDocument();
+    if (!document || !document->window())
         return 1.0;
-    return protect(responsibleDocument())->window()->devicePixelRatio();
+    return protect(document->window())->devicePixelRatio();
 }
 
 PaintDefinition::PaintDefinition(const AtomString& name, JSC::JSObject* paintConstructor, Ref<CSSPaintCallback>&& paintCallback, Vector<AtomString>&& inputProperties, Vector<String>&& inputArguments)
@@ -156,8 +157,10 @@ ExceptionOr<void> PaintWorkletGlobalScope::registerPaint(JSC::JSGlobalObject& gl
     // FIXME: construct documentDefinition (step 22).
 
     // FIXME: we should only repaint affected custom paint images <https://bugs.webkit.org/show_bug.cgi?id=192322>.
-    if (responsibleDocument() && responsibleDocument()->renderView())
-        responsibleDocument()->renderView()->repaintRootContents();
+    if (RefPtr document = responsibleDocument()) {
+        if (CheckedPtr renderView = document->renderView())
+            renderView->repaintRootContents();
+    }
 
     return { };
 }

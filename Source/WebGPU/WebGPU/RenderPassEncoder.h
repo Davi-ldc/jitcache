@@ -28,12 +28,12 @@
 #import "BindableResource.h"
 #import "CommandsMixin.h"
 #import "TextureOrTextureView.h"
+#import <WebGPU/WebGPUCpp.h>
 #import <wtf/FastMalloc.h>
 #import <wtf/HashMap.h>
 #import <wtf/HashSet.h>
 #import <wtf/HashTraits.h>
 #import <wtf/Ref.h>
-#import <wtf/RefCountedAndCanMakeWeakPtr.h>
 #import <wtf/RetainPtr.h>
 #import <wtf/SwiftBridging.h>
 #import <wtf/TZoneMalloc.h>
@@ -46,7 +46,7 @@
 struct WGPURenderPassEncoderImpl {
 };
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class BindGroup;
 class Buffer;
@@ -60,7 +60,7 @@ class TextureView;
 struct BindableResources;
 
 // https://gpuweb.github.io/gpuweb/#gpurenderpassencoder
-class RenderPassEncoder : public RefCountedAndCanMakeWeakPtr<RenderPassEncoder>, public WGPURenderPassEncoderImpl, public CommandsMixin {
+class RenderPassEncoder final : public WebGPU::RenderPassEncoder, public WGPURenderPassEncoderImpl, public CommandsMixin {
     WTF_MAKE_TZONE_ALLOCATED(RenderPassEncoder);
 public:
     static Ref<RenderPassEncoder> create(id<MTLRenderCommandEncoder> renderCommandEncoder, const WGPURenderPassDescriptor& descriptor, NSUInteger visibilityResultBufferSize, bool depthReadOnly, bool stencilReadOnly, CommandEncoder& parentEncoder, id<MTLBuffer> visibilityResultBuffer, uint64_t maxDrawCount, Device& device, MTLRenderPassDescriptor* mtlDescriptor)
@@ -70,6 +70,12 @@ public:
     static Ref<RenderPassEncoder> createInvalid(CommandEncoder& parentEncoder, Device& device, NSString* errorString)
     {
         return adoptRef(*new RenderPassEncoder(parentEncoder, device, errorString));
+    }
+    static Ref<RenderPassEncoder> createInvalidWithEncoderStateNotOpen(CommandEncoder& parentEncoder, Device& device, NSString* errorString)
+    {
+        Ref renderPassEncoder = createInvalid(parentEncoder, device, errorString);
+        renderPassEncoder->markEncoderStateWasNotOpen();
+        return renderPassEncoder;
     }
 
     ~RenderPassEncoder();
@@ -93,11 +99,14 @@ public:
     void setStencilReference(uint32_t);
     void setVertexBuffer(uint32_t slot, const Buffer*, uint64_t offset, uint64_t size);
     void setViewport(float x, float y, float width, float height, float minDepth, float maxDepth);
-    void setLabel(String&&);
+    void setLabel(String&&) final;
 
     Device& device() const { return m_device; }
 
-    bool isValid() const { return m_renderCommandEncoder; }
+    bool isValid() const final { return m_renderCommandEncoder; }
+    // A pass begun while its command encoder was not open never took the encoder over, so it can
+    // never be ended. https://gpuweb.github.io/gpuweb/#dom-gpurenderpassencoder-end
+    void markEncoderStateWasNotOpen() { m_encoderStateWasNotOpen = true; }
     NSString* errorValidatingColorDepthStencilTargets(const RenderPipeline&) const;
     id<MTLRenderCommandEncoder> NODELETE renderCommandEncoder() const;
     void makeInvalid(NSString* = nil);
@@ -131,7 +140,6 @@ private:
     RenderPassEncoder(CommandEncoder&, Device&, NSString*);
 
     bool NODELETE validatePopDebugGroup() const;
-    bool executePreDrawCommands(uint32_t vertexCount);
     bool executePreDrawCommands(uint32_t firstInstance, uint32_t instanceCount, bool passWasSplit, const Buffer*, bool needsValidationLayerWorkaround);
     bool runIndexBufferValidation(uint32_t firstInstance, uint32_t instanceCount);
     void runVertexBufferValidation(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance);
@@ -140,7 +148,7 @@ private:
     void addResourceToActiveResources(const TextureView&, OptionSet<BindGroupEntryUsage>, WGPUTextureAspect);
     void addResourceToActiveResources(const TextureOrTextureView&, OptionSet<BindGroupEntryUsage>, WGPUTextureAspect);
     void addResourceToActiveResources(const Texture&, OptionSet<BindGroupEntryUsage>);
-    void addTextureToActiveResources(const void*, id<MTLResource>, OptionSet<BindGroupEntryUsage>, uint32_t baseMipLevel, uint32_t baseArrayLayer, WGPUTextureAspect);
+    void addTextureToActiveResources(const void*, id<MTLResource>, OptionSet<BindGroupEntryUsage>, uint32_t baseMipLevel, uint32_t mipLevelCount, uint32_t baseArrayLayer, uint32_t arrayLayerCount, WGPUTextureAspect);
     void addResourceToActiveResources(const void*, OptionSet<BindGroupEntryUsage>);
 
     NSString* errorValidatingAndBindingBuffers();
@@ -197,9 +205,6 @@ private:
     uint32_t m_memoryBarrierCount { 0 };
     NSMutableDictionary<NSNumber*, TextureAndClearColor*> *m_attachmentsToClear { nil };
     id<MTLTexture> m_depthStencilAttachmentToClear { nil };
-    WGPURenderPassDescriptor m_descriptor;
-    Vector<WGPURenderPassColorAttachment> m_descriptorColorAttachments;
-    WGPURenderPassDepthStencilAttachment m_descriptorDepthStencilAttachment;
     Vector<TextureOrTextureView> m_colorAttachmentViews;
     std::optional<TextureOrTextureView> m_depthStencilView;
     struct BufferAndOffset {
@@ -224,12 +229,17 @@ private:
     const uint64_t m_maxDrawCount { 0 };
     id<MTLRasterizationRateMap> m_rasterizationRateMap { nil };
     uint32_t m_stencilClearValue { 0 };
+    // Kept for the lifetime of the pass rather than cleared once applied: every draw reads the depth
+    // range back out to tell the fragment shader what to clamp frag_depth to, and splitting the pass
+    // has to reapply the viewport to the new command encoder.
     std::optional<MTLViewport> m_viewport;
+    bool m_viewportNeedsApplying { false };
     MTLDepthClipMode m_overrideDepthClipMode { MTLDepthClipModeClip };
     bool m_clearDepthAttachment { false };
     bool m_clearStencilAttachment { false };
     bool m_occlusionQueryActive { false };
     bool m_passEnded { false };
+    bool m_encoderStateWasNotOpen { false };
     bool m_ignoreBufferCache { false };
     Vector<bool> m_bindGroupDynamicOffsetsChanged;
 
@@ -244,16 +254,18 @@ private:
         Vector<Entry> entries;
     };
     RefPtr<IndirectDeviceLostChecks> m_indirectDeviceLostChecks;
-} SWIFT_SHARED_REFERENCE(refRenderPassEncoder, derefRenderPassEncoder) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+} DERIVED_CLASS_SWIFT_SHARED_REFERENCE(refRenderPassEncoder, derefRenderPassEncoder);
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
-inline void refRenderPassEncoder(WebGPU::RenderPassEncoder* obj)
+#if !ENABLE(SWIFT_BASE_CLASS_ANNOTATIONS)
+inline void refRenderPassEncoder(WebGPU::Metal::RenderPassEncoder* obj)
 {
     obj->ref();
 }
 
-inline void derefRenderPassEncoder(WebGPU::RenderPassEncoder* obj)
+inline void derefRenderPassEncoder(WebGPU::Metal::RenderPassEncoder* obj)
 {
     obj->deref();
 }
+#endif

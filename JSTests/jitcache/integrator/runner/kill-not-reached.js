@@ -1,4 +1,4 @@
-// jitcache-runs: Producer --jitcache-test-kill=after-rename@1000
+// jitcache-runs: Producer --jitcache-test-kill=after-root@1000
 // jitcache-expect-exit: 0 kill
 
 // A Producer that makes fewer commits than its kill point counts exits 0, which a directive that

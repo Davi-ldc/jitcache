@@ -47,8 +47,8 @@ namespace WebCore {
 class GPUBuffer;
 class GPUDevice;
 struct GPUImageCopyExternalImage;
-struct GPUCopyElementImageDestination;
-struct GPUCopyElementImageSource;
+struct GPUDrawElementImageDestination;
+struct GPUDrawElementImageSource;
 
 class GPUQueue : public RefCountedAndCanMakeWeakPtr<GPUQueue> {
 public:
@@ -62,7 +62,7 @@ public:
 
     void submit(Vector<Ref<GPUCommandBuffer>>&&);
 
-    using OnSubmittedWorkDonePromise = DOMPromiseDeferred<IDLNull>;
+    using OnSubmittedWorkDonePromise = DOMPromiseDeferred<void>;
     void onSubmittedWorkDone(OnSubmittedWorkDonePromise&&);
 
     ExceptionOr<void> writeBuffer(
@@ -84,9 +84,9 @@ public:
         const GPUImageCopyTextureTagged& destination,
         const GPUExtent3D& copySize);
 
-    ExceptionOr<void> copyElementImageToTexture(
-        const GPUCopyElementImageSource&,
-        const GPUCopyElementImageDestination&);
+    ExceptionOr<void> drawElementImageToTexture(
+        const GPUDrawElementImageSource&,
+        const GPUDrawElementImageDestination&);
 
     WebGPU::Queue& backing() { return m_backing; }
     const WebGPU::Queue& backing() const { return m_backing; }

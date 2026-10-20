@@ -41,6 +41,7 @@
 #include "HTMLNames.h"
 #include "HTMLParserIdioms.h"
 #include "HTMLTableCellElement.h"
+#include "KeyboardEvent.h"
 #include "LocalFrame.h"
 #include "MathMLNames.h"
 #include "MouseEvent.h"
@@ -92,8 +93,8 @@ void MathMLElement::attributeChanged(const QualifiedName& name, const AtomString
         break;
     case AttributeNames::columnspanAttr:
     case AttributeNames::rowspanAttr:
-        if (is<RenderTableCell>(renderer()) && hasTagName(mtdTag))
-            downcast<RenderTableCell>(*renderer()).colSpanOrRowSpanChanged();
+        if (CheckedPtr cell = dynamicDowncast<RenderTableCell>(renderer()); cell && hasTagName(mtdTag))
+            cell->colSpanOrRowSpanChanged();
         break;
     case AttributeNames::tabindexAttr:
         if (auto optionalTabIndex = parseHTMLInteger(newValue))
@@ -298,7 +299,7 @@ bool MathMLElement::willRespondToMouseClickEventsWithEditability(Editability edi
 void MathMLElement::defaultEventHandler(Event& event)
 {
     if (isLink()) {
-        if (focused() && isEnterKeyKeydownEvent(event)) {
+        if (focused() && KeyboardEvent::isEnterKeyKeydownEvent(event)) {
             event.setDefaultHandled();
             dispatchSimulatedClick(&event);
             return;

@@ -30,6 +30,7 @@
 #import "WebPreferencesInternal.h"
 
 #import "NetworkStorageSessionMap.h"
+#import <WebCore/CookieStorageSession.h>
 #import "WebFeature.h"
 #import "WebFrameNetworkingContext.h"
 #import "WebKitLogging.h"
@@ -42,7 +43,6 @@
 #import <JavaScriptCore/InitializeThreading.h>
 #import <WebCore/AudioSession.h>
 #import <WebCore/MediaPlayerEnums.h>
-#import <WebCore/NetworkStorageSession.h>
 #import <WebCore/Settings.h>
 #import <WebCore/WebCoreJITOperations.h>
 #import <WebCore/WebCoreMainThread.h>
@@ -65,10 +65,10 @@
 #import <WebCore/WebCoreThreadMessage.h>
 #endif
 
-NSString *WebPreferencesChangedNotification = @"WebPreferencesChangedNotification";
-NSString *WebPreferencesRemovedNotification = @"WebPreferencesRemovedNotification";
-NSString *WebPreferencesChangedInternalNotification = @"WebPreferencesChangedInternalNotification";
-NSString *WebPreferencesCacheModelChangedInternalNotification = @"WebPreferencesCacheModelChangedInternalNotification";
+NSString * const WebPreferencesChangedNotification = @"WebPreferencesChangedNotification";
+NSString * const WebPreferencesRemovedNotification = @"WebPreferencesRemovedNotification";
+NSString * const WebPreferencesChangedInternalNotification = @"WebPreferencesChangedInternalNotification";
+NSString * const WebPreferencesCacheModelChangedInternalNotification = @"WebPreferencesCacheModelChangedInternalNotification";
 
 #define KEY(x) (_private->identifier ? [_private->identifier.get() stringByAppendingString:(x)] : (x))
 
@@ -1241,7 +1241,6 @@ public:
 }
 #endif
 
-#if ENABLE(TEXT_AUTOSIZING)
 - (void)_setMinimumZoomFontSize:(float)size
 {
     [self _setFloatValue:size forKey:WebKitMinimumZoomFontSizePreferenceKey];
@@ -1261,7 +1260,6 @@ public:
 {
     return [self _boolValueForKey:WebKitTextAutosizingEnabledPreferenceKey];
 }
-#endif
 
 #if PLATFORM(IOS_FAMILY)
 - (void)_setMaxParseDuration:(float)d
@@ -2708,14 +2706,14 @@ static RetainPtr<NSString>& NODELETE classIBCreatorID()
 
 + (void)_setCurrentNetworkLoaderSessionCookieAcceptPolicy:(NSHTTPCookieAcceptPolicy)policy
 {
-    auto cookieStorage = NetworkStorageSessionMap::defaultStorageSession().cookieStorage();
+    RetainPtr cookieStorage = protect(NetworkStorageSessionMap::defaultStorageSession())->cookieStorage();
     RELEASE_ASSERT(cookieStorage); // Will fail when NetworkStorageSessionMap::switchToNewTestingSession() was not called beforehand.
     CFHTTPCookieStorageSetCookieAcceptPolicy(cookieStorage.get(), policy);
 }
 
 + (void)_clearNetworkLoaderSession:(void (^)(void))completionHandler
 {
-    NetworkStorageSessionMap::defaultStorageSession().deleteAllCookies([completionHandler = makeBlockPtr(completionHandler)] {
+    protect(NetworkStorageSessionMap::defaultStorageSession())->deleteAllCookies([completionHandler = makeBlockPtr(completionHandler)] {
         completionHandler();
     });
 }

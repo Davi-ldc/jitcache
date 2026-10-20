@@ -3,8 +3,10 @@
 // Calls in imported images, each import twin-checked. Every call's fast path loads LLInt::defaultCall() (ProcessThunk);
 // a callee called with fewer arguments than it declares enters through its arity check, which pads the frame and calls
 // the arity fixup; varargs calls and constructs spread, apply and forward arguments; strict functions tail-call,
-// directly and with varargs; a site that meets many callees goes polymorphic and then virtual; a constructor reaches its
-// base through super. slowThenString runs typeof, an opcode whose template only calls its slow path (DEFINE_SLOW_OP),
+// directly and with varargs, and tailLate's tail call first runs once its function runs baseline code, whose tail-call
+// path then calls operationEnsureCallLinkInfoForTailCall through the address it moves into a register; a site that
+// meets many callees goes polymorphic and then virtual; a constructor reaches its base through super. slowThenString
+// runs typeof, an opcode whose template only calls its slow path (DEFINE_SLOW_OP),
 // and stores a string constant at once, so on ARM64, outside the debug builds' consistency checks, the slow path's bl and
 // the store's movz put a Call and a Pointer fixup at one site.
 // The consumer checks that its images carry: the default call target LLInt::defaultCall() as a Pointer; the arity
@@ -45,6 +47,12 @@
         "use strict";
         return sum3.apply(null, arguments);
     }
+    function tailLate(n, late) {
+        "use strict";
+        if (late)
+            return sum3(n, late, 1);
+        return n;
+    }
     function callEach(callees, x) {
         let total = 0;
         for (const callee of callees)
@@ -84,29 +92,34 @@
         const derived = new Derived(i);
         total += derived.value + derived.extra;
         text += slowThenString([i, "s", null, undefined, { }, () => i][i % 6]).length;
+        total += tailLate(i, 0);
     }
+    // Sixty calls compiled tailLate before its tail call ever ran.
+    for (let i = 0; i < 4; ++i)
+        total += tailLate(i, i + 1);
     print(total);
     print(text);
 
-    // The case happened (HARNESS.md, Tests): the producer compiled every function the loop calls, each at least 60 times,
-    // so each ran its import here, the constructors at their first construction, and their images carry the targets the
-    // header claims.
+    // The case happened: the producer compiled every function the loop calls, each at least 60 times, so each ran its
+    // import here, the constructors at their first construction, and their images carry the targets the header claims.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
-        const bodies = { sum3, arity, viaApply, viaSpread, construct, countdown, tailSpread, tailForward, callEach, slowThenString };
+        const bodies = {
+            sum3, arity, viaApply, viaSpread, construct, countdown, tailSpread, tailForward, tailLate, callEach, slowThenString,
+        };
         few.forEach((fn, index) => bodies[`few[${index}]`] = fn);
         many.forEach((fn, index) => bodies[`many[${index}]`] = fn);
         const constructors = { Pair, Base, Derived };
         sections.expectImports(role, bodies);
         sections.expectImports(role, constructors, "construct");
         sections.expectTargets(role, { call: bodies, construct: constructors }, [
-            { site: "A15", kind: "ProcessThunk", a: "DefaultCall", form: "Pointer" },
-            { site: "B2", kind: "ProcessThunk", a: "ArityFixup", form: "Call" },
-            { site: "A8, B4", kind: "VMAddress", a: "SoftStackLimit", form: "Pointer" },
-            { site: "A1", kind: "SlowPathThunk", form: "Call" },
-            { site: "C1, B6", kind: "UCBConstantCell", form: "Pointer" },
-            { site: "E1", kind: "CommonThunk", a: "ReturnFromBaseline", form: "Jump" },
-            { site: "C17", kind: "BaselineThunk", a: "OpEnterHandler", form: "Call" },
+            { site: "a call fast path's default call target", kind: "ProcessThunk", a: "DefaultCall", form: "Pointer" },
+            { site: "the prologue's arity fixup call", kind: "ProcessThunk", a: "ArityFixup", form: "Call" },
+            { site: "the arity check's stack limit compare", kind: "VMAddress", a: "SoftStackLimit", form: "Pointer" },
+            { site: "a JITSlowPathCall's call to its slow-path thunk", kind: "SlowPathThunk", form: "Call" },
+            { site: "mov's or emitGetVirtualRegister's constant cell", kind: "UCBConstantCell", form: "Pointer" },
+            { site: "ret's jump to the return thunk", kind: "CommonThunk", a: "ReturnFromBaseline", form: "Jump" },
+            { site: "enter's handler thunk call", kind: "BaselineThunk", a: "OpEnterHandler", form: "Call" },
         ]);
     }
 })(...arguments);

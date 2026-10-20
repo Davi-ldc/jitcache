@@ -47,6 +47,7 @@
 #include "WasmModuleInformation.h"
 #include "WasmTag.h"
 #include "WasmTypeDefinitionInlines.h"
+#include "WebAssemblyBuiltin.h"
 #include "WebAssemblyFunctionBase.h"
 #include "WebAssemblyModuleRecord.h"
 #include "WebAssemblyWrapperFunction.h"
@@ -313,7 +314,7 @@ size_t JSWebAssemblyInstance::allocationSize(const Wasm::ModuleInformation& info
 }
 
 
-JSWebAssemblyInstance* JSWebAssemblyInstance::tryCreate(VM& vm, Structure* instanceStructure, JSGlobalObject* globalObject, const Identifier& moduleKey, JSWebAssemblyModule* jsModule, JSObject* importObject, CreationMode creationMode, RefPtr<SourceProvider>&& provider)
+JSWebAssemblyInstance* JSWebAssemblyInstance::tryCreate(VM& vm, Structure* instanceStructure, JSGlobalObject* globalObject, JSModuleLoader* moduleLoader, const Identifier& moduleKey, JSWebAssemblyModule* jsModule, JSObject* importObject, CreationMode creationMode, RefPtr<SourceProvider>&& provider)
 {
     auto throwScope = DECLARE_THROW_SCOPE(vm);
 
@@ -328,7 +329,7 @@ JSWebAssemblyInstance* JSWebAssemblyInstance::tryCreate(VM& vm, Structure* insta
     if (!globalObject->webAssemblyEnabled())
         return exception(createJSWebAssemblyCompileError(globalObject, vm, globalObject->webAssemblyDisabledErrorMessage()));
 
-    WebAssemblyModuleRecord* moduleRecord = WebAssemblyModuleRecord::create(globalObject, vm, globalObject->webAssemblyModuleRecordStructure(), moduleKey, moduleInformation);
+    WebAssemblyModuleRecord* moduleRecord = WebAssemblyModuleRecord::create(globalObject, vm, globalObject->webAssemblyModuleRecordStructure(), moduleLoader, moduleKey, moduleInformation);
     RETURN_IF_EXCEPTION(throwScope, nullptr);
 
     // FIXME: These objects could be pretty big we should try to throw OOM here.
@@ -363,11 +364,19 @@ JSWebAssemblyInstance* JSWebAssemblyInstance::tryCreate(VM& vm, Structure* insta
             const auto& fieldName = importNames[importIndex].field;
             bool skipRequestedModule = false;
             if (fromModuleLoader) {
-                if (startsWith(import.module.span(), "wasm-js:"_s))
-                    return exception(createJSWebAssemblyLinkError(globalObject, vm, makeString("Import module '"_s, StringView(moduleName.impl()), "' is reserved"_s)));
-                if (isReservedESMName(import.field))
-                    return exception(createJSWebAssemblyLinkError(globalObject, vm, makeString("Import name '"_s, StringView(fieldName.impl()), "' is reserved"_s)));
-                skipRequestedModule = moduleInformation.importedStringConstantsEquals(import.module) || moduleInformation.builtinSetsInclude(import.module);
+                const bool isStringConstantImport = moduleInformation.importedStringConstantsEquals(import.module);
+                bool isBuiltinImport = false;
+                if (!isStringConstantImport && moduleInformation.builtinSetsInclude(import.module)) {
+                    if (const auto* builtinSet = WebAssemblyBuiltinRegistry::singleton().findByQualifiedName(makeString(import.module)))
+                        isBuiltinImport = builtinSet->findBuiltin(makeString(import.field));
+                }
+                if (!isStringConstantImport && !isBuiltinImport) {
+                    if (startsWith(import.module.span(), "wasm-js:"_s))
+                        return exception(createJSWebAssemblyLinkError(globalObject, vm, makeString("Import module '"_s, StringView(moduleName.impl()), "' is reserved"_s)));
+                    if (isReservedESMName(import.field))
+                        return exception(createJSWebAssemblyLinkError(globalObject, vm, makeString("Import name '"_s, StringView(fieldName.impl()), "' is reserved"_s)));
+                }
+                skipRequestedModule = isStringConstantImport || moduleInformation.builtinSetsInclude(import.module);
             }
             auto result = specifiers.add(moduleName.impl());
             if (result.isNewEntry && !skipRequestedModule)

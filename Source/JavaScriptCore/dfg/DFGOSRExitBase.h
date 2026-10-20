@@ -29,6 +29,9 @@
 
 #include "CodeOrigin.h"
 #include "DFGExitProfile.h"
+#include "MacroAssembler.h"
+#include <span>
+#include <wtf/Vector.h>
 
 namespace JSC { namespace DFG {
 
@@ -38,19 +41,22 @@ struct Node;
 // Provides for the OSR exit profiling functionality that is common between the DFG
 // and the FTL.
 
+static_assert(isARM64() || isX86_64());
+static constexpr size_t osrExitEntranceSize = isARM64() ? 4 : 5;
+static_assert(osrExitEntranceSize >= static_cast<size_t>(MacroAssembler::AssemblerType_T::maxJumpReplacementSize()));
+
 struct OSRExitBase {
     OSRExitBase(ExitKind kind, CodeOrigin origin, CodeOrigin originForProfile, bool wasHoisted, uint32_t dfgNodeIndex)
         : m_kind(kind)
         , m_wasHoisted(wasHoisted)
-        , m_codeOrigin(origin)
-        , m_codeOriginForExitProfile(originForProfile)
+        , m_codeOrigin(WTF::move(origin))
+        , m_codeOriginForExitProfile(WTF::move(originForProfile))
         , m_dfgNodeIndex(dfgNodeIndex)
     {
         ASSERT(m_codeOrigin.isSet());
         ASSERT(m_codeOriginForExitProfile.isSet());
     }
 
-    uint32_t m_count { 0 };
     ExitKind m_kind;
     bool m_wasHoisted;
     
@@ -85,15 +91,24 @@ struct OSRExitBase {
     }
 
 protected:
-    void considerAddingAsFrequentExitSite(CodeBlock* profiledCodeBlock, ExitingJITType jitType)
-    {
-        if (m_count)
-            considerAddingAsFrequentExitSiteSlow(profiledCodeBlock, jitType);
-    }
-
-private:
-    void considerAddingAsFrequentExitSiteSlow(CodeBlock* profiledCodeBlock, ExitingJITType);
+    void considerAddingAsFrequentExitSite(CodeBlock* profiledCodeBlock, ExitingJITType);
 };
+
+enum class CodeOriginTag : unsigned {
+    SameAsPrevious,
+    SameInlineCallFrame,
+    NewInlineCallFrame,
+};
+
+inline CodeOriginTag codeOriginTagFromFlags(unsigned flags, unsigned shift)
+{
+    constexpr unsigned mask = 3;
+    return static_cast<CodeOriginTag>((flags >> shift) & mask);
+}
+
+CodeOriginTag codeOriginTag(const CodeOrigin&, const CodeOrigin& previous);
+void encodeCodeOrigin(Vector<uint8_t>&, CodeOriginTag, const CodeOrigin&, const CodeOrigin& previous);
+CodeOrigin decodeCodeOrigin(std::span<const uint8_t>, size_t& offset, CodeOriginTag, const CodeOrigin& previous);
 
 } } // namespace JSC::DFG
 

@@ -49,11 +49,12 @@ template<typename T, typename U> inline bool compareEqual(const T& a, const U& b
 
 // MARK: - ComputedStyleBase::NonInheritedFlags
 
-inline void ComputedStyleBase::NonInheritedFlags::setHasPseudoStyles(EnumSet<PseudoElementType> pseudoElementSet)
+inline void ComputedStyleBase::NonInheritedFlags::setHasPseudoStyles(EnumSet<PseudoElementType> pseudoElementSet, PseudoElementBoxGeneration boxGeneration)
 {
     ASSERT(pseudoElementSet);
     ASSERT(pseudoElementSet.containsOnly(allPublicPseudoElementTypes));
     pseudoBits = pseudoElementSet.toRaw();
+    pseudoElementBoxGeneration = std::to_underlying(boxGeneration);
 }
 
 // MARK: - Non-property setters
@@ -113,6 +114,13 @@ inline void ComputedStyleBase::setEffectiveInert(bool effectiveInert)
 {
     SET(m_inheritedRareData, effectiveInert, effectiveInert);
 }
+
+#if ENABLE(SMART_IMAGE_RESIZER)
+inline void ComputedStyleBase::setIsAffectedBySmartImageResizer(bool isAffectedBySmartImageResizer)
+{
+    SET(m_inheritedRareData, isAffectedBySmartImageResizer, isAffectedBySmartImageResizer);
+}
+#endif
 
 inline void ComputedStyleBase::setIsEffectivelyTransparent(bool effectivelyTransparent)
 {
@@ -184,6 +192,11 @@ inline void ComputedStyleBase::setInsideSubmitButton(bool value)
     SET(m_inheritedRareData, insideSubmitButton, value);
 }
 
+inline void ComputedStyleBase::setInBaseAppearanceSubtree(bool value)
+{
+    SET(m_inheritedRareData, inBaseAppearanceSubtree, value);
+}
+
 inline void ComputedStyleBase::setUsedPositionOptionIndex(std::optional<size_t> index)
 {
     SET_NESTED(m_nonInheritedData, rareData, usedPositionOptionIndex, index);
@@ -230,9 +243,9 @@ inline void ComputedStyleBase::setUsedAppleVisualEffectForSubtree(AppleVisualEff
 
 // MARK: - Pseudo element/style
 
-inline void ComputedStyleBase::setHasPseudoStyles(EnumSet<PseudoElementType> set)
+inline void ComputedStyleBase::setHasPseudoStyles(EnumSet<PseudoElementType> set, PseudoElementBoxGeneration boxGeneration)
 {
-    m_nonInheritedFlags.setHasPseudoStyles(set);
+    m_nonInheritedFlags.setHasPseudoStyles(set, boxGeneration);
 }
 
 inline void ComputedStyleBase::setPseudoElementIdentifier(std::optional<PseudoElementIdentifier>&& identifier)

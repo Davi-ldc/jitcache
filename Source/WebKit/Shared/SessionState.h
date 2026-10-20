@@ -153,15 +153,15 @@ private:
     );
 
     Vector<AtomString> m_documentState;
-} SWIFT_SHARED_REFERENCE(refFrameState, derefFrameState) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+} DERIVED_CLASS_SWIFT_SHARED_REFERENCE(refFrameState, derefFrameState);
 
-// FIXME(rdar://171785683): see if this SWIFT_ESCAPABLE can be avoided
+// FIXME(rdar://171785683): see if this SWIFT_SELF_CONTAINED can be avoided
 struct BackForwardListItemState {
     Ref<FrameState> frameState;
     std::optional<WebCore::FrameIdentifier> navigatedFrameID;
 
     bool isEqualForTesting(const BackForwardListItemState&) const;
-} SWIFT_ESCAPABLE;
+} SWIFT_SELF_CONTAINED;
 
 using VectorBackForwardListItemState = Vector<BackForwardListItemState>;
 
@@ -181,12 +181,10 @@ struct SessionState {
     bool isEqualForTesting(const SessionState&) const;
 };
 
-using RefFrameState = Ref<FrameState>;
-using RefPtrFrameState = RefPtr<FrameState>;
-using VectorRefFrameState = Vector<Ref<FrameState>>;
 
 } // namespace WebKit
 
+#if !ENABLE(SWIFT_BASE_CLASS_ANNOTATIONS)
 inline void refFrameState(WebKit::FrameState* obj)
 {
     obj->ref();
@@ -196,3 +194,4 @@ inline void derefFrameState(WebKit::FrameState* obj)
 {
     obj->deref();
 }
+#endif

@@ -29,6 +29,7 @@
 #include <limits>
 #include <numbers>
 #include <sstream>
+#include <wtf/ASCIICType.h>
 #include <wtf/MathExtras.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
@@ -53,7 +54,7 @@ TEST(WTF, StringCreationFromLiteral)
 
 TEST(WTF, StringASCII)
 {
-    CString output;
+    ASCIICString output;
 
     // Null String.
     output = String().ascii();
@@ -78,149 +79,143 @@ TEST(WTF, StringStartsWithEmptyVsNull)
     EXPECT_TRUE(stringWithCharacters.startsWith(emptyString));
 }
 
-static inline const char* testStringNumberFixedPrecision(double number)
+static inline UTF8CString testStringNumberFixedPrecision(double number)
 {
-    static char testBuffer[100] = { };
-    std::strncpy(testBuffer, String::numberToStringFixedPrecision(number).utf8().data(), 99);
-    return testBuffer;
+    return String::numberToStringFixedPrecision(number).utf8();
 }
 
 TEST(WTF, StringNumberFixedPrecision)
 {
     using Limits = std::numeric_limits<double>;
 
-    EXPECT_STREQ("Infinity", testStringNumberFixedPrecision(Limits::infinity()));
-    EXPECT_STREQ("-Infinity", testStringNumberFixedPrecision(-Limits::infinity()));
+    EXPECT_EQ("Infinity"_s, testStringNumberFixedPrecision(Limits::infinity()));
+    EXPECT_EQ("-Infinity"_s, testStringNumberFixedPrecision(-Limits::infinity()));
 
-    EXPECT_STREQ("NaN", testStringNumberFixedPrecision(-Limits::quiet_NaN()));
+    EXPECT_EQ("NaN"_s, testStringNumberFixedPrecision(-Limits::quiet_NaN()));
 
-    EXPECT_STREQ("0", testStringNumberFixedPrecision(0));
-    EXPECT_STREQ("0", testStringNumberFixedPrecision(-0));
+    EXPECT_EQ("0"_s, testStringNumberFixedPrecision(0));
+    EXPECT_EQ("0"_s, testStringNumberFixedPrecision(-0));
 
-    EXPECT_STREQ("2.22507e-308", testStringNumberFixedPrecision(Limits::min()));
-    EXPECT_STREQ("-1.79769e+308", testStringNumberFixedPrecision(Limits::lowest()));
-    EXPECT_STREQ("1.79769e+308", testStringNumberFixedPrecision(Limits::max()));
+    EXPECT_EQ("2.22507e-308"_s, testStringNumberFixedPrecision(Limits::min()));
+    EXPECT_EQ("-1.79769e+308"_s, testStringNumberFixedPrecision(Limits::lowest()));
+    EXPECT_EQ("1.79769e+308"_s, testStringNumberFixedPrecision(Limits::max()));
 
-    EXPECT_STREQ("3.14159", testStringNumberFixedPrecision(std::numbers::pi));
-    EXPECT_STREQ("3.14159", testStringNumberFixedPrecision(std::numbers::pi_v<float>));
-    EXPECT_STREQ("1.5708", testStringNumberFixedPrecision(piOverTwoDouble));
-    EXPECT_STREQ("1.5708", testStringNumberFixedPrecision(piOverTwoFloat));
-    EXPECT_STREQ("0.785398", testStringNumberFixedPrecision(piOverFourDouble));
-    EXPECT_STREQ("0.785398", testStringNumberFixedPrecision(piOverFourFloat));
+    EXPECT_EQ("3.14159"_s, testStringNumberFixedPrecision(std::numbers::pi));
+    EXPECT_EQ("3.14159"_s, testStringNumberFixedPrecision(std::numbers::pi_v<float>));
+    EXPECT_EQ("1.5708"_s, testStringNumberFixedPrecision(piOverTwoDouble));
+    EXPECT_EQ("1.5708"_s, testStringNumberFixedPrecision(piOverTwoFloat));
+    EXPECT_EQ("0.785398"_s, testStringNumberFixedPrecision(piOverFourDouble));
+    EXPECT_EQ("0.785398"_s, testStringNumberFixedPrecision(piOverFourFloat));
 
-    EXPECT_STREQ("2.71828", testStringNumberFixedPrecision(2.71828182845904523536028747135266249775724709369995));
+    EXPECT_EQ("2.71828"_s, testStringNumberFixedPrecision(2.71828182845904523536028747135266249775724709369995));
 
-    EXPECT_STREQ("2.99792e+8", testStringNumberFixedPrecision(299792458));
+    EXPECT_EQ("2.99792e+8"_s, testStringNumberFixedPrecision(299792458));
 
-    EXPECT_STREQ("1.61803", testStringNumberFixedPrecision(1.6180339887498948482));
+    EXPECT_EQ("1.61803"_s, testStringNumberFixedPrecision(1.6180339887498948482));
 
-    EXPECT_STREQ("1000", testStringNumberFixedPrecision(1e3));
-    EXPECT_STREQ("1e+10", testStringNumberFixedPrecision(1e10));
-    EXPECT_STREQ("1e+20", testStringNumberFixedPrecision(1e20));
-    EXPECT_STREQ("1e+21", testStringNumberFixedPrecision(1e21));
-    EXPECT_STREQ("1e+30", testStringNumberFixedPrecision(1e30));
+    EXPECT_EQ("1000"_s, testStringNumberFixedPrecision(1e3));
+    EXPECT_EQ("1e+10"_s, testStringNumberFixedPrecision(1e10));
+    EXPECT_EQ("1e+20"_s, testStringNumberFixedPrecision(1e20));
+    EXPECT_EQ("1e+21"_s, testStringNumberFixedPrecision(1e21));
+    EXPECT_EQ("1e+30"_s, testStringNumberFixedPrecision(1e30));
 
-    EXPECT_STREQ("1100", testStringNumberFixedPrecision(1.1e3));
-    EXPECT_STREQ("1.1e+10", testStringNumberFixedPrecision(1.1e10));
-    EXPECT_STREQ("1.1e+20", testStringNumberFixedPrecision(1.1e20));
-    EXPECT_STREQ("1.1e+21", testStringNumberFixedPrecision(1.1e21));
-    EXPECT_STREQ("1.1e+30", testStringNumberFixedPrecision(1.1e30));
+    EXPECT_EQ("1100"_s, testStringNumberFixedPrecision(1.1e3));
+    EXPECT_EQ("1.1e+10"_s, testStringNumberFixedPrecision(1.1e10));
+    EXPECT_EQ("1.1e+20"_s, testStringNumberFixedPrecision(1.1e20));
+    EXPECT_EQ("1.1e+21"_s, testStringNumberFixedPrecision(1.1e21));
+    EXPECT_EQ("1.1e+30"_s, testStringNumberFixedPrecision(1.1e30));
 }
 
-static inline const char* testStringNumberFixedWidth(double number)
+static inline UTF8CString testStringNumberFixedWidth(double number)
 {
-    static char testBuffer[100] = { };
-    std::strncpy(testBuffer, String::numberToStringFixedWidth(number, 6).utf8().data(), 99);
-    return testBuffer;
+    return String::numberToStringFixedWidth(number, 6).utf8();
 }
 
 TEST(WTF, StringNumberFixedWidth)
 {
     using Limits = std::numeric_limits<double>;
 
-    EXPECT_STREQ("Infinity", testStringNumberFixedWidth(Limits::infinity()));
-    EXPECT_STREQ("-Infinity", testStringNumberFixedWidth(-Limits::infinity()));
+    EXPECT_EQ("Infinity"_s, testStringNumberFixedWidth(Limits::infinity()));
+    EXPECT_EQ("-Infinity"_s, testStringNumberFixedWidth(-Limits::infinity()));
 
-    EXPECT_STREQ("NaN", testStringNumberFixedWidth(-Limits::quiet_NaN()));
+    EXPECT_EQ("NaN"_s, testStringNumberFixedWidth(-Limits::quiet_NaN()));
 
-    EXPECT_STREQ("0.000000", testStringNumberFixedWidth(0));
-    EXPECT_STREQ("0.000000", testStringNumberFixedWidth(-0));
+    EXPECT_EQ("0.000000"_s, testStringNumberFixedWidth(0));
+    EXPECT_EQ("0.000000"_s, testStringNumberFixedWidth(-0));
 
-    EXPECT_STREQ("0.000000", testStringNumberFixedWidth(Limits::min()));
-    EXPECT_STREQ("", testStringNumberFixedWidth(Limits::lowest()));
-    EXPECT_STREQ("", testStringNumberFixedWidth(Limits::max()));
+    EXPECT_EQ("0.000000"_s, testStringNumberFixedWidth(Limits::min()));
+    EXPECT_EQ(""_s, testStringNumberFixedWidth(Limits::lowest()));
+    EXPECT_EQ(""_s, testStringNumberFixedWidth(Limits::max()));
 
-    EXPECT_STREQ("3.141593", testStringNumberFixedWidth(std::numbers::pi));
-    EXPECT_STREQ("3.141593", testStringNumberFixedWidth(std::numbers::pi_v<float>));
-    EXPECT_STREQ("1.570796", testStringNumberFixedWidth(piOverTwoDouble));
-    EXPECT_STREQ("1.570796", testStringNumberFixedWidth(piOverTwoFloat));
-    EXPECT_STREQ("0.785398", testStringNumberFixedWidth(piOverFourDouble));
-    EXPECT_STREQ("0.785398", testStringNumberFixedWidth(piOverFourFloat));
+    EXPECT_EQ("3.141593"_s, testStringNumberFixedWidth(std::numbers::pi));
+    EXPECT_EQ("3.141593"_s, testStringNumberFixedWidth(std::numbers::pi_v<float>));
+    EXPECT_EQ("1.570796"_s, testStringNumberFixedWidth(piOverTwoDouble));
+    EXPECT_EQ("1.570796"_s, testStringNumberFixedWidth(piOverTwoFloat));
+    EXPECT_EQ("0.785398"_s, testStringNumberFixedWidth(piOverFourDouble));
+    EXPECT_EQ("0.785398"_s, testStringNumberFixedWidth(piOverFourFloat));
 
-    EXPECT_STREQ("2.718282", testStringNumberFixedWidth(2.71828182845904523536028747135266249775724709369995));
+    EXPECT_EQ("2.718282"_s, testStringNumberFixedWidth(2.71828182845904523536028747135266249775724709369995));
 
-    EXPECT_STREQ("299792458.000000", testStringNumberFixedWidth(299792458));
+    EXPECT_EQ("299792458.000000"_s, testStringNumberFixedWidth(299792458));
 
-    EXPECT_STREQ("1.618034", testStringNumberFixedWidth(1.6180339887498948482));
+    EXPECT_EQ("1.618034"_s, testStringNumberFixedWidth(1.6180339887498948482));
 
-    EXPECT_STREQ("1000.000000", testStringNumberFixedWidth(1e3));
-    EXPECT_STREQ("10000000000.000000", testStringNumberFixedWidth(1e10));
-    EXPECT_STREQ("100000000000000000000.000000", testStringNumberFixedWidth(1e20));
-    EXPECT_STREQ("", testStringNumberFixedWidth(1e21));
+    EXPECT_EQ("1000.000000"_s, testStringNumberFixedWidth(1e3));
+    EXPECT_EQ("10000000000.000000"_s, testStringNumberFixedWidth(1e10));
+    EXPECT_EQ("100000000000000000000.000000"_s, testStringNumberFixedWidth(1e20));
+    EXPECT_EQ(""_s, testStringNumberFixedWidth(1e21));
 
-    EXPECT_STREQ("1100.000000", testStringNumberFixedWidth(1.1e3));
-    EXPECT_STREQ("11000000000.000000", testStringNumberFixedWidth(1.1e10));
-    EXPECT_STREQ("110000000000000000000.000000", testStringNumberFixedWidth(1.1e20));
-    EXPECT_STREQ("", testStringNumberFixedWidth(1.1e21));
+    EXPECT_EQ("1100.000000"_s, testStringNumberFixedWidth(1.1e3));
+    EXPECT_EQ("11000000000.000000"_s, testStringNumberFixedWidth(1.1e10));
+    EXPECT_EQ("110000000000000000000.000000"_s, testStringNumberFixedWidth(1.1e20));
+    EXPECT_EQ(""_s, testStringNumberFixedWidth(1.1e21));
 }
 
-static inline const char* testStringNumber(double number)
+static inline UTF8CString testStringNumber(double number)
 {
-    static char testBuffer[100] = { };
-    std::strncpy(testBuffer, String::number(number).utf8().data(), 99);
-    return testBuffer;
+    return String::number(number).utf8();
 }
 
 TEST(WTF, StringNumber)
 {
     using Limits = std::numeric_limits<double>;
 
-    EXPECT_STREQ("Infinity", testStringNumber(Limits::infinity()));
-    EXPECT_STREQ("-Infinity", testStringNumber(-Limits::infinity()));
+    EXPECT_EQ("Infinity"_s, testStringNumber(Limits::infinity()));
+    EXPECT_EQ("-Infinity"_s, testStringNumber(-Limits::infinity()));
 
-    EXPECT_STREQ("NaN", testStringNumber(-Limits::quiet_NaN()));
+    EXPECT_EQ("NaN"_s, testStringNumber(-Limits::quiet_NaN()));
 
-    EXPECT_STREQ("0", testStringNumber(0));
-    EXPECT_STREQ("0", testStringNumber(-0));
+    EXPECT_EQ("0"_s, testStringNumber(0));
+    EXPECT_EQ("0"_s, testStringNumber(-0));
 
-    EXPECT_STREQ("2.2250738585072014e-308", testStringNumber(Limits::min()));
-    EXPECT_STREQ("-1.7976931348623157e+308", testStringNumber(Limits::lowest()));
-    EXPECT_STREQ("1.7976931348623157e+308", testStringNumber(Limits::max()));
+    EXPECT_EQ("2.2250738585072014e-308"_s, testStringNumber(Limits::min()));
+    EXPECT_EQ("-1.7976931348623157e+308"_s, testStringNumber(Limits::lowest()));
+    EXPECT_EQ("1.7976931348623157e+308"_s, testStringNumber(Limits::max()));
 
-    EXPECT_STREQ("3.141592653589793", testStringNumber(std::numbers::pi));
-    EXPECT_STREQ("3.1415927410125732", testStringNumber(std::numbers::pi_v<float>));
-    EXPECT_STREQ("1.5707963267948966", testStringNumber(piOverTwoDouble));
-    EXPECT_STREQ("1.5707963705062866", testStringNumber(piOverTwoFloat));
-    EXPECT_STREQ("0.7853981633974483", testStringNumber(piOverFourDouble));
-    EXPECT_STREQ("0.7853981852531433", testStringNumber(piOverFourFloat));
+    EXPECT_EQ("3.141592653589793"_s, testStringNumber(std::numbers::pi));
+    EXPECT_EQ("3.1415927410125732"_s, testStringNumber(std::numbers::pi_v<float>));
+    EXPECT_EQ("1.5707963267948966"_s, testStringNumber(piOverTwoDouble));
+    EXPECT_EQ("1.5707963705062866"_s, testStringNumber(piOverTwoFloat));
+    EXPECT_EQ("0.7853981633974483"_s, testStringNumber(piOverFourDouble));
+    EXPECT_EQ("0.7853981852531433"_s, testStringNumber(piOverFourFloat));
 
-    EXPECT_STREQ("2.718281828459045", testStringNumber(2.71828182845904523536028747135266249775724709369995));
+    EXPECT_EQ("2.718281828459045"_s, testStringNumber(2.71828182845904523536028747135266249775724709369995));
 
-    EXPECT_STREQ("299792458", testStringNumber(299792458));
+    EXPECT_EQ("299792458"_s, testStringNumber(299792458));
 
-    EXPECT_STREQ("1.618033988749895", testStringNumber(1.6180339887498948482));
+    EXPECT_EQ("1.618033988749895"_s, testStringNumber(1.6180339887498948482));
 
-    EXPECT_STREQ("1000", testStringNumber(1e3));
-    EXPECT_STREQ("10000000000", testStringNumber(1e10));
-    EXPECT_STREQ("100000000000000000000", testStringNumber(1e20));
-    EXPECT_STREQ("1e+21", testStringNumber(1e21));
-    EXPECT_STREQ("1e+30", testStringNumber(1e30));
+    EXPECT_EQ("1000"_s, testStringNumber(1e3));
+    EXPECT_EQ("10000000000"_s, testStringNumber(1e10));
+    EXPECT_EQ("100000000000000000000"_s, testStringNumber(1e20));
+    EXPECT_EQ("1e+21"_s, testStringNumber(1e21));
+    EXPECT_EQ("1e+30"_s, testStringNumber(1e30));
 
-    EXPECT_STREQ("1100", testStringNumber(1.1e3));
-    EXPECT_STREQ("11000000000", testStringNumber(1.1e10));
-    EXPECT_STREQ("110000000000000000000", testStringNumber(1.1e20));
-    EXPECT_STREQ("1.1e+21", testStringNumber(1.1e21));
-    EXPECT_STREQ("1.1e+30", testStringNumber(1.1e30));
+    EXPECT_EQ("1100"_s, testStringNumber(1.1e3));
+    EXPECT_EQ("11000000000"_s, testStringNumber(1.1e10));
+    EXPECT_EQ("110000000000000000000"_s, testStringNumber(1.1e20));
+    EXPECT_EQ("1.1e+21"_s, testStringNumber(1.1e21));
+    EXPECT_EQ("1.1e+30"_s, testStringNumber(1.1e30));
 }
 
 TEST(WTF, StringNumberIntMin)
@@ -242,38 +237,38 @@ TEST(WTF, StringReplaceWithLiteral)
     String testString = "1224"_s;
     EXPECT_TRUE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, '2', ""_s);
-    EXPECT_STREQ("14", testString.utf8().data());
+    EXPECT_EQ("14"_s, testString);
 
     testString = "1224"_s;
     EXPECT_TRUE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, '2', "3"_s);
-    EXPECT_STREQ("1334", testString.utf8().data());
+    EXPECT_EQ("1334"_s, testString);
 
     testString = "1224"_s;
     EXPECT_TRUE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, '2', "555"_s);
-    EXPECT_STREQ("15555554", testString.utf8().data());
+    EXPECT_EQ("15555554"_s, testString);
 
     testString = "1224"_s;
     EXPECT_TRUE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, '3', "NotFound"_s);
-    EXPECT_STREQ("1224", testString.utf8().data());
+    EXPECT_EQ("1224"_s, testString);
 
     // Cases for 16Bit source.
     testString = String::fromUTF8("résumé");
     EXPECT_FALSE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, char16_t(0x00E9 /*U+00E9 is 'é'*/), "e"_s);
-    EXPECT_STREQ("resume", testString.utf8().data());
+    EXPECT_EQ("resume"_s, testString);
 
     testString = String::fromUTF8("résumé");
     EXPECT_FALSE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, char16_t(0x00E9 /*U+00E9 is 'é'*/), ""_s);
-    EXPECT_STREQ("rsum", testString.utf8().data());
+    EXPECT_EQ("rsum"_s, testString);
 
     testString = String::fromUTF8("résumé");
     EXPECT_FALSE(testString.is8Bit());
     testString = makeStringByReplacingAll(testString, '3', "NotFound"_s);
-    EXPECT_STREQ("résumé", testString.utf8().data());
+    EXPECT_EQ(UTF8CString { u8"résumé"_span }, testString.utf8());
 }
 
 TEST(WTF, StringIsolatedCopy)
@@ -488,13 +483,13 @@ TEST(WTF, StringSplitWithConsecutiveSeparators)
     Vector<String> expected { "This"_s, "is"_s, "a"_s, "sentence."_s };
     ASSERT_EQ(expected.size(), actual.size());
     for (auto i = 0u; i < actual.size(); ++i)
-        EXPECT_STREQ(expected[i].utf8().data(), actual[i].utf8().data()) << "Vectors differ at index " << i;
+        EXPECT_EQ(expected[i], actual[i]) << "Vectors differ at index " << i;
 
     actual = string.splitAllowingEmptyEntries(' ');
     expected = { ""_s, "This"_s, ""_s, ""_s, ""_s, ""_s, "is"_s, ""_s, "a"_s, ""_s, ""_s, ""_s, ""_s, ""_s, ""_s, "sentence."_s, ""_s };
     ASSERT_EQ(expected.size(), actual.size());
     for (auto i = 0u; i < actual.size(); ++i)
-        EXPECT_STREQ(expected[i].utf8().data(), actual[i].utf8().data()) << "Vectors differ at index " << i;
+        EXPECT_EQ(expected[i], actual[i]) << "Vectors differ at index " << i;
 }
 
 TEST(WTF, StringMakeStringByJoining)
@@ -510,6 +505,25 @@ TEST(WTF, StringMakeStringByJoining)
     std::vector<String> test3 = { "foo"_s, "bar"_s };
     auto test3_result = makeStringByJoining(test3, ", "_s);
     ASSERT_EQ(test3_result, "foo, bar"_s);
+
+    Vector<String> test4 = { emptyString(), "a"_s };
+    ASSERT_EQ(makeStringByJoining(test4, "\n"_s), "\na"_s);
+
+    Vector<String> test5 = { emptyString(), emptyString(), "a"_s, "b"_s };
+    ASSERT_EQ(makeStringByJoining(test5, "\n"_s), "\n\na\nb"_s);
+
+    Vector<String> test6 = { emptyString(), emptyString() };
+    ASSERT_EQ(makeStringByJoining(test6, "\n"_s), "\n"_s);
+
+    Vector<String> test7 = { String { }, "a"_s };
+    ASSERT_EQ(makeStringByJoining(test7, "\n"_s), "\na"_s);
+
+    Vector<String> test8 = { "a"_s, emptyString(), "b"_s };
+    ASSERT_EQ(makeStringByJoining(test8, "\n"_s), "a\n\nb"_s);
+
+    auto test9_result = makeStringByJoining(Vector<String> { }, ", "_s);
+    ASSERT_TRUE(test9_result.isEmpty());
+    ASSERT_FALSE(test9_result.isNull());
 }
 
 TEST(WTF, StringUTF8ConversionInvalidUTF16LenientMode)
@@ -523,14 +537,14 @@ TEST(WTF, StringUTF8ConversionInvalidUTF16LenientMode)
 
     auto result = stringWithOrphanHigh.utf8(LenientConversion);
     // U+FFFD in UTF-8 is 0xEF 0xBF 0xBD
-    EXPECT_STREQ("abc\xEF\xBF\xBD" "def", result.data());
+    EXPECT_EQ(UTF8CString { u8"abc\xEF\xBF\xBD" "def"_span }, result);
 
     // Create a string with an orphan low surrogate (0xDC00)
     char16_t orphanLowSurrogate[] = { 'x', 0xDC00, 'y', 0 };
     String stringWithOrphanLow = String(std::span { orphanLowSurrogate, 3 });
 
     auto resultLow = stringWithOrphanLow.utf8(LenientConversion);
-    EXPECT_STREQ("x\xEF\xBF\xBDy", resultLow.data());
+    EXPECT_EQ(UTF8CString { u8"x\xEF\xBF\xBDy"_span }, resultLow);
 
     // Create a string with two consecutive orphan surrogates
     char16_t doubleOrphan[] = { 0xD800, 0xD800, 0 };
@@ -538,7 +552,7 @@ TEST(WTF, StringUTF8ConversionInvalidUTF16LenientMode)
 
     auto resultDouble = stringWithDoubleOrphan.utf8(LenientConversion);
     // Each orphan should become one replacement character
-    EXPECT_STREQ("\xEF\xBF\xBD\xEF\xBF\xBD", resultDouble.data());
+    EXPECT_EQ(UTF8CString { u8"\xEF\xBF\xBD\xEF\xBF\xBD"_span }, resultDouble);
 
     // Create a string with reversed surrogate pair (low then high)
     char16_t reversedPair[] = { 0xDC00, 0xD800, 0 };
@@ -546,7 +560,7 @@ TEST(WTF, StringUTF8ConversionInvalidUTF16LenientMode)
 
     auto resultReversed = stringWithReversed.utf8(LenientConversion);
     // Both are invalid, should become two replacement characters
-    EXPECT_STREQ("\xEF\xBF\xBD\xEF\xBF\xBD", resultReversed.data());
+    EXPECT_EQ(UTF8CString { u8"\xEF\xBF\xBD\xEF\xBF\xBD"_span }, resultReversed);
 }
 
 TEST(WTF, StringUTF8ConversionStrictReplacingMode)
@@ -559,7 +573,53 @@ TEST(WTF, StringUTF8ConversionStrictReplacingMode)
     String stringWithOrphan = String(std::span { orphanHighSurrogate, 4 });
 
     auto result = stringWithOrphan.utf8(StrictConversionReplacingUnpairedSurrogatesWithFFFD);
-    EXPECT_STREQ("ab\xEF\xBF\xBD" "c", result.data());
+    EXPECT_EQ(UTF8CString { u8"ab\xEF\xBF\xBD" "c"_span }, result);
+}
+
+TEST(WTF, StringSimplifyWhiteSpace)
+{
+    auto simplify = [](const String& string) {
+        return string.simplifyWhiteSpace(isASCIIWhitespace);
+    };
+
+    // Null and empty are returned unchanged.
+    EXPECT_TRUE(simplify(String()).isNull());
+    EXPECT_EQ(emptyString(), simplify(emptyString()));
+
+    // Already-simplified strings come back equal (fast path).
+    EXPECT_EQ("word"_s, simplify("word"_s));
+    EXPECT_EQ("two words"_s, simplify("two words"_s));
+    EXPECT_EQ("a b c d e"_s, simplify("a b c d e"_s));
+
+    // Leading and trailing whitespace is stripped.
+    EXPECT_EQ("word"_s, simplify(" word"_s));
+    EXPECT_EQ("word"_s, simplify("word "_s));
+    EXPECT_EQ("word"_s, simplify("   word   "_s));
+    EXPECT_EQ("two words"_s, simplify("  two words  "_s));
+
+    // Interior runs collapse to a single space.
+    EXPECT_EQ("two words"_s, simplify("two  words"_s));
+    EXPECT_EQ("a b c"_s, simplify("a    b     c"_s));
+
+    // Non-space whitespace is converted to a single space.
+    EXPECT_EQ("a b"_s, simplify("a\tb"_s));
+    EXPECT_EQ("a b"_s, simplify("a\nb"_s));
+    EXPECT_EQ("a b"_s, simplify("a\r\n\t b"_s));
+    EXPECT_EQ("a b"_s, simplify("\t a \f b \n"_s));
+
+    // All-whitespace and single whitespace collapse to empty.
+    EXPECT_EQ(emptyString(), simplify(" "_s));
+    EXPECT_EQ(emptyString(), simplify(" \t\n\r "_s));
+
+    // Vertical tab is not ASCII whitespace, so it is preserved unchanged.
+    EXPECT_EQ("a\vb"_s, simplify("a\vb"_s));
+
+    // 16-bit strings take the same path.
+    char16_t wide[] = { ' ', ' ', 0x4E2D, '\t', 0x6587, ' ', ' ', 0 };
+    char16_t expected[] = { 0x4E2D, ' ', 0x6587, 0 };
+    String wideString { std::span { wide, 7 } };
+    EXPECT_FALSE(wideString.is8Bit());
+    EXPECT_EQ(String(std::span { expected, 3 }), simplify(wideString));
 }
 
 } // namespace TestWebKitAPI

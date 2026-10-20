@@ -194,10 +194,9 @@ static inline String gap(JSGlobalObject* globalObject, JSValue space)
     // If the space value is a number, create a gap string with that number of spaces.
     if (space.isNumber()) {
         unsigned count = clampTo<unsigned>(space.asNumber(), 0, maxGapLength);
-        char spaces[maxGapLength];
-        for (unsigned i = 0; i < count; ++i)
-            spaces[i] = ' ';
-        return String(std::span { spaces }.first(count));
+        constexpr auto spaces = "          "_s;
+        static_assert(spaces.length() == maxGapLength);
+        return String(spaces.span8().first(count));
     }
 
     // If the space value is a string, use it as the gap string, otherwise use no gap string.
@@ -2119,7 +2118,8 @@ NEVER_INLINE JSValue Walker::walk(JSValue unfiltered)
                 else {
                     unsigned attributes;
                     PropertyOffset offset = object->getDirectOffset(vm, prop, attributes);
-                    if (offset != invalidOffset && attributes == static_cast<unsigned>(PropertyAttribute::None)) [[likely]] {
+                    // The reviver was handed this holder and may have made its properties immutable: only the checked path may write then.
+                    if (offset != invalidOffset && attributes == static_cast<unsigned>(PropertyAttribute::None) && !object->structure()->hasImmutableProperties()) [[likely]] {
                         object->putDirectOffset(vm, offset, filteredValue);
                         object->structure()->didReplaceProperty(offset);
                     } else {

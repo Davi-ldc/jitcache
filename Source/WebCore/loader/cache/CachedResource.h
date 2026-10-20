@@ -357,7 +357,7 @@ protected:
 
     // FIXME: Make the rest of these data members private and use functions in derived classes instead.
     SingleThreadWeakHashCountedSet<CachedResourceClient> m_clients;
-    std::unique_ptr<ResourceRequest> m_originalRequest; // Needed by Ping loads.
+    std::unique_ptr<ResourceRequest> m_originalRequest; // Used by SubresourceLoader::originalHeaders() for CORS checks.
     RefPtr<SubresourceLoader> m_loader;
     RefPtr<FragmentedSharedBuffer> m_data;
 
@@ -382,7 +382,7 @@ private:
 
     MonotonicTime m_lastDecodedAccessTime; // Used as a "thrash guard" in the cache
     PAL::SessionID m_sessionID;
-    RefPtr<const CookieJar> m_cookieJar;
+    const RefPtr<const CookieJar> m_cookieJar;
     WallTime m_responseTimestamp { WallTime::now() };
     Markable<ResourceLoaderIdentifier> m_identifierForLoadWithoutResourceLoader;
 
@@ -405,7 +405,7 @@ private:
 
     String m_fragmentIdentifierForRequest;
 
-    RefPtr<SecurityOrigin> m_origin;
+    const RefPtr<SecurityOrigin> m_origin;
     AtomString m_initiatorType;
 
     RedirectChainCacheStatus m_redirectChainCacheStatus;

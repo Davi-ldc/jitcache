@@ -31,9 +31,11 @@
 #include "APIPageHandle.h"
 #include "APIUIClient.h"
 #include "AuthenticatorManager.h"
+#include "AuxiliaryProcessMessages.h"
 #include "DownloadProxyMap.h"
 #include "DrawingAreaProxy.h"
 #include "GPUProcessConnectionParameters.h"
+#include "GPUProcessProxy.h"
 #include "GoToBackForwardItemParameters.h"
 #include "JavaScriptEvaluationResult.h"
 #include "LoadParameters.h"
@@ -89,6 +91,7 @@
 #include "WebUserContentControllerProxy.h"
 #include "WebsiteData.h"
 #include "WebsiteDataFetchOption.h"
+#include <WebCore/AXObjectTypes.h>
 #include <WebCore/AudioSession.h>
 #include <WebCore/CryptoKey.h>
 #include <WebCore/DiagnosticLoggingClient.h>
@@ -136,6 +139,15 @@
 
 #if ENABLE(GPU_PROCESS)
 #include "APIPageConfiguration.h"
+#endif
+
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+#include "GPUProcessMessages.h"
+#include "GPUProcessProxy.h"
+#if PLATFORM(COCOA)
+#include "RemoteLayerBackingStore.h"
+#include "RemoteLayerTreeDrawingAreaProxy.h"
+#endif
 #endif
 
 #if ENABLE(MEDIA_STREAM)
@@ -257,6 +269,15 @@ WebProcessProxy::WebProcessProxyMap& WebProcessProxy::allProcessMap()
     return map;
 }
 
+// The accessibility mode every web content process should be in. When one web content process changes mode,
+// it reports to us (the UI process). Then, if needed, the mode is updated and broadcast to other web content processes.
+static WebCore::AccessibilityMode& webContentAccessibilityModeStorage()
+{
+    ASSERT(isMainRunLoop());
+    static WebCore::AccessibilityMode mode { };
+    return mode;
+}
+
 Vector<Ref<WebProcessProxy>> WebProcessProxy::allProcesses()
 {
     return WTF::map(allProcessMap(), [] (auto& keyValue) -> Ref<WebProcessProxy> {
@@ -338,6 +359,56 @@ unsigned WebProcessProxy::remotePageCount() const
     return m_remotePages.computeSize();
 }
 
+void WebProcessProxy::accessibilityModeDidChange(WebCore::AccessibilityMode mode)
+{
+    // A web process reporting the mode it just transitioned to. It must not be echoed back. That process
+    // already has the mode, and the echo would arrive asynchronously, potentially after the process
+    // deliberately turned accessibility back off (which Internals::resetToConsistentState does between
+    // layout tests).
+    setAccessibilityModeForWebContent(mode, /* processToSkip */ this);
+}
+
+WebCore::AccessibilityMode WebProcessProxy::accessibilityModeForWebContent()
+{
+    ASSERT(isMainRunLoop());
+    return webContentAccessibilityModeStorage();
+}
+
+void WebProcessProxy::setAccessibilityModeForWebContent(WebCore::AccessibilityMode mode, const WebProcessProxy* processToSkip)
+{
+    ASSERT(isMainRunLoop());
+
+    // This only allows the mode to increase. resetAccessibilityModeForTesting is the only way it decreases, and it does
+    // so through direct assignment rather than through here.
+    if (WebCore::accessibilityModeRank(mode) <= WebCore::accessibilityModeRank(webContentAccessibilityModeStorage()))
+        return;
+
+    webContentAccessibilityModeStorage() = mode;
+
+    // All web content processes should now be notified of the mode change.
+    for (Ref process : allProcesses()) {
+        if (process.ptr() == processToSkip)
+            continue;
+        process->send(Messages::WebProcess::SetAccessibilityMode(mode), 0);
+    }
+
+#if ENABLE(ACCESSIBILITY_LOCAL_FRAME)
+    // Frame geometry is per-page and is only computed while accessibility is on, so every page needs a
+    // fresh one now that it is.
+    for (Ref page : globalPages())
+        page->scheduleAccessibilityFrameGeometryUpdate();
+#endif
+}
+
+void WebProcessProxy::resetAccessibilityModeForTesting()
+{
+    ASSERT(isMainRunLoop());
+    // Assigned directly rather than going through setAccessibilityModeForWebContent, which only ever
+    // raises the mode. Tests share one UI process, so a test that turns accessibility on has to be able
+    // to put this back or it would change the behavior of every test that follows it.
+    webContentAccessibilityModeStorage() = WebCore::AccessibilityMode::Off;
+}
+
 void WebProcessProxy::forWebPagesWithOrigin(PAL::SessionID sessionID, const SecurityOriginData& origin, NOESCAPE const Function<void(WebPageProxy&)>& callback)
 {
     for (Ref page : globalPages()) {
@@ -358,7 +429,7 @@ Ref<WebProcessProxy> WebProcessProxy::create(WebProcessPool& processPool, Websit
 {
     Ref proxy = adoptRef(*new WebProcessProxy(processPool, websiteDataStore, isPrewarmed, crossOriginMode, lockdownMode, enhancedSecurity));
 #if PLATFORM(MAC) && USE(RUNNINGBOARD)
-    // FIXME: disable jetsam boost on prewarmed processes always, not just when SI is enabled.
+    // FIXME(rdar://188839922): disable jetsam boost on prewarmed processes always, not just when SI is enabled.
     if (isPrewarmed == IsPrewarmed::Yes && WebProcessPool::hasAnyProcessPoolUsedSiteIsolation())
         proxy->setJetsamBoostEnabled(false);
 #endif
@@ -478,6 +549,10 @@ WebProcessProxy::~WebProcessProxy()
 {
     RELEASE_ASSERT(isMainThreadOrCheckDisabled());
     WEBPROCESSPROXY_RELEASE_LOG(Process, "destructor:");
+
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+    removeOffscreenCanvasPlaceholdersForProcess(coreProcessIdentifier());
+#endif
 
     // ~AuxiliaryProcessProxy() replies to pending messages after our members are gone; a reply
     // handler that upgrades its still-live WeakPtr<WebProcessProxy> would then touch freed members
@@ -875,10 +950,14 @@ void WebProcessProxy::shutDown()
 
     m_isShuttingDown = true;
 
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+    removeOffscreenCanvasPlaceholdersForProcess(coreProcessIdentifier());
+#endif
+
     didStopRunningProcess();
 
     if (m_isInProcessCache) {
-        processPool().webProcessCache().removeProcess(*this, WebProcessCache::ShouldShutDownProcess::No);
+        protect(processPool().webProcessCache())->removeProcess(*this, WebProcessCache::ShouldShutDownProcess::No);
         ASSERT(!m_isInProcessCache);
     }
 
@@ -905,6 +984,12 @@ void WebProcessProxy::shutDown()
 
     for (Ref page : mainPages())
         page->disconnectFramesFromPage();
+
+#if ENABLE(GPU_PROCESS)
+    // Any frame this process was asked to record into a snapshot will not be recorded now.
+    if (RefPtr gpuProcess = GPUProcessProxy::singletonIfCreated())
+        gpuProcess->abandonSnapshotFramesOwnedBy(coreProcessIdentifier());
+#endif
 
     m_userInitiatedActionMap.clear();
 
@@ -1147,6 +1232,44 @@ bool WebProcessProxy::hasCommittedClientOrigin(const WebCore::ClientOrigin& clie
     return m_remoteWorkerSites.contains(Site { clientOrigin.topOrigin });
 }
 
+// Terminates only on positive evidence that no page this process participates in can speak for the
+// site: an inconclusive answer from any of them, or no page to ask, has to be tolerated.
+WebProcessProxy::FirstPartyAccessResult WebProcessProxy::participatesInPageWithFirstPartySite(const WebCore::Site& site) const
+{
+    bool askedAnyPage = false;
+    bool anyAnswerInconclusive = false;
+    auto mainFrameProcessAllowsSite = [&](WebPageProxy& page) {
+        RefPtr mainFrame = page.mainFrame();
+        if (!mainFrame)
+            return false;
+        askedAnyPage = true;
+        switch (protect(mainFrame->process())->allowsFirstPartyAccess(site.domain())) {
+        case FirstPartyAccessResult::Pass:
+            return true;
+        case FirstPartyAccessResult::SilentFailure:
+            anyAnswerInconclusive = true;
+            return false;
+        case FirstPartyAccessResult::HardFailure:
+            return false;
+        }
+        RELEASE_ASSERT_NOT_REACHED();
+    };
+
+    for (Ref page : pages()) {
+        if (mainFrameProcessAllowsSite(page))
+            return FirstPartyAccessResult::Pass;
+    }
+
+    for (Ref remotePage : m_remotePages) {
+        if (RefPtr page = remotePage->page(); page && mainFrameProcessAllowsSite(*page))
+            return FirstPartyAccessResult::Pass;
+    }
+
+    if (anyAnswerInconclusive || !askedAnyPage)
+        return FirstPartyAccessResult::SilentFailure;
+    return FirstPartyAccessResult::HardFailure;
+}
+
 void WebProcessProxy::didCommitLoadClientOrigin(WebCore::ClientOrigin&& clientOrigin)
 {
     m_committedClientOrigins.add(WTF::move(clientOrigin));
@@ -1160,13 +1283,13 @@ void WebProcessProxy::didBecomeRemoteWorkerHostForSite(const WebCore::Site& site
 void WebProcessProxy::addVisitedLinkStoreUser(VisitedLinkStore& visitedLinkStore, WebPageProxyIdentifier pageID)
 {
     auto& users = m_visitedLinkStoresWithUsers.ensure(visitedLinkStore, [] {
-        return HashSet<WebPageProxyIdentifier> { };
+        return HashCountedSet<WebPageProxyIdentifier> { };
     }).iterator->value;
 
-    ASSERT(!users.contains(pageID));
+    bool hadUsers = !users.isEmpty();
     users.add(pageID);
 
-    if (users.size() == 1)
+    if (!hadUsers)
         visitedLinkStore.addProcess(*this);
 }
 
@@ -1203,7 +1326,7 @@ void WebProcessProxy::assumeReadAccessToBaseURL(WebPageProxy& page, const String
     // Get url's base URL to add to m_localPathsWithAssumedReadAccess.
     auto baseURL = url.truncatedForUseAsBase();
     auto path = baseURL.fileSystemPath();
-    WEBPROCESSPROXY_RELEASE_LOG(Sandbox, "assumeReadAccessToBaseURL(%u): path = %" PRIVATE_LOG_STRING, baseURL.isValid() ? WTF::URLHash::hash(baseURL) : 0, path.utf8().data());
+    WEBPROCESSPROXY_RELEASE_LOG(Sandbox, "assumeReadAccessToBaseURL(%u): path = %" PRIVATE_LOG_STRING, baseURL.isValid() ? WTF::URLHash::hash(baseURL) : 0, path.utf8());
     if (path.isNull())
         return completionHandler();
 
@@ -1211,13 +1334,14 @@ void WebProcessProxy::assumeReadAccessToBaseURL(WebPageProxy& page, const String
     if (!dataStore)
         return completionHandler();
     auto afterAllowAccess = [weakThis = WeakPtr { *this }, weakPage = WeakPtr { page }, path, completionHandler = WTF::move(completionHandler)] mutable {
-        if (!weakThis || !weakPage)
+        RefPtr page = weakPage;
+        if (!weakThis || !page)
             return completionHandler();
 
         // Client loads an alternate string. This doesn't grant universal file read, but the web process is assumed
         // to have read access to this directory already.
         weakThis->m_localPathsWithAssumedReadAccess.add(path);
-        weakPage->addPreviouslyVisitedPath(path);
+        page->addPreviouslyVisitedPath(path);
         completionHandler();
     };
 
@@ -1266,14 +1390,15 @@ void WebProcessProxy::assumeReadAccessToBaseURLs(WebPageProxy& page, const Vecto
 
     auto messagePaths = paths;
     protect(dataStore->networkProcess())->sendWithAsyncReply(Messages::NetworkProcess::AllowFilesAccessFromWebProcess(coreProcessIdentifier(), WTF::move(messagePaths)), [weakThis = WeakPtr { *this }, weakPage = WeakPtr { page }, paths = WTF::move(paths), completionHandler = WTF::move(completionHandler)] mutable {
-        if (!weakThis || !weakPage)
+        RefPtr page = weakPage;
+        if (!weakThis || !page)
             return completionHandler();
 
         // Client loads an alternate string. This doesn't grant universal file read, but the web process is assumed
         // to have read access to this directory already.
         for (auto& path : paths) {
             weakThis->m_localPathsWithAssumedReadAccess.add(path);
-            weakPage->addPreviouslyVisitedPath(path);
+            page->addPreviouslyVisitedPath(path);
         }
         completionHandler();
     });
@@ -1409,6 +1534,49 @@ void WebProcessProxy::gpuProcessConnectionDidBecomeUnresponsive(GPUProcessConnec
         process->childConnectionDidBecomeUnresponsive();
 }
 
+// A frame hosted in another process was painted into a snapshot here. Received by the process rather
+// than a page, because the frame may be going away along with the last of this process's frames in
+// the page, and a request that reached nothing would leave the snapshot waiting for it.
+void WebProcessProxy::drawFrameToSnapshot(WebCore::FrameIdentifier frameID, const WebCore::IntRect& rect, RemoteSnapshotIdentifier snapshotIdentifier, WebCore::RenderingMode renderingMode)
+{
+    MESSAGE_CHECK(renderingMode == WebCore::RenderingMode::DisplayList || renderingMode == WebCore::RenderingMode::PDFDocument);
+
+    // Nothing can be waiting for a snapshot the GPU process does not have.
+    RefPtr gpuProcess = GPUProcessProxy::singletonIfCreated();
+    if (!gpuProcess)
+        return;
+
+    // Gone since it was painted, so it draws nothing.
+    RefPtr frame = WebFrameProxy::webFrame(frameID);
+    RefPtr parentFrame = frame ? frame->parentFrame() : nullptr;
+    if (!parentFrame) {
+        gpuProcess->abandonSnapshotFrame(snapshotIdentifier, frameID);
+        return;
+    }
+
+    // Only the process that painted the frame's parent can have painted the frame. The parent may also
+    // have moved to another process since it was painted, so the frame draws nothing either way.
+    if (&parentFrame->process() != this) {
+        WEBPROCESSPROXY_RELEASE_LOG_ERROR(Process, "drawFrameToSnapshot: asked for a frame whose parent is hosted elsewhere");
+        gpuProcess->abandonSnapshotFrame(snapshotIdentifier, frameID);
+        return;
+    }
+
+    Ref frameProcess = frame->process();
+    if (!frameProcess->canSendMessage()) {
+        gpuProcess->abandonSnapshotFrame(snapshotIdentifier, frameID);
+        return;
+    }
+
+    // Told before the frame's process is asked, so that the frame is abandoned if that process goes
+    // away first: either by the GPU process, if it had connected there, or by shutDown(), on this same
+    // connection so that it cannot overtake this.
+    gpuProcess->snapshotFrameWillBeDrawnByProcess(snapshotIdentifier, frameID, frameProcess->coreProcessIdentifier());
+    // Also while the frame's process is waiting on this one, as it does for alert(), since this
+    // process may itself be blocked waiting for the snapshot.
+    frameProcess->send(Messages::WebProcess::DrawFrameToSnapshot(frameID, rect, snapshotIdentifier, renderingMode), 0, IPC::SendOption::DispatchMessageEvenWhenWaitingForUnboundedSyncReply);
+}
+
 void WebProcessProxy::gpuProcessDidFinishLaunching()
 {
     for (Ref page : pages())
@@ -1507,16 +1675,17 @@ bool WebProcessProxy::handleRemoteObjectRegistryMessage(IPC::Connection& connect
         return false;
 
     WebPageProxyIdentifier pageID(decoder.destinationID());
-    if (!isAssociatedWithPage(pageID))
-        return false;
 
     RefPtr page = WebPageProxy::fromIdentifier(pageID);
     if (!page)
+        return true;
+
+    if (!isAssociatedWithPage(pageID))
         return false;
 
     RefPtr registry = page->uiRemoteObjectRegistry();
     if (!registry)
-        return false;
+        return true;
 
     registry->didReceiveMessage(connection, decoder);
     return true;
@@ -2602,23 +2771,31 @@ void WebProcessProxy::didStartProvisionalLoadForMainFrame(const URL& url)
     updateSiteForMainFrameNavigation(url);
 }
 
-void WebProcessProxy::didCommitMainFrameLoadWithoutSiteIsolation(const URL& url)
+void WebProcessProxy::didCommitMainFrameLoad(const URL& url)
 {
     RELEASE_ASSERT(!isInProcessCache());
 
-    // We need to update site state both in didStartProvisionalLoad and didCommitMainFrameLoad when
-    // Site Isolation is disabled. For instance:
-    //
-    // - Process A starts a provisional load
-    // - Response forces a BCG switch (e.g. due to COOP response header)
-    // - Process B commits the load after the BCG switch
-    //
-    // Now both process A and B have to update the sites associated with their WebProcessProxy. This
-    // code takes care of updating the state for process B.
-    //
-    // This is not necessary when site isolation is enabled, since that goes down a different site
-    // update path even in the case of a BCG switch (didStartUsingProcessForSiteIsolation).
-    updateSiteForMainFrameNavigation(url);
+    if (!m_sharedPreferencesForWebProcess.siteIsolationEnabled) {
+        // We need to update site state both in didStartProvisionalLoad and didCommitMainFrameLoad when
+        // Site Isolation is disabled. For instance:
+        //
+        // - Process A starts a provisional load
+        // - Response forces a BCG switch (e.g. due to COOP response header)
+        // - Process B commits the load after the BCG switch
+        //
+        // Now both process A and B have to update the sites associated with their WebProcessProxy. This
+        // code takes care of updating the state for process B.
+        //
+        // This is not necessary when site isolation is enabled, since that goes down a different site
+        // update path even in the case of a BCG switch (didStartUsingProcessForSiteIsolation).
+        updateSiteForMainFrameNavigation(url);
+    }
+
+    if (m_coopCacheOrigin && !url.protocolIsAbout() && SecurityOriginData::fromURL(url) != *m_coopCacheOrigin) {
+        WEBPROCESSPROXY_RELEASE_LOG(ProcessSwapping, "didCommitMainFrameLoad: Main frame committed a different origin, process is no longer eligible for the WebProcess cache");
+        m_coopCacheOrigin = std::nullopt;
+        setIneligbleForWebProcessCache();
+    }
 }
 
 void WebProcessProxy::updateSiteForMainFrameNavigation(const URL& url)
@@ -2916,7 +3093,8 @@ void WebProcessProxy::createSpeechRecognitionServer(SpeechRecognitionServerIdent
     m_speechRecognitionServerMap.ensure(identifier, [&]() {
 #if ENABLE(MEDIA_STREAM)
         auto createRealtimeMediaSource = [weakPage = WeakPtr { targetPage }](WebCore::SpeechRecognitionConnectionClientIdentifier clientIdentifier) {
-            return weakPage ? weakPage->createRealtimeMediaSourceForSpeechRecognition(clientIdentifier) : CaptureSourceOrError { { "Page is invalid"_s, WebCore::MediaAccessDenialReason::InvalidAccess } };
+            RefPtr page = weakPage;
+            return page ? page->createRealtimeMediaSourceForSpeechRecognition(clientIdentifier) : CaptureSourceOrError { { "Page is invalid"_s, WebCore::MediaAccessDenialReason::InvalidAccess } };
         };
         Ref speechRecognitionServer = SpeechRecognitionServer::create(*this, identifier, WTF::move(permissionChecker), WTF::move(checkIfMockCaptureDevicesEnabled), WTF::move(createRealtimeMediaSource));
 #else
@@ -3185,6 +3363,14 @@ void WebProcessProxy::enableRemoteWorkers(RemoteWorkerType workerType, const Web
     updateRemoteWorkerProcessAssertion(workerType);
 }
 
+std::optional<WebPageProxyIdentifier> WebProcessProxy::remoteWorkerPageProxyID(RemoteWorkerType workerType) const
+{
+    auto& workerInformation = workerType == RemoteWorkerType::SharedWorker ? m_sharedWorkerInformation : m_serviceWorkerInformation;
+    if (!workerInformation)
+        return std::nullopt;
+    return workerInformation->remoteWorkerPageProxyID;
+}
+
 #if !USE(GLIB)
 void WebProcessProxy::systemBeep()
 {
@@ -3336,7 +3522,7 @@ Logger& WebProcessProxy::logger()
 {
     if (!m_logger) {
         Ref logger = Logger::create(this);
-        m_logger = logger.copyRef();
+        lazyInitialize(m_logger, logger.copyRef());
         logger->setEnabled(this, isAlwaysOnLoggingAllowed());
     }
     return *m_logger;
@@ -3547,13 +3733,13 @@ void WebProcessProxy::setResourceMonitorRuleLists(RefPtr<WebCompiledContentRuleL
 std::optional<SandboxExtension::Handle> WebProcessProxy::sandboxExtensionForFile(const String& fileName) const
 {
     auto handle = m_fileSandboxExtensions.getOptional(fileName);
-    WEBPROCESSPROXY_RELEASE_LOG(Sandbox, "sandboxExtensionForFile: %" PRIVATE_LOG_STRING ", has cached extension: %d", fileName.utf8().data(), !!handle);
+    WEBPROCESSPROXY_RELEASE_LOG(Sandbox, "sandboxExtensionForFile: %" PRIVATE_LOG_STRING ", has cached extension: %d", fileName.utf8(), !!handle);
     return handle;
 }
 
 void WebProcessProxy::addSandboxExtensionForFile(const String& fileName, SandboxExtension::Handle handle)
 {
-    WEBPROCESSPROXY_RELEASE_LOG(Sandbox, "addSandboxExtensionForFile: %" PRIVATE_LOG_STRING, fileName.utf8().data());
+    WEBPROCESSPROXY_RELEASE_LOG(Sandbox, "addSandboxExtensionForFile: %" PRIVATE_LOG_STRING, fileName.utf8());
     m_fileSandboxExtensions.add(fileName, handle);
 }
 
@@ -3680,9 +3866,247 @@ void WebProcessProxy::updateWasmDebuggerTarget()
 #if ENABLE(IPC_TESTING_API)
 void WebProcessProxy::takeInvalidMessageStringForTesting(CompletionHandler<void(String&&)>&& callback)
 {
-    ASCIILiteral error = protect(connection())->takeErrorString();
-    String errorString = !error.isNull() ? String::fromUTF8(error) : emptyString();
-    callback(WTF::move(errorString));
+    String error = protect(connection())->takeErrorString();
+    if (error.isNull())
+        error = emptyString();
+    callback(WTF::move(error));
+}
+#endif
+
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+struct OffscreenCanvasPlaceholderFrame {
+    WebCore::ImageBufferTransferHandle transferHandle;
+    WebCore::PlaceholderFrameIdentifier frame;
+    bool originClean { false };
+    bool opaque { false };
+};
+
+struct OffscreenCanvasPlaceholder {
+    WTF_MAKE_STRUCT_TZONE_ALLOCATED(OffscreenCanvasPlaceholder);
+
+    Markable<WebCore::ProcessIdentifier> owner; // Always set.
+    WebCore::PlaceholderFrameIdentifier lastFrame;
+    bool frameInFlightToOwner { false };
+    std::optional<OffscreenCanvasPlaceholderFrame> pendingFrame { };
+    // The layer displaying the placeholder, so that a committed frame can be applied to it directly.
+    Markable<WebCore::PlatformLayerIdentifier> layerID { };
+    Markable<WebPageProxyIdentifier> pageID { };
+};
+
+WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(OffscreenCanvasPlaceholder);
+
+static void releaseTransferredImageBuffers(Vector<WebCore::ImageBufferTransferIdentifier>&& identifiers)
+{
+    if (identifiers.isEmpty())
+        return;
+    if (RefPtr gpuProcess = GPUProcessProxy::singletonIfCreated())
+        gpuProcess->send(Messages::GPUProcess::ReleaseTransferredImageBuffers(WTF::move(identifiers)), 0);
+}
+
+// The placeholder's process was never told about a pending frame, so it cannot be claiming it.
+static void releasePendingFrames(const Vector<UniqueRef<OffscreenCanvasPlaceholder>>& placeholders)
+{
+    releaseTransferredImageBuffers(WTF::compactMap(placeholders, [](auto& placeholder) -> std::optional<WebCore::ImageBufferTransferIdentifier> {
+        if (!placeholder->pendingFrame)
+            return std::nullopt;
+        return placeholder->pendingFrame->transferHandle.identifier;
+    }));
+}
+
+// Where to deliver frames committed to each placeholder. Process wide because frames can come from
+// any process the canvas was transferred to.
+static HashMap<WebCore::PlaceholderRenderingContextIdentifier, UniqueRef<OffscreenCanvasPlaceholder>>& offscreenCanvasPlaceholders()
+{
+    ASSERT(isMainThreadOrCheckDisabled());
+    static NeverDestroyed<HashMap<WebCore::PlaceholderRenderingContextIdentifier, UniqueRef<OffscreenCanvasPlaceholder>>> placeholders;
+    return placeholders;
+}
+
+static RefPtr<WebProcessProxy> liveProcessForIdentifier(WebCore::ProcessIdentifier identifier)
+{
+    RefPtr process = WebProcessProxy::processForIdentifier(identifier);
+    if (!process || process->state() == AuxiliaryProcessProxy::State::Terminated)
+        return nullptr;
+    return process;
+}
+
+void WebProcessProxy::offscreenCanvasPlaceholderCreated(WebCore::PlaceholderRenderingContextIdentifier identifier)
+{
+    auto result = offscreenCanvasPlaceholders().add(identifier, makeUniqueRef<OffscreenCanvasPlaceholder>(OffscreenCanvasPlaceholder { coreProcessIdentifier(), { } }));
+    // A fresh UUID never collides, so this process is trying to take over another's placeholder.
+    MESSAGE_CHECK(result.isNewEntry);
+}
+
+void WebProcessProxy::offscreenCanvasPlaceholderDestroyed(WebCore::PlaceholderRenderingContextIdentifier identifier)
+{
+    auto& placeholders = offscreenCanvasPlaceholders();
+    auto placeholder = placeholders.find(identifier);
+    if (placeholder == placeholders.end())
+        return;
+    MESSAGE_CHECK(placeholder->value->owner == coreProcessIdentifier());
+    if (auto& pendingFrame = placeholder->value->pendingFrame)
+        releaseTransferredImageBuffers({ pendingFrame->transferHandle.identifier });
+    placeholders.remove(placeholder);
+}
+
+void WebProcessProxy::setOffscreenCanvasPlaceholderLayer(WebCore::PlaceholderRenderingContextIdentifier identifier, WebPageProxyIdentifier pageID, std::optional<WebCore::PlatformLayerIdentifier> layerID)
+{
+    auto& placeholders = offscreenCanvasPlaceholders();
+    auto placeholder = placeholders.find(identifier);
+    if (placeholder == placeholders.end())
+        return;
+    MESSAGE_CHECK(placeholder->value->owner == coreProcessIdentifier());
+    placeholder->value->layerID = layerID;
+    placeholder->value->pageID = layerID ? std::optional { pageID } : std::nullopt;
+}
+
+#if PLATFORM(COCOA)
+// Optional: when there is no layer to target, the rendering update that the placeholder's process
+// schedules delivers the frame instead.
+static void applyFrameToOffscreenCanvasPlaceholderLayer(const OffscreenCanvasPlaceholder& placeholder, ImageBufferBackendHandle&& handle, WebCore::PlaceholderFrameIdentifier frame, bool opaque)
+{
+    if (!placeholder.layerID)
+        return;
+    RefPtr page = WebProcessProxy::webPage(*placeholder.pageID);
+    if (!page)
+        return;
+    RefPtr drawingArea = dynamicDowncast<RemoteLayerTreeDrawingAreaProxy>(page->drawingArea());
+    if (!drawingArea)
+        return;
+    drawingArea->setLayerContentsFromAnotherProcess(*placeholder.layerID, RemoteLayerBackingStoreProperties(WTF::move(handle), frame, opaque));
+}
+#endif
+
+void WebProcessProxy::removeOffscreenCanvasPlaceholdersForProcess(WebCore::ProcessIdentifier processIdentifier)
+{
+    Vector<UniqueRef<OffscreenCanvasPlaceholder>> removed;
+    offscreenCanvasPlaceholders().removeIf([&](auto& entry) {
+        if (entry.value->owner != processIdentifier)
+            return false;
+        removed.append(WTF::move(entry.value));
+        return true;
+    });
+    releasePendingFrames(removed);
+}
+
+static void sendOffscreenCanvasPlaceholderFrameToOwner(WebCore::PlaceholderRenderingContextIdentifier, WebProcessProxy& owner, OffscreenCanvasPlaceholderFrame&&);
+
+static void offscreenCanvasPlaceholderFrameHandledByOwner(WebCore::PlaceholderRenderingContextIdentifier identifier, WebCore::ImageBufferTransferIdentifier transferIdentifier, bool handled)
+{
+    // Not handled means the owner exited first.
+    if (!handled)
+        releaseTransferredImageBuffers({ transferIdentifier });
+
+    auto placeholder = offscreenCanvasPlaceholders().find(identifier);
+    if (placeholder == offscreenCanvasPlaceholders().end())
+        return;
+
+    auto next = std::exchange(placeholder->value->pendingFrame, std::nullopt);
+    RefPtr owner = handled ? liveProcessForIdentifier(*placeholder->value->owner) : nullptr;
+    if (!next || !owner) {
+        placeholder->value->frameInFlightToOwner = false;
+        if (next)
+            releaseTransferredImageBuffers({ next->transferHandle.identifier });
+        return;
+    }
+    sendOffscreenCanvasPlaceholderFrameToOwner(identifier, *owner, WTF::move(*next));
+}
+
+static void sendOffscreenCanvasPlaceholderFrameToOwner(WebCore::PlaceholderRenderingContextIdentifier identifier, WebProcessProxy& owner, OffscreenCanvasPlaceholderFrame&& frame)
+{
+    auto transferIdentifier = frame.transferHandle.identifier;
+    owner.sendWithAsyncReply(Messages::WebProcess::CommitOffscreenCanvasPlaceholderFrame(identifier, WTF::move(frame.transferHandle), frame.frame, frame.originClean, frame.opaque), [identifier, transferIdentifier](bool handled) {
+        offscreenCanvasPlaceholderFrameHandledByOwner(identifier, transferIdentifier, handled);
+    });
+}
+
+// A frame as committed by a process the canvas was transferred to.
+struct CommittedOffscreenCanvasPlaceholderFrame {
+    WTF_MAKE_STRUCT_TZONE_ALLOCATED(CommittedOffscreenCanvasPlaceholderFrame);
+
+    WebCore::ImageBufferTransferHandle transferHandle;
+    std::optional<ImageBufferBackendHandle> layerContentsHandle;
+    bool originClean { false };
+    bool opaque { false };
+    CompletionHandler<void(bool placeholderMayExist)> completionHandler;
+};
+
+WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(CommittedOffscreenCanvasPlaceholderFrame);
+
+static HashMap<WebCore::PlaceholderRenderingContextIdentifier, UniqueRef<CommittedOffscreenCanvasPlaceholderFrame>>& offscreenCanvasPlaceholderFramesAwaitingOwner()
+{
+    ASSERT(isMainThreadOrCheckDisabled());
+    static NeverDestroyed<HashMap<WebCore::PlaceholderRenderingContextIdentifier, UniqueRef<CommittedOffscreenCanvasPlaceholderFrame>>> frames;
+    return frames;
+}
+
+static void commitFrameToOffscreenCanvasPlaceholder(WebCore::PlaceholderRenderingContextIdentifier identifier, CommittedOffscreenCanvasPlaceholderFrame&& committedFrame)
+{
+    auto& placeholders = offscreenCanvasPlaceholders();
+    auto placeholder = placeholders.find(identifier);
+    RefPtr destination = placeholder != placeholders.end() ? liveProcessForIdentifier(*placeholder->value->owner) : nullptr;
+    if (!destination) {
+        releaseTransferredImageBuffers({ committedFrame.transferHandle.identifier });
+        return committedFrame.completionHandler(false);
+    }
+    committedFrame.completionHandler(true);
+
+    auto frame = placeholder->value->lastFrame.increment();
+
+    // Set the buffer to the layer immediately rather than waiting for a rendering update round trip.
+#if PLATFORM(COCOA)
+    if (committedFrame.layerContentsHandle)
+        applyFrameToOffscreenCanvasPlaceholderLayer(placeholder->value.get(), WTF::move(*committedFrame.layerContentsHandle), frame, committedFrame.opaque);
+#endif
+
+    // Without a GPU process the buffer went with it; frames resume once one relaunches.
+    RefPtr gpuProcess = GPUProcessProxy::singletonIfCreated();
+    if (!gpuProcess)
+        return;
+
+    // Eagerly transfer ownership of the buffer in case the sending process crashes.
+    gpuProcess->send(Messages::GPUProcess::HandOverTransferredImageBuffers({ committedFrame.transferHandle.identifier }, destination->coreProcessIdentifier()), 0);
+
+    OffscreenCanvasPlaceholderFrame placeholderFrame { WTF::move(committedFrame.transferHandle), frame, committedFrame.originClean, committedFrame.opaque };
+    if (placeholder->value->frameInFlightToOwner) {
+        // Queue the newest frame while the in flight one is processed, releasing the pending one if it exists, since it's been superceeded.
+        if (auto superseded = std::exchange(placeholder->value->pendingFrame, WTF::move(placeholderFrame)))
+            releaseTransferredImageBuffers({ superseded->transferHandle.identifier });
+        return;
+    }
+    placeholder->value->frameInFlightToOwner = true;
+    sendOffscreenCanvasPlaceholderFrameToOwner(identifier, *destination, WTF::move(placeholderFrame));
+}
+
+void WebProcessProxy::commitOffscreenCanvasPlaceholderFrame(WebCore::RemotePlaceholderRenderingContextIdentifier&& identifier, WebCore::ImageBufferTransferHandle&& transferHandle, std::optional<ImageBufferBackendHandle>&& layerContentsHandle, bool originClean, bool opaque, CompletionHandler<void(bool)>&& completionHandler)
+{
+    auto placeholderIdentifier = identifier.object();
+    CommittedOffscreenCanvasPlaceholderFrame frame { WTF::move(transferHandle), WTF::move(layerContentsHandle), originClean, opaque, WTF::move(completionHandler) };
+    if (offscreenCanvasPlaceholders().contains(placeholderIdentifier))
+        return commitFrameToOffscreenCanvasPlaceholder(placeholderIdentifier, WTF::move(frame));
+
+    RefPtr owner = liveProcessForIdentifier(identifier.processIdentifier());
+    if (!owner) {
+        releaseTransferredImageBuffers({ frame.transferHandle.identifier });
+        return frame.completionHandler(false);
+    }
+
+    // An unknown placeholder is not treated as an attack: it may have been destroyed, or its owner's
+    // registration may not have arrived. Hold on to the most recent buffer while we do a round trip
+    // to the source process to flush out the pending registration case.
+    auto result = offscreenCanvasPlaceholderFramesAwaitingOwner().ensure(placeholderIdentifier, [&] {
+        return makeUniqueRef<CommittedOffscreenCanvasPlaceholderFrame>(WTF::move(frame));
+    });
+    if (result.isNewEntry) {
+        owner->sendWithAsyncReply(Messages::AuxiliaryProcess::MainThreadPing(), [placeholderIdentifier] {
+            if (auto frame = offscreenCanvasPlaceholderFramesAwaitingOwner().take(placeholderIdentifier))
+                commitFrameToOffscreenCanvasPlaceholder(placeholderIdentifier, WTF::move(*frame));
+        });
+    } else {
+        auto superseded = std::exchange(result.iterator->value.get(), WTF::move(frame));
+        releaseTransferredImageBuffers({ superseded.transferHandle.identifier });
+        superseded.completionHandler(true);
+    }
 }
 #endif
 

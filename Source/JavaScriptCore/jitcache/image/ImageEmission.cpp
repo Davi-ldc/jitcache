@@ -78,7 +78,7 @@ static std::optional<Recording> recordingOf(MacroAssembler& masm, const ImageRef
         return std::nullopt;
     auto target = reference.recordedTarget(*recorder);
     if (!target) {
-        recorder->markUnrecordable(Unrecordable::InconsistentRecord);
+        recorder->markUnrecordable(reference.isForeignOperation() ? Unrecordable::ForeignCodeSymbol : Unrecordable::InconsistentRecord);
         return std::nullopt;
     }
     return Recording { *recorder, *target };
@@ -150,6 +150,15 @@ ImageReference ImageReference::processThunk(ProcessThunk thunk)
     return ImageReference(ImageEmissionInternal::makeTarget(TargetKind::ProcessThunk, static_cast<uint32_t>(thunk)), LLInt::defaultCall().code().taggedPtr());
 }
 
+ImageReference ImageReference::operationAt(const void* function, const void* value)
+{
+    // Without pointer authentication value is the function's address, which the consumer resolves the CodeSymbol to.
+    auto symbol = CodeSymbol::of(function);
+    if (!symbol)
+        return ImageReference(ImageEmissionInternal::makeTarget(TargetKind::Operation), value, TargetState::ForeignCodeSymbol);
+    return ImageReference(ImageTarget { .kind = TargetKind::Operation, .a = 0, .b = 0, .payload = symbol->offset }, value);
+}
+
 ImageReference ImageReference::ucbConstantCell(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, VirtualRegister constant)
 {
     ASSERT(constant.isConstant());
@@ -212,6 +221,7 @@ std::optional<ImageTarget> ImageReference::recordedTarget(const ImageRecorder& r
         if (!recorder.isRecording())
             return m_target;
         return recorder.mathICTarget(m_value);
+    case TargetState::ForeignCodeSymbol:
     case TargetState::Unknown:
         return std::nullopt;
     }

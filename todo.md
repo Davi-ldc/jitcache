@@ -1,5 +1,12 @@
+# First priority
+
+Make body identity function-relative, so that an app whose source changed still imports every function that did not change. Today a root is identified by a digest of its whole text and each nested function by its parent's key, table and index, so one edit makes every body of a bundle miss; for Bun 1.4.3 a changed app turns JITCache off with a warning instead. A function's UCB does not depend on where the function sits (`CodeBlock::expressionInfoForBytecodeIndex` adds the function's `sourceOffset()` to the positions its UCB stores), and the holder digest of its UFE already covers everything else its generation reads. A key made of the function's own text digest and a holder digest without absolute positions would therefore let unchanged functions keep importing across deploys. Measure first how many functions keep identical text when a bench app is edited a little and rebuilt with `bun build`, with and without `--minify`. Two identical functions would share one body, which baked facts and the richness rule keep sound.
+
+Support multithreading and workers later. A `child_process.fork` child that runs another entry file inherits the parent's `--jitcache` flags but gets another app digest, so for Bun 1.4.3 it is refused (Consumer parent) or turned off by the producer lock (ConsumerProducer parent) and runs without JITCache. Function-relative identity removes the app gate; until then Bun could pass the parent's digest to forked children.
+
 # Cool ideas
 * analisar somar profiles ao invés de ficar com o melhor.
+
 ## Compact
 
 Investigar a fração de CPU atribuída ao corpo em relação à CPU total da execução como um sinal adicional para a heurística de `compact`, separando trabalho de CPU de espera por I/O. A coleta, sua atribuição e seu overhead precisam ser avaliados antes de entrar no desenho; por enquanto, a poda usa apenas o aquecimento restaurável e os bytes efetivamente recuperáveis.
@@ -32,13 +39,23 @@ Otimizar o strict. Hoje ele valida a estrutura inteira do que o JITCache lê e a
 
 O decode estrito de um core deve falhar no segundo alcance de um registro que ele lê no lugar (constantes, `CachedOptional` e o rare data que `CachedVariableEnvironment` e `CachedSymbolTable` leem direto), como já falha para os registros do cache de offsets. Hoje esses registros decodificam a cada alcance, como no decode nativo, e um core forjado que nomeia um deles de muitos slots pode esgotar a memória dentro do `DeferGC` do decode.
 
-## Cross-compilação aarch64
+O S3 do CB ainda rejeita um caso raro: um progresso negativo commitado ao lado de um total grande e restaurado ao lado de um total menor falha numa recaptura estrita antes de o corpo rodar de novo. Ele precisa de um teto de slice fora do padrão, acima de 2^24, e de uma chamada que lance entre a instalação e a entrada. Fechá-lo pede que `finishCounter` restaure `max(P, 0)`, o que muda o I7 e a expectativa `counter-progress` do twin.
 
-O LeakSanitizer não roda sob QEMU user mode, que recusa com EINVAL o `clone` do tracer dele, então as checagens de vazamento em aarch64 ficam para hardware ARM64 real.
+## Harness and maintenance
 
-`bun build.ts ci-release --arch=aarch64`, com LTO, ainda não foi compilado.
+About 180 fixture names in the UCB tests (`jitcacheUA7`, `jitcache-u8-attach-alpha` and the like, most from 1.4.2) are built from test IDs, which strings should not cite. Renaming them needs a build and a full run, since some checks match on those names.
 
-O build release aarch64 morre com SIGILL sob o modelo `cortex-a53` do QEMU: o mimalloc que o Bun embute compila com `-march=armv8.1-a` e executa `casal` em `mi_process_init`. É nativo e fora do escopo; os builds com ASan rodam sob todos os modelos.
+A `.cache.replaced` that holds an unknown file blocks every later ConsumerProducer start until someone removes it. Replacement should move such a leftover aside instead of failing.
+
+Scan images in twins builds for unrecorded immediates that fall inside the engine image. Such a reference passes every test, because our builds load the engine at its link-time address and the relocation check skips those targets; until 1.4.3 only the census review caught one, the tail-call operation pointer in `CallLinkInfo::emitFastPathImpl`.
+
+`cb/tier-up-history.js` is not bench-safe: in `--bench`'s native copy its Consumer runs over an empty artifact while the script asserts imported state, so it fails there. Exclude it from the bench, or make its assertions depend on whether its bodies were imported.
+
+Neither LLVM prefix holds a clang-format (`~/collo-local/tools/llvm-21`, `llvm-23`), so agents format with `/usr/bin/clang-format` 19.1.7, which disagrees with the tree on `{ }` spacing and short enums. Install the toolchain's clang-format (23.1.x once the bump lands) into its prefix from apt.llvm.org, as the rest of LLVM 23 came, before the next reformat, and name it in CLAUDE.md beside the prefix.
+
+Measure whether native leaks vary between runs of one corpus script. A JSC stress test showed it on our build and on the pin alike: one or two of the single-character atoms `SmallStrings::initializeCommonStrings` creates. A corpus run and its oracle run are two processes, so such a leak could fail the harness's pairing of leaks although both are the engine's. Run each corpus script's `Off` run about 20 times and compare the leak sets; only if one varies, have the runner repeat the oracle run up to N times and accept a leak that some native sample reports, and say so in the harness sub-SPEC.
+
+Propose `installationBoundFraction` and `installationBoundSmallestBody` from `PerformanceTests/JITCache/bound.ts` on a quiet release-local build, x86_64 here and ARM64 on the A1, by the rule Davi approved on 2026-10-12: the smallest body is the least installed image size whose excluded bodies hold under 5% of each workload's native compile CPU, and the fraction is the largest covered ratio once each outlier is fixed or explained, rounded up to the next 0.05. Show him, for candidate sizes from 0 to 4 KiB, the bodies covered, their share of native compile CPU and the p50, p99 and largest ratio, with the install steps of the worst body. Neither value enters HARNESS.md before he picks it.
 
 ## Porte para macOS (baixa prioridade)
 
@@ -61,6 +78,8 @@ Portão antes da primeira compilação DFG de um CB importado, como refinamento 
 Transportar os caches de metadata que guardam células: caches de propriedade do LLInt, a Structure de `to_this` e os callees de `create_this` e parentes. Hoje começam como o link nativo deixa. Num CB nascido em baseline, só a compilação DFG que cai na janela antes de o IC ligar a recipe perde algo: o status lê sem informação, e um `put_by_id` ainda planta `ForceOSRExit`. A forma estudada resolvia a Structure a partir de uma raiz do realm por transições de adição de propriedade.
 
 Transportar as previsões dos buffers de `catch`, hoje omitidas. O buffer nasce no primeiro catch, a partir da liveness da UCB, e cria o rare data da CB. Semeá-lo exigiria alocá-lo cedo com a lista de operandos do produtor, por uma entrada nativa anterior ao tipo de JIT, porque o alocador público exige CB baseline e um seed depois de `installCode` corre contra o primeiro dreno do marker. Reabrir se o bench mostrar compilações DFG de corpos importados que leem um `catch` antes do primeiro catch do consumidor e saem por falta de predição.
+
+Bun 1.4.3 changes the entry above: both the value profiles of `catch` entries and the mark that a catch ran without its buffer should travel later. In 1.4.3 a catch gets its buffer when its function first crosses the DFG threshold (`useLazyCatchLiveness`), a native point before the DFG compile, so seeding the buffer's predictions there no longer needs the early allocation the entry above describes. The CodeBlock's flag (`m_hasCatchThatExecutedWithoutBuffer`) cannot travel as captured: after the producer's DFG compile the flag is clear while each catch's `hasExecutedWithoutBuffer` bit stays set, so a restore would derive the flag from the bits. Once catch state travels, `useLazyCatchLiveness` must be fixed on again, because the marks mean that a catch ran before its buffer existed only under it.
 
 
 

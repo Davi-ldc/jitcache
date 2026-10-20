@@ -124,7 +124,6 @@ static void appendProgress(StringBuilder& json, const Progress& progress)
     appendNumber(json, "bodyOpens"_s, progress.bodyOpens);
     appendNumber(json, "transientOpenFailures"_s, progress.transientOpenFailures);
     appendNumber(json, "imports"_s, progress.imports);
-    appendNumber(json, "seededDecodes"_s, progress.seededDecodes);
     appendNumber(json, "attaches"_s, progress.attaches);
     appendNumber(json, "gateDrops"_s, progress.gateDrops);
     appendNumber(json, "misses"_s, progress.misses);
@@ -188,6 +187,8 @@ static StartResult startResultOf(ArtifactAccessFailure&& failure)
         return { StartOutcome::Rejected, "start.not-an-artifact"_s, WTF::move(failure.detail) };
     case Kind::Incompatible:
         return { StartOutcome::Rejected, "start.incompatible"_s, WTF::move(failure.detail) };
+    case Kind::AnotherApp:
+        return { StartOutcome::Rejected, "start.another-app"_s, WTF::move(failure.detail) };
     case Kind::Busy:
         return { StartOutcome::Busy, "start.busy"_s, WTF::move(failure.detail) };
     case Kind::IO:
@@ -379,9 +380,11 @@ StartResult start(VM& vm, const Config& config)
     if (facts.engineObject && !facts.engineObject->size)
         return rejectWithoutState({ StartOutcome::Rejected, "start.build-id"_s, "the engine object has no GNU build ID"_s });
 
-    // Started, at start.replaced when a ConsumerProducer replaced an incompatible artifact, or a Fault, which configures
-    // the VM with activity off. A Fault releases the producer lock the access took, since a faulted VM never produces.
-    auto access = openArtifact(config.artifactPath, accessModeOf(config.role));
+    // Started, at start.replaced when a ConsumerProducer replaced an incompatible artifact or one made for another app, or
+    // a Fault, which configures the VM with activity off. A Fault releases the producer lock the access took, since a
+    // faulted VM never produces. The config's app is the host's: JITCache only compares it with the header's and writes it
+    // into the header of an artifact it creates.
+    auto access = openArtifact(config.artifactPath, accessModeOf(config.role), config.appDigest);
     StartResult result = !access ? startResultOf(WTF::move(access.error()))
         : access->replaced.isNull() ? StartResult { StartOutcome::Started, { }, { } }
         : StartResult { StartOutcome::Started, "start.replaced"_s, access->replaced };

@@ -25,12 +25,14 @@
 
 #include "config.h"
 
+#include "Helpers/Counters.h"
 #include "MoveOnly.h"
 #include <ranges>
 #include <wtf/CrossThreadCopier.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
 #include <wtf/ListHashSet.h>
+#include <wtf/Variant.h>
 #include <wtf/Vector.h>
 #include <wtf/text/StringHash.h>
 #include <wtf/text/WTFString.h>
@@ -388,6 +390,76 @@ TEST(WTF_Vector, AppendList)
     EXPECT_EQ(vector[5], 6U);
 }
 
+TEST(WTF_Vector, AppendDefaultConstructedTemporaryMovesFromIt)
+{
+    Vector<CopyMoveCounter> vector;
+    CopyMoveCounter::TestingScope scope;
+    vector.append(CopyMoveCounter { });
+    EXPECT_EQ(1U, vector.size());
+    EXPECT_EQ(1U, CopyMoveCounter::constructionCount);
+    EXPECT_EQ(0U, CopyMoveCounter::copyCount);
+    EXPECT_EQ(1U, CopyMoveCounter::moveCount);
+}
+
+TEST(WTF_Vector, ConstructAndAppendConstructsInPlace)
+{
+    for (bool reserveCapacity : { false, true }) {
+        Vector<CopyMoveCounter> vector;
+        if (reserveCapacity)
+            vector.reserveInitialCapacity(1);
+        CopyMoveCounter::TestingScope scope;
+        vector.constructAndAppend();
+        EXPECT_EQ(1U, vector.size());
+        EXPECT_EQ(1U, CopyMoveCounter::constructionCount);
+        EXPECT_EQ(0U, CopyMoveCounter::copyCount);
+        EXPECT_EQ(0U, CopyMoveCounter::moveCount);
+    }
+}
+
+TEST(WTF_Vector, AppendEmptyBracesAppendsOneValueInitializedElement)
+{
+    Vector<int> ints { 1 };
+    ints.append({ });
+    EXPECT_EQ(2U, ints.size());
+    EXPECT_EQ(0, ints[1]);
+
+    Vector<Vector<int>> vectors;
+    vectors.append({ });
+    EXPECT_EQ(1U, vectors.size());
+    EXPECT_TRUE(vectors[0].isEmpty());
+
+    Vector<CopyMoveCounter> counters;
+    CopyMoveCounter::TestingScope scope;
+    counters.append({ });
+    EXPECT_EQ(1U, counters.size());
+    EXPECT_EQ(1U, CopyMoveCounter::constructionCount);
+    EXPECT_EQ(1U, CopyMoveCounter::moveCount);
+}
+
+TEST(WTF_Vector, ConstructAndAppendVariantAlternativeInPlace)
+{
+    using CounterVariant = Variant<int, CopyMoveCounter>;
+    for (bool reserveCapacity : { false, true }) {
+        Vector<CounterVariant> vector;
+        if (reserveCapacity)
+            vector.reserveInitialCapacity(2);
+        CopyMoveCounter::TestingScope scope;
+        vector.constructAndAppend(WTF::InPlaceType<CopyMoveCounter>);
+        vector.append(WTF::InPlaceType<CopyMoveCounter>);
+        EXPECT_EQ(2U, vector.size());
+        EXPECT_TRUE(std::holds_alternative<CopyMoveCounter>(vector[0]));
+        EXPECT_TRUE(std::holds_alternative<CopyMoveCounter>(vector[1]));
+        EXPECT_EQ(2U, CopyMoveCounter::constructionCount);
+        EXPECT_EQ(0U, CopyMoveCounter::copyCount);
+        EXPECT_EQ(0U, CopyMoveCounter::moveCount);
+    }
+
+    // Without an in-place type, the first alternative is constructed.
+    Vector<CounterVariant> vector;
+    vector.constructAndAppend();
+    EXPECT_TRUE(std::holds_alternative<int>(vector[0]));
+}
+
 TEST(WTF_Vector, AppendContainerWithMapping)
 {
     Vector<size_t> vector({ 1, 2, 3 });
@@ -429,6 +501,148 @@ TEST(WTF_Vector, Reverse)
     EXPECT_EQ(11, intVector[2]);
     EXPECT_EQ(12, intVector[3]);
     EXPECT_EQ(13, intVector[4]);
+}
+
+TEST(WTF_Vector, MoveTo)
+{
+    Vector<int> intVector { 10, 11, 12, 13, 14 };
+
+    // Move an earlier element to a later index: only the range in between shifts.
+    intVector.moveTo(1, 3);
+    EXPECT_EQ(10, intVector[0]);
+    EXPECT_EQ(12, intVector[1]);
+    EXPECT_EQ(13, intVector[2]);
+    EXPECT_EQ(11, intVector[3]);
+    EXPECT_EQ(14, intVector[4]);
+
+    // Move a later element back to an earlier index.
+    intVector.moveTo(3, 0);
+    EXPECT_EQ(11, intVector[0]);
+    EXPECT_EQ(10, intVector[1]);
+    EXPECT_EQ(12, intVector[2]);
+    EXPECT_EQ(13, intVector[3]);
+    EXPECT_EQ(14, intVector[4]);
+
+    // Moving to the same index is a no-op.
+    intVector.moveTo(2, 2);
+    EXPECT_EQ(11, intVector[0]);
+    EXPECT_EQ(10, intVector[1]);
+    EXPECT_EQ(12, intVector[2]);
+    EXPECT_EQ(13, intVector[3]);
+    EXPECT_EQ(14, intVector[4]);
+
+    // Move first to last and last to first.
+    intVector.moveTo(0, 4);
+    EXPECT_EQ(10, intVector[0]);
+    EXPECT_EQ(12, intVector[1]);
+    EXPECT_EQ(13, intVector[2]);
+    EXPECT_EQ(14, intVector[3]);
+    EXPECT_EQ(11, intVector[4]);
+
+    intVector.moveTo(4, 0);
+    EXPECT_EQ(11, intVector[0]);
+    EXPECT_EQ(10, intVector[1]);
+    EXPECT_EQ(12, intVector[2]);
+    EXPECT_EQ(13, intVector[3]);
+    EXPECT_EQ(14, intVector[4]);
+}
+
+TEST(WTF_Vector, MoveToAdjacent)
+{
+    Vector<int> intVector { 1, 2, 3 };
+
+    intVector.moveTo(0, 1);
+    EXPECT_EQ(2, intVector[0]);
+    EXPECT_EQ(1, intVector[1]);
+    EXPECT_EQ(3, intVector[2]);
+
+    intVector.moveTo(2, 1);
+    EXPECT_EQ(2, intVector[0]);
+    EXPECT_EQ(3, intVector[1]);
+    EXPECT_EQ(1, intVector[2]);
+}
+
+TEST(WTF_Vector, MoveToSamePosition)
+{
+    Vector<int> intVector { 10, 11, 12 };
+
+    intVector.moveTo(0, 0);
+    intVector.moveTo(1, 1);
+    intVector.moveTo(2, 2);
+    EXPECT_EQ(3U, intVector.size());
+    EXPECT_EQ(10, intVector[0]);
+    EXPECT_EQ(11, intVector[1]);
+    EXPECT_EQ(12, intVector[2]);
+
+    // A single-element vector: the only valid move is a no-op.
+    Vector<int> single { 42 };
+    single.moveTo(0, 0);
+    EXPECT_EQ(1U, single.size());
+    EXPECT_EQ(42, single[0]);
+}
+
+TEST(WTF_Vector, MoveToInlineCapacity)
+{
+    Vector<int, 8> intVector { 10, 11, 12, 13, 14 };
+
+    intVector.moveTo(1, 3);
+    EXPECT_EQ(10, intVector[0]);
+    EXPECT_EQ(12, intVector[1]);
+    EXPECT_EQ(13, intVector[2]);
+    EXPECT_EQ(11, intVector[3]);
+    EXPECT_EQ(14, intVector[4]);
+
+    intVector.moveTo(3, 0);
+    EXPECT_EQ(11, intVector[0]);
+    EXPECT_EQ(10, intVector[1]);
+    EXPECT_EQ(12, intVector[2]);
+    EXPECT_EQ(13, intVector[3]);
+    EXPECT_EQ(14, intVector[4]);
+
+    intVector.moveTo(2, 2);
+    EXPECT_EQ(12, intVector[2]);
+}
+
+TEST(WTF_Vector, MoveToMoveOnly)
+{
+    Vector<MoveOnly> vector;
+    for (unsigned i = 0; i < 5; ++i)
+        vector.append(MoveOnly(i));
+
+    // Move an earlier element to a later index.
+    vector.moveTo(1, 3);
+    EXPECT_EQ(0U, vector[0].value());
+    EXPECT_EQ(2U, vector[1].value());
+    EXPECT_EQ(3U, vector[2].value());
+    EXPECT_EQ(1U, vector[3].value());
+    EXPECT_EQ(4U, vector[4].value());
+
+    // Move a later element back to an earlier index.
+    vector.moveTo(3, 0);
+    EXPECT_EQ(1U, vector[0].value());
+    EXPECT_EQ(0U, vector[1].value());
+    EXPECT_EQ(2U, vector[2].value());
+    EXPECT_EQ(3U, vector[3].value());
+    EXPECT_EQ(4U, vector[4].value());
+
+    // Same-position move leaves a move-only element untouched.
+    vector.moveTo(2, 2);
+    EXPECT_EQ(2U, vector[2].value());
+
+    // First to last and last to first.
+    vector.moveTo(0, 4);
+    EXPECT_EQ(0U, vector[0].value());
+    EXPECT_EQ(2U, vector[1].value());
+    EXPECT_EQ(3U, vector[2].value());
+    EXPECT_EQ(4U, vector[3].value());
+    EXPECT_EQ(1U, vector[4].value());
+
+    vector.moveTo(4, 0);
+    EXPECT_EQ(1U, vector[0].value());
+    EXPECT_EQ(0U, vector[1].value());
+    EXPECT_EQ(2U, vector[2].value());
+    EXPECT_EQ(3U, vector[3].value());
+    EXPECT_EQ(4U, vector[4].value());
 }
 
 TEST(WTF_Vector, ReverseIterator)
@@ -760,24 +974,24 @@ TEST(WTF_Vector, RemoveAll)
     EXPECT_TRUE(v == Vector<int>({3, 2, 4, 2, 2, 2, 4, 4, 3}));
 
     // Using a non memcpy-able type.
-    static_assert(!VectorTraits<CString>::canMoveWithMemcpy, "Should use a non memcpy-able type");
-    Vector<CString> vExpected;
-    Vector<CString> v2;
+    static_assert(!VectorTraits<ASCIICString>::canMoveWithMemcpy, "Should use a non memcpy-able type");
+    Vector<ASCIICString> vExpected;
+    Vector<ASCIICString> v2;
     EXPECT_TRUE(v2.isEmpty());
     EXPECT_FALSE(v2.removeAll("1"_s));
     EXPECT_TRUE(v2.isEmpty());
 
-    v2.fill("1", 10);
+    v2.fill("1"_s, 10);
     EXPECT_EQ(10U, v2.size());
     EXPECT_EQ(10U, v2.removeAll("1"_s));
     EXPECT_TRUE(v2.isEmpty());
 
-    v2.fill("2", 10);
+    v2.fill("2"_s, 10);
     EXPECT_EQ(10U, v2.size());
     EXPECT_EQ(0U, v2.removeAll("1"_s));
     EXPECT_EQ(10U, v2.size());
 
-    v2 = {"1", "2", "1", "2", "1", "2", "2", "1", "1", "1"};
+    v2 = { "1"_s, "2"_s, "1"_s, "2"_s, "1"_s, "2"_s, "2"_s, "1"_s, "1"_s, "1"_s };
     EXPECT_EQ(10U, v2.size());
     EXPECT_EQ(6U, v2.removeAll("1"_s));
     EXPECT_EQ(4U, v2.size());
@@ -785,29 +999,29 @@ TEST(WTF_Vector, RemoveAll)
     EXPECT_EQ(4U, v2.removeAll("2"_s));
     EXPECT_TRUE(v2.isEmpty());
 
-    v2 = {"3", "1", "2", "1", "2", "1", "2", "2", "1", "1", "1", "3"};
+    v2 = { "3"_s, "1"_s, "2"_s, "1"_s, "2"_s, "1"_s, "2"_s, "2"_s, "1"_s, "1"_s, "1"_s, "3"_s };
     EXPECT_EQ(12U, v2.size());
     EXPECT_EQ(6U, v2.removeAll("1"_s));
     EXPECT_EQ(6U, v2.size());
     EXPECT_TRUE(v2.find("1"_s) == notFound);
-    vExpected = {"3", "2", "2", "2", "2", "3"};
+    vExpected = { "3"_s, "2"_s, "2"_s, "2"_s, "2"_s, "3"_s };
     EXPECT_TRUE(v2 == vExpected);
 
     EXPECT_EQ(4U, v2.removeAll("2"_s));
     EXPECT_EQ(2U, v2.size());
     EXPECT_TRUE(v2.find("2"_s) == notFound);
-    vExpected = {"3", "3"};
+    vExpected = { "3"_s, "3"_s };
     EXPECT_TRUE(v2 == vExpected);
 
     EXPECT_EQ(2U, v2.removeAll("3"_s));
     EXPECT_TRUE(v2.isEmpty());
 
-    v2 = {"1", "1", "1", "3", "2", "4", "2", "2", "2", "4", "4", "3"};
+    v2 = { "1"_s, "1"_s, "1"_s, "3"_s, "2"_s, "4"_s, "2"_s, "2"_s, "2"_s, "4"_s, "4"_s, "3"_s };
     EXPECT_EQ(12U, v2.size());
     EXPECT_EQ(3U, v2.removeAll("1"_s));
     EXPECT_EQ(9U, v2.size());
     EXPECT_TRUE(v2.find("1"_s) == notFound);
-    vExpected = {"3", "2", "4", "2", "2", "2", "4", "4", "3"};
+    vExpected = { "3"_s, "2"_s, "4"_s, "2"_s, "2"_s, "2"_s, "4"_s, "4"_s, "3"_s };
     EXPECT_TRUE(v2 == vExpected);
 }
 
@@ -1782,15 +1996,15 @@ TEST(WTF_Vector, MoveConstructor)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1804,15 +2018,15 @@ TEST(WTF_Vector, MoveConstructor)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 10U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 10U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1826,15 +2040,15 @@ TEST(WTF_Vector, MoveConstructor)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 }
 
@@ -1852,15 +2066,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1874,15 +2088,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1897,15 +2111,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 10U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 10U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1920,15 +2134,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 10U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 10U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1943,15 +2157,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1966,15 +2180,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -1989,15 +2203,15 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 5U);
         EXPECT_EQ(strings2.capacity(), 5U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
-        EXPECT_STREQ(strings2[3].utf8().data(), "d");
-        EXPECT_STREQ(strings2[4].utf8().data(), "e");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
+        EXPECT_EQ(strings2[2], "c"_s);
+        EXPECT_EQ(strings2[3], "d"_s);
+        EXPECT_EQ(strings2[4], "e"_s);
         strings2.append("f"_str);
         EXPECT_EQ(strings2.size(), 6U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[5].utf8().data(), "f");
+        EXPECT_EQ(strings2[5], "f"_s);
     }
 
     {
@@ -2012,12 +2226,12 @@ TEST(WTF_Vector, MoveAssignmentOperator)
         }
         EXPECT_EQ(strings2.size(), 2U);
         EXPECT_EQ(strings2.capacity(), 2U);
-        EXPECT_STREQ(strings2[0].utf8().data(), "a");
-        EXPECT_STREQ(strings2[1].utf8().data(), "b");
+        EXPECT_EQ(strings2[0], "a"_s);
+        EXPECT_EQ(strings2[1], "b"_s);
         strings2.append("c"_str);
         EXPECT_EQ(strings2.size(), 3U);
         EXPECT_EQ(strings2.capacity(), 16U);
-        EXPECT_STREQ(strings2[2].utf8().data(), "c");
+        EXPECT_EQ(strings2[2], "c"_s);
     }
 }
 

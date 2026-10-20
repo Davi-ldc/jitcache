@@ -65,7 +65,7 @@
 #include "JSHTMLModelElementCamera.h"
 #include "LayoutRect.h"
 #include "LayoutSize.h"
-#include "LazyLoadModelObserver.h"
+#include "LazyLoadElementObserver.h"
 #include "LegacySchemeRegistry.h"
 #include "Logging.h"
 #include "MIMETypeRegistry.h"
@@ -95,6 +95,7 @@
 #include <wtf/Seconds.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/URL.h>
+#include <wtf/text/MakeString.h>
 
 #if ENABLE(MODEL_CONTEXT)
 #include "ModelContext.h"
@@ -104,6 +105,12 @@
 #include "DocumentImmersive.h"
 #endif
 
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+#include "Chrome.h"
+#include "ChromeClient.h"
+#include "ElementVolumetricScene.h"
+#endif
+
 #if ENABLE(TOUCH_EVENTS) && (ENABLE(GPU_PROCESS_MODEL) || ENABLE(MODEL_PROCESS))
 #include <WebCore/TouchEvent.h>
 #endif
@@ -111,8 +118,13 @@
 #if ENABLE(SPATIAL_PORTAL)
 #include "ElementAncestorIteratorInlines.h"
 #include "SpatialPortalController.h"
+#include "StyleEnvironmentMap.h"
 #include "StyleTransformResolver.h"
 #include "TransformOperationData.h"
+#endif
+
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+#include "EnvironmentMapLoader.h"
 #endif
 
 namespace WebCore {
@@ -176,14 +188,7 @@ HTMLModelElement::~HTMLModelElement()
     if (RefPtr resource = std::exchange(m_resource, nullptr))
         resource->removeClient(*this);
 
-#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
-    if (m_environmentMapResource) {
-        m_environmentMapResource->removeClient(*this);
-        m_environmentMapResource = nullptr;
-    }
-#endif
-
-    LazyLoadModelObserver::unobserve(*this, protect(document()));
+    LazyLoadElementObserver::unobserve(*this, protect(document()));
 
     m_loadModelTimer = nullptr;
 
@@ -233,7 +238,7 @@ RefPtr<Model> HTMLModelElement::model() const
 {
     if (!m_dataComplete)
         return nullptr;
-    
+
     return m_model;
 }
 
@@ -361,6 +366,15 @@ HTMLModelElement& HTMLModelElement::readyPromiseResolve()
 
 void HTMLModelElement::visibilityStateChanged()
 {
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    ElementVolumetricScene::documentVisibilityDidChange(*this);
+#endif
+
+    updatePlayerVisibility();
+}
+
+void HTMLModelElement::updatePlayerVisibility()
+{
 #if ENABLE(SPATIAL_PORTAL)
     if (CheckedPtr controller = m_lastRegisteredPortalController.get()) {
         controller->childVisibilityStateChanged(*this);
@@ -484,6 +498,12 @@ void HTMLModelElement::updateEntityTransformFromCSS()
     controller->childTransformDidChange(*this, transform);
 }
 
+void HTMLModelElement::updateAnchorFromCSS()
+{
+    if (CheckedPtr controller = findPortalController())
+        controller->scheduleAnchorUpdate();
+}
+
 void HTMLModelElement::updateSpatialPortalController()
 {
     CheckedPtr controller = findPortalController();
@@ -525,6 +545,10 @@ void HTMLModelElement::spatialPortalContextDidChange()
 
 #if ENABLE(MODEL_ELEMENT_STAGE_MODE)
     updateStageMode();
+#endif
+
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP) && ENABLE(SPATIAL_PORTAL)
+    environmentMapStyleDidChange();
 #endif
 
     queueTaskKeepingObjectAlive(*this, TaskSource::DOMManipulation, [](auto& element) {
@@ -570,10 +594,6 @@ void HTMLModelElement::dataReceived(CachedResource& resource, const SharedBuffer
 {
     if (&resource == m_resource)
         m_data.append(buffer);
-#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
-    else if (&resource == m_environmentMapResource)
-        m_environmentMapData.append(buffer);
-#endif
     else
         ASSERT_NOT_REACHED();
 }
@@ -582,10 +602,6 @@ void HTMLModelElement::notifyFinished(CachedResource& resource, const NetworkLoa
 {
     if (&resource == m_resource)
         modelResourceFinished();
-#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
-    else if (&resource == m_environmentMapResource)
-        environmentMapResourceFinished();
-#endif
 }
 
 // MARK: - ModelPlayerClient overrides.
@@ -630,6 +646,13 @@ void HTMLModelElement::didFinishLoading(ModelPlayer& modelPlayer, NodeIdentifier
         renderer->updateFromElement();
     if (!m_readyPromise->isFulfilled())
         m_readyPromise->resolve(*this);
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (m_presentationMode == ModelPresentationMode::Volumetric) {
+        if (RefPtr page = document().page())
+            page->chrome().client().reconnectVolumetricSceneForElement(*this);
+    }
+#endif
 }
 
 void HTMLModelElement::didFailLoading(ModelPlayer& modelPlayer, NodeIdentifier nodeID, const ResourceError&)
@@ -674,7 +697,7 @@ void HTMLModelElement::didConvertModelData(ModelPlayer& modelPlayer, Ref<SharedB
 #endif
     ASSERT(m_dataComplete);
 
-    RELEASE_LOG(ModelElement, "%p - HTMLModelElement::didConvertModelData: Received converted model data, size=%zu mimeType=%s", this, convertedData->size(), convertedMIMEType.utf8().data());
+    RELEASE_LOG(ModelElement, "%p - HTMLModelElement::didConvertModelData: Received converted model data, size=%zu mimeType=%s", this, convertedData->size(), convertedMIMEType.utf8());
 
     m_model = Model::create(WTF::move(convertedData), String { convertedMIMEType }, m_sourceURL, true /* isConverted */);
     m_dataMemoryCost.store(m_model->data()->size(), std::memory_order_relaxed);
@@ -687,7 +710,7 @@ void HTMLModelElement::didConvertModelData(ModelPlayer& modelPlayer, Ref<SharedB
 
 void HTMLModelElement::didFinishEnvironmentMapLoading(ModelPlayer&, bool succeeded)
 {
-    if (!m_environmentMapURL.isEmpty() && !m_environmentMapReadyPromise->isFulfilled()) {
+    if (m_environmentMapKind == EnvironmentMapKind::Custom && !m_environmentMapReadyPromise->isFulfilled()) {
         if (succeeded)
             m_environmentMapReadyPromise->resolve();
         else {
@@ -784,8 +807,8 @@ bool HTMLModelElement::isVisible() const
     }
 #endif
     bool isVisibleInline = !protect(document())->hidden() && m_isIntersectingViewport;
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-    return isVisibleInline || m_detachedForImmersive;
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    return isVisibleInline || m_presentationMode != ModelPresentationMode::Inline;
 #else
     return isVisibleInline;
 #endif
@@ -823,8 +846,8 @@ void HTMLModelElement::modelDidChange()
     }
 #endif
 
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-    bool hasRenderer = this->renderer() || m_detachedForImmersive;
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    bool hasRenderer = this->renderer() || m_presentationMode != ModelPresentationMode::Inline;
 #else
     bool hasRenderer = this->renderer();
 #endif
@@ -922,13 +945,15 @@ void HTMLModelElement::createModelPlayer()
     // in with load probably doesn't make sense.
     bool isForImmersive = false;
 #if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-    isForImmersive = m_detachedForImmersive;
+    isForImmersive = m_presentationMode == ModelPresentationMode::Immersive;
 #endif
     modelPlayer->load(nodeID, *model, contentSize(), isForImmersive);
 
 #if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
-    if (m_environmentMapData)
-        modelPlayer->setEnvironmentMap(m_environmentMapData.takeBufferAsContiguous().get());
+    if (m_environmentMapKind == EnvironmentMapKind::None)
+        modelPlayer->disableEnvironmentMap();
+    if (RefPtr environmentMapData = std::exchange(m_environmentMapData, nullptr))
+        modelPlayer->setEnvironmentMap(environmentMapData.releaseNonNull(), m_environmentMapURL);
     else if (!m_environmentMapURL.isEmpty())
         environmentMapRequestResource();
 #endif
@@ -955,7 +980,7 @@ void HTMLModelElement::deleteModelPlayer()
 #if ENABLE(MODEL_ELEMENT_IMMERSIVE)
     // Let the document trigger the model player deletion after transitioning out the immersive element if needed
     RefPtr documentImmersive = document().immersiveIfExists();
-    if (m_detachedForImmersive && documentImmersive)
+    if (m_presentationMode == ModelPresentationMode::Immersive && documentImmersive)
         return documentImmersive->exitRemovedImmersiveElementIfNeeded(this, WTF::move(deleteModelPlayerBlock));
 #endif
     deleteModelPlayerBlock();
@@ -1054,8 +1079,10 @@ void HTMLModelElement::reloadModelPlayer()
     modelPlayer->reload(nodeID, *model, contentSize(), *animationState, WTF::move(*transformState));
 
 #if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
-    if (m_environmentMapData)
-        modelPlayer->setEnvironmentMap(m_environmentMapData.takeBufferAsContiguous().get());
+    if (m_environmentMapKind == EnvironmentMapKind::None)
+        modelPlayer->disableEnvironmentMap();
+    if (RefPtr environmentMapData = std::exchange(m_environmentMapData, nullptr))
+        modelPlayer->setEnvironmentMap(environmentMapData.releaseNonNull(), m_environmentMapURL);
     else if (!m_environmentMapURL.isEmpty())
         environmentMapRequestResource();
 #endif
@@ -1127,8 +1154,8 @@ void HTMLModelElement::configureGraphicsLayer(GraphicsLayer& graphicsLayer, Colo
 #if ENABLE(MODEL_ELEMENT_PORTAL)
         .hasPortal = hasPortal(),
 #endif
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-        .detachedForImmersive = m_detachedForImmersive,
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+        .presentationMode = m_presentationMode,
 #endif
     });
 }
@@ -1212,9 +1239,10 @@ bool HTMLModelElement::canSetEntityTransform() const
 bool HTMLModelElement::supportsStageModeInteraction() const
 {
 #if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-    if (m_detachedForImmersive)
+    if (m_presentationMode == ModelPresentationMode::Immersive)
         return false;
 #endif
+    // Volumetric content is still interactive, in the volume. Callers exclude hit-tests over its blank inline box.
     return canSetEntityTransform();
 }
 
@@ -1661,7 +1689,7 @@ void HTMLModelElement::updateStageMode()
 
 #if ENABLE(TOUCH_EVENTS)
     if (!m_eventListener)
-        m_eventListener = HTMLModelElementEventListener::create();
+        lazyInitialize(m_eventListener, HTMLModelElementEventListener::create());
 
     if (mode == WebCore::StageModeOperation::Orbit) {
         addEventListener(eventNames().touchstartEvent, *m_eventListener, { });
@@ -1703,31 +1731,90 @@ const URL& HTMLModelElement::environmentMap() const
     return m_environmentMapURL;
 }
 
-void HTMLModelElement::setEnvironmentMap(const URL& url)
+void HTMLModelElement::setEffectiveEnvironmentMap(EnvironmentMapKind kind, const URL& url)
 {
-    if (url == m_environmentMapURL)
+    if (kind == m_environmentMapKind && url == m_environmentMapURL)
         return;
 
+    m_environmentMapKind = kind;
     m_environmentMapURL = url;
+    m_environmentMapFailed = false;
     m_environmentMapDataMemoryCost.store(0, std::memory_order_relaxed);
 
     environmentMapResetAndReject(Exception { ExceptionCode::AbortError });
     m_environmentMapReadyPromise = makeUniqueRef<EnvironmentMapPromise>();
 
-    if (m_environmentMapURL.isEmpty()) {
-        // sending a message with empty data to indicate resource removal
-        if (m_modelPlayer)
-            m_modelPlayer->setEnvironmentMap(SharedBuffer::create());
+    RefPtr modelPlayer = m_modelPlayer;
+
+    switch (m_environmentMapKind) {
+    case EnvironmentMapKind::None:
+        if (modelPlayer)
+            modelPlayer->disableEnvironmentMap();
         reportExtraMemoryCost();
         return;
-    }
 
-    environmentMapRequestResource();
+    case EnvironmentMapKind::Default:
+        if (modelPlayer)
+            modelPlayer->enableSystemEnvironmentMap();
+        reportExtraMemoryCost();
+        return;
+
+    case EnvironmentMapKind::Custom:
+        environmentMapRequestResource();
+        return;
+    }
+}
+
+static EnvironmentMapKind environmentMapKindForURL(const URL& url)
+{
+    return url.isEmpty() ? EnvironmentMapKind::Default : EnvironmentMapKind::Custom;
 }
 
 void HTMLModelElement::updateEnvironmentMap()
 {
-    setEnvironmentMap(selectEnvironmentMapURL());
+#if ENABLE(SPATIAL_PORTAL)
+    if (isInsidePortal()) {
+        setEffectiveEnvironmentMap(EnvironmentMapKind::Default, URL { });
+        return;
+    }
+
+    if (document().settings().spatialPortalEnabled()) {
+        if (CheckedPtr style = existingComputedStyle()) {
+            auto& environmentMap = style->environmentMap();
+            if (environmentMap.isNone()) {
+                setEffectiveEnvironmentMap(EnvironmentMapKind::None, URL { });
+                return;
+            }
+            if (!environmentMap.isAuto()) {
+                auto resolvedURL = resolvedEnvironmentMapURL(*this, environmentMap).value_or(URL { });
+                setEffectiveEnvironmentMap(environmentMapKindForURL(resolvedURL), resolvedURL);
+                return;
+            }
+        }
+    }
+#endif
+
+    auto attributeURL = selectEnvironmentMapURL();
+    setEffectiveEnvironmentMap(environmentMapKindForURL(attributeURL), attributeURL);
+}
+
+#if ENABLE(SPATIAL_PORTAL)
+
+void HTMLModelElement::environmentMapStyleDidChange()
+{
+    queueTaskKeepingObjectAlive(*this, TaskSource::ModelElement, [](auto& element) {
+        element.updateEnvironmentMap();
+    });
+}
+
+#endif
+
+String HTMLModelElement::effectiveEnvironmentMapForTesting() const
+{
+    if (RefPtr modelPlayer = m_modelPlayer)
+        return modelPlayer->environmentMapForTesting();
+
+    return "no player"_s;
 }
 
 URL HTMLModelElement::selectEnvironmentMapURL() const
@@ -1747,54 +1834,48 @@ URL HTMLModelElement::selectEnvironmentMapURL() const
 
 void HTMLModelElement::environmentMapRequestResource()
 {
-    auto request = createResourceRequest(m_environmentMapURL, FetchOptions::Destination::Environmentmap);
-    auto resource = protect(document().cachedResourceLoader())->requestEnvironmentMapResource(WTF::move(request));
-    if (!resource.has_value()) {
-        if (!m_environmentMapReadyPromise->isFulfilled())
-            m_environmentMapReadyPromise->reject(Exception { ExceptionCode::NetworkError });
-        // sending a message with empty data to indicate resource removal
-        if (m_modelPlayer)
-            m_modelPlayer->setEnvironmentMap(SharedBuffer::create());
-        return;
-    }
+    if (!m_environmentMapLoader)
+        lazyInitialize(m_environmentMapLoader, EnvironmentMapLoader::create());
 
-    m_environmentMapData.empty();
-
-    m_environmentMapResource = resource.value();
-    m_environmentMapResource->addClient(*this);
+    RefPtr loader = m_environmentMapLoader;
+    loader->load(*this, m_environmentMapURL, [weakThis = WeakPtr { *this }, url = m_environmentMapURL](RefPtr<SharedBuffer>&& data) {
+        if (RefPtr element = weakThis.get())
+            element->environmentMapDidLoad(url, WTF::move(data));
+    });
 }
 
 void HTMLModelElement::environmentMapResetAndReject(Exception&& exception)
 {
-    m_environmentMapData.reset();
+    m_environmentMapData = nullptr;
 
-    if (m_environmentMapResource) {
-        m_environmentMapResource->removeClient(*this);
-        m_environmentMapResource = nullptr;
-    }
+    if (RefPtr loader = m_environmentMapLoader)
+        loader->cancel();
 
     if (!m_environmentMapReadyPromise->isFulfilled())
         m_environmentMapReadyPromise->reject(WTF::move(exception));
 }
 
-void HTMLModelElement::environmentMapResourceFinished()
+void HTMLModelElement::environmentMapDidLoad(const URL& url, RefPtr<SharedBuffer>&& data)
 {
-    int status = m_environmentMapResource->response().httpStatusCode();
-    if (m_environmentMapResource->loadFailedOrCanceled() || (status && !isHttpOkStatus(status))) {
-        environmentMapResetAndReject(Exception { ExceptionCode::NetworkError });
+    if (m_environmentMapURL != url)
+        return;
 
-        // sending a message with empty data to indicate resource removal
-        if (m_modelPlayer)
-            m_modelPlayer->setEnvironmentMap(SharedBuffer::create());
+    if (!data) {
+        environmentMapResetAndReject(Exception { ExceptionCode::NetworkError });
+        m_environmentMapFailed = true;
+
+        if (RefPtr modelPlayer = m_modelPlayer)
+            modelPlayer->enableSystemEnvironmentMap();
         return;
     }
-    if (m_modelPlayer) {
-        m_environmentMapDataMemoryCost.store(m_environmentMapData.size(), std::memory_order_relaxed);
-        m_modelPlayer->setEnvironmentMap(m_environmentMapData.takeBufferAsContiguous().get());
+
+    if (RefPtr modelPlayer = m_modelPlayer) {
+        m_environmentMapDataMemoryCost.store(data->size(), std::memory_order_relaxed);
+        modelPlayer->setEnvironmentMap(data.releaseNonNull(), m_environmentMapURL);
+        return;
     }
 
-    m_environmentMapResource->removeClient(*this);
-    m_environmentMapResource = nullptr;
+    m_environmentMapData = WTF::move(data);
 }
 
 #endif
@@ -1991,21 +2072,28 @@ void HTMLModelElement::requestImmersive(DOMPromiseDeferred<void>&& promise)
 
 void HTMLModelElement::ensureImmersivePresentation(CompletionHandler<void(ExceptionOr<LayerHostingContextIdentifier>)>&& completion)
 {
-    setDetachedForImmersive(true);
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (m_presentationMode == ModelPresentationMode::Volumetric) {
+        completion(Exception { ExceptionCode::InvalidStateError, "Model is presented in a volumetric scene"_s });
+        return;
+    }
+#endif
+
+    setPresentationMode(ModelPresentationMode::Immersive);
     ensureModelPlayer([weakThis = WeakPtr { *this }, completion = WTF::move(completion)](auto result) mutable {
         RefPtr protectedThis { weakThis };
         if (!protectedThis)
             return completion(Exception { ExceptionCode::AbortError });
 
         if (result.hasException()) {
-            protectedThis->setDetachedForImmersive(false);
+            protectedThis->setPresentationMode(ModelPresentationMode::Inline);
             completion(result.releaseException());
             return;
         }
 
         RefPtr modelPlayer = result.releaseReturnValue();
         if (!modelPlayer) {
-            protectedThis->setDetachedForImmersive(false);
+            protectedThis->setPresentationMode(ModelPresentationMode::Inline);
             completion(Exception { ExceptionCode::AbortError });
             return;
         }
@@ -2016,7 +2104,7 @@ void HTMLModelElement::ensureImmersivePresentation(CompletionHandler<void(Except
                 return completion(Exception { ExceptionCode::AbortError });
 
             if (!contextID.has_value()) {
-                protectedThis->setDetachedForImmersive(false);
+                protectedThis->setPresentationMode(ModelPresentationMode::Inline);
                 completion(Exception { ExceptionCode::TypeError, "Failed to decode model"_s });
                 return;
             }
@@ -2030,7 +2118,7 @@ void HTMLModelElement::exitImmersivePresentation(CompletionHandler<void()>&& com
 {
     RefPtr modelPlayer = m_modelPlayer;
     if (!modelPlayer) {
-        setDetachedForImmersive(false);
+        setPresentationMode(ModelPresentationMode::Inline);
         completion();
         return;
     }
@@ -2043,20 +2131,9 @@ void HTMLModelElement::exitImmersivePresentation(CompletionHandler<void()>&& com
 
         // Only reset if no new request has re-armed the flag since this exit started.
         if (protectedThis->m_immersiveDetachGeneration == generation)
-            protectedThis->setDetachedForImmersive(false);
+            protectedThis->setPresentationMode(ModelPresentationMode::Inline);
         completion();
     });
-}
-
-void HTMLModelElement::setDetachedForImmersive(bool detachedForImmersive)
-{
-    if (detachedForImmersive)
-        ++m_immersiveDetachGeneration;
-    m_detachedForImmersive = detachedForImmersive;
-    visibilityStateChanged();
-    invalidateStyleAndLayerComposition();
-    if (CheckedPtr renderer = this->renderer())
-        renderer->updateFromElement();
 }
 
 void HTMLModelElement::ensureModelPlayer(CompletionHandler<void(ExceptionOr<RefPtr<ModelPlayer>>)>&& completion)
@@ -2077,6 +2154,34 @@ void HTMLModelElement::ensureModelPlayer(CompletionHandler<void(ExceptionOr<RefP
 
 #endif
 
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+
+void HTMLModelElement::setPresentationMode(ModelPresentationMode mode)
+{
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
+    // Bumped before the early return below, and even when the mode is unchanged: exitImmersivePresentation()
+    // leaves the mode Immersive until its completion runs, so a re-armed request has to invalidate an exit that
+    // is already in flight.
+    if (mode == ModelPresentationMode::Immersive)
+        ++m_immersiveDetachGeneration;
+#endif
+
+    if (m_presentationMode == mode)
+        return;
+
+    m_presentationMode = mode;
+
+    // Skips visibilityStateChanged() so that a mode change cannot itself start a volumetric scene exit.
+    updatePlayerVisibility();
+
+    // Re-running layer configuration is what moves the content between the page and its new host.
+    invalidateStyleAndLayerComposition();
+    if (CheckedPtr renderer = this->renderer())
+        renderer->updateFromElement();
+}
+
+#endif // ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+
 void HTMLModelElement::triggerModelPlayerCreationCallbacksIfNeeded(ExceptionOr<RefPtr<ModelPlayer>>&& result)
 {
 #if ENABLE(MODEL_ELEMENT_IMMERSIVE)
@@ -2084,7 +2189,7 @@ void HTMLModelElement::triggerModelPlayerCreationCallbacksIfNeeded(ExceptionOr<R
         return;
 
     if (result.hasException())
-        RELEASE_LOG_ERROR(ModelElement, "%p - HTMLModelElement: Model Player creation request: FAILED with error: %s", this, result.exception().message().utf8().data());
+        RELEASE_LOG_ERROR(ModelElement, "%p - HTMLModelElement: Model Player creation request: FAILED with error: %s", this, result.exception().message().utf8());
     else
         RELEASE_LOG_INFO(ModelElement, "%p - HTMLModelElement: Model Player creation request: SUCCEEDED", this);
 
@@ -2112,7 +2217,7 @@ void HTMLModelElement::stop()
 {
     RELEASE_LOG(ModelElement, "%p - HTMLModelElement::stop()", this);
 
-    LazyLoadModelObserver::unobserve(*this, protect(document()));
+    LazyLoadElementObserver::unobserve(*this, protect(document()));
 
     m_loadModelTimer = nullptr;
 
@@ -2120,6 +2225,11 @@ void HTMLModelElement::stop()
     if (CheckedPtr controller = m_lastRegisteredPortalController.get())
         controller->unregisterChildModel(*this);
     m_lastRegisteredPortalController = nullptr;
+#endif
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    // Nothing else closes the volume once the element driving it is gone.
+    ElementVolumetricScene::exitVolumetricScene(*this);
 #endif
 
     // Once an active DOM object has been stopped it cannot be restarted,
@@ -2150,8 +2260,8 @@ LayoutSize HTMLModelElement::contentSize() const
 
 bool HTMLModelElement::modelContainerSizeIsEmpty() const
 {
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-    return contentSize().isEmpty() && !m_detachedForImmersive;
+#if ENABLE(MODEL_ELEMENT_IMMERSIVE) || ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    return contentSize().isEmpty() && m_presentationMode == ModelPresentationMode::Inline;
 #else
     return contentSize().isEmpty();
 #endif
@@ -2194,7 +2304,7 @@ Node::NeedsPostConnectionSteps HTMLModelElement::insertionSteps(InsertionType in
         document->registerForVisibilityStateChangedCallbacks(*this);
         if (RefPtr page = document->page()) {
             m_modelPlayerProvider = page->modelPlayerProvider();
-            LazyLoadModelObserver::observe(*this);
+            LazyLoadElementObserver::observe(*this);
         }
 #if ENABLE(SPATIAL_PORTAL)
         updateSpatialPortalController();
@@ -2217,9 +2327,13 @@ void HTMLModelElement::removingSteps(RemovalType removalType, ContainerNode& old
     if (removalType.disconnectedFromDocument) {
         Ref document = this->document();
         document->unregisterForVisibilityStateChangedCallbacks(*this);
-        LazyLoadModelObserver::unobserve(*this, document);
+        LazyLoadElementObserver::unobserve(*this, document);
 
         m_loadModelTimer = nullptr;
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+        ElementVolumetricScene::exitVolumetricScene(*this);
+#endif
 
         deletePendingModelPlayer();
         deleteModelPlayer();
@@ -2291,7 +2405,7 @@ void HTMLModelElement::sourceRequestResource()
     protect(m_resource)->addClient(*this);
 }
 
-void HTMLModelElement::viewportIntersectionChanged(bool isIntersecting)
+void HTMLModelElement::lazyLoadIntersectionCallbackInvoked(bool isIntersecting)
 {
     if (isIntersecting == m_isIntersectingViewport)
         return;
@@ -2315,6 +2429,16 @@ bool HTMLModelElement::hasLiveModelPlayer() const
     RefPtr modelPlayer = m_modelPlayer;
     return modelPlayer && !modelPlayer->isPlaceholder();
 }
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+RefPtr<ModelPlayer> HTMLModelElement::liveModelPlayer() const
+{
+    RefPtr modelPlayer = m_modelPlayer;
+    if (!modelPlayer || modelPlayer->isPlaceholder())
+        return nullptr;
+    return modelPlayer;
+}
+#endif
 
 bool HTMLModelElement::isModelLoading() const
 {
@@ -2358,6 +2482,35 @@ String HTMLModelElement::modelElementStateForTesting() const
     ASSERT_NOT_REACHED();
     return "Unknown"_s;
 }
+
+#if ENABLE(MODEL_PROCESS)
+void HTMLModelElement::sceneGraphAsTextForTesting(const ModelSceneGraphAsTextOptions& options, CompletionHandler<void(String&&)>&& completionHandler) const
+{
+    RefPtr modelPlayer = m_modelPlayer;
+    if (modelPlayer) {
+        modelPlayer->sceneGraphAsTextForTesting(std::nullopt, { { nodeIdentifier(), dumpLabelForTesting(1) } }, options, WTF::move(completionHandler));
+        return;
+    }
+
+#if ENABLE(SPATIAL_PORTAL)
+    CheckedPtr controller = m_lastRegisteredPortalController.get();
+    if (controller) {
+        controller->sceneGraphAsTextForTesting(nodeIdentifier(), options, WTF::move(completionHandler));
+        return;
+    }
+#endif
+
+    completionHandler({ });
+}
+
+String HTMLModelElement::dumpLabelForTesting(unsigned treeOrderPosition) const
+{
+    auto& id = getIdAttribute();
+    if (!id.isEmpty())
+        return makeString('#', id);
+    return makeString(localName(), '[', treeOrderPosition, ']');
+}
+#endif
 
 #if HAVE(SUPPORT_HDR_DISPLAY) && ENABLE(PIXEL_FORMAT_RGBA16F)
 void HTMLModelElement::dynamicRangeLimitDidChange(PlatformDynamicRangeLimit dynamicRangeLimit)

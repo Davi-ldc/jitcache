@@ -27,6 +27,7 @@
 #include "LayerOverlapMap.h"
 #include "Logging.h"
 #include "RenderLayer.h"
+#include <ranges>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/TextStream.h>
 
@@ -35,19 +36,39 @@ namespace WebCore {
 struct RectList {
     Vector<LayoutRect> rects;
     LayoutRect boundingRect;
-    
+
+    static constexpr size_t recentRectsToTestForContainment = 4;
+
+    bool isAlreadyCovered(const LayoutRect& rect) const
+    {
+        size_t recentCount = std::min(recentRectsToTestForContainment, rects.size());
+        auto recentRects = rects | std::views::reverse | std::views::take(recentCount);
+        return std::ranges::any_of(recentRects, [&](auto& existingRect) { return existingRect.contains(rect); });
+    }
+
+    void removeRecentRectsCoveredBy(const LayoutRect& rect)
+    {
+        size_t recentCount = std::min(recentRectsToTestForContainment, rects.size());
+        rects.removeAllMatching([&](auto& existingRect) { return rect.contains(existingRect); }, rects.size() - recentCount);
+    }
+
     void append(const LayoutRect& rect)
     {
+        if (isAlreadyCovered(rect))
+            return;
+
+        removeRecentRectsCoveredBy(rect);
+
         rects.append(rect);
         boundingRect.unite(rect);
     }
 
     void append(const RectList& rectList)
     {
-        rects.appendVector(rectList.rects);
-        boundingRect.unite(rectList.boundingRect);
+        for (auto& rect : rectList.rects)
+            append(rect);
     }
-    
+
     bool intersects(const LayoutRect& rect) const
     {
         if (!rects.size() || !rect.intersects(boundingRect))
@@ -84,6 +105,7 @@ public:
     // Layers are added in z-order, lazily creating clipping scopes as necessary.
     void add(const RenderLayer&, const LayoutRect& bounds, const LayerOverlapMap::LayerAndBoundsVector& enclosingClippingLayers);
     bool overlapsLayers(const RenderLayer&, const LayoutRect& bounds, const LayerOverlapMap::LayerAndBoundsVector& enclosingClippingLayers) const;
+    bool isCoveredByRecentRects(const LayoutRect& bounds, const LayerOverlapMap::LayerAndBoundsVector& enclosingClippingLayers) const;
     void append(std::unique_ptr<OverlapMapContainer>&&);
 
     bool isEmpty() const;
@@ -242,6 +264,15 @@ OverlapMapContainer::ClippingScope* OverlapMapContainer::ensureClippingScopeForL
     return const_cast<ClippingScope*>(currScope);
 }
 
+bool OverlapMapContainer::isCoveredByRecentRects(const LayoutRect& bounds, const LayerOverlapMap::LayerAndBoundsVector& enclosingClippingLayers) const
+{
+    auto* clippingScope = findClippingScopeForLayers(enclosingClippingLayers);
+    if (!clippingScope)
+        return false;
+
+    return clippingScope->rectList.isAlreadyCovered(bounds);
+}
+
 OverlapMapContainer::ClippingScope* NODELETE OverlapMapContainer::findClippingScopeForLayers(const LayerOverlapMap::LayerAndBoundsVector& enclosingClippingLayers) const
 {
     ASSERT(enclosingClippingLayers.size());
@@ -290,6 +321,21 @@ LayerOverlapMap::LayerOverlapMap(const RenderLayer& rootLayer)
 }
 
 LayerOverlapMap::~LayerOverlapMap() = default;
+
+bool LayerOverlapMap::isCoveredByRecentRects(const LayoutRect& bounds, const LayerAndBoundsVector& enclosingClippingLayers) const
+{
+    if (m_overlapStack.size() < 2)
+        return false;
+
+    if (!m_overlapStack[m_overlapStack.size() - 2]->isCoveredByRecentRects(bounds, enclosingClippingLayers))
+        return false;
+
+    if (m_speculativeOverlapStack.size() >= 2
+        && !m_speculativeOverlapStack[m_speculativeOverlapStack.size() - 2]->isCoveredByRecentRects(bounds, enclosingClippingLayers))
+        return false;
+
+    return true;
+}
 
 void LayerOverlapMap::add(const RenderLayer& layer, const LayoutRect& bounds, const LayerAndBoundsVector& enclosingClippingLayers)
 {

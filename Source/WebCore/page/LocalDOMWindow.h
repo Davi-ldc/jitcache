@@ -273,7 +273,7 @@ public:
     // Secure Contexts
     bool isSecureContext() const;
 
-    bool NODELETE crossOriginIsolated() const;
+    bool crossOriginIsolated() const;
     bool NODELETE originAgentCluster() const;
 
     // Events
@@ -313,6 +313,8 @@ public:
 
     ExceptionOr<Ref<NodeList>> collectMatchingElementsInFlatTree(Node&, const String& selectors);
     ExceptionOr<RefPtr<Element>> matchingElementInFlatTree(Node&, const String& selectors);
+
+    ExceptionOr<Ref<DOMRect>> convertRectToMainFrameCoordinates(const DOMRectInit&);
 
 #if ENABLE(ORIENTATION_EVENTS)
     // This is the interface orientation in degrees. Some examples are:
@@ -522,7 +524,7 @@ private:
     mutable RefPtr<WebKitNamespace> m_webkitNamespace;
 #endif
 
-    RefPtr<CookieStore> m_cookieStore;
+    const RefPtr<CookieStore> m_cookieStore;
 
 #if ENABLE(DECLARATIVE_WEB_PUSH)
     const std::unique_ptr<PushManager> m_pushManager;

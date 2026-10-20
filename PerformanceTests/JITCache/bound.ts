@@ -4,7 +4,7 @@
 // runs as fresh jsc processes with strict off and every JSC option at its default, each writing a bench report of its
 // own: one Producer, which commits the workload's bodies at exit, then N Consumers that import them from its artifact,
 // alternating with N Consumers whose artifact holds none of them, where every body compiles natively without recording.
-// A body's import cost is the counted total of its import or seed request plus its install event's total, joined by
+// A body's import cost is the counted total of its import request plus its install event's total, joined by
 // key; its native cost is its compile event's compilation plus finalization. Each side's value is the minimum over its
 // N samples, with the median beside it. A sample whose compile or install reports supportGenerated does not count, and
 // a body left with no counting sample on a side is set aside. The samples and their tallies are those of the runner's
@@ -486,7 +486,7 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
   if (build.twins || build.sanitized || buildProfile(build).includes("debug"))
     lines.push("This build is a debug, sanitized or twins build, whose costs say nothing about the bound a release build meets.", "");
   lines.push(
-    "A body's import cost is its import or seed request's bound total (the request event's `counted`) plus its install event's total; its native cost is its compile event's compilation plus finalization, in Consumers whose artifact holds none of the workload's bodies. Each cost is the minimum over the processes that gave the body a counting sample, and the ratio divides the import minimum by the native one; bodies.json also holds the medians. A joined body is covered at S when its image size, the installed image's linked size (the install event's `image.codeSize`), is at least S. The share is the covered bodies' native cost over that of every joined body, and p50 and p99 are nearest-rank percentiles of the covered bodies' ratios.",
+    "A body's import cost is its import request's bound total (the request event's `counted`) plus its install event's total; its native cost is its compile event's compilation plus finalization, in Consumers whose artifact holds none of the workload's bodies. Each cost is the minimum over the processes that gave the body a counting sample, and the ratio divides the import minimum by the native one; bodies.json also holds the medians. A joined body is covered at S when its image size, the installed image's linked size (the install event's `image.codeSize`), is at least S. The share is the covered bodies' native cost over that of every joined body, and p50 and p99 are nearest-rank percentiles of the covered bodies' ratios.",
     "",
     "## All workloads",
     "",
@@ -527,7 +527,7 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
   lines.push(
     "## Bodies set aside or joined on one side only",
     "",
-    "A body is set aside when each of its samples on one side was excluded: per-VM support was generated during its compile or install (IB3), or no import or seed request preceded its install. A body joined on one side only was never installed on the import side or never compiled on the native side. Compiles without a key are native-side compiles whose UCB the parent-key registry did not hold, over all of a workload's native-side processes.",
+    "A body is set aside when each of its samples on one side was excluded: per-VM support was generated during its compile or install (the bound measures both sides with that support already generated), or no import request preceded its install. A body joined on one side only was never installed on the import side or never compiled on the native side. Compiles without a key are native-side compiles whose UCB the parent-key registry did not hold, over all of a workload's native-side processes.",
     "",
   );
   const tallyRow = (label: string, scope: BodyResult[], artifactBodies: string, keyless: number) => {

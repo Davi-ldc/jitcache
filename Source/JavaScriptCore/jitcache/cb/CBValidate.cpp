@@ -14,10 +14,10 @@
 #include <initializer_list>
 #include <limits>
 
-// The structural rules of cb.state and cb.summary, the native counter invariant, and the description of every CBCheck.
-// The rules run only with strict on. A strict capture applies them to what it built, so it never commits what a strict
-// consumer's prepare would reject. They read the section with byte-wise loads, since a strict consumer must reject
-// malformed bytes and cannot assume they arrived aligned.
+// The structural rules of cb.state and cb.summary, the native counter invariant, and the token and detail of every
+// CBCheck. The rules run only with strict on. A strict capture applies them to what it built, so it never commits what a
+// strict consumer's prepare would reject. They read the section with byte-wise loads, since a strict consumer must
+// reject malformed bytes and cannot assume they arrived aligned.
 
 namespace JSC::JITCache {
 
@@ -70,8 +70,7 @@ std::optional<CBCheck> validateState(std::span<const uint8_t> stateSection, Code
     auto header = readField<CBFormat::StateHeader>(stateSection, 0);
     if (header.layoutVersion != CBFormat::stateLayoutVersion
         || header.tier != static_cast<uint8_t>(CBFormat::Tier::Baseline)
-        || !CBFormat::counterModeFits(header.counterMode)
-        || header.reserved1)
+        || !CBFormat::counterModeFits(header.counterMode))
         return CBCheck::StateHeader;
 
     // The counts match the CB, so every array the seeds walk in step with the CB has one record per slot.
@@ -183,7 +182,7 @@ std::optional<CBCheck> validateSummary(std::span<const uint8_t> summarySection)
 {
     using CBFormat::SummaryArray;
 
-    // The header, which has no reserved field. The summary's counts match no CodeBlock, since scoring runs without one.
+    // The summary's counts match no CodeBlock, since scoring runs without one.
     if (summarySection.size() < sizeof(CBFormat::SummaryHeader))
         return CBCheck::SummaryHeader;
     auto header = readField<CBFormat::SummaryHeader>(summarySection, 0);
@@ -220,66 +219,125 @@ std::optional<CBCheck> validateSummary(std::span<const uint8_t> summarySection)
 
 bool counterObeysNativeInvariant(const CBFormat::StateHeader& header)
 {
-    // Native counters keep a carried counter's progress non-negative unless the threshold is infinite. The progress is
-    // computed as ExecutionCounter::count() computes it.
+    // Native counters keep a carried counter's progress from going negative unless the threshold is infinite, up to one
+    // float rounding. ExecutionCounter::setThreshold arms a slice from a progress P that is not negative: it stores
+    // -trunc(slice) in m_counter and the float nearest P + slice in m_totalCount. Past 2^24, which a slice scaled by the
+    // startup deferral scale can reach, that float may lie below trunc(slice), so count() is slightly negative. Rounding
+    // to float keeps order, so the total is never below the float nearest -m_counter, and the counter's increments only
+    // raise m_counter.
     if (header.counterMode != static_cast<uint8_t>(CBFormat::CounterMode::Carried))
         return true;
     if (header.counterActiveThreshold == std::numeric_limits<int32_t>::max())
         return true;
-    return static_cast<double>(header.counterTotalCount) + header.counterValue >= 0;
+    return header.counterTotalCount >= static_cast<float>(-static_cast<double>(header.counterValue));
 }
 
 ASCIILiteral description(CBCheck check)
 {
     switch (check) {
     case CBCheck::StateHeader:
-        return "cb.state header: layout version, tier, counter mode or reserved field"_s;
+        return "state-header"_s;
     case CBCheck::ArgumentCount:
-        return "cb.state argument count differs from the CodeBlock's"_s;
+        return "state-argument-count"_s;
     case CBCheck::ValueProfileCount:
-        return "cb.state value-profile count differs from the UnlinkedCodeBlock's"_s;
+        return "state-value-profile-count"_s;
     case CBCheck::FamilyCount:
-        return "cb.state metadata entry counts differ from the CodeBlock's"_s;
+        return "state-family-count"_s;
     case CBCheck::StateLength:
-        return "cb.state length or padding"_s;
+        return "state-length"_s;
     case CBCheck::ValuePrediction:
-        return "cb.state argument or value prediction outside SpecBytecodeTop"_s;
+        return "state-value-prediction"_s;
     case CBCheck::ArrayProfile:
-        return "cb.state array profile modes or flags"_s;
+        return "state-array-profile"_s;
     case CBCheck::AllocationHint:
-        return "cb.state allocation hint"_s;
+        return "state-allocation-hint"_s;
     case CBCheck::IterationModes:
-        return "cb.state iteration modes outside their opcode's native bits"_s;
+        return "state-iteration-modes"_s;
     case CBCheck::EnumeratorModes:
-        return "cb.state enumerator modes"_s;
+        return "state-enumerator-modes"_s;
     case CBCheck::ToThisStatus:
-        return "cb.state to_this status"_s;
+        return "state-to-this-status"_s;
     case CBCheck::BranchBit:
-        return "cb.state jneq_ptr branch bit"_s;
+        return "state-branch-bit"_s;
     case CBCheck::LazyOperand:
-        return "cb.state lazy-operand profile"_s;
+        return "state-lazy-operand"_s;
     case CBCheck::TierUpHistory:
-        return "cb.state profile deferrals or reoptimization count above its option"_s;
+        return "state-tier-up-history"_s;
     case CBCheck::Counter:
-        return "cb.state baseline counter fields"_s;
+        return "state-counter"_s;
     case CBCheck::SummaryHeader:
-        return "cb.summary header: layout version, tier or counter mode"_s;
+        return "summary-header"_s;
     case CBCheck::SummaryLength:
-        return "cb.summary length or padding"_s;
+        return "summary-length"_s;
     case CBCheck::SummaryValue:
-        return "cb.summary category, array flag or counter progress"_s;
+        return "summary-value"_s;
     case CBCheck::StrictNewborn:
-        return "install: the CodeBlock is not newborn"_s;
+        return "strict-newborn"_s;
     case CBCheck::StrictLinkState:
-        return "install: the CodeBlock is not at its link state"_s;
+        return "strict-link-state"_s;
     case CBCheck::StrictCounter:
-        return "cb.state counter has negative progress under a finite threshold"_s;
+        return "strict-counter"_s;
     case CBCheck::CapturePairing:
-        return "capture: the UnlinkedCodeBlock's profile copies do not pair with the CodeBlock's"_s;
+        return "capture-pairing"_s;
     case CBCheck::CaptureCharge:
-        return "capture: the producer budget refused the section buffers"_s;
+        return "capture-charge"_s;
     case CBCheck::CaptureStrict:
-        return "capture: a strict check of the CodeBlock or of the built sections failed"_s;
+        return "capture-strict"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+ASCIILiteral faultDetail(CBCheck check)
+{
+    switch (check) {
+    case CBCheck::StateHeader:
+        return "a cb.state too short for its header, or of another layout version, tier or counter mode"_s;
+    case CBCheck::ArgumentCount:
+        return "an argument count that differs from the CodeBlock's"_s;
+    case CBCheck::ValueProfileCount:
+        return "a value-profile count that differs from the CodeBlock's"_s;
+    case CBCheck::FamilyCount:
+        return "metadata entry counts that differ from the CodeBlock's"_s;
+    case CBCheck::StateLength:
+        return "a cb.state length or padding other than its counts lay out"_s;
+    case CBCheck::ValuePrediction:
+        return "an argument or value prediction outside the types bytecode sees"_s;
+    case CBCheck::ArrayProfile:
+        return "array modes or flags no array profile records"_s;
+    case CBCheck::AllocationHint:
+        return "an allocation hint its site cannot hold"_s;
+    case CBCheck::IterationModes:
+        return "iteration modes its opcode never records"_s;
+    case CBCheck::EnumeratorModes:
+        return "enumerator modes outside the enumerator's flags"_s;
+    case CBCheck::ToThisStatus:
+        return "an unknown to_this status"_s;
+    case CBCheck::BranchBit:
+        return "a jneq_ptr bit other than 0 or 1"_s;
+    case CBCheck::LazyOperand:
+        return "a lazy-operand key or prediction the engine cannot hold"_s;
+    case CBCheck::TierUpHistory:
+        return "profile deferrals or reoptimizations above their option's bound"_s;
+    case CBCheck::Counter:
+        return "baseline counter fields no native counter holds"_s;
+    case CBCheck::SummaryHeader:
+        return "a cb.summary too short for its header, or of another layout version, tier or counter mode"_s;
+    case CBCheck::SummaryLength:
+        return "a cb.summary length or padding other than its counts lay out"_s;
+    case CBCheck::SummaryValue:
+        return "a cb.summary category, array flag or counter progress out of its bounds"_s;
+    case CBCheck::StrictNewborn:
+        return "a CodeBlock that is not newborn"_s;
+    case CBCheck::StrictLinkState:
+        return "a CodeBlock that is no longer at its link state"_s;
+    case CBCheck::StrictCounter:
+        return "counter progress under a finite threshold, negative beyond its float total's rounding"_s;
+    case CBCheck::CapturePairing:
+        return "UnlinkedCodeBlock profile copies that do not pair with the CodeBlock's profiles"_s;
+    case CBCheck::CaptureCharge:
+        return "section buffers the producer budget refused"_s;
+    case CBCheck::CaptureStrict:
+        return "a CodeBlock the capture cannot read, or sections that fail their own validation"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }

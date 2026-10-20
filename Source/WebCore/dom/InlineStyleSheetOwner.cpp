@@ -27,7 +27,6 @@
 #include "Logging.h"
 #include "MediaList.h"
 #include "MediaQueryParser.h"
-#include "MediaQueryParserContext.h"
 #include "PluginDocument.h"
 #include "ScriptableDocumentParser.h"
 #include "ShadowRoot.h"
@@ -115,7 +114,7 @@ void InlineStyleSheetOwner::finishParsingChildren(Element& element)
 
 void InlineStyleSheetOwner::createSheetFromTextContents(Element& element)
 {
-    createSheet(element, TextNodeTraversal::contentsAsString(element));
+    createSheet(element, TextNodeTraversal::childTextContent(element));
 }
 
 void InlineStyleSheetOwner::clearSheet()

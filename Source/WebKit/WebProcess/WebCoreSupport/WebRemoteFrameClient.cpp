@@ -30,6 +30,7 @@
 #include "RemoteDisplayListRecorderProxy.h"
 #include "WebFrameProxyMessages.h"
 #include "WebMessagePortChannelProvider.h"
+#include <WebCore/SerializedScriptValue.h>
 #include "WebPage.h"
 #include "WebPageProxyMessages.h"
 #include "WebProcess.h"
@@ -96,8 +97,32 @@ void WebRemoteFrameClient::postMessageToRemote(FrameIdentifier source, const Sec
     for (auto& port : message.transferredPorts)
         WebMessagePortChannelProvider::singleton().messagePortSentToRemote(port.first);
 
-    if (RefPtr page = m_frame->page())
+    if (RefPtr serializedValue = message.message)
+        serializedValue->sinkBuffersIntoTransferHandles();
+
+    RefPtr page = m_frame->page();
+    if (!page)
+        return;
+
+    if (message.transferredPorts.isEmpty() && (!m_pendingPostMessages || m_pendingPostMessages->isEmpty())) {
         page->send(Messages::WebPageProxy::PostMessageToRemote(source, sourceOrigin, target, targetOrigin, message, userGestureToken));
+        return;
+    }
+
+    if (!m_pendingPostMessages)
+        lazyInitialize(m_pendingPostMessages, PendingPostMessages::create());
+
+    RefPtr pendingPostMessages = m_pendingPostMessages;
+    pendingPostMessages->append(PendingPostMessages::PendingPostMessage { source, sourceOrigin, target, targetOrigin, message, userGestureToken });
+
+    if (message.transferredPorts.isEmpty())
+        return;
+
+    WebMessagePortChannelProvider::singleton().ensureMessagePortCreatedWithRoundtrip([pendingPostMessages, page] {
+        auto messagesToSend = pendingPostMessages->takeMessagesThroughNextPortTransfer();
+        for (auto& pendingPostMessage : messagesToSend)
+            page->send(Messages::WebPageProxy::PostMessageToRemote(pendingPostMessage.source, pendingPostMessage.sourceOrigin, pendingPostMessage.target, pendingPostMessage.targetOrigin, pendingPostMessage.message, pendingPostMessage.userGestureToken));
+    });
 }
 
 void WebRemoteFrameClient::changeLocation(FrameLoadRequest&& request, std::optional<PrivateClickMeasurement>&& privateClickMeasurement)
@@ -235,9 +260,9 @@ void WebRemoteFrameClient::broadcastAllFrameTreeSyncDataToOtherProcesses(FrameTr
     WebFrameLoaderClient::broadcastAllFrameTreeSyncDataToOtherProcesses(data);
 }
 
-void WebRemoteFrameClient::broadcastFrameTreeSyncDataToOtherProcesses(const FrameTreeSyncSerializationData& data)
+void WebRemoteFrameClient::broadcastFrameTreeSyncDataToOtherProcesses(FrameTreeSyncSerializationData&& data)
 {
-    WebFrameLoaderClient::broadcastFrameTreeSyncDataToOtherProcesses(data);
+    WebFrameLoaderClient::broadcastFrameTreeSyncDataToOtherProcesses(WTF::move(data));
 }
 
 void WebRemoteFrameClient::didNotifyUserActivation(MonotonicTime activationTime)

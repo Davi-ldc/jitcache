@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2010-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2010-2026 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -439,6 +439,7 @@ public:
 #endif
 #if PLATFORM(MAC)
     virtual WebCore::IntRect rootViewToWindow(const WebCore::IntRect&) = 0;
+    virtual std::optional<WebCore::FloatRect> windowFrameInDeviceSpace() const { return std::nullopt; }
 #endif
 #if ENABLE(TWO_PHASE_CLICKS)
     virtual void didNotHandleTapAsClick(const WebCore::IntPoint&) = 0;
@@ -494,7 +495,7 @@ public:
     virtual void didDismissContextMenu() { }
 #endif
 
-    virtual RefPtr<WebColorPicker> createColorPicker(WebPageProxy&, const WebCore::Color& initialColor, const WebCore::IntRect&, ColorControlSupportsAlpha, Vector<WebCore::Color>&&, std::optional<WebCore::FrameIdentifier>) = 0;
+    virtual RefPtr<WebColorPicker> createColorPicker(WebPageProxy&, const WebCore::Color& initialColor, ColorControlSupportsAlpha, Vector<WebCore::Color>&&, std::optional<WebCore::FrameIdentifier>) = 0;
 
     virtual RefPtr<WebDataListSuggestionsDropdown> createDataListSuggestionsDropdown(WebPageProxy&) = 0;
 
@@ -588,6 +589,13 @@ public:
     virtual WebCore::ColorSpace colorSpace() = 0;
 #endif
 
+#if ENABLE(UI_SIDE_COMPOSITING)
+    // The document rect in unscaled content coordinates, and the minimum scale it may be displayed at. Both
+    // feed WebPageProxy::computeLayoutViewportRect().
+    virtual WebCore::FloatRect documentRect() const = 0;
+    virtual double minimumZoomScale() const = 0;
+#endif
+
     virtual void reconcileEnclosingScrollViewContentOffset(EditorState&) { };
 
 #if ENABLE(TWO_PHASE_CLICKS)
@@ -608,15 +616,14 @@ public:
     virtual void didProgrammaticallyClearFocusedElement(WebCore::ElementContext&&) = 0;
     virtual void updateFocusedElementInformation(const FocusedElementInformation&) = 0;
     virtual void elementDidBlur() = 0;
+    virtual bool hasFocusedElement() const = 0;
     virtual void focusedElementDidChangeInputMode(WebCore::InputMode) = 0;
     virtual void didUpdateEditorState() = 0;
     virtual bool isFocusingElement() = 0;
     virtual bool interpretKeyEvent(const NativeWebKeyboardEvent&, KeyEventInterpretationContext&&) = 0;
-    virtual void saveImageToLibrary(Ref<WebCore::SharedBuffer>&&) = 0;
+    virtual void saveImageToLibrary(const Ref<WebCore::SharedBuffer>&) = 0;
     virtual void showPlaybackTargetPicker(bool hasVideo, const WebCore::IntRect& elementRect, WebCore::RouteSharingPolicy, const String&) = 0;
     virtual void showDataDetectorsUIForPositionInformation(const InteractionInformationAtPosition&) = 0;
-    virtual double minimumZoomScale() const = 0;
-    virtual WebCore::FloatRect documentRect() const = 0;
     virtual WebCore::InteractiveWidgetValue viewportMetaTagInteractiveWidget() const = 0;
     virtual void scrollingNodeScrollViewWillStartPanGesture(WebCore::ScrollingNodeID) = 0;
     virtual void scrollingNodeScrollWillStartScroll(std::optional<WebCore::ScrollingNodeID>) = 0;
@@ -657,7 +664,7 @@ public:
     virtual bool isTextRecognitionInFullscreenVideoEnabled() const { return false; }
 
 #if PLATFORM(COCOA)
-    virtual void positionInformationDidChange(const InteractionInformationAtPosition&) = 0;
+    virtual void positionInformationDidChange(const InteractionInformationAtPosition&, std::optional<WebCore::FrameIdentifier>) = 0;
 #endif
 
 #if ENABLE(VIDEO)
@@ -683,6 +690,10 @@ public:
 
     virtual void willBeginViewGesture() { }
     virtual void didEndViewGesture() { }
+
+#if PLATFORM(MAC)
+    virtual bool everMagnifiedDuringCurrentGesture() const { return false; }
+#endif
 
     virtual void didFirstVisuallyNonEmptyLayoutForMainFrame() = 0;
     virtual void didFinishNavigation(API::Navigation*) = 0;
@@ -726,7 +737,6 @@ public:
 #endif // ENABLE(MEDIA_CONTROLS_CONTEXT_MENUS) && USE(UICONTEXTMENU)
     
 #if PLATFORM(MAC)
-    virtual void didPerformImmediateActionHitTest(const WebHitTestResultData&, bool contentPreventsDefault, API::Object*) = 0;
     virtual NSObject *immediateActionAnimationControllerForHitTestResult(RefPtr<API::HitTestResult>, uint64_t, RefPtr<API::Object>) = 0;
 #endif
 

@@ -25,7 +25,9 @@
 
 #pragma once
 
-#include <wtf/RefCounted.h>
+#include <WebCore/PlaceholderFrameIdentifier.h>
+#include <WebCore/PlatformLayerIdentifier.h>
+#include <wtf/ThreadSafeRefCounted.h>
 
 #if !USE(CA) && !USE(COORDINATED_GRAPHICS)
 #include <WebCore/PlatformLayer.h>
@@ -52,7 +54,7 @@ enum class GraphicsLayerCompositingCoordinatesOrientation : uint8_t;
 // Platform specific interface for attaching contents to GraphicsLayer.
 // Responsible for creating compositor resources to show the particular contents
 // in the platform specific GraphicsLayer.
-class WEBCORE_EXPORT GraphicsLayerContentsDisplayDelegate : public RefCounted<GraphicsLayerContentsDisplayDelegate> {
+class WEBCORE_EXPORT GraphicsLayerContentsDisplayDelegate : public ThreadSafeRefCounted<GraphicsLayerContentsDisplayDelegate> {
 public:
     virtual ~GraphicsLayerContentsDisplayDelegate();
 
@@ -63,7 +65,7 @@ public:
     virtual GraphicsLayerCompositingCoordinatesOrientation orientation() const;
 #elif USE(COORDINATED_GRAPHICS)
     virtual void setDisplayBuffer(std::unique_ptr<CoordinatedPlatformLayerBuffer>&&) = 0;
-    virtual bool display(CoordinatedPlatformLayer&, std::optional<Damage>&&) = 0;
+    virtual void display(CoordinatedPlatformLayer&, std::optional<Damage>&&) = 0;
 #if USE(SKIA)
     void setThreadSafeGrContext(const sk_sp<GrContextThreadSafeProxy>&);
     const sk_sp<GrContextThreadSafeProxy>& threadSafeGrContext() const;
@@ -83,7 +85,14 @@ class GraphicsLayerAsyncContentsDisplayDelegate : public GraphicsLayerContentsDi
 public:
     virtual ~GraphicsLayerAsyncContentsDisplayDelegate() = default;
 
-    virtual bool WEBCORE_EXPORT tryCopyToLayer(ImageBuffer&, bool opaque) = 0;
+    virtual bool WEBCORE_EXPORT tryCopyToLayer(ImageBuffer&, bool opaque, PlaceholderFrameIdentifier) = 0;
+
+    // Like tryCopyToLayer(), but for a buffer that nothing will draw into again, and leaving it to the
+    // next rendering update to deliver where that is how the layer's contents reach the compositor.
+    virtual bool setContentsForNextDisplay(ImageBuffer& buffer, bool opaque, PlaceholderFrameIdentifier frame) { return tryCopyToLayer(buffer, opaque, frame); }
+
+    // Set only when the layer is hosted in another process, and so can be targeted from one.
+    virtual std::optional<PlatformLayerIdentifier> destinationLayerID() const { return std::nullopt; }
 
     virtual bool isGraphicsLayerAsyncContentsDisplayDelegateCocoa() const { return false; }
     virtual bool isGraphicsLayerCARemoteAsyncContentsDisplayDelegate() const { return false; }

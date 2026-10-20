@@ -32,6 +32,7 @@
 #include <WebCore/PlatformScreen.h>
 #include <glib/gi18n-lib.h>
 #include <gtk/gtk.h>
+#include <wtf/text/MakeString.h>
 
 struct WindowStateEvent;
 
@@ -66,10 +67,10 @@ gboolean webkitWebViewAuthenticate(WebKitWebView* webView, WebKitAuthenticationR
 
 gboolean webkitWebViewScriptDialog(WebKitWebView* webView, WebKitScriptDialog* scriptDialog)
 {
-    GUniquePtr<char> title(g_strdup_printf("JavaScript - %s", webkitWebViewGetPage(webView).pageLoadState().url().string().utf8().data()));
+    auto title = makeString("JavaScript - "_s, webkitWebViewGetPage(webView).pageLoadState().url().string()).utf8();
     // Limit script dialog size to 80% of the web view size.
     GtkRequisition maxSize = { static_cast<int>(gtk_widget_get_allocated_width(GTK_WIDGET(webView)) * 0.80), static_cast<int>(gtk_widget_get_allocated_height(GTK_WIDGET(webView)) * 0.80) };
-    webkitWebViewBaseAddDialog(WEBKIT_WEB_VIEW_BASE(webView), webkitScriptDialogImplNew(scriptDialog, title.get(), &maxSize));
+    webkitWebViewBaseAddDialog(WEBKIT_WEB_VIEW_BASE(webView), webkitScriptDialogImplNew(scriptDialog, title.legacyCStringPointer(), &maxSize));
 
     return TRUE;
 }
@@ -330,9 +331,9 @@ void webkitWebViewRestoreWindow(WebKitWebView* view, CompletionHandler<void()>&&
  *
  * Creates a new #WebKitWebView with the default #WebKitWebContext and
  * no #WebKitUserContentManager associated with it.
- * See also webkit_web_view_new_with_context(),
- * webkit_web_view_new_with_user_content_manager(), and
- * webkit_web_view_new_with_settings().
+ * Set the #WebKitWebView:web-context, #WebKitWebView:user-content-manager
+ * or #WebKitWebView:settings properties at construction to use a different
+ * configuration.
  *
  * Returns: The newly created #WebKitWebView widget
  */

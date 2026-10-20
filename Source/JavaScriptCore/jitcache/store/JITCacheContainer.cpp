@@ -8,6 +8,7 @@
 #include <limits>
 #include <mutex>
 #include <tuple>
+#include <wtf/HexNumber.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/MakeString.h>
@@ -62,15 +63,20 @@ static_assert(sectionKindsFollowDirectoryOrder(), "SectionKind's order is the di
 // The header.
 
 static constexpr std::array<uint8_t, 8> headerTag { 'J', 'I', 'T', 'C', 'H', 'E', 'A', 'D' };
-static constexpr uint16_t headerLayoutVersion = 1;
+static constexpr uint16_t headerLayoutVersion = 2;
 static constexpr size_t headerVersionOffset = 8;
 static constexpr size_t headerArchitectureOffset = 10;
 static constexpr size_t headerBuildIDCountOffset = 11;
 static constexpr size_t headerSizeOffset = 12;
 static constexpr size_t headerCPUFeaturesOffset = 16;
 static constexpr size_t headerOptionCountOffset = 24;
-static constexpr size_t headerReservedOffset = 28;
-static constexpr size_t headerRecordsOffset = 32;
+// The app record, bytes [28, 40): a flag, three zero bytes and the digest.
+static constexpr size_t headerAppFlagOffset = 28;
+static constexpr size_t headerAppZeroOffset = 29;
+static constexpr size_t headerAppZeroBytes = 3;
+static constexpr size_t headerAppDigestOffset = 32;
+static constexpr size_t headerRecordsOffset = 40;
+static_assert(headerAppDigestOffset + sizeof(uint64_t) == headerRecordsOffset);
 static constexpr size_t buildIDRecordBytes = 72;
 static constexpr size_t buildIDRecordIDOffset = 8;
 static constexpr size_t maximumBuildIDBytes = 64;
@@ -170,7 +176,31 @@ static String firstDifferingField(const ArtifactHeader& artifact, const Artifact
     return "header"_s;
 }
 
-// Body files.
+static void writeAppRecord(std::span<uint8_t> header, std::optional<uint64_t> app)
+{
+    writeField<uint8_t>(header, headerAppFlagOffset, app ? 1 : 0);
+    writeField<uint64_t>(header, headerAppDigestOffset, app.value_or(0));
+}
+
+// The CRC of the header's bytes before it, written in place.
+static void sealHeader(std::span<uint8_t> header)
+{
+    size_t checksummed = header.size() - headerTrailerBytes;
+    writeField<uint32_t>(header, checksummed, crc32cOf(header.first(checksummed)));
+}
+
+// Whether two headers that passed their own checks have equal bytes [0, H - 8) outside the app record: the bytes the
+// process's facts decide.
+static bool equalOutsideAppRecord(std::span<const uint8_t> a, std::span<const uint8_t> b)
+{
+    if (a.size() != b.size() || a.size() < minimumArtifactHeaderFileBytes)
+        return false;
+    size_t recordsBytes = a.size() - headerTrailerBytes - headerRecordsOffset;
+    return equalSpans(a.first(headerAppFlagOffset), b.first(headerAppFlagOffset))
+        && equalSpans(a.subspan(headerRecordsOffset, recordsBytes), b.subspan(headerRecordsOffset, recordsBytes));
+}
+
+// Bodies.
 
 static constexpr std::array<uint8_t, 8> bodyTag { 'J', 'I', 'T', 'C', 'B', 'O', 'D', 'Y' };
 static constexpr uint16_t bodyLayoutVersion = 1;
@@ -231,12 +261,13 @@ static BodyEnvelope decodeEnvelope(std::span<const uint8_t> envelope)
     return result;
 }
 
-// The checks from container.size to container.version. fileStart holds the file's first bytes, all 128 of the envelope
-// when the file is that long.
+// The checks from container.size to container.version. fileStart holds the body's first bytes, all 128 of the envelope
+// when the body is that long.
 static std::expected<BodyEnvelope, ContainerCheck> checkEnvelope(std::span<const uint8_t> fileStart, uint64_t fileSize,
     const BodyKey& expectedKey, std::span<const uint8_t, 16> headerDigest, ValidationMode mode)
 {
-    // container.size. A file start shorter than the envelope while the file is not means the file changed under its reader.
+    // container.size. Every caller passes the whole envelope when the body holds one; the second test keeps the reads
+    // below inside fileStart all the same.
     if (fileSize < bodyEnvelopeBytes || fileStart.size() < bodyEnvelopeBytes)
         return std::unexpected(ContainerChecks::size);
     auto envelope = fileStart.first(bodyEnvelopeBytes);
@@ -301,7 +332,7 @@ static size_t directoryRecordCount(std::span<const uint8_t> directory)
     return directory.size() / bodyDirectoryEntryBytes;
 }
 
-// container.directory apart from the padding, over a directory that lies inside the file, whose size container.size
+// container.directory apart from the padding, over a directory that lies inside the body, whose size container.size
 // established is the envelope's.
 static std::optional<ContainerCheck> checkDirectory(std::span<const uint8_t> directory, const BodyEnvelope& envelope, ValidationMode mode)
 {
@@ -334,15 +365,17 @@ static std::optional<ContainerCheck> checkDirectory(std::span<const uint8_t> dir
         }
         if (record.offset != expectedOffset)
             return ContainerChecks::directory;
-        end = record.offset + record.size; // inside the file, checked above
+        end = record.offset + record.size; // inside the body, checked above
     }
     if (end != fileSize)
         return ContainerChecks::directory;
     return std::nullopt;
 }
 
-// container.required, over a directory that passed container.directory in Full mode, so its entries name distinct kinds.
-static bool holdsRequiredSections(std::span<const uint8_t> directory, uint8_t highestTier)
+// container.required, over a directory that passed container.directory in Full mode, so its entries name distinct kinds:
+// the kinds the highest tier requires, plus at most ucb.analysis, which only a module's body may hold. The key is the one
+// container.key found in the envelope.
+static bool holdsRequiredSections(std::span<const uint8_t> directory, uint8_t highestTier, const BodyKey& key)
 {
     std::array<bool, numberOfSectionKinds> present { };
     for (size_t index = 0; index < directoryRecordCount(directory); ++index) {
@@ -351,7 +384,13 @@ static bool holdsRequiredSections(std::span<const uint8_t> directory, uint8_t hi
             present[static_cast<size_t>(*kind)] = true;
     }
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
-        if (present[index] != isSectionRequired(static_cast<SectionKind>(index), highestTier))
+        auto kind = static_cast<SectionKind>(index);
+        if (kind == SectionKind::UCBAnalysis) {
+            if (present[index] && key.identityKind() != IdentityKind::Module)
+                return false;
+            continue;
+        }
+        if (present[index] != isSectionRequired(kind, highestTier))
             return false;
     }
     return true;
@@ -403,6 +442,7 @@ std::optional<ArtifactHeaderBytes> encodeArtifactHeader(const ArtifactHeader& he
     writeField<uint32_t>(bytes, ContainerInternal::headerSizeOffset, result.size);
     writeField<uint64_t>(bytes, ContainerInternal::headerCPUFeaturesOffset, facts.cpuFeatures);
     writeField<uint32_t>(bytes, ContainerInternal::headerOptionCountOffset, ContainerInternal::headerOptionCount);
+    ContainerInternal::writeAppRecord(bytes, header.app);
     ContainerInternal::writeBuildIDRecord(bytes, 0, facts.mainExecutable);
     if (facts.engineObject)
         ContainerInternal::writeBuildIDRecord(bytes, 1, *facts.engineObject);
@@ -413,8 +453,7 @@ std::optional<ArtifactHeaderBytes> encodeArtifactHeader(const ArtifactHeader& he
         writeField<uint8_t>(bytes, record + 2, ContainerInternal::optionTypeBool);
         writeField<uint8_t>(bytes, record + 3, facts.mustMatch[index] ? 1 : 0);
     }
-    size_t checksummed = result.size - ContainerInternal::headerTrailerBytes;
-    writeField<uint32_t>(bytes, checksummed, ContainerInternal::crc32cOf(bytes.first(checksummed)));
+    ContainerInternal::sealHeader(bytes);
     return result;
 }
 
@@ -423,11 +462,22 @@ const ArtifactHeaderBytes& expectedHeader()
     static LazyNeverDestroyed<ArtifactHeaderBytes> header;
     static std::once_flag onceFlag;
     std::call_once(onceFlag, [] {
-        auto bytes = encodeArtifactHeader({ thisHeaderArchitecture(), processFacts() });
+        auto bytes = encodeArtifactHeader({ thisHeaderArchitecture(), processFacts(), std::nullopt });
         RELEASE_ASSERT(bytes);
         header.construct(*bytes);
     });
     return header.get();
+}
+
+ArtifactHeaderBytes headerNamingApp(std::optional<uint64_t> appDigest)
+{
+    ArtifactHeaderBytes header = expectedHeader();
+    if (!appDigest)
+        return header;
+    auto bytes = std::span { header.bytes }.first(header.size);
+    ContainerInternal::writeAppRecord(bytes, appDigest);
+    ContainerInternal::sealHeader(bytes);
+    return header;
 }
 
 std::expected<ArtifactHeader, HeaderRejection> readArtifactHeader(std::span<const uint8_t> file)
@@ -437,7 +487,7 @@ std::expected<ArtifactHeader, HeaderRejection> readArtifactHeader(std::span<cons
     };
 
     if (file.size() < minimumArtifactHeaderFileBytes || file.size() > maximumArtifactHeaderFileBytes)
-        return corrupt("the file is shorter than 40 bytes or larger than 4 KiB"_s);
+        return corrupt("the file is shorter than 48 bytes or larger than 4 KiB"_s);
     if (!equalSpans(file.first(ContainerInternal::headerTag.size()), std::span { ContainerInternal::headerTag }))
         return corrupt("the tag is not JITCHEAD"_s);
     if (readField<uint16_t>(file, ContainerInternal::headerVersionOffset) != ContainerInternal::headerLayoutVersion)
@@ -449,17 +499,25 @@ std::expected<ArtifactHeader, HeaderRejection> readArtifactHeader(std::span<cons
     if (size != file.size())
         return corrupt("H differs from the file's size"_s);
     if (size != ContainerInternal::headerSizeFor(buildIDCount, optionCount))
-        return corrupt("H differs from 32 + 72 B + 8 M + 8"_s);
+        return corrupt("H differs from 40 + 72 B + 8 M + 8"_s);
     if (buildIDCount < 1 || buildIDCount > 2)
         return corrupt("B is not 1 or 2"_s);
     if (optionCount != ContainerInternal::headerOptionCount)
         return corrupt("M is not 3"_s);
-    if (readField<uint32_t>(file, ContainerInternal::headerReservedOffset))
+    uint8_t appFlag = readField<uint8_t>(file, ContainerInternal::headerAppFlagOffset);
+    uint64_t appDigest = readField<uint64_t>(file, ContainerInternal::headerAppDigestOffset);
+    if (appFlag > 1)
+        return corrupt("the app record's flag is neither 0 nor 1"_s);
+    if (!appFlag && appDigest)
+        return corrupt("the app record names no app beside a digest other than 0"_s);
+    if (!isAllZero(file.subspan(ContainerInternal::headerAppZeroOffset, ContainerInternal::headerAppZeroBytes)))
         return corrupt("a reserved byte is not zero"_s);
 
     ArtifactHeader header;
     header.architecture = readField<uint8_t>(file, ContainerInternal::headerArchitectureOffset);
     header.facts.cpuFeatures = readField<uint64_t>(file, ContainerInternal::headerCPUFeaturesOffset);
+    if (appFlag)
+        header.app = appDigest;
     for (unsigned index = 0; index < buildIDCount; ++index) {
         auto record = file.subspan(ContainerInternal::headerRecordsOffset + ContainerInternal::buildIDRecordBytes * index, ContainerInternal::buildIDRecordBytes);
         uint8_t length = record[1];
@@ -499,19 +557,22 @@ std::expected<ArtifactHeader, HeaderRejection> readArtifactHeader(std::span<cons
     return header;
 }
 
-HeaderCheck checkArtifactHeader(std::span<const uint8_t> file, std::span<const uint8_t> processHeader)
+HeaderCheck checkArtifactHeader(std::span<const uint8_t> file, std::span<const uint8_t> processHeader, std::optional<uint64_t> appDigest)
 {
     auto artifact = readArtifactHeader(file);
     if (!artifact)
         return { artifact.error().verdict, String { artifact.error().reason } };
-    size_t compared = file.size() - ContainerInternal::headerTrailerBytes;
-    if (processHeader.size() == file.size() && equalSpans(file.first(compared), processHeader.first(compared)))
-        return { HeaderVerdict::Compatible, { } };
-    auto process = readArtifactHeader(processHeader);
-    ASSERT(process); // the process's own header, which encodeArtifactHeader wrote
-    if (!process)
-        return { HeaderVerdict::Incompatible, "header"_s };
-    return { HeaderVerdict::Incompatible, ContainerInternal::firstDifferingField(*artifact, *process) };
+    if (!ContainerInternal::equalOutsideAppRecord(file, processHeader)) {
+        auto process = readArtifactHeader(processHeader);
+        ASSERT(process); // the process's own header, which encodeArtifactHeader wrote
+        if (!process)
+            return { HeaderVerdict::Incompatible, "header"_s };
+        return { HeaderVerdict::Incompatible, ContainerInternal::firstDifferingField(*artifact, *process) };
+    }
+    // The app gates only when both the header and the config name one.
+    if (artifact->app && appDigest && *artifact->app != *appDigest)
+        return { HeaderVerdict::AnotherApp, makeString("app "_s, hex(*artifact->app, 16, Lowercase), " in the cache, "_s, hex(*appDigest, 16, Lowercase), " in this run"_s) };
+    return { HeaderVerdict::Compatible, { } };
 }
 
 HeaderDigest artifactHeaderDigest(std::span<const uint8_t> header)
@@ -594,7 +655,7 @@ BodyValidationStream::BodyValidationStream(const BodyKey& expectedKey, std::span
     , m_mode(mode)
     , m_fileSize(fileSize)
 {
-    // container.size: a file shorter than the envelope has no envelope to read.
+    // container.size: a body shorter than the envelope has no envelope to read.
     if (fileSize < bodyEnvelopeBytes)
         m_failure = ContainerChecks::size;
 }
@@ -607,13 +668,13 @@ std::span<const uint8_t> BodyValidationStream::directoryBytes() const
 void BodyValidationStream::append(std::span<const uint8_t> bytes)
 {
     while (!bytes.empty()) {
-        // After a failure, and past the file's size, the bytes only count toward container.size.
+        // After a failure, and past the body's size, the bytes only count toward container.size.
         if (m_failure || m_received >= m_fileSize) {
             m_received += bytes.size();
             return;
         }
         if (m_stage != Stage::Sections) {
-            // m_framingEnd is at most the file's size, so these bytes are the file's and fit the framing buffer.
+            // m_framingEnd is at most the body's size, so these bytes are the body's and fit the framing buffer.
             size_t count = static_cast<size_t>(std::min<uint64_t>(bytes.size(), m_framingEnd - m_received));
             memcpySpan(std::span { m_framing }.subspan(static_cast<size_t>(m_received), count), bytes.first(count));
             m_received += count;
@@ -642,7 +703,7 @@ void BodyValidationStream::didReceiveEnvelope()
     }
     m_envelope = *envelope;
     m_framingEnd = ContainerInternal::framingBytesFor(m_envelope.sectionCount);
-    // container.directory: the directory must lie inside the file for its CRC and its entries to be read.
+    // container.directory: the directory must lie inside the body for its CRC and its entries to be read.
     if (m_framingEnd > m_fileSize) {
         m_failure = ContainerChecks::directory;
         return;
@@ -658,12 +719,12 @@ void BodyValidationStream::didReceiveDirectory()
         return;
     }
     if (m_mode == ValidationMode::Full)
-        m_requiredSectionsDiffer = !ContainerInternal::holdsRequiredSections(directory, m_envelope.highestTier);
+        m_requiredSectionsDiffer = !ContainerInternal::holdsRequiredSections(directory, m_envelope.highestTier, m_expectedKey);
     for (size_t index = 0; index < m_envelope.sectionCount; ++index) {
         auto record = ContainerInternal::directoryRecord(directory, index);
         uint32_t state = ~0u;
         // Only Integrity lets an entry cover framing bytes, which have arrived already; container.directory kept the entry
-        // inside the file.
+        // inside the body.
         if (record.offset < m_framingEnd) {
             uint64_t end = std::min(record.offset + record.size, m_framingEnd);
             state = crc32cExtend(state, std::span { m_framing }.subspan(static_cast<size_t>(record.offset), static_cast<size_t>(end - record.offset)));
@@ -673,7 +734,7 @@ void BodyValidationStream::didReceiveDirectory()
     m_stage = Stage::Sections;
 }
 
-// bytes start at file offset m_received, past the framing and inside the file.
+// bytes start at body offset m_received, past the framing and inside the body.
 void BodyValidationStream::appendSectionBytes(std::span<const uint8_t> bytes)
 {
     uint64_t begin = m_received;
@@ -707,7 +768,7 @@ std::expected<BodyLayout, ContainerCheck> BodyValidationStream::finish()
         return std::unexpected(ContainerChecks::size);
     if (m_failure)
         return std::unexpected(*m_failure);
-    // A stream that received the whole file without a failure has checked its envelope and its directory.
+    // A stream that received the whole body without a failure has checked its envelope and its directory.
     ASSERT(m_stage == Stage::Sections);
     if (!m_paddingIsZero)
         return std::unexpected(ContainerChecks::directory);
@@ -719,12 +780,6 @@ std::expected<BodyLayout, ContainerCheck> BodyValidationStream::finish()
             return std::unexpected(ContainerChecks::checksum);
     }
     return ContainerInternal::layoutOf(m_envelope, directory);
-}
-
-std::expected<BodyEnvelope, ContainerCheck> validateBodyEnvelope(std::span<const uint8_t> fileStart, uint64_t fileSize,
-    const BodyKey& expectedKey, std::span<const uint8_t, 16> headerDigest, ValidationMode mode)
-{
-    return ContainerInternal::checkEnvelope(fileStart, fileSize, expectedKey, headerDigest, mode);
 }
 
 std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
@@ -739,7 +794,7 @@ std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const ui
     auto directory = bytes.subspan(bodyEnvelopeBytes, static_cast<size_t>(framingEnd - bodyEnvelopeBytes));
     if (auto failure = ContainerInternal::checkDirectory(directory, *envelope, mode))
         return std::unexpected(*failure);
-    if (mode == ValidationMode::Full && !ContainerInternal::holdsRequiredSections(directory, envelope->highestTier))
+    if (mode == ValidationMode::Full && !ContainerInternal::holdsRequiredSections(directory, envelope->highestTier, expectedKey))
         return std::unexpected(ContainerChecks::required);
     for (SectionKind kind : checksummedKinds) {
         auto index = ContainerInternal::firstRecordOf(directory, kind);
@@ -830,7 +885,7 @@ std::expected<PackPrefix, PackRejection> decodePackPrefix(std::span<const uint8_
     if (!result.identifier)
         return std::unexpected("the pack identifier is zero"_s);
     if (!equalSpans(std::span<const uint8_t> { result.headerDigest }, std::span<const uint8_t> { headerDigest }))
-        return std::unexpected("the pack belongs to another artifact header"_s);
+        return std::unexpected(packOfAnotherHeader);
     return result;
 }
 

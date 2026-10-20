@@ -33,6 +33,7 @@
 #include "TestController.h"
 #include "UIScriptController.h"
 #include "WebCoreTestSupport.h"
+#include <WebKit/WKCast.h>
 #include <WebKit/WKContextPrivate.h>
 #include <WebKit/WKData.h>
 #include <WebKit/WKDictionary.h>
@@ -232,18 +233,18 @@ end:
     TestController::singleton().reattachPageToWebProcess();
 }
 
-void TestInvocation::dumpWebProcessUnresponsiveness(const char* errorMessage)
+void TestInvocation::dumpWebProcessUnresponsiveness(ASCIILiteral errorMessage)
 {
-    fprintf(stderr, "%s", errorMessage);
+    SAFE_FPRINTF(stderr, "%s", errorMessage);
     char buffer[1024] = { };
 #if PLATFORM(COCOA)
     pid_t pid = WKPageGetProcessIdentifier(TestController::singleton().mainWebView()->page());
-    snprintf(buffer, sizeof(buffer), "#PROCESS UNRESPONSIVE - %s (pid %ld)\n", TestController::webProcessName().characters(), static_cast<long>(pid));
+    SAFE_SPRINTF(std::span { buffer }, "#PROCESS UNRESPONSIVE - %s (pid %ld)\n", TestController::webProcessName(), static_cast<long>(pid));
 #else
-    snprintf(buffer, sizeof(buffer), "#PROCESS UNRESPONSIVE - %s\n", TestController::webProcessName().characters());
+    SAFE_SPRINTF(std::span { buffer }, "#PROCESS UNRESPONSIVE - %s\n", TestController::webProcessName());
 #endif
 
-    dump(errorMessage, buffer, true);
+    dump(errorMessage, UTF8CStringView::unsafeFromUTF8(buffer), true);
 
     if (!TestController::singleton().usingServerMode())
         return;
@@ -252,16 +253,16 @@ void TestInvocation::dumpWebProcessUnresponsiveness(const char* errorMessage)
         fputs("Grab an image of the stack, then hit enter...\n", stderr);
 
     if (!fgets(buffer, sizeof(buffer), stdin) || strcmp(buffer, "#SAMPLE FINISHED\n"))
-        fprintf(stderr, "Failed receive expected sample response, got:\n\t\"%s\"\nContinuing...\n", buffer);
+        SAFE_FPRINTF(stderr, "Failed receive expected sample response, got:\n\t\"%s\"\nContinuing...\n", UTF8CStringView::unsafeFromUTF8(buffer));
 }
 
-void TestInvocation::dump(const char* textToStdout, const char* textToStderr, bool seenError)
+void TestInvocation::dump(UTF8CStringView textToStdout, UTF8CStringView textToStderr, bool seenError)
 {
     printf("Content-Type: text/plain\n");
-    if (textToStdout)
-        fputs(textToStdout, stdout);
-    if (textToStderr)
-        fputs(textToStderr, stderr);
+    if (!textToStdout.isNull())
+        fputs(textToStdout.utf8(), stdout);
+    if (!textToStderr.isNull())
+        fputs(textToStderr.utf8(), stderr);
 
     fputs("#EOF\n", stdout);
     fputs("#EOF\n", stderr);
@@ -283,6 +284,36 @@ void TestInvocation::forceRepaintDoneCallback(WKErrorRef error, void* context)
     testInvocation->m_gotRepaint = true;
     TestController::singleton().notifyDone();
 }
+
+#if PLATFORM(GTK) || PLATFORM(WPE)
+void TestInvocation::presentationUpdateDoneCallback(WKErrorRef error, void* context)
+{
+    if (error)
+        return;
+
+    auto* testInvocation = static_cast<TestInvocation*>(context);
+    RELEASE_ASSERT(TestController::singleton().isCurrentInvocation(testInvocation));
+
+    testInvocation->m_gotPresentationUpdate = true;
+    TestController::singleton().notifyDone();
+}
+
+void TestInvocation::waitForPresentationUpdate()
+{
+    // Tests that use testRunner.dontForceRepaint(), still need the frame reflecting the last
+    // rendering update to reach the view before capturing. Since the coordinated graphics ports
+    // composite/hand-over buffers asynchronously, we need an explicit wait here to capture
+    // the correct frame.
+    m_gotPresentationUpdate = false;
+    WKPageCallAfterNextPresentationUpdate(TestController::singleton().mainWebView()->page(), this, TestInvocation::presentationUpdateDoneCallback);
+    TestController::singleton().runUntil(m_gotPresentationUpdate, m_timeout);
+}
+#else
+void TestInvocation::waitForPresentationUpdate()
+{
+    // Cocoa ports synchronize with the window server in PlatformWebView::windowSnapshotImage().
+}
+#endif
 
 void TestInvocation::dumpResourceLoadStatisticsIfNecessary()
 {
@@ -311,9 +342,9 @@ void TestInvocation::dumpResults()
         m_textOutput.append(TestController::singleton().dumpPrivateClickMeasurement());
 
     if (m_textOutput.hasOverflowed())
-        dump("text output overflowed");
+        dump("text output overflowed"_s);
     else if (m_textOutput.length() || !m_audioResult)
-        dump(m_textOutput.toString().utf8().data());
+        dump(m_textOutput.toString().utf8());
     else
         dumpAudio(m_audioResult.get());
 
@@ -325,7 +356,8 @@ void TestInvocation::dumpResults()
                 m_gotRepaint = false;
                 WKPageForceRepaint(TestController::singleton().mainWebView()->page(), this, TestInvocation::forceRepaintDoneCallback);
                 TestController::singleton().runUntil(m_gotRepaint, TestController::noTimeout);
-            }
+            } else
+                waitForPresentationUpdate();
             dumpPixelsAndCompareWithExpected(SnapshotResultType::WebView, m_repaintRects.get());
         }
     }
@@ -638,6 +670,11 @@ WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedB
 
     if (WKStringIsEqualToUTF8CString(messageName, "SetWindowIsKey")) {
         TestController::singleton().mainWebView()->setWindowIsKey(booleanValue(messageBody));
+        return nullptr;
+    }
+
+    if (WKStringIsEqualToUTF8CString(messageName, "DisconnectFrameInspectorTarget")) {
+        WKPageDisconnectInspectorFrameTargetForTesting(TestController::singleton().mainWebView()->page(), dynamic_wk_cast<WKFrameHandleRef>(messageBody));
         return nullptr;
     }
 
@@ -1280,8 +1317,8 @@ WKRetainPtr<WKTypeRef> TestInvocation::didReceiveSynchronousMessageFromInjectedB
 
     if (WKStringIsEqualToUTF8CString(messageName, "SetPrivateClickMeasurementAttributionReportURLsForTesting")) {
         auto testDictionary = dictionaryValue(messageBody);
-        auto sourceURL = adoptWK(WKURLCreateWithUTF8CString(toWTFString(stringValue(testDictionary, "SourceURLString")).utf8().data()));
-        auto destinationURL = adoptWK(WKURLCreateWithUTF8CString(toWTFString(stringValue(testDictionary, "AttributeOnURLString")).utf8().data()));
+        auto sourceURL = toWKURL(toWTFString(stringValue(testDictionary, "SourceURLString")));
+        auto destinationURL = toWKURL(toWTFString(stringValue(testDictionary, "AttributeOnURLString")));
         TestController::singleton().setPrivateClickMeasurementAttributionReportURLsForTesting(sourceURL.get(), destinationURL.get());
         return nullptr;
     }

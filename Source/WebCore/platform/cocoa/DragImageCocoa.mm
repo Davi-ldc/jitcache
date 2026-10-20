@@ -31,11 +31,9 @@
 #import "BitmapImage.h"
 #import "ColorMac.h"
 #import "Element.h"
-#import "FloatRoundedRect.h"
 #import "FontCascade.h"
 #import "FontDescription.h"
 #import "FontSelector.h"
-#import "GraphicsContextCG.h"
 #import "Image.h"
 #import "ImageAdapter.h"
 #import "LocalDefaultSystemAppearance.h"
@@ -192,7 +190,7 @@ LinkImageLayout::LinkImageLayout(URL& url, const String& titleString)
     RetainPtr nsURL = url.createNSURL();
     NSString *absoluteURLString = [nsURL absoluteString];
 
-    NSString *domain = absoluteURLString;
+    RetainPtr domain = absoluteURLString;
 #if HAVE(URL_FORMATTING)
     domain = [nsURL _lp_simplifiedDisplayString];
 #else
@@ -239,7 +237,7 @@ LinkImageLayout::LinkImageLayout(URL& url, const String& titleString)
         RetainPtr<CGPathRef> textPath = adoptCF(CGPathCreateWithRect(CGRectMake(0, 0, textSize.width, textSize.height), nullptr));
         RetainPtr<CTFrameRef> textFrame = adoptCF(CTFramesetterCreateFrame(textFramesetter.get(), fitRange, textPath.get(), (CFDictionaryRef)frameAttributes));
 
-        CFArrayRef ctLines = CTFrameGetLines(textFrame.get());
+        RetainPtr ctLines = CTFrameGetLines(textFrame.get());
         CFIndex lineCount = CFArrayGetCount(ctLines);
         if (!lineCount)
             return;
@@ -249,7 +247,7 @@ LinkImageLayout::LinkImageLayout(URL& url, const String& titleString)
         CGFloat height = 0;
         CTFrameGetLineOrigins(textFrame.get(), CFRangeMake(0, 0), origins.mutableSpan().data());
         for (CFIndex lineIndex = 0; lineIndex < lineCount; ++lineIndex) {
-            CTLineRef line = (CTLineRef)CFArrayGetValueAtIndex(ctLines, lineIndex);
+            RetainPtr line = (CTLineRef)CFArrayGetValueAtIndex(ctLines, lineIndex);
 
             lineBounds = CTLineGetBoundsWithOptions(line, 0);
             CGFloat trailingWhitespaceWidth = CTLineGetTrailingWhitespaceWidth(line);
@@ -291,20 +289,25 @@ DragImageData createDragImageForLink(Element& element, URL& url, const String& t
 {
     LinkImageLayout layout(url, title);
 
-    LocalDefaultSystemAppearance localAppearance(element.document().useDarkAppearance(element.computedStyle()));
+    LocalDefaultSystemAppearance localAppearance(protect(element.document())->useDarkAppearance(protect(element.computedStyle())));
 
     auto imageSize = layout.boundingRect.size();
     RetainPtr<NSImage> dragImage = adoptNS([[NSImage alloc] initWithSize:imageSize]);
     [dragImage _web_lockFocusWithDeviceScaleFactor:deviceScaleFactor];
 
-    GraphicsContextCG context([NSGraphicsContext currentContext].CGContext);
+    RetainPtr<CGContextRef> cgContext = [NSGraphicsContext currentContext].CGContext;
 
-    context.fillRoundedRect(FloatRoundedRect(layout.boundingRect, CornerRadii(linkImageCornerRadius)), colorFromCocoaColor([NSColor controlBackgroundColor]));
+    RetainPtr backgroundPath = adoptCF(CGPathCreateWithRoundedRect(layout.boundingRect, linkImageCornerRadius, linkImageCornerRadius, nullptr));
+    CGContextSetFillColorWithColor(cgContext.get(), cachedCGColor(colorFromCocoaColor([NSColor controlBackgroundColor])).get());
+    CGContextAddPath(cgContext.get(), backgroundPath.get());
+    CGContextFillPath(cgContext.get());
+    CGContextSetTextMatrix(cgContext.get(), CGAffineTransformIdentity);
 
     for (const auto& label : layout.labels) {
-        GraphicsContextStateSaver saver(context);
-        context.translate(label.origin.x(), layout.boundingRect.height() - label.origin.y() - linkImagePadding);
-        CTFrameDraw(label.frame.get(), context.platformContext());
+        CGContextSaveGState(cgContext.get());
+        CGContextTranslateCTM(cgContext.get(), label.origin.x(), layout.boundingRect.height() - label.origin.y() - linkImagePadding);
+        CTFrameDraw(label.frame.get(), cgContext.get());
+        CGContextRestoreGState(cgContext.get());
     }
 
     [dragImage unlockFocus];

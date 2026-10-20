@@ -507,7 +507,7 @@ RetainPtr<NSMenuItem> WebContextMenuProxyMac::createShareMenuItem(ShareMenuItemT
     if (hitTestData.imageSharedMemory) {
         if (usePlaceholder)
             [items addObject:adoptNS([[NSImage alloc] init]).get()];
-        else if (auto image = adoptNS([[NSImage alloc] initWithData:protect(*hitTestData.imageSharedMemory)->toNSData().get()])) {
+        else if (RetainPtr image = createCocoaImageRestrictedToSupportedTypes(protect(*hitTestData.imageSharedMemory)->toNSData().get())) {
             RetainPtr title = hitTestData.imageText.createNSString();
             if (![title length])
                 title = WEB_UI_NSSTRING(@"Image", "Fallback title for images in the share sheet");
@@ -546,7 +546,7 @@ RetainPtr<NSMenuItem> WebContextMenuProxyMac::createShareMenuItem(ShareMenuItemT
 
 void WebContextMenuProxyMac::cancelTracking()
 {
-    [protect(m_menu) cancelTracking];
+    [protect(m_menu) cancelTrackingWithoutAnimation];
 }
 
 void WebContextMenuProxyMac::show()
@@ -1146,7 +1146,7 @@ RetainPtr<NSArray> WebContextMenuProxyMac::platformData() const
 WKCaptionStyleMenuController *WebContextMenuProxyMac::captionStyleMenuController()
 {
     if (!m_captionStyleMenuController) {
-        m_captionStyleMenuController = [WKCaptionStyleMenuController menuController];
+        lazyInitialize(m_captionStyleMenuController, retainPtr([WKCaptionStyleMenuController menuController]));
         [m_captionStyleMenuController setDelegate:RetainPtr { menuDelegate() }.get()];
     }
     return m_captionStyleMenuController.get();
@@ -1155,7 +1155,7 @@ WKCaptionStyleMenuController *WebContextMenuProxyMac::captionStyleMenuController
 WKMenuDelegate *WebContextMenuProxyMac::menuDelegate()
 {
     if (!m_menuDelegate)
-        m_menuDelegate = adoptNS([[WKMenuDelegate alloc] initWithMenuProxy:*this]);
+        lazyInitialize(m_menuDelegate, adoptNS([[WKMenuDelegate alloc] initWithMenuProxy:*this]));
     return m_menuDelegate.get();
 }
 
@@ -1166,7 +1166,7 @@ void WebContextMenuProxyMac::didShowContextMenu(NSMenu *)
 
 void WebContextMenuProxyMac::didDismissContextMenu(NSMenu *menu)
 {
-    protect(page())->didDismissContextMenu();
+    protect(page())->didDismissContextMenu(frameInfo());
 
     if (m_captionStyleMenuController && [m_captionStyleMenuController hasAncestor:menu])
         captionStyleMenuDidClose();

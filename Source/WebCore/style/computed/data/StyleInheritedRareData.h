@@ -55,6 +55,7 @@
 #include <WebCore/StyleTextEmphasisStyle.h>
 #include <WebCore/StyleTextIndent.h>
 #include <WebCore/StyleTextShadow.h>
+#include <WebCore/StyleTextSizeAdjust.h>
 #include <WebCore/StyleTextUnderlineOffset.h>
 #include <WebCore/StyleTextUnderlinePosition.h>
 #include <WebCore/StyleTouchAction.h>
@@ -71,10 +72,6 @@
 
 #if HAVE(CORE_MATERIAL)
 #include <WebCore/AppleVisualEffect.h>
-#endif
-
-#if ENABLE(TEXT_AUTOSIZING)
-#include <WebCore/StyleTextSizeAdjust.h>
 #endif
 
 #if ENABLE(DARK_MODE_CSS)
@@ -165,9 +162,7 @@ public:
 
     StrokeMiterlimit strokeMiterLimit;
 
-#if ENABLE(TEXT_AUTOSIZING)
     TextSizeAdjust textSizeAdjust;
-#endif
 
     MathDepth mathDepth;
 
@@ -176,6 +171,7 @@ public:
 
     Widows widows;
     Orphans orphans;
+    HyphenateLimitEdge internalHyphenateLimitCharsWord;
     HyphenateLimitEdge hyphenateLimitBefore;
     HyphenateLimitEdge hyphenateLimitAfter;
     HyphenateLimitLines hyphenateLimitLines;
@@ -212,6 +208,7 @@ public:
     PREFERRED_TYPE(RubyAlign) unsigned rubyAlign : 2;
     PREFERRED_TYPE(RubyOverhang) unsigned rubyOverhang : 1;
     PREFERRED_TYPE(TextZoom) unsigned textZoom: 1;
+    PREFERRED_TYPE(InterpolateSize) unsigned interpolateSize : 1;
 #if ENABLE(WEBKIT_TOUCH_CALLOUT_CSS_PROPERTY)
     PREFERRED_TYPE(WebkitTouchCallout) unsigned touchCallout : 1;
 #endif
@@ -230,6 +227,10 @@ public:
     PREFERRED_TYPE(bool) unsigned autoRevealsWhenFound : 1;
     PREFERRED_TYPE(bool) unsigned insideDefaultButton : 1;
     PREFERRED_TYPE(bool) unsigned insideSubmitButton : 1;
+    PREFERRED_TYPE(bool) unsigned inBaseAppearanceSubtree : 1;
+#if ENABLE(SMART_IMAGE_RESIZER)
+    PREFERRED_TYPE(bool) unsigned isAffectedBySmartImageResizer : 1;
+#endif
 #if HAVE(CORE_MATERIAL)
     PREFERRED_TYPE(AppleVisualEffect) unsigned usedAppleVisualEffectForSubtree : 5;
 #endif

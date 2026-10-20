@@ -160,14 +160,14 @@ int main(int argc, char** argv)
     // Options::initializeWithOptionsCustomization runs the callback once every option holds its default and the
     // override bookkeeping Options::setOptions writes exists, and before notifyOptionsChanged derives the dependent
     // options, which is where Bun's JSCInitialize and the testb3 and testmasm drivers apply theirs.
-    CString groupOptions = group.utf8();
+    UTF8CString groupOptions = group.utf8();
     bool groupRejected = false;
     JSC::initialize([&] {
         if (groupOptions.length())
-            groupRejected = !JSC::Options::setOptions(groupOptions.data());
+            groupRejected = !JSC::Options::setOptions(groupOptions.legacyCStringPointer());
     });
     if (groupRejected) {
-        fprintf(stderr, "testjitcache: JSC rejected the options of group \"%s\"\n", groupOptions.data());
+        SAFE_FPRINTF(stderr, "testjitcache: JSC rejected the options of group \"%s\"\n", groupOptions);
         return 2;
     }
 
@@ -183,7 +183,7 @@ int main(int argc, char** argv)
             anyFailed = true;
             printf("FAIL %s\n", test.name.characters());
             for (auto& message : messages)
-                printf("    %s\n", message.utf8().data());
+                SAFE_PRINTF("    %s\n", message.utf8());
         }
         fflush(stdout);
     }

@@ -25,12 +25,14 @@
 
 #pragma once
 
+#include <WebCore/CSSLinkParameter.h>
 #include <wtf/Forward.h>
 
 namespace WebCore {
 
 class CSSParserTokenRange;
 class CSSValue;
+struct CSSParserContext;
 
 namespace CSS {
 struct PropertyParserState;
@@ -38,9 +40,14 @@ struct PropertyParserState;
 
 namespace CSSPropertyParserHelpers {
 
-// <param()> = param( <dashed-ident> , <declaration-value>? )
+// <param()> = param( <param-spec> , <declaration-value>? )
 // https://drafts.csswg.org/css-link-params/#funcdef-param
+std::optional<CSS::ParamFunction> consumeParamFunctionRaw(CSSParserTokenRange&, CSS::PropertyParserState&);
 RefPtr<CSSValue> consumeParamFunction(CSSParserTokenRange&, CSS::PropertyParserState&);
+
+// The parameters of a URL's fragment directive.
+// https://drafts.csswg.org/css-link-params/#url-frag
+Vector<CSS::ParamFunction> parseLinkParametersFromFragment(StringView, const CSSParserContext&);
 
 } // namespace CSSPropertyParserHelpers
 } // namespace WebCore

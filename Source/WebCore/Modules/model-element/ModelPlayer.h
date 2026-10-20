@@ -70,6 +70,16 @@ class ColorSpace;
 class FloatSize;
 struct ModelPlayerGraphicsLayerConfiguration;
 
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+enum class EnvironmentMapKind : uint8_t { None, Default, Custom };
+#endif
+
+#if ENABLE(MODEL_PROCESS)
+struct ModelSceneGraphAsTextOptions {
+    bool includeAssetEntities { false };
+};
+#endif
+
 class WEBCORE_EXPORT ModelPlayer : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<ModelPlayer, WTF::DestructionThread::Main> {
     WTF_MAKE_TZONE_ALLOCATED_EXPORT(ModelPlayer, WEBCORE_EXPORT);
 public:
@@ -153,7 +163,10 @@ public:
 #endif
 
 #if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
-    virtual void setEnvironmentMap(Ref<SharedBuffer>&& data);
+    virtual void setEnvironmentMap(Ref<SharedBuffer>&& data, const URL& sourceURL);
+    virtual void disableEnvironmentMap();
+    virtual void enableSystemEnvironmentMap();
+    virtual String environmentMapForTesting() const;
 #endif
 
 #if ENABLE(MODEL_ELEMENT_PORTAL)
@@ -161,8 +174,9 @@ public:
 #endif
 
 #if ENABLE(SPATIAL_PORTAL)
-    virtual void setPortalTransform(PortalTransformKind);
+    virtual void setPortalTransform(const UsedPortalTransform&);
     virtual void setPortalAction(PortalActionKind);
+    virtual void setAnchor(NodeIdentifier, std::optional<NodeIdentifier> anchorNode, const String& placement);
 #endif
 
 #if ENABLE(MODEL_ELEMENT_STAGE_MODE)
@@ -174,9 +188,19 @@ public:
     virtual void exitImmersivePresentation(CompletionHandler<void()>&&);
 #endif
 
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    virtual void enterVolumetricPresentation(CompletionHandler<void(std::optional<LayerHostingContextIdentifier>)>&&);
+    virtual void exitVolumetricPresentation();
+    virtual void updateVolumetricPresentationSize(const FloatSize&);
+#endif
+
 #if HAVE(SUPPORT_HDR_DISPLAY) && ENABLE(PIXEL_FORMAT_RGBA16F)
     virtual void setDynamicRangeLimit(PlatformDynamicRangeLimit, float, bool);
     virtual std::optional<double> getEffectiveDynamicRangeLimitValue() const;
+#endif
+
+#if ENABLE(MODEL_PROCESS)
+    virtual void sceneGraphAsTextForTesting(std::optional<NodeIdentifier> rootNode, Vector<std::pair<NodeIdentifier, String>>&& modelLabels, const ModelSceneGraphAsTextOptions&, CompletionHandler<void(String&&)>&&);
 #endif
 };
 

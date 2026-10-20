@@ -163,10 +163,10 @@ webrtc::PeerConnectionInterface::RTCConfiguration configurationFromMediaEndpoint
 
     for (auto& server : configuration.iceServers) {
         webrtc::PeerConnectionInterface::IceServer iceServer;
-        iceServer.username = server.username.utf8().data();
-        iceServer.password = server.credential.utf8().data();
+        iceServer.username = server.username.utf8().toStdString();
+        iceServer.password = server.credential.utf8().toStdString();
         for (auto& url : server.urls)
-            iceServer.urls.push_back({ url.string().utf8().data() });
+            iceServer.urls.push_back(url.string().utf8().toStdString());
         rtcConfiguration.servers.push_back(WTF::move(iceServer));
     }
 
@@ -175,7 +175,7 @@ webrtc::PeerConnectionInterface::RTCConfiguration configurationFromMediaEndpoint
 
     for (auto& pem : configuration.certificates) {
         rtcConfiguration.certificates.push_back(webrtc::RTCCertificate::FromPEM(webrtc::RTCCertificatePEM {
-            pem.privateKey.utf8().data(), pem.certificate.utf8().data()
+            std::string_view { byteCast<char>(pem.privateKey.utf8().span()) }, std::string_view { byteCast<char>(pem.certificate.utf8().span()) }
         }));
     }
 
@@ -272,7 +272,7 @@ void LibWebRTCPeerConnectionBackend::doAddIceCandidate(RTCIceCandidate& candidat
 {
     webrtc::SdpParseError error;
     int sdpMLineIndex = candidate.sdpMLineIndex() ? candidate.sdpMLineIndex().value() : 0;
-    std::unique_ptr<webrtc::IceCandidate> rtcCandidate(webrtc::CreateIceCandidate(candidate.sdpMid().utf8().data(), sdpMLineIndex, candidate.candidate().utf8().data(), &error));
+    std::unique_ptr<webrtc::IceCandidate> rtcCandidate(webrtc::CreateIceCandidate(std::string_view { byteCast<char>(candidate.sdpMid().utf8().span()) }, sdpMLineIndex, candidate.candidate().utf8().toStdString(), &error));
 
     if (!rtcCandidate) {
         callback(Exception { ExceptionCode::OperationError, String::fromUTF8(error.description) });

@@ -45,7 +45,9 @@
 namespace JSC {
 
 class EvalExecutable;
+#if USE(BUN_JSC_ADDITIONS)
 class GlobalExecutable;
+#endif
 class IndirectEvalExecutable;
 class Identifier;
 class DirectEvalExecutable;
@@ -95,16 +97,21 @@ public:
     iterator begin() { return m_map.begin(); }
     iterator end() { return m_map.end(); }
 
-    // A miss returns null: CodeCache::getUnlinkedGlobalCodeBlock decodes the provider's cached bytecode itself
-    // (fetchFromDisk), so JITCache can seed a decoded block before the map publishes it.
     template<typename UnlinkedCodeBlockType>
-    UnlinkedCodeBlockType* findCacheAndUpdateAge(VM&, const SourceCodeKey& key)
+    UnlinkedCodeBlockType* findCacheAndUpdateAge(VM& vm, const SourceCodeKey& key)
     {
         prune();
 
         iterator findResult = m_map.find(key);
-        if (findResult == m_map.end())
-            return nullptr;
+        if (findResult == m_map.end()) {
+            // A block decoded from the provider's cached bytecode is as reusable as one we generated: remember it the
+            // way getUnlinkedGlobalCodeBlock() remembers those, so another global in this VM loading the same source
+            // links against this block instead of decoding its own copy of the unlinked tree.
+            UnlinkedCodeBlockType* decoded = fetchFromDisk<UnlinkedCodeBlockType>(vm, key);
+            if (decoded && Options::useCodeCache())
+                addCache(key, SourceCodeValue(vm, decoded, m_age));
+            return decoded;
+        }
 
         int64_t age = m_age - findResult->value.age;
         if (age > m_capacity) {
@@ -145,6 +152,9 @@ public:
         m_map.remove(it);
     }
 
+    void removeIfHolds(const SourceCodeKey&, JSCell*);
+    void removeCodeDecodedFromPersistentPayloads();
+
     void clear()
     {
         m_size = 0;
@@ -154,12 +164,11 @@ public:
 
     int64_t age() { return m_age; }
 
-    // Decodes the block the key's provider holds in its cached bytecode, if any; adds nothing to the map.
     template<typename UnlinkedCodeBlockType>
-    UnlinkedCodeBlockType* fetchFromDisk(VM& vm, const SourceCodeKey& key)
+    UnlinkedCodeBlockType* fetchFromDisk(VM& vm, const SourceCodeKey& key, Decoder::RecoverableCode recoverableCode = Decoder::RecoverableCode::Yes)
     {
         if constexpr (std::is_base_of_v<UnlinkedCodeBlock, UnlinkedCodeBlockType> && !std::is_same_v<UnlinkedCodeBlockType, UnlinkedEvalCodeBlock>) {
-            UnlinkedCodeBlockType* codeBlock = fetchFromDiskImpl<UnlinkedCodeBlockType>(vm, key);
+            UnlinkedCodeBlockType* codeBlock = fetchFromDiskImpl<UnlinkedCodeBlockType>(vm, key, recoverableCode);
             if (Options::forceDiskCache()) [[unlikely]] {
                 if (isMainThread())
                     RELEASE_ASSERT(codeBlock);
@@ -170,18 +179,19 @@ public:
         } else {
             UNUSED_PARAM(vm);
             UNUSED_PARAM(key);
+            UNUSED_PARAM(recoverableCode);
             return nullptr;
         }
     }
 
 private:
     template<typename UnlinkedCodeBlockType>
-    UnlinkedCodeBlockType* fetchFromDiskImpl(VM& vm, const SourceCodeKey& key)
+    UnlinkedCodeBlockType* fetchFromDiskImpl(VM& vm, const SourceCodeKey& key, Decoder::RecoverableCode recoverableCode)
     {
         RefPtr<CachedBytecode> cachedBytecode = key.source().provider().cachedBytecode();
         if (!cachedBytecode || !cachedBytecode->size())
             return nullptr;
-        return decodeCodeBlock<UnlinkedCodeBlockType>(vm, key, *cachedBytecode);
+        return decodeCodeBlock<UnlinkedCodeBlockType>(vm, key, *cachedBytecode, recoverableCode);
     }
 
     // This constant factor biases cache capacity toward allowing a minimum
@@ -189,6 +199,9 @@ private:
     static constexpr Seconds workingSetTime = 10_s;
     static constexpr int64_t workingSetMaxBytes = 16000000;
     static constexpr size_t workingSetMaxEntries = 2000;
+
+    // How many random entries pruneSlowCase() looks at to pick the one it evicts.
+    static constexpr unsigned evictionSampleSize = 5;
 
     // This constant factor biases cache capacity toward recent activity. We
     // want to adapt to changing workloads.
@@ -236,19 +249,25 @@ public:
 
     void updateCache(const UnlinkedFunctionExecutable*, const SourceCode&, CodeSpecializationKind, const UnlinkedFunctionCodeBlock*);
 
+    // The module's evaluation finished, so nothing links against this block again unless the same source is loaded
+    // into another global object of this VM, which then decodes or generates its own.
+    void forgetUnlinkedModuleProgramCodeBlock(ModuleProgramExecutable*, const SourceCode&, UnlinkedModuleProgramCodeBlock*);
+
     void clear()
     {
         write();
         m_sourceCode.clear();
     }
     JS_EXPORT_PRIVATE void write();
+    // Entries a lookup can decode again instead of parsing.
+    void clearCodeDecodedFromPersistentPayloads() { m_sourceCode.removeCodeDecodedFromPersistentPayloads(); }
 
 private:
-    template <class UnlinkedCodeBlockType, class ExecutableType>
+    template <class UnlinkedCodeBlockType, class ExecutableType> 
     UnlinkedCodeBlockType* getUnlinkedGlobalCodeBlock(VM&, ExecutableType*, const SourceCode&, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType);
-    // What follows a generation, and an import in its place: when useCodeCache is on, the
-    // map entry and the provider's two cache hooks. Does nothing for null.
-    void publishGeneratedCodeBlock(VM&, const SourceCodeKey&, UnlinkedCodeBlock*);
+    // What follows a generation, and an import in its place: when useCodeCache is on and the block is not private to
+    // its executable, the map entry and the provider's two cache hooks. Does nothing for null.
+    void publishGeneratedCodeBlock(VM&, const SourceCodeKey&, UnlinkedCodeBlock*, bool privateToExecutable);
 
     CodeCacheMap m_sourceCode;
 };
@@ -275,12 +294,12 @@ template <> struct CacheTypes<UnlinkedModuleProgramCodeBlock> {
 
 UnlinkedEvalCodeBlock* generateUnlinkedCodeBlockForDirectEval(VM&, DirectEvalExecutable*, const SourceCode&, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType, const TDZEnvironment* variablesUnderTDZ, const PrivateNameEnvironment*);
 // `depth` bounds how many levels of nested functions get code blocks (0 = only the program's own).
-UnlinkedProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForProgram(VM&, const SourceCode&, LexicallyScopedFeatures, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType, unsigned depth = std::numeric_limits<unsigned>::max());
-UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModuleProgram(VM&, const SourceCode&, LexicallyScopedFeatures, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType, unsigned depth = std::numeric_limits<unsigned>::max());
+UnlinkedProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForProgram(VM&, const SourceCode&, LexicallyScopedFeatures, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType, unsigned depth = std::numeric_limits<unsigned>::max(), OptimizeBytecode = OptimizeBytecode::No);
+UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModuleProgram(VM&, const SourceCode&, LexicallyScopedFeatures, JSParserScriptMode, OptionSet<CodeGenerationMode>, ParserError&, EvalContextType, unsigned depth = std::numeric_limits<unsigned>::max(), OptimizeBytecode = OptimizeBytecode::No);
 // For a function executable that was created directly (e.g. a builtin): its body and every nested function, as an ahead-of-time cache wants.
 // `depth` bounds how many levels of nested functions get code blocks (0 = only the function's own; functions past the
 // bound stay in the cache as executables whose bodies are generated from source when first called).
-JS_EXPORT_PRIVATE void recursivelyGenerateUnlinkedCodeBlocksForFunction(VM&, UnlinkedFunctionExecutable*, const SourceCode& parentSource, ParserError&, unsigned depth = std::numeric_limits<unsigned>::max());
+JS_EXPORT_PRIVATE void recursivelyGenerateUnlinkedCodeBlocksForFunction(VM&, UnlinkedFunctionExecutable*, const SourceCode& parentSource, ParserError&, unsigned depth = std::numeric_limits<unsigned>::max(), OptimizeBytecode = OptimizeBytecode::No);
 
 // What a CodeCache hit does besides returning the block: the executable learns the parse results
 // (newCodeBlockFor() requires them) and the provider the //# sourceURL / sourceMappingURL directives.

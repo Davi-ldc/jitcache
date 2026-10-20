@@ -32,7 +32,6 @@
 #include "Term.h"
 #include <wtf/DataLog.h>
 #include <wtf/Vector.h>
-#include <wtf/text/CString.h>
 
 namespace WebCore {
 
@@ -110,13 +109,13 @@ static String prefixTreeVertexToString(const PrefixTreeVertex& vertex, const Has
 
 static void recursivePrint(const PrefixTreeVertex& vertex, const HashMap<const PrefixTreeVertex*, ActionList>& actions, unsigned depth)
 {
-    dataLogF("%s", prefixTreeVertexToString(vertex, actions, depth).utf8().data());
+    dataLog(prefixTreeVertexToString(vertex, actions, depth));
     for (const auto& edge : vertex.edges) {
         StringBuilder builder;
         for (unsigned i = 0; i < depth * 2; ++i)
             builder.append(' ');
         builder.append("vertex edge: "_s, edge.term->toString(), '\n');
-        dataLogF("%s", builder.toString().utf8().data());
+        dataLog(builder.toString());
         ASSERT(edge.child);
         recursivePrint(*edge.child.get(), actions, depth + 1);
     }
@@ -398,7 +397,7 @@ static void generateNFAForSubtree(NFA& nfa, ImmutableCharNFANodeBuilder&& subtre
     clearReverseSuffixTree(reverseSuffixTreeRoots);
 }
 
-bool CombinedURLFilters::processNFAs(size_t maxNFASize, Function<bool(NFA&&)>&& handler)
+bool CombinedURLFilters::processNFAs(size_t maxNFASize, NOESCAPE const Function<bool(NFA&&)>& handler)
 {
 #if CONTENT_EXTENSIONS_STATE_MACHINE_DEBUGGING
     print();

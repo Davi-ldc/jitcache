@@ -238,6 +238,12 @@ WK_EXPORT void WKWebsiteDataStoreSetStorageAccessPermissionForTesting(WKWebsiteD
 typedef void (*WKWebsiteDataStoreSetStorageAccessForTestingFunction)(void* functionContext);
 WK_EXPORT void WKWebsiteDataStoreSetStorageAccessForTesting(WKWebsiteDataStoreRef dataStoreRef, bool blocked, void* context, WKWebsiteDataStoreSetStorageAccessForTestingFunction completionHandler);
 
+typedef void (*WKWebsiteDataStoreRevokeLocalNetworkAccessPermissionsForTestingFunction)(void* functionContext);
+WK_EXPORT void WKWebsiteDataStoreRevokeLocalNetworkAccessPermissionsForTesting(WKWebsiteDataStoreRef dataStoreRef, WKStringRef originString, void* context, WKWebsiteDataStoreRevokeLocalNetworkAccessPermissionsForTestingFunction completionHandler);
+
+typedef void (*WKWebsiteDataStoreClearLocalNetworkAccessPermissionsForTestingFunction)(void* functionContext);
+WK_EXPORT void WKWebsiteDataStoreClearLocalNetworkAccessPermissionsForTesting(WKWebsiteDataStoreRef dataStoreRef, void* context, WKWebsiteDataStoreClearLocalNetworkAccessPermissionsForTestingFunction completionHandler);
+
 typedef void (*WKWebsiteDataStoreFlushNetworkProcessIPCCallback)(void* context);
 WK_EXPORT void WKWebsiteDataStoreFlushNetworkProcessIPC(WKWebsiteDataStoreRef dataStore, void* context, WKWebsiteDataStoreFlushNetworkProcessIPCCallback callback);
 

@@ -36,7 +36,7 @@
 #import <wtf/GetPtr.h>
 #import <wtf/URL.h>
 
-#define IMPL static_cast<WebCore::ProcessingInstruction*>(reinterpret_cast<WebCore::Node*>(_internal))
+#define IMPL downcast<WebCore::ProcessingInstruction>(reinterpret_cast<WebCore::Node*>(_internal))
 
 @implementation DOMProcessingInstruction
 
@@ -59,7 +59,7 @@ WebCore::ProcessingInstruction* core(DOMProcessingInstruction *wrapper)
     return wrapper ? reinterpret_cast<WebCore::ProcessingInstruction*>(wrapper->_internal) : 0;
 }
 
-DOMProcessingInstruction *kit(WebCore::ProcessingInstruction* value)
+SUPPRESS_NODELETE DOMProcessingInstruction *kit(WebCore::ProcessingInstruction* value)
 {
     WebCoreThreadViolationCheckRoundOne();
     return static_cast<DOMProcessingInstruction*>(kit(static_cast<WebCore::Node*>(value)));

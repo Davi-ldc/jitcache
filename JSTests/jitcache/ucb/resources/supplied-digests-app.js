@@ -1,9 +1,8 @@
-// The app of supplied-digests.js, built with `bun build --compile` together with supplied-digests-module.js, which it loads
-// at run time. supplied-digests.js runs it as a JITCache VM of its own with the run's role (resources/ucb-bun.js, runApp);
-// the sequence index, which runApp passes on, picks the case: 0 and 1, built with --bytecode, with strict on and then off
-// in the Consumer; 2, built without it; 3, built without it and with the digest record removed; 4 and 5, built as
-// CommonJS without it, with the module wrapper overridden in the Producer or in the Consumer before the module loads. The
-// checks are listed in supplied-digests.js.
+// The app of supplied-digests.js, built with `bun build --compile` together with supplied-digests-module.js and
+// warm-module.js, which it loads at run time. supplied-digests.js runs it as a JITCache VM of its own with the run's role and strict on
+// (resources/ucb-bun.js, runApp); the sequence index, which runApp passes on, picks the case: 0, an ES build; 1, the same
+// with the digest record removed; 2 and 3, built as CommonJS, with the module wrapper overridden in the Producer or in the
+// Consumer before the module loads. The checks are listed in supplied-digests.js.
 //
 // Bun creates some of its own JS builtins while it creates the global object, after JITCache's start, and their roots are
 // hashed from their text: each builtin's source is a range of one provider that holds them all, so none spans its
@@ -22,26 +21,26 @@ const Module = require("node:module");
 const { appContext } = require("./ucb-bun.js");
 
 const t = appContext();
-const decodes = t.sequence <= 1;
-const strict = t.sequence !== 1;
-const hasRecord = t.sequence !== 3;
-const overrides = (t.sequence === 4 && t.role === "Producer") || (t.sequence === 5 && t.role !== "Producer");
-// 2 and 3 are ES builds, where the bundler makes the CommonJS embedded module an ES module whose default export is its
+const hasRecord = t.sequence !== 1;
+const overrides = (t.sequence === 2 && t.role === "Producer") || (t.sequence === 3 && t.role !== "Producer");
+// 0 and 1 are ES builds, where the bundler makes the CommonJS embedded module an ES module whose default export is its
 // `module.exports` (`export default require_...()`), and require of an ES module returns its namespace.
-const esBuild = t.sequence === 2 || t.sequence === 3;
+const esBuild = t.sequence <= 1;
 
-// At its first statement, the entry module has been decoded or imported. Without --bytecode its body was captured, so
-// the Consumer imported it, and with strict on that import verified the digest its key rests on, the run's first
-// verification.
+// At its first statement, the entry module has been imported: its body was captured, so the Consumer imported it, and
+// with strict on that import verified the digest its key rests on. In an ES build, Bun's provider of the module looked
+// up its analysis when Bun created it, which hashed the text once before: with the record, to check the recorded
+// digest, a verification of its own; without it, to compute the digest the provider then supplies, which the import
+// verifies as it verifies a recorded one.
 const atStart = t.observes ? atFirstStatement : null;
-if (atStart && t.imports && !decodes) {
+if (atStart && t.imports) {
     t.check(atStart.imports >= 1, "the entry module did not import");
-    const verifications = hasRecord && strict ? 1 : 0;
+    const verifications = esBuild && hasRecord ? 2 : 1;
     t.check(atStart.suppliedDigestVerifications === verifications, () => `the entry module's import made ${atStart.suppliedDigestVerifications} verifications, expected ${verifications}`);
 }
 
-// What a function's first call in the Consumer does: a decoded function is seeded, a generated one imports.
-const firstCall = decodes ? { seededDecodes: [">=", 1], suppliedDigestVerifications: 0 } : { imports: [">=", 1], suppliedDigestVerifications: 0 };
+// What a function's first call in the Consumer does: it imports, and verifies nothing more.
+const firstCall = { imports: [">=", 1], suppliedDigestVerifications: 0 };
 
 // The overriding wrapper. JSCommonJSModule::evaluate keeps a module's text from its first newline, which in a CommonJS
 // build ends the `// @bun @bun-cjs` comment, and drops its last four characters, which hold the `})` closing the bundled
@@ -50,21 +49,25 @@ const firstCall = decodes ? { seededDecodes: [">=", 1], suppliedDigestVerificati
 const wrapperStart = "(function(exports,require,module,__filename,__dirname){return(";
 const wrapperEnd = "}).call(this,exports,require,module,__filename,__dirname))})";
 
-// Where the module's digest comes from: decoded from bytecode or loaded with its record, the executable's record; under an
-// overridden wrapper, which clears the digest the record gives its provider, and without a record, its own text.
+// Where the module's digest comes from: loaded with its record, the executable's record; under an overridden wrapper,
+// which clears the digest the record gives its provider, and without a record, its own text. node:querystring's comes
+// from the internal modules' digest table.
 let loadExpectations = { };
-if (t.configured && decodes)
-    loadExpectations = { sourceDigests: 0, suppliedSourceDigests: [">=", 2] };
-else if (t.configured && overrides)
+if (t.configured && overrides)
     loadExpectations = { sourceDigests: 1 };
-else if (t.configured && t.sequence >= 4)
+else if (t.configured && t.sequence >= 2)
     loadExpectations = { sourceDigests: 0, suppliedSourceDigests: [">=", 1] };
+else if (t.configured && hasRecord)
+    loadExpectations = { sourceDigests: 0, suppliedSourceDigests: [">=", 2] };
 else if (t.configured)
-    loadExpectations = { suppliedSourceDigests: [">=", 1] };
+    loadExpectations = { sourceDigests: [">=", 1], suppliedSourceDigests: [">=", 1] };
 // The embedded module sits beside the entry module in the executable, whose path is Bun.main. A bundle inlines
 // `__dirname` as the directory the app was built from, so path.join(__dirname, ...) would load the module's source file
-// from disk, without its recorded digest or its bytecode.
+// from disk, without its recorded digest.
 const embeddedModule = path.join(path.dirname(Bun.main), "supplied-digests-module.js");
+// The first runtime require of an embedded module runs some of Bun's own builtins for the first time, whose roots Bun
+// hashes from their text; it happens here, outside the window.
+require(path.join(path.dirname(Bun.main), "warm-module.js"));
 const loaded = t.window("loading node:querystring and the embedded module", () => {
     const querystring = require("node:querystring");
     // Bun applies Module.wrapper when it evaluates a CommonJS module; nothing in its loader calls Module.wrap.
@@ -82,14 +85,14 @@ function sdHot(x)
     return total;
 }
 
-// A direct eval of one text, which reads `n` from the decoded function's scope, so every call evaluates the same body.
+// A direct eval of one text, which reads `n` from the imported function's scope, so every call evaluates the same body.
 function sdEval(n)
 {
     return eval("{ let sdEvalTotal = n; for (let i = 0; i < 300; ++i) sdEvalTotal = (sdEvalTotal + i) | 0; sdEvalTotal; }");
 }
 
-// An ES5 constructor: the bytecode generated ahead of time holds only its call body, so `new` requests its
-// construct body, which imports after verifying the module's supplied digest once, with strict on.
+// An ES5 constructor: `new` requests its construct body, which imports with no further verification, since the entry
+// module's import verified the digest its key rests on.
 function SdPoint(x)
 {
     this.x = x;
@@ -105,29 +108,26 @@ for (let i = 0; i < 400; ++i)
     total = (total + sdHot(i)) | 0;
 lines.push(`sdHot ${total}`);
 
-// With --bytecode and strict on, nothing has imported yet a body whose key rests on the entry module's digest, so the
-// direct eval's import is the first that could, and verifies nothing: its key ends in its own text's digest.
+// The direct eval's key ends in its own text's digest, so its import verifies nothing.
 total = t.window("sdEval's first call", () => sdEval(1), t.imports ? { suppliedDigestVerifications: 0, imports: [">=", 1] } : { });
 for (let i = 0; i < 40; ++i)
     total = (total + sdEval(i)) | 0;
 lines.push(`sdEval ${total}`);
 
-const pointExpectations = !t.imports ? { } : decodes && strict ? { imports: 1, suppliedDigestVerifications: 1 } : { imports: 1, suppliedDigestVerifications: 0 };
+const pointExpectations = t.imports ? { imports: 1, suppliedDigestVerifications: 0 } : { };
 total = t.window("new SdPoint()'s first construction", () => new SdPoint(2).x, pointExpectations);
 for (let i = 0; i < 400; ++i)
     total = (total + new SdPoint(i).scaled(3)) | 0;
 lines.push(`SdPoint ${total}`);
 
-// The embedded module's root never reaches the baseline, so it is never imported: without --bytecode, its function's
-// import is the first to rest on its recorded digest, and verifies it, with strict on. Under the other run's wrapper the
-// function's key has no body at all.
+// The embedded module's root never reaches the baseline, so it is never imported: its function's import is the first to
+// rest on its provider's digest, the recorded one or, without the record, the one its analysis lookup computed, and
+// verifies it, with strict on. Under the other run's wrapper the function's key has no body at all.
 let moduleExpectations = { };
-if (t.imports && t.sequence >= 4)
-    moduleExpectations = { imports: 0, seededDecodes: 0, "misses.NoBody": [">=", 1] };
-else if (t.imports && decodes)
-    moduleExpectations = firstCall;
+if (t.imports && t.sequence >= 2)
+    moduleExpectations = { imports: 0, "misses.NoBody": [">=", 1] };
 else if (t.imports)
-    moduleExpectations = { imports: [">=", 1], suppliedDigestVerifications: hasRecord ? 1 : 0 };
+    moduleExpectations = { imports: [">=", 1], suppliedDigestVerifications: 1 };
 total = t.window("the embedded module's function's first call", () => loaded.module.sdModuleHot(1), moduleExpectations);
 for (let i = 0; i < 400; ++i)
     total = (total + loaded.module.sdModuleHot(i)) | 0;

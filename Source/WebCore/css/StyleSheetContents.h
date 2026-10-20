@@ -69,7 +69,7 @@ public:
     const AtomString& NODELETE namespaceURIFromPrefix(const AtomString& prefix);
     const CSSNamespacePrefixMap& namespacePrefixMap() const { return m_namespacePrefixMap; }
 
-    bool parseAuthorStyleSheet(const CachedCSSStyleSheet*, const SecurityOrigin*);
+    bool parseAuthorStyleSheet(const CachedCSSStyleSheet&, const SecurityOrigin*);
     WEBCORE_EXPORT bool parseString(const String&);
 
     bool isCacheable() const;
@@ -116,7 +116,7 @@ public:
     void notifyLoadedSheet(const CachedCSSStyleSheet*);
     
     StyleSheetContents* NODELETE parentStyleSheet() const;
-    StyleRuleImport* ownerRule() const { return m_ownerRule; }
+    StyleRuleImport* NODELETE ownerRule() const;
     void clearOwnerRule() { m_ownerRule = nullptr; }
     
     // Note that href is the URL that started the redirect chain that led to
@@ -171,7 +171,7 @@ private:
 
     void clearCharsetRule();
 
-    StyleRuleImport* m_ownerRule { nullptr };
+    WeakPtr<StyleRuleImport> m_ownerRule;
 
     String m_originalURL;
 

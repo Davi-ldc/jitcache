@@ -37,12 +37,16 @@
 #include "WebResourceLoadStatisticsStore.h"
 #include "WebsiteDataStoreClient.h"
 #include "WebsiteDataStoreConfiguration.h"
+#include <WebCore/ClientOrigin.h>
 #include <WebCore/Cookie.h>
 #include <WebCore/DeviceOrientationOrMotionPermissionState.h>
+#include <WebCore/IPAddressSpace.h>
 #include <WebCore/PageIdentifier.h>
+#include <WebCore/PermissionState.h>
 #include <WebCore/RegistrableDomain.h>
 #include <WebCore/SecurityOriginData.h>
 #include <WebCore/SecurityOriginHash.h>
+#include <WebCore/ThirdPartyCookieBlockingMode.h>
 #include <pal/SessionID.h>
 #include <wtf/CheckedRef.h>
 #include <wtf/Function.h>
@@ -52,6 +56,7 @@
 #include <wtf/RefCounted.h>
 #include <wtf/RefCounter.h>
 #include <wtf/RefPtr.h>
+#include <wtf/Seconds.h>
 #include <wtf/SwiftBridging.h>
 #include <wtf/UniqueRef.h>
 #include <wtf/WeakHashSet.h>
@@ -137,6 +142,9 @@ struct WebsiteDataStoreParameters;
 enum RemoveDataTaskCounterType { };
 using RemoveDataTaskCounter = RefCounter<RemoveDataTaskCounterType>;
 
+struct LocalNetworkAccessPromptIdentifierType;
+using LocalNetworkAccessPromptIdentifier = ObjectIdentifier<LocalNetworkAccessPromptIdentifierType>;
+
 class WebsiteDataStore : public API::ObjectImpl<API::Object::Type::WebsiteDataStore>, public CanMakeWeakPtr<WebsiteDataStore> {
 public:
     static WebsiteDataStore& defaultDataStore();
@@ -153,7 +161,7 @@ public:
     WebsiteDataStore(Ref<WebsiteDataStoreConfiguration>&&, PAL::SessionID);
     ~WebsiteDataStore();
 
-    static void forEachWebsiteDataStore(NOESCAPE Function<void(WebsiteDataStore&)>&&);
+    static void forEachWebsiteDataStore(NOESCAPE const Function<void(WebsiteDataStore&)>&);
     
     NetworkProcessProxy& networkProcess() const;
     NetworkProcessProxy& networkProcess();
@@ -220,6 +228,10 @@ public:
     void clearResourceLoadStatisticsInWebProcesses(CompletionHandler<void()>&&);
     void setUserAgentStringQuirkForTesting(const String& domain, const String& userAgentString, CompletionHandler<void()>&&);
     void setPrivateTokenIPCForTesting(bool enabled);
+    void requestLocalNetworkAccessPermission(WebPageProxyIdentifier, WebCore::ClientOrigin&&, WebCore::IPAddressSpace, CompletionHandler<void(WebCore::PermissionState)>&&);
+    void queryLocalNetworkAccessPermission(std::optional<WebPageProxyIdentifier>, const WebCore::ClientOrigin&, WebCore::IPAddressSpace, CompletionHandler<void(std::optional<WebCore::PermissionState>)>&&);
+    void removeLocalNetworkAccessPermissions(const WebCore::SecurityOriginData& topOrigin);
+    void clearLocalNetworkAccessPermissionsForTesting();
 
     void fetchDomainsWithUserInteraction(CompletionHandler<void(std::optional<HashMap<WebCore::RegistrableDomain, WallTime>>&&)>&&);
 
@@ -477,7 +489,7 @@ public:
     void workerUpdatedAppBadge(const WebCore::SecurityOriginData&, std::optional<uint64_t>);
 
 #if ENABLE(INSPECTOR_NETWORK_THROTTLING)
-    void setEmulatedConditions(std::optional<int64_t>&& bytesPerSecondLimit);
+    void setEmulatedConditions(std::optional<uint64_t> bandwidthBytesPerSecond, Seconds latency);
 #endif
 
     void addPage(WebPageProxy&);
@@ -678,6 +690,25 @@ private:
 
     UniqueRef<WebsiteDataStoreClient> m_client;
 
+    using LocalNetworkAccessPermissionKey = std::pair<WebCore::ClientOrigin, WebCore::IPAddressSpace>;
+    enum class RecordLocalNetworkAccessDecision : bool { No, Yes };
+    void askPageForLocalNetworkAccess(const LocalNetworkAccessPermissionKey&);
+    void finishLocalNetworkAccessPrompt(const LocalNetworkAccessPermissionKey&, WebCore::PermissionState, RecordLocalNetworkAccessDecision);
+    void cancelLocalNetworkAccessPrompts(const std::optional<WebCore::SecurityOriginData>& topOrigin);
+
+    // Keyed on the origin pair as well as the space, so a grant does not follow the same origin embedded
+    // in an unrelated site.
+    HashMap<LocalNetworkAccessPermissionKey, WebCore::PermissionState> m_localNetworkAccessPermissions;
+    struct LocalNetworkAccessWaiter {
+        WebPageProxyIdentifier pageID;
+        CompletionHandler<void(WebCore::PermissionState)> handler;
+    };
+    struct PendingLocalNetworkAccessPrompt {
+        LocalNetworkAccessPromptIdentifier identifier { LocalNetworkAccessPromptIdentifier::generate() };
+        Vector<LocalNetworkAccessWaiter> waiters;
+    };
+    HashMap<LocalNetworkAccessPermissionKey, PendingLocalNetworkAccessPrompt> m_pendingLocalNetworkAccessPrompts;
+
     const RefPtr<API::HTTPCookieStore> m_cookieStore;
     RefPtr<NetworkProcessProxy> m_networkProcess;
 
@@ -709,10 +740,11 @@ private:
 
     RemoveDataTaskCounter m_removeDataTaskCounter;
     uint64_t m_cookiesVersion { 0 };
-} SWIFT_SHARED_REFERENCE(refDataStore, derefDataStore) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+} DERIVED_CLASS_SWIFT_SHARED_REFERENCE(refDataStore, derefDataStore);
 
 }
 
+#if !ENABLE(SWIFT_BASE_CLASS_ANNOTATIONS)
 inline void refDataStore(WebKit::WebsiteDataStore* WTF_NONNULL obj)
 {
     obj->ref();
@@ -722,6 +754,7 @@ inline void derefDataStore(WebKit::WebsiteDataStore* WTF_NONNULL obj)
 {
     obj->deref();
 }
+#endif
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebKit::WebsiteDataStore)
 static bool isType(const API::Object& object) { return object.type() == API::Object::Type::WebsiteDataStore; }

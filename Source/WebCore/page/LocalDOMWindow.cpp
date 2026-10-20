@@ -47,6 +47,7 @@
 #include "CrossOriginOpenerPolicy.h"
 #include "Crypto.h"
 #include "CustomElementRegistry.h"
+#include "DOMRect.h"
 #include "DOMSelection.h"
 #include "DOMStringList.h"
 #include "DOMTimer.h"
@@ -666,7 +667,7 @@ void LocalDOMWindow::resumeFromBackForwardCache()
 CustomElementRegistry& LocalDOMWindow::ensureCustomElementRegistry()
 {
     if (!m_customElementRegistry) {
-        m_customElementRegistry = CustomElementRegistry::create(*scriptExecutionContext(), *this);
+        m_customElementRegistry = CustomElementRegistry::create(protect(*scriptExecutionContext()), *this);
         for (Ref shadowRoot : document()->inDocumentShadowRoots()) {
             if (shadowRoot->mode() == ShadowRootMode::UserAgent || shadowRoot->hasScopedCustomElementRegistry())
                 continue;
@@ -730,6 +731,24 @@ ExceptionOr<RefPtr<Element>> LocalDOMWindow::matchingElementInFlatTree(Node& sco
     }
 
     return RefPtr<Element> { nullptr };
+}
+
+ExceptionOr<Ref<DOMRect>> LocalDOMWindow::convertRectToMainFrameCoordinates(const DOMRectInit& rect)
+{
+    RefPtr document = this->document();
+    if (!document)
+        return Exception { ExceptionCode::InvalidStateError };
+
+    RefPtr view = document->view();
+    if (!view)
+        return Exception { ExceptionCode::InvalidStateError };
+
+    // Unlike other callers of contentsToMainFrameView, this rect comes from JS
+    // and it is CSS pixels that have not had zoom taken into account.
+    FloatRect contentsRect(rect.x, rect.y, rect.width, rect.height);
+    Ref frame = view->frame();
+    contentsRect.scale(frame->pageZoomFactor() * frame->frameScaleFactor());
+    return DOMRect::create(view->contentsToMainFrameView(enclosingIntRect(contentsRect)));
 }
 
 #if ENABLE(ORIENTATION_EVENTS)
@@ -1318,7 +1337,7 @@ bool LocalDOMWindow::find(const String& string, bool caseSensitive, bool backwar
         options.add(FindOption::CaseInsensitive);
     if (wrap)
         options.add(FindOption::WrapAround);
-    return protect(frame())->editor().findString(string, options).has_value();
+    return protect(protect(frame())->editor())->findString(string, options).has_value();
 }
 
 bool LocalDOMWindow::offscreenBuffering() const
@@ -1606,7 +1625,7 @@ bool LocalDOMWindow::consumeTransientActivation()
             window->consumeLastActivationIfNecessary();
     }
 
-    if (RefPtr page = thisFrame ? thisFrame->page() : nullptr; page && page->hasRemoteFrames())
+    if (RefPtr page = thisFrame ? thisFrame->page() : nullptr; page && page->mainFrame().tree().containsRemoteFrame())
         thisFrame->loader().client().didConsumeUserActivation();
 
     return true;
@@ -1664,10 +1683,7 @@ void LocalDOMWindow::notifyActivated(MonotonicTime activationTime)
     if (!frame)
         return;
 
-    for (RefPtr ancestor = frame->tree().parent(); ancestor; ancestor = ancestor->tree().parent()) {
-        RefPtr localAncestor = dynamicDowncast<LocalFrame>(ancestor);
-        if (!localAncestor)
-            continue;
+    for (Ref localAncestor : ancestorFrames<LocalFrame>(*frame)) {
         if (RefPtr window = localAncestor->window())
             updateActivationTimestampAndNotify(*window, activationTime, closeWatcherEnabled);
     }
@@ -1692,7 +1708,7 @@ void LocalDOMWindow::notifyActivated(MonotonicTime activationTime)
         updateActivationTimestampAndNotify(*descendantWindow, activationTime, closeWatcherEnabled);
     }
 
-    if (RefPtr page = frame->page(); page && page->hasRemoteFrames())
+    if (RefPtr page = frame->page(); page && page->mainFrame().tree().containsRemoteFrame())
         frame->loader().client().didNotifyUserActivation(activationTime);
 }
 
@@ -1733,7 +1749,7 @@ RefPtr<CSSRuleList> LocalDOMWindow::getMatchedCSSRules(Element* element, const S
     if (!authorOnly)
         rulesToInclude |= Style::Resolver::UAAndUserCSSRules;
 
-    auto matchedRules = document->styleScope().resolver().pseudoStyleRulesForElement(element, pseudoElementIdentifier, rulesToInclude);
+    auto matchedRules = protect(protect(document->styleScope())->resolver())->pseudoStyleRulesForElement(element, pseudoElementIdentifier, rulesToInclude);
     if (matchedRules.isEmpty())
         return nullptr;
 
@@ -2039,7 +2055,7 @@ bool LocalDOMWindow::isSecureContext() const
 
 bool LocalDOMWindow::crossOriginIsolated() const
 {
-    auto* document = this->document();
+    RefPtr document = this->document();
     return document && document->crossOriginIsolated();
 }
 
@@ -2220,11 +2236,12 @@ bool LocalDOMWindow::isAllowedToUseDeviceOrientation(String& message) const
 bool LocalDOMWindow::hasPermissionToReceiveDeviceMotionOrOrientationEvents(String& message) const
 {
     if (frame()->settings().deviceOrientationPermissionAPIEnabled()) {
-        if (!page()) {
+        RefPtr page = this->page();
+        if (!page) {
             message = "No browsing context"_s;
             return false;
         }
-        auto accessState = page()->deviceOrientationAndMotionAccessController().accessState(protect(*this->document()));
+        auto accessState = protect(page->deviceOrientationAndMotionAccessController())->accessState(protect(*this->document()));
         switch (accessState) {
         case DeviceOrientationOrMotionPermissionState::Denied:
             message = "Permission to use the API was denied"_s;
@@ -2449,6 +2466,12 @@ void LocalDOMWindow::dispatchLoadEvent()
         WTFEmitSignpost(document.get(), NavigationAndPaintTiming, "loadEventBegin");
     }
 
+    // When the owner element lives in another process its load event is dispatched asynchronously,
+    // so notify it before running this frame's own load event handlers. Otherwise a message posted
+    // to the parent frame by one of those handlers could be delivered before the owner element's
+    // load event, which is never the case when both frames are in the same process.
+    bool notifiedRemoteParent = frame && frame->dispatchLoadEventToRemoteParent();
+
     dispatchEvent(Event::create(eventNames().loadEvent, Event::CanBubble::No, Event::IsCancelable::No), document.get());
 
     if (shouldMarkLoadEventTimes) {
@@ -2460,7 +2483,7 @@ void LocalDOMWindow::dispatchLoadEvent()
     }
 
     // Send a separate load event to the element that owns this frame.
-    if (RefPtr frame = this->frame())
+    if (RefPtr frame = this->frame(); frame && !notifiedRemoteParent)
         frame->dispatchLoadEventToParent();
 
     InspectorInstrumentation::loadEventFired(protect(this->frame()).get());
@@ -2965,11 +2988,8 @@ ExceptionOr<RefPtr<Frame>> LocalDOMWindow::createWindow(const String& urlString,
 #if PLATFORM(IOS_FAMILY)
 static bool shouldBypassPopupBlockerForQuirk(const Document* document, const String& urlString)
 {
-    if (RefPtr firstFrameDocument = document) {
-        if (firstFrameDocument->quirks().shouldAllowPopupFromMicrosoftOfficeToOneDrive())
-            return firstFrameDocument->quirks().needsPopupFromMicrosoftOfficeToOneDrive(firstFrameDocument->encodingParseURL(urlString));
-    }
-    return false;
+    RefPtr firstFrameDocument = document;
+    return firstFrameDocument && firstFrameDocument->quirks().needsPopupFromMicrosoftOfficeToOneDrive(urlString);
 }
 #endif
 
@@ -3121,7 +3141,7 @@ void LocalDOMWindow::eventListenersDidChange()
 CookieStore& LocalDOMWindow::cookieStore()
 {
     if (!m_cookieStore)
-        m_cookieStore = CookieStore::create(protect(document()).get());
+        lazyInitialize(m_cookieStore, CookieStore::create(protect(document()).get()));
     return *m_cookieStore;
 }
 
@@ -3154,7 +3174,7 @@ void LocalDOMWindow::subscribeToPushService(const Vector<uint8_t>& applicationSe
 {
     LOG(Push, "LocalDOMWindow::subscribeToPushService");
 
-    platformStrategies()->pushStrategy()->windowSubscribeToPushService(toScope(*this), applicationServerKey, [protectedThis = Ref { *this }, promise = WTF::move(promise)](auto&& result) mutable {
+    platformStrategies()->pushStrategy()->windowSubscribeToPushService(toScope(*this), applicationServerKey, [protectedThis = Ref { *this }, promise = WTF::move(promise)](ExceptionOr<PushSubscriptionData>&& result) mutable {
         LOG(Push, "LocalDOMWindow::subscribeToPushService completed");
         if (result.hasException()) {
             promise.reject(result.releaseException());
@@ -3179,7 +3199,7 @@ void LocalDOMWindow::getPushSubscription(DOMPromiseDeferred<IDLNullable<IDLInter
 {
     LOG(Push, "LocalDOMWindow::getPushSubscription");
 
-    platformStrategies()->pushStrategy()->windowGetPushSubscription(toScope(*this), [protectedThis = Ref { *this }, promise = WTF::move(promise)](auto&& result) mutable {
+    platformStrategies()->pushStrategy()->windowGetPushSubscription(toScope(*this), [protectedThis = Ref { *this }, promise = WTF::move(promise)](ExceptionOr<std::optional<PushSubscriptionData>>&& result) mutable {
         LOG(Push, "LocalDOMWindow::getPushSubscription completed");
         if (result.hasException()) {
             promise.reject(result.releaseException());
@@ -3192,7 +3212,7 @@ void LocalDOMWindow::getPushSubscription(DOMPromiseDeferred<IDLNullable<IDLInter
             return;
         }
 
-        promise.resolve(protect(PushSubscription::create(WTF::move(*optionalPushSubscriptionData), protectedThis.ptr()).ptr()));
+        promise.resolve(PushSubscription::create(WTF::move(*optionalPushSubscriptionData), protectedThis.ptr()).ptr());
     });
 }
 

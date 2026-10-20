@@ -30,7 +30,6 @@
 #include "GridFormattingContext.h"
 #include "GridItemRect.h"
 #include "GridLayoutConstraints.h"
-#include "GridLayoutUtils.h"
 #include "LayoutIntegrationBoxGeometryUpdater.h"
 #include "LayoutIntegrationBoxTreeUpdater.h"
 #include "RenderGrid.h"
@@ -150,12 +149,22 @@ static inline Layout::GridLayoutConstraints constraintsForGridContent(const Layo
     return { inlineAxisConstraint, blockAxisConstraint };
 }
 
-void GridLayout::updateGridItemRenderers()
+GridLayout::GridItemBorderBoxRects GridLayout::gridItemBorderBoxRects() const
 {
+    GridItemBorderBoxRects gridItemBorderBoxRects;
+    for (CheckedRef layoutBox : formattingContextBoxes(gridBox()))
+        gridItemBorderBoxRects.append(CheckedRef { downcast<RenderBox>(*layoutBox->rendererForIntegration()) }->borderBoxRectInContainer());
+    return gridItemBorderBoxRects;
+}
+
+void GridLayout::updateGridItemRenderers(const GridItemBorderBoxRects& previousGridItemRects)
+{
+    CheckedRef renderGrid = gridBoxRenderer();
     CheckedRef layoutState = this->layoutState();
     auto& gridBoxGeometry = layoutState->geometryForBox(gridBox());
     auto contentBoxOffset = LayoutPoint(gridBoxGeometry.contentBoxLeft(), gridBoxGeometry.contentBoxTop());
 
+    size_t gridItemIndex = 0;
     for (CheckedRef layoutBox : formattingContextBoxes(gridBox())) {
         CheckedRef renderer = downcast<RenderBox>(*layoutBox->rendererForIntegration());
         auto& gridItemGeometry = layoutState->geometryForBox(layoutBox);
@@ -169,10 +178,15 @@ void GridLayout::updateGridItemRenderers()
         renderer->setMarginAfter(gridItemGeometry.marginAfter());
         renderer->setMarginStart(gridItemGeometry.marginStart());
         renderer->setMarginEnd(gridItemGeometry.marginEnd());
+
+        if (!renderGrid->selfNeedsLayout() && renderer->checkForRepaintDuringLayout())
+            renderer->repaintDuringLayoutIfMoved(previousGridItemRects[gridItemIndex]);
+        ++gridItemIndex;
     }
+    ASSERT(gridItemIndex == previousGridItemRects.size());
 }
 
-void GridLayout::updateFormattingContextRootRenderer(const Layout::GridLayoutConstraints& layoutConstraints, const Layout::UsedTrackSizes& usedTrackSizes, const Layout::GridItemRects& gridItemRects)
+void GridLayout::updateFormattingContextRootRenderer(LayoutUnit blockContentSize, const Layout::GridItemRects& gridItemRects)
 {
     CheckedRef renderGrid = gridBoxRenderer();
     auto& currentGrid = renderGrid->currentGrid();
@@ -191,13 +205,7 @@ void GridLayout::updateFormattingContextRootRenderer(const Layout::GridLayoutCon
 
     OrderIteratorPopulator orderIteratorPopulator(currentGrid.orderIterator());
 
-    if (layoutConstraints.blockAxis.scenario() != Layout::AxisConstraint::FreeSpaceScenario::Definite) {
-        auto& rowSizes = usedTrackSizes.rowSizes;
-        auto usedRowGutter = Layout::GridFormattingContext::usedGapValue(renderGrid->style().rowGap(), renderGrid->style());
-        auto blockContentSize = std::reduce(rowSizes.begin(), rowSizes.end()) + Layout::GridLayoutUtils::totalGuttersSize(rowSizes.size(), usedRowGutter);
-        renderGrid->setBorderBoxHeight(blockContentSize + renderGrid->borderAndPaddingLogicalHeight());
-    } else
-        renderGrid->setBorderBoxHeight(layoutConstraints.blockAxis.availableSpace() + renderGrid->borderAndPaddingLogicalHeight());
+    renderGrid->setBorderBoxHeight(blockContentSize + renderGrid->borderAndPaddingLogicalHeight());
 
     for (CheckedRef layoutBox : formattingContextBoxes(gridBox()))
         orderIteratorPopulator.collectChild(CheckedRef { downcast<RenderBox>(*layoutBox->rendererForIntegration()) });
@@ -222,9 +230,12 @@ std::pair<LayoutUnit, LayoutUnit> GridLayout::computeIntrinsicWidths()
 void GridLayout::layout()
 {
     auto gridLayoutConstraints = constraintsForGridContent(gridBox());
-    auto [ usedTrackSizes, gridItemRects ] = Layout::GridFormattingContext { gridBox(), layoutState() }.layout(gridLayoutConstraints);
-    updateGridItemRenderers();
-    updateFormattingContextRootRenderer(gridLayoutConstraints, usedTrackSizes, gridItemRects);
+
+    auto previousGridItemRects = gridItemBorderBoxRects();
+
+    auto [ usedTrackSizes, gridItemRects, blockContentSize ] = Layout::GridFormattingContext { gridBox(), layoutState() }.layout(gridLayoutConstraints);
+    updateGridItemRenderers(previousGridItemRects);
+    updateFormattingContextRootRenderer(blockContentSize, gridItemRects);
     layoutOutOfFlowBoxes(usedTrackSizes);
 
     CheckedRef renderGrid = gridBoxRenderer();

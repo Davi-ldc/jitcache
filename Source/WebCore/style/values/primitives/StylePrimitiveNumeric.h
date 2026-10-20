@@ -40,7 +40,8 @@ namespace WebCore {
 namespace Style {
 
 template<typename> struct DimensionPercentageMapping;
-template<Numeric, WebCore::CSS::SpecificKeyword...> struct PrimitiveNumericOrKeyword;
+enum class CalcSizeSupport : bool;
+template<Numeric, CalcSizeSupport, WebCore::CSS::SpecificKeyword...> struct PrimitiveNumericOrKeywordOrOptionalCalcSize;
 template<typename, typename> struct EvaluationMinimum;
 
 struct PrimitiveNumericEmptyToken { constexpr bool operator==(const PrimitiveNumericEmptyToken&) const = default; };
@@ -251,7 +252,7 @@ template<CSS::DimensionPercentageNumeric CSSType> struct PrimitiveNumeric<CSSTyp
         );
     }
 
-    template<typename... F> decltype(auto) switchOn(F&&... functors) const
+    template<typename... F> decltype(auto) switchOn(NOESCAPE F&&... functors) const
     {
         return WTF::switchOn(m_value, std::forward<F>(functors)...);
     }
@@ -362,7 +363,7 @@ template<CSS::Range R, typename V> struct PrimitiveNumeric<CSS::LengthPercentage
         return m_value.type() == indexForType<T>();
     }
 
-    template<typename... F> decltype(auto) switchOn(F&&... f) const
+    template<typename... F> decltype(auto) switchOn(NOESCAPE F&&... f) const
     {
         auto visitor = WTF::makeVisitor(std::forward<F>(f)...);
 
@@ -419,7 +420,7 @@ template<CSS::Range R, typename V> struct PrimitiveNumeric<CSS::LengthPercentage
     std::optional<Dimension> tryFixed() const { return tryGet<Dimension>(); }
 
 private:
-    template<Numeric, WebCore::CSS::SpecificKeyword...> friend struct PrimitiveNumericOrKeyword;
+    template<Numeric, CalcSizeSupport, WebCore::CSS::SpecificKeyword...> friend struct PrimitiveNumericOrKeywordOrOptionalCalcSize;
     template<typename> friend struct Blending;
     template<typename, typename> friend struct Evaluation;
     template<typename, typename> friend struct EvaluationMinimum;
@@ -611,7 +612,7 @@ template<CSS::Range R, typename V> struct PrimitiveNumericWrapperBase<LengthPerc
         return value.template holdsAlternative<T>();
     }
     template<typename... F>
-    ALWAYS_INLINE decltype(auto) switchOn(F&&... f) const
+    ALWAYS_INLINE decltype(auto) switchOn(NOESCAPE F&&... f) const
     {
         return value.switchOn(std::forward<F>(f)...);
     }

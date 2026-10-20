@@ -30,16 +30,16 @@
     }
     print(total);
 
-    // The case happened (HARNESS.md, Tests): the producer compiled every body, each called 42 times, so each ran its
-    // import here and met the twin check's byte comparison.
+    // The case happened: the producer compiled every body, each called 42 times, so each ran its import here and met the
+    // twin check's byte comparison.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const imported = { };
         bodies.forEach((body, index) => imported[`the body of ${index + 1} statements`] = body);
         sections.expectImports(role, imported);
         sections.expectTargets(role, { call: imported }, [
-            { site: "G", kind: "ImageOffset", form: "Jump" },
-            { site: "section 6.2", kind: "SnippetEntry", form: "Jump" },
+            { site: "a MathIC snippet's jump back into the image", kind: "ImageOffset", form: "Jump" },
+            { site: "a MathIC's inline start rewritten to jump to its snippet", kind: "SnippetEntry", form: "Jump" },
         ]);
     }
 })(...arguments);

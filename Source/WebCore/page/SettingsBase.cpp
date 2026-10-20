@@ -38,7 +38,9 @@
 #include "LocalFrameView.h"
 #include "Page.h"
 #include "RenderObjectInlines.h"
+#include "RenderView.h"
 #include "RenderWidget.h"
+#include "SVGImage.h"
 #include "Settings.h"
 #include "SystemFontDatabase.h"
 #include <wtf/StdLibExtras.h>
@@ -46,6 +48,10 @@
 
 #if ENABLE(MEDIA_STREAM)
 #include "MockRealtimeMediaSourceCenter.h"
+#endif
+
+#if __has_include(<WebKitAdditions/SettingsBaseAdditions.cpp>)
+#include <WebKitAdditions/SettingsBaseAdditions.cpp>
 #endif
 
 namespace WebCore {
@@ -198,10 +204,7 @@ void SettingsBase::setMinimumDOMTimerInterval(Seconds interval)
     if (!m_page)
         return;
 
-    for (RefPtr frame = m_page->mainFrame(); frame; frame = frame->tree().traverseNext()) {
-        RefPtr localFrame = dynamicDowncast<LocalFrame>(frame);
-        if (!localFrame)
-            continue;
+    for (Ref localFrame : inclusiveDescendantFrames<LocalFrame>(m_page->mainFrame())) {
         if (RefPtr document = localFrame->document())
             document->adjustMinimumDOMTimerInterval(oldTimerInterval);
     }
@@ -305,11 +308,9 @@ void SettingsBase::resetToConsistentState()
     setAllowedMediaAudioCodecIDs(std::nullopt);
     setAllowedMediaCaptionFormatTypes(std::nullopt);
 
-#if ENABLE(TEXT_AUTOSIZING)
     m_oneLineTextMultiplierCoefficient = defaultOneLineTextMultiplierCoefficient;
     m_multiLineTextMultiplierCoefficient = defaultMultiLineTextMultiplierCoefficient;
     m_maxTextAutosizingScaleIncrease = defaultMaxTextAutosizingScaleIncrease;
-#endif
 }
 
 // MARK - onChange handlers
@@ -329,9 +330,8 @@ void SettingsBase::setNeedsRelayoutAllFrames()
         RefPtr localFrame = dynamicDowncast<LocalFrame>(frame);
         if (!localFrame)
             continue;
-        if (!localFrame->ownerRenderer())
-            continue;
-        localFrame->ownerRenderer()->setNeedsLayoutAndInvalidateContentLogicalWidths();
+        if (CheckedPtr ownerRenderer = localFrame->ownerRenderer())
+            ownerRenderer->setNeedsLayoutAndInvalidateContentLogicalWidths();
     }
 }
 
@@ -399,8 +399,6 @@ void SettingsBase::iceCandidateFilteringEnabledChanged()
         protect(m_page)->disableICECandidateFiltering();
 }
 
-#if ENABLE(TEXT_AUTOSIZING)
-
 void SettingsBase::shouldEnableTextAutosizingBoostChanged()
 {
     if (!m_page)
@@ -420,8 +418,6 @@ void SettingsBase::textAutosizingUsesIdempotentModeChanged()
         m_page->chrome().client().textAutosizingUsesIdempotentModeChanged();
     setNeedsRecalcStyleInAllFrames();
 }
-
-#endif // ENABLE(TEXT_AUTOSIZING)
 
 #if ENABLE(MEDIA_STREAM)
 

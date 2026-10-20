@@ -40,6 +40,10 @@
 #include <wtf/TZoneMalloc.h>
 #include <wtf/WeakPtr.h>
 
+#if ENABLE(THREADED_ANIMATIONS)
+#include "RemoteMonotonicTimeline.h"
+#endif
+
 OBJC_CLASS UIScrollView;
 
 namespace WebCore {
@@ -144,6 +148,10 @@ public:
     virtual void setRootNodeIsInUserScroll(bool) { }
     virtual void setRubberBandingInProgressForNode(WebCore::ScrollingNodeID, bool isRubberBanding) { }
 
+    // The main frame's scroll position changed in the UI-process tree. Platforms where the UI process owns the
+    // layout viewport have to refresh it, since it's derived from the scroll position.
+    virtual void mainFrameScrollPositionDidChange() { }
+
     virtual void scrollingTreeNodeDidBeginScrollSnapping(WebCore::ScrollingNodeID) { }
     virtual void scrollingTreeNodeDidEndScrollSnapping(WebCore::ScrollingNodeID) { }
     
@@ -159,10 +167,12 @@ public:
     virtual void animationsWereAddedToNode(RemoteLayerTreeNode&) { }
     virtual void animationsWereRemovedFromNode(RemoteLayerTreeNode&) { }
     virtual void updateTimelinesRegistration(WebCore::ProcessIdentifier, const WebCore::AcceleratedTimelinesUpdate&, MonotonicTime) { }
+    virtual void removeTimelines(WebCore::ProcessIdentifier) { };
     virtual RefPtr<const RemoteAnimationTimeline> timeline(const TimelineID&) const { return nullptr; }
     virtual void progressBasedTimelinesWereUpdatedForNode(const WebCore::ScrollingTreeScrollingNode&) { }
     virtual RefPtr<const RemoteAnimationStack> animationStackForNodeWithIDForTesting(WebCore::PlatformLayerIdentifier) const { return nullptr; }
     virtual HashSet<Ref<RemoteProgressBasedTimeline>> timelinesForScrollingNodeIDForTesting(WebCore::ScrollingNodeID) const { return { }; }
+    virtual HashSet<Ref<RemoteMonotonicTimeline>> monotonicTimelinesForProcessForTesting(WebCore::ProcessIdentifier) const { return { }; }
     virtual bool hasHighImpactMonotonicAnimations() const { return false; }
 #endif
 
@@ -197,8 +207,13 @@ public:
     int headerHeight() const;
     int footerHeight() const;
     float mainFrameScaleFactor() const;
+    // Syncs the UI-process-owned page scale into the scrolling tree when we aren't sending a delegated
+    // viewport update, e.g. after a navigation resets the scale.
+    void setDelegatedPageScaleFactor(float);
     WebCore::FloatSize totalContentsSize() const;
-    
+    WebCore::FloatSize sizeForVisibleContent() const;
+    bool isCommittingScrollingTreeState() const;
+
     void viewWillStartLiveResize();
     void viewWillEndLiveResize();
     void viewSizeDidChange();

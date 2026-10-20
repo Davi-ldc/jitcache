@@ -91,11 +91,10 @@ ImageRecorder::ImageRecorder(RecordingScope scope, VM& vm, UnlinkedCodeBlock& un
 }
 
 #if ENABLE(JITCACHE_TWINS)
-ImageRecorder::ImageRecorder(RecordingScope scope, VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, Ref<ProducerBudget>&& budget, const TwinSeeds& seeds, const TwinCompileInputs& compileInputs)
+ImageRecorder::ImageRecorder(RecordingScope scope, VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, Ref<ProducerBudget>&& budget, const TwinSeeds& seeds)
     : ImageRecorder(scope, vm, unlinkedCodeBlock, WTF::move(budget))
 {
     m_twinSeeds = &seeds;
-    m_twinCompileInputs = &compileInputs;
 }
 #endif
 
@@ -172,7 +171,6 @@ void ImageRecorder::stop(RecordState state)
     forgetRecorded(m_compileInputs.inputs);
     forgetRecorded(m_compileInputs.binaryArithBits);
     forgetRecorded(m_compileInputs.unaryArithBits);
-    forgetRecorded(m_strictEqualityInputs);
 #endif
 }
 
@@ -370,52 +368,11 @@ void ImageRecorder::recordCompileInputs(TwinCompileInputs&& inputs)
     m_compileInputs = WTF::move(inputs);
 }
 
-StrictEqualityAtomOperand ImageRecorder::strictEqualityAtomOperand(BytecodeIndex bytecodeIndex, StrictEqualityAtomOperand chosen)
-{
-    ASSERT(m_scope == RecordingScope::BaselineCompile);
-    // A twin answers from the producer's input at the instruction, after it stops too, so that it compares inline where
-    // the producer did; the compile input check gave every instruction that asks one such input, naming an atom of this
-    // UCB.
-    StrictEqualityAtomOperand answer = chosen;
-    uint32_t bytecodeOffset = bytecodeIndex.offset();
-    if (m_twinCompileInputs) {
-        auto& inputs = m_twinCompileInputs->inputs;
-        auto input = std::ranges::lower_bound(inputs, bytecodeOffset, { }, &CompileInput::bytecodeOffset);
-        if (input != inputs.end() && input->bytecodeOffset == bytecodeOffset && input->kind == CompileInputKind::StrictEqualityAtomOperand)
-            answer = static_cast<StrictEqualityAtomOperand>(input->value);
-        else
-            ASSERT_NOT_REACHED();
-    }
-    if (isRecording() && reserveRecorded(m_strictEqualityInputs, 1, 16)) {
-        m_strictEqualityInputs.append(CompileInput {
-            .bytecodeOffset = bytecodeOffset,
-            .kind = CompileInputKind::StrictEqualityAtomOperand,
-            .value = static_cast<uint8_t>(answer),
-            .localScopeDepth = 0,
-        });
-    }
-    return answer;
-}
-
-std::optional<TwinData> ImageRecorder::finishTwinData()
+TwinData ImageRecorder::finishTwinData()
 {
     ASSERT(isRecording());
-    // Both lists are in bytecode order and name different opcodes, so a merge keeps the inputs sorted with one per
-    // instruction. The merged storage is charged before it is allocated, and the two lists are freed after.
-    auto& snapshot = m_compileInputs.inputs;
-    size_t count = snapshot.size() + m_strictEqualityInputs.size();
-    Vector<CompileInput> merged;
-    if (!reserveRecorded(merged, count, count))
-        return std::nullopt;
-    size_t snapshotIndex = 0;
-    size_t strictEqualityIndex = 0;
-    while (snapshotIndex < snapshot.size() || strictEqualityIndex < m_strictEqualityInputs.size()) {
-        bool takesSnapshot = strictEqualityIndex == m_strictEqualityInputs.size()
-            || (snapshotIndex < snapshot.size() && snapshot[snapshotIndex].bytecodeOffset < m_strictEqualityInputs[strictEqualityIndex].bytecodeOffset);
-        merged.append(takesSnapshot ? snapshot[snapshotIndex++] : m_strictEqualityInputs[strictEqualityIndex++]);
-    }
-    forgetRecorded(snapshot);
-    forgetRecorded(m_strictEqualityInputs);
+    // The snapshot's vectors are at their exact sizes already, and the seeds' shrink here, so that the record's charge
+    // follows its bytes.
     m_binarySwitchSeeds.shrinkToFit();
 
     TwinData data;
@@ -423,7 +380,7 @@ std::optional<TwinData> ImageRecorder::finishTwinData()
     ASSERT(m_assemblerSeed);
     data.seeds.assembler = m_assemblerSeed.value_or(0);
     data.seeds.binarySwitches = std::exchange(m_binarySwitchSeeds, { });
-    data.compileInputs.inputs = WTF::move(merged);
+    data.compileInputs.inputs = std::exchange(m_compileInputs.inputs, { });
     data.compileInputs.binaryArithBits = std::exchange(m_compileInputs.binaryArithBits, { });
     data.compileInputs.unaryArithBits = std::exchange(m_compileInputs.unaryArithBits, { });
     data.compileInputs.compiledHoldingAPILock = m_compileInputs.compiledHoldingAPILock;
@@ -585,8 +542,7 @@ std::unique_ptr<ImageRecord> ImageRecorder::finishBaselineCompile(LinkBuffer& li
         markUnrecordable(Unrecordable::NotShareable);
 
 #if ENABLE(JITCACHE_TWINS)
-    // The twin data the record keeps beside the provenance, with the strict-equality inputs merged into the
-    // snapshot's.
+    // The twin data the record keeps beside the provenance.
     std::optional<TwinData> twinData;
     if (isRecording())
         twinData = finishTwinData();
@@ -649,7 +605,7 @@ void ImageRecorder::handChargeToRecord(size_t bytes)
     // Finishing moved every container the recorder charged for into the record, or freed it.
     ASSERT(!m_fixups.capacity() && !m_mathICs.capacity() && !m_veneerGroups.capacity());
 #if ENABLE(JITCACHE_TWINS)
-    ASSERT(!m_binarySwitchSeeds.capacity() && !m_strictEqualityInputs.capacity());
+    ASSERT(!m_binarySwitchSeeds.capacity());
     ASSERT(!m_compileInputs.inputs.capacity() && !m_compileInputs.binaryArithBits.capacity() && !m_compileInputs.unaryArithBits.capacity());
 #endif
     RELEASE_ASSERT(bytes <= m_chargedBytes);

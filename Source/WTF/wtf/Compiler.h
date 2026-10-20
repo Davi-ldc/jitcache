@@ -612,6 +612,12 @@
 
 #endif
 
+// FIXME: The static analyzer does not perform escape analysis inside function templates, so it
+// reports uncounted lambda captures even when the lambda is invoked immediately, passed to a
+// NOESCAPE parameter, or forwarded through WTF::makeVisitor. Replace every use of this macro
+// with nothing once rdar://187551637 is fixed.
+#define SUPPRESS_UNCOUNTED_LAMBDA_CAPTURE_IN_FUNCTION_TEMPLATE SUPPRESS_UNCOUNTED_LAMBDA_CAPTURE
+
 // To suppress webkit.RefCntblBaseVirtualDtor, use NoVirtualDestructorBase instead.
 
 #define SUPPRESS_MEMORY_UNSAFE_CAST \
@@ -749,10 +755,6 @@
 #define WTF_NULLABLE
 #define WTF_NONNULL
 #endif
-
-// Used to indicate that a class member has a specialized implementation in Swift. See
-// "SwiftCXXThunk.h".
-#define HAS_SWIFTCXX_THUNK  NS_REFINED_FOR_SWIFT
 
 #ifdef __cplusplus
 namespace WTF {

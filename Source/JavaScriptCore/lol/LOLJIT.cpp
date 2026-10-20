@@ -276,7 +276,7 @@ void LOLJIT::privateCompileMainPass()
         ASSERT(m_currentInstruction->size());
 
         if (m_disassembler)
-            m_disassembler->setForBytecodeMainPath(m_bytecodeIndex.offset(), label(), toCString("Allocator State Before: ", m_fastAllocator));
+            m_disassembler->setForBytecodeMainPath(m_bytecodeIndex.offset(), label(), toUTF8CString("Allocator State Before: ", m_fastAllocator));
         m_pcToCodeOriginMapBuilder.appendItem(label(), CodeOrigin(m_bytecodeIndex));
         m_labels[m_bytecodeIndex.offset()] = label();
 
@@ -463,6 +463,7 @@ void LOLJIT::privateCompileMainPass()
         DEFINE_OP(op_new_async_generator_func_exp)
         DEFINE_OP(op_new_object)
         DEFINE_OP(op_new_reg_exp)
+        DEFINE_OP(op_new_reg_exp_shared)
         DEFINE_OP(op_not)
         DEFINE_OP(op_nstricteq)
         DEFINE_OP(op_create_lexical_environment)
@@ -491,6 +492,7 @@ void LOLJIT::privateCompileMainPass()
 
         DEFINE_OP(op_iterator_open)
         DEFINE_OP(op_iterator_next)
+        DEFINE_OP(op_iterator_close_check)
         DEFINE_OP(op_async_iterator_next)
 
         DEFINE_OP(op_ret)
@@ -610,7 +612,7 @@ void LOLJIT::privateCompileSlowCases()
         BytecodeIndex firstTo = iter->to;
 
         if (m_disassembler)
-            m_disassembler->setForBytecodeSlowPath(m_bytecodeIndex.offset(), label(), toCString("Allocator State Before: ", m_replayAllocator));
+            m_disassembler->setForBytecodeSlowPath(m_bytecodeIndex.offset(), label(), toUTF8CString("Allocator State Before: ", m_replayAllocator));
 
         std::optional<JITSizeStatistics::Marker> sizeMarker;
         if (Options::dumpBaselineJITSizeStatistics()) [[unlikely]] {
@@ -769,8 +771,8 @@ void LOLJIT::privateCompileSlowCases()
             dataLogLn("At ", firstTo, " linked ", iter - iterStart, " slow cases");
 
         if (firstTo.offset() == m_bytecodeIndex.offset()) {
-            RELEASE_ASSERT_WITH_MESSAGE(iter == m_slowCases.end() || firstTo.offset() != iter->to.offset(), "Not enough jumps linked in slow case codegen while handling %s.", toCString(currentInstruction->opcodeID()).data());
-            RELEASE_ASSERT_WITH_MESSAGE(firstTo.offset() == (iter - 1)->to.offset(), "Too many jumps linked in slow case codegen while handling %s.", toCString(currentInstruction->opcodeID()).data());
+            RELEASE_ASSERT_WITH_MESSAGE(iter == m_slowCases.end() || firstTo.offset() != iter->to.offset(), "Not enough jumps linked in slow case codegen while handling %s.", toUTF8CString(currentInstruction->opcodeID()));
+            RELEASE_ASSERT_WITH_MESSAGE(firstTo.offset() == (iter - 1)->to.offset(), "Too many jumps linked in slow case codegen while handling %s.", toUTF8CString(currentInstruction->opcodeID()));
         }
 
         jump().linkTo(fastPathResumePoint(), this);
@@ -954,7 +956,7 @@ void LOLJIT::emitCompare(const JSInstruction* instruction, RelationalCondition c
 }
 
 template <typename EmitCompareFunctor>
-ALWAYS_INLINE void LOLJIT::emitCompareImpl(VirtualRegister op1, GPRReg op1GPR, VirtualRegister op2, GPRReg op2GPR, RelationalCondition condition, const EmitCompareFunctor& emitCompare)
+ALWAYS_INLINE void LOLJIT::emitCompareImpl(VirtualRegister op1, GPRReg op1GPR, VirtualRegister op2, GPRReg op2GPR, RelationalCondition condition, NOESCAPE const EmitCompareFunctor& emitCompare)
 {
     // We generate inline code for the following cases in the fast path:
     // - int immediate to constant int immediate
@@ -1025,7 +1027,7 @@ void LOLJIT::emitCompareSlow(const JSInstruction* instruction, DoubleCondition c
 
 // FIXME: Maybe this should take a shouldBox template parameter instead of relying on !dstGPR
 template<typename SlowOperation>
-void LOLJIT::emitCompareSlowImpl(const auto& allocations, VirtualRegister lhs, GPRReg lhsGPR, VirtualRegister rhs, GPRReg rhsGPR, GPRReg dstGPR, SlowOperation operation, Vector<SlowCaseEntry>::iterator& iter, const Invocable<void(FPRReg, FPRReg)> auto& emitDoubleCompare)
+void LOLJIT::emitCompareSlowImpl(const auto& allocations, VirtualRegister lhs, GPRReg lhsGPR, VirtualRegister rhs, GPRReg rhsGPR, GPRReg dstGPR, SlowOperation operation, Vector<SlowCaseEntry>::iterator& iter, NOESCAPE const Invocable<void(FPRReg, FPRReg)> auto& emitDoubleCompare)
 {
     // We generate inline code for the following cases in the slow path:
     // - floating-point number to constant int immediate
@@ -3086,9 +3088,15 @@ void LOLJIT::emit_op_get_from_scope(const JSInstruction* currentInstruction)
     if (profiledResolveType == ClosureVar) {
         loadPtrFromMetadata(bytecode, Metadata::offsetOfOperand(), s_scratch);
         loadValue(BaseIndex(scopeGPR, s_scratch, TimesEight, JSLexicalEnvironment::offsetOfVariables()), destGPR);
+    } else if (profiledResolveType == LazyClosureVar) {
+        // No resolve type check, as for ClosureVar: see JIT::emit_op_get_from_scope.
+        loadPtrFromMetadata(bytecode, Metadata::offsetOfOperand(), s_scratch);
+        loadValue(BaseIndex(scopeGPR, s_scratch, TimesEight, JSLexicalEnvironment::offsetOfVariables()), s_scratch);
+        addSlowCase(branchIfEmpty(s_scratch));
+        move(s_scratch, destGPR);
     } else {
         // Inlined fast path for common types.
-        constexpr size_t metadataMinAlignment = alignof(Metadata);
+        constexpr size_t metadataMinAlignment = 4;
         constexpr size_t metadataPointerAlignment = alignof(void*);
         static_assert(!(metadataPointerAlignment % metadataMinAlignment));
         static_assert(!(Metadata::offsetOfGetPutInfo() % metadataMinAlignment));
@@ -3298,9 +3306,11 @@ MacroAssemblerCodeRef<JITThunkPtrTag> LOLJIT::generateOpGetFromScopeThunk(VM& vm
             jit.loadValue(BaseIndex(scopeGPR, scratch1GPR, TimesEight, JSLexicalEnvironment::offsetOfVariables()), returnValueGPR);
             break;
         case Dynamic:
+        case LazyClosureVar:
             slowCase.append(jit.jump());
             break;
         case ResolvedClosureVar:
+        case ResolvedLazyClosureVar:
         case ModuleVar:
         case UnresolvedProperty:
         case UnresolvedPropertyWithVarInjectionChecks:
@@ -3485,6 +3495,8 @@ void LOLJIT::emit_op_put_to_scope(const JSInstruction* currentInstruction)
         case Dynamic:
             addSlowCase(jump());
             break;
+        case LazyClosureVar:
+        case ResolvedLazyClosureVar:
         case UnresolvedProperty:
         case UnresolvedPropertyWithVarInjectionChecks:
             RELEASE_ASSERT_NOT_REACHED();
@@ -3589,20 +3601,27 @@ void LOLJIT::emit_op_resolve_scope(const JSInstruction* currentInstruction)
     // If we profile certain resolve types, we're guaranteed all linked code will have the same
     // resolve type.
 
-    if (profiledResolveType == ModuleVar)
-        loadPtrFromMetadata(bytecode, Metadata::offsetOfLexicalEnvironment(), destGPR);
-    else if (profiledResolveType == ClosureVar) {
-        move(scopeGPR, destGPR);
+    if (profiledResolveType == ClosureVar || profiledResolveType == ModuleVar) {
+        // ModuleVar walks in the scratch register: its slow case needs scopeGPR, which destGPR may alias.
+        GPRReg walkGPR = profiledResolveType == ModuleVar ? metadataGPR : destGPR;
+        move(scopeGPR, walkGPR);
         unsigned localScopeDepth = bytecode.metadata(m_profiledCodeBlock).m_localScopeDepth;
         if (localScopeDepth < 8) {
             for (unsigned index = 0; index < localScopeDepth; ++index)
-                loadPtr(Address(destGPR, JSScope::offsetOfNext()), destGPR);
+                loadPtr(Address(walkGPR, JSScope::offsetOfNext()), walkGPR);
         } else {
             ASSERT(localScopeDepth >= 8);
             load32FromMetadata(bytecode, Metadata::offsetOfLocalScopeDepth(), s_scratch);
             auto loop = label();
-            loadPtr(Address(destGPR, JSScope::offsetOfNext()), destGPR);
+            loadPtr(Address(walkGPR, JSScope::offsetOfNext()), walkGPR);
             branchSub32(NonZero, s_scratch, TrustedImm32(1), s_scratch).linkTo(loop, this);
+        }
+        if (profiledResolveType == ModuleVar) {
+            // See JIT::emit_op_resolve_scope.
+            unsigned moduleImportSlot = bytecode.metadata(m_profiledCodeBlock).m_moduleImportSlot;
+            loadPtr(Address(walkGPR, JSLexicalEnvironment::offsetOfVariables() + moduleImportSlot * sizeof(WriteBarrier<Unknown>)), walkGPR);
+            addSlowCase(branchIfEmpty(walkGPR));
+            move(walkGPR, destGPR);
         }
     } else {
         // Inlined fast path for common types.
@@ -3653,7 +3672,7 @@ void LOLJIT::emit_op_resolve_scope(const JSInstruction* currentInstruction)
                 code = vm().getCTIStub(generateOpResolveScopeThunk<GlobalVar>);
 
 
-            // TODO: We should teach RegisterAllocator to always pick these registers when not one of the constant resolve types (e.g. ModuleVar).
+            // TODO: We should teach RegisterAllocator to always pick these registers when not one of the constant resolve types (e.g. GlobalVar).
             silentSpill(m_fastAllocator, allocations);
 
             if (metadataAddress.base != metadataGPR) {
@@ -3817,6 +3836,8 @@ MacroAssemblerCodeRef<JITThunkPtrTag> LOLJIT::generateOpResolveScopeThunk(VM& vm
             break;
         case ResolvedClosureVar:
         case ModuleVar:
+        case LazyClosureVar:
+        case ResolvedLazyClosureVar:
         case UnresolvedProperty:
         case UnresolvedPropertyWithVarInjectionChecks:
             RELEASE_ASSERT_NOT_REACHED();

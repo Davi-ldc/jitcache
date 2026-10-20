@@ -84,8 +84,8 @@ public:
     void serialize(GVariantBuilder*) const;
 
     WEBCORE_EXPORT String id() const;
-    WEBCORE_EXPORT CString name() const;
-    WEBCORE_EXPORT CString description() const;
+    WEBCORE_EXPORT UTF8CString name() const;
+    WEBCORE_EXPORT UTF8CString description() const;
     WEBCORE_EXPORT String locale() const;
     WEBCORE_EXPORT Atspi::Role role() const;
     WEBCORE_EXPORT unsigned childCount() const;
@@ -144,7 +144,7 @@ public:
     WEBCORE_EXPORT bool doAction() const;
 
     WEBCORE_EXPORT String documentAttribute(const String&) const;
-    void loadEvent(const char*);
+    void loadEvent(ASCIILiteral);
 
     WEBCORE_EXPORT AccessibilityObjectAtspi* activeDescendant() const;
     void activeDescendantChanged();
@@ -197,8 +197,8 @@ private:
 
     static TextGranularity atspiBoundaryToTextGranularity(Atspi::TextBoundaryType);
     static TextGranularity atspiGranularityToTextGranularity(Atspi::TextGranularityType);
-    CString text(int, int) const;
-    CString textAtOffset(int, TextGranularity, int&, int&) const;
+    UTF8CString text(int, int) const;
+    UTF8CString textAtOffset(int, TextGranularity, int&, int&) const;
     int characterAtOffset(int) const;
     std::optional<unsigned> characterOffset(char16_t, int) const;
     std::optional<unsigned> characterIndex(char16_t, unsigned) const;
@@ -291,7 +291,7 @@ private:
 
     RefPtr<AXCoreObject> m_coreObject;
     OptionSet<Interface> m_interfaces;
-    RefPtr<AccessibilityRootAtspi> m_root;
+    const RefPtr<AccessibilityRootAtspi> m_root;
     std::optional<RefPtr<AccessibilityObjectAtspi>> m_parent;
     bool m_isRegistered { false };
     String m_path;

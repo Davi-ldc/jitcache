@@ -36,6 +36,7 @@
 #include <sqlite3.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/TextStream.h>
 
 namespace WebCore {
 namespace IDBServer {
@@ -191,7 +192,7 @@ bool SQLiteIDBCursor::establishStatement()
 
 bool SQLiteIDBCursor::createSQLiteStatement(StringView sql)
 {
-    LOG(IndexedDB, "Creating cursor with SQL query: \"%s\"", sql.utf8().data());
+    LOG_WITH_STREAM(IndexedDB, stream << "Creating cursor with SQL query: \""_s << sql << "\""_s);
 
     ASSERT(!m_currentLowerKey.isNull());
     ASSERT(!m_currentUpperKey.isNull());
@@ -270,7 +271,7 @@ void SQLiteIDBCursor::resetAndRebindStatement()
 
 bool SQLiteIDBCursor::bindArguments()
 {
-    LOG(IndexedDB, "Cursor is binding lower key '%s' and upper key '%s'", m_currentLowerKey.loggingString().utf8().data(), m_currentUpperKey.loggingString().utf8().data());
+    LOG_WITH_STREAM(IndexedDB, stream << "Cursor is binding lower key '"_s << m_currentLowerKey.loggingString() << "' and upper key '"_s << m_currentUpperKey.loggingString() << "'"_s);
 
     int currentBindArgument = 1;
 
@@ -305,7 +306,7 @@ bool SQLiteIDBCursor::resetAndRebindPreIndexStatementIfNecessary()
 
     CheckedPtr database = m_transaction->sqliteDatabase();
     if (!m_preIndexStatement) {
-        m_preIndexStatement = database->prepareStatementSlow(buildPreIndexStatement(isDirectionNext()));
+        lazyInitialize(m_preIndexStatement, database->prepareStatementSlow(buildPreIndexStatement(isDirectionNext())));
         if (!m_preIndexStatement) {
             LOG_ERROR("Could not prepare pre statement - '%s'", database->lastErrorMsg());
             return false;
@@ -430,7 +431,7 @@ bool SQLiteIDBCursor::fetch()
 {
     ASSERT(m_fetchedRecords.isEmpty() || !m_fetchedRecords.last().isTerminalRecord());
 
-    m_fetchedRecords.append({ });
+    m_fetchedRecords.constructAndAppend();
 
     bool isUnique = m_cursorDirection == IndexedDB::CursorDirection::Nextunique || m_cursorDirection == IndexedDB::CursorDirection::Prevunique;
     if (!isUnique) {

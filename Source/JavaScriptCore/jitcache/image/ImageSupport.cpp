@@ -11,6 +11,7 @@
 #include "JITThunks.h"
 #include "JSCConfig.h"
 #include "JSCInlines.h"
+#include "JSSentinel.h"
 #include "JSTemplateObjectDescriptor.h"
 #include "LLIntEntrypoint.h"
 #include "Options.h"
@@ -187,6 +188,10 @@ JSCell* vmCell(VM& vm, VMCell entry)
         return jsEmptyString(vm);
     case VMCell::SmallStringsSentinel:
         return vm.smallStrings.sentinelString();
+    case VMCell::FastArraySentinel:
+        return vm.fastArraySentinel();
+    case VMCell::FastStringSentinel:
+        return vm.fastStringSentinel();
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -387,12 +392,13 @@ const void* resolveTarget(const ResolutionContext& context, const ImageTarget& t
         return offsets[rank.indexInTable].untaggedPtr();
     }
     case TargetKind::MathIC:
-        // Only MathICs with inline code are named, which ImageCheck::V6 checks; the span holds every MathIC of the image.
+        // Only MathICs with inline code are named, which ImageCheck::MathICAndSwitchTargets checks; the span holds every
+        // MathIC of the image.
         ASSERT(target.a < context.mathICs.size() && context.mathICs[target.a]);
         return context.mathICs[target.a];
     case TargetKind::SwitchTableBase:
-        // A dense table's storage, which exists once the table is sized; ImageCheck::V6 checks that the target names a
-        // dense table.
+        // A dense table's storage, which exists once the table is sized; ImageCheck::MathICAndSwitchTargets checks that
+        // the target names a dense table.
         ASSERT(target.a < context.switchTableBases.size() && context.switchTableBases[target.a]);
         return context.switchTableBases[target.a];
     case TargetKind::ImageOffset:

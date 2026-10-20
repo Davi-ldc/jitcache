@@ -377,7 +377,7 @@ void ScrollingTreeScrollingNodeDelegateIOS::commitStateAfterChildren(const Scrol
         RetainPtr scrollView = this->scrollView();
         if (scrollingStateNode.hasChangedProperty(ScrollingStateNode::Property::ScrollContainerLayer)) {
             if (!m_scrollViewDelegate)
-                m_scrollViewDelegate = adoptNS([[WKScrollingNodeScrollViewDelegate alloc] initWithScrollingTreeNodeDelegate:*this]);
+                lazyInitialize(m_scrollViewDelegate, adoptNS([[WKScrollingNodeScrollViewDelegate alloc] initWithScrollingTreeNodeDelegate:*this]));
 
             scrollView.get().scrollsToTop = NO;
             scrollView.get().delegate = m_scrollViewDelegate.get();
@@ -576,8 +576,7 @@ void ScrollingTreeScrollingNodeDelegateIOS::currentSnapPointIndicesDidChange(std
 
 WKBaseScrollView *ScrollingTreeScrollingNodeDelegateIOS::scrollView() const
 {
-    // FIXME: This is a static analyzer false positive.
-    SUPPRESS_UNRETAINED_LOCAL if (auto* delegate = protect(scrollLayer()).get().delegate) {
+    if (auto* delegate = protect(scrollLayer()).get().delegate) {
         ASSERT(is_objc<WKBaseScrollView>(delegate));
         return dynamic_objc_cast<WKBaseScrollView>(delegate);
     }

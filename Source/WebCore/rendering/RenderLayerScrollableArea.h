@@ -115,9 +115,7 @@ public:
     bool hasVerticalScrollbar() const { return verticalScrollbar(); }
     void setHasHorizontalScrollbar(bool);
     void setHasVerticalScrollbar(bool);
-    
-    bool needsAnimatedScroll() const final { return m_isRegisteredForAnimatedScroll; }
-    
+
     OverscrollBehavior NODELETE horizontalOverscrollBehavior() const final;
     OverscrollBehavior NODELETE verticalOverscrollBehavior() const final;
 
@@ -339,7 +337,7 @@ private:
 
     std::unique_ptr<RenderMarquee> m_marquee;
 
-    std::unique_ptr<ScrollAnchoringController> m_scrollAnchoringController;
+    const std::unique_ptr<ScrollAnchoringController> m_scrollAnchoringController;
 };
 
 } // namespace WebCore

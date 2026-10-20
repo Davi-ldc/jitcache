@@ -116,21 +116,21 @@
     }
     print(stack);
 
-    // The case happened (HARNESS.md, Tests): the getter, which throws at every call, is the one body here the producer
-    // never compiles. The images of the others carry the targets the header claims.
+    // The case happened: the getter, which throws at every call, is the one body here the producer never compiles. The
+    // images of the others carry the targets the header claims.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const bodies = { thrower, catcher, rethrower, readProperty, bindingFree, deepest, middle, outer };
         sections.expectImports(role, bodies);
         sections.expectTargets(role, { call: bodies }, [
-            { site: "C5", kind: "BaselineThunk", a: "OpThrowHandler", form: "Jump" },
-            { site: "A3, B7", kind: "VMAddress", a: "Exception", form: "Pointer" },
-            { site: "A17", kind: "CommonThunk", a: "HandleException", form: "Jump" },
-            { site: "C8, A9", kind: "VMAddress", a: "TopEntryFrame", form: "Pointer" },
-            { site: "C9, C10", kind: "VMAddress", a: "VM", form: "Pointer" },
-            { site: "C11, A12", kind: "VMAddress", a: "TargetMachinePCForThrow", form: "Pointer" },
-            { site: "C4", kind: "BaselineThunk", a: "ValueIsFalsey", form: "Call" },
-            { site: "A2", kind: "VMAddress", a: "TopCallFrame", form: "Pointer" },
+            { site: "throw's jump to its handler thunk", kind: "BaselineThunk", a: "OpThrowHandler", form: "Jump" },
+            { site: "an exception check's test of the VM's exception", kind: "VMAddress", a: "Exception", form: "Pointer" },
+            { site: "an exception check's jump to the handler", kind: "CommonThunk", a: "HandleException", form: "Jump" },
+            { site: "catch's callee-save restore", kind: "VMAddress", a: "TopEntryFrame", form: "Pointer" },
+            { site: "catch's VM pointer and VM arguments", kind: "VMAddress", a: "VM", form: "Pointer" },
+            { site: "catch's load of the throw target", kind: "VMAddress", a: "TargetMachinePCForThrow", form: "Pointer" },
+            { site: "jfalse's call to the falsiness thunk", kind: "BaselineThunk", a: "ValueIsFalsey", form: "Call" },
+            { site: "prepareCallOperation's top call frame store", kind: "VMAddress", a: "TopCallFrame", form: "Pointer" },
         ]);
     }
 })(...arguments);

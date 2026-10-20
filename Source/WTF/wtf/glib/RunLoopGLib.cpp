@@ -33,7 +33,6 @@
 #include <wtf/BubbleSort.h>
 #include <wtf/MainThread.h>
 #include <wtf/SafeStrerror.h>
-#include <wtf/glib/ActivityObserver.h>
 #include <wtf/glib/RunLoopSourcePriority.h>
 
 #if HAVE(TIMERFD)
@@ -183,7 +182,7 @@ void RunLoop::runGLibMainLoopIteration(MayBlock mayBlock)
         auto* pollFunction = g_main_context_get_poll_func(m_mainContext.get());
         auto result = (*pollFunction)(m_pollFDs.mutableSpan().data(), numFDs, timeoutInMilliseconds);
         if (result < 0 && errno != EINTR)
-            LOG_ERROR("RunLoop::runGLibMainLoopIteration() - polling failed, ignoring. Error message: %s", safeStrerror(errno).data());
+            LOG_ERROR("RunLoop::runGLibMainLoopIteration() - polling failed, ignoring. Error message: %s", safeStrerror(errno));
     }
     notifyActivity(Activity::AfterWaiting);
 
@@ -341,7 +340,7 @@ RunLoop::TimerBase::~TimerBase()
     // (Starting a timer cross-thread is safe and supported -- that is how dispatch()/dispatchAfter()
     // schedule work onto another run loop.)
     if (isActive())
-        releaseAssertIsCurrent(m_runLoop);
+        assertIsCurrent(m_runLoop);
     g_source_destroy(m_source.get());
 }
 
@@ -374,7 +373,7 @@ void RunLoop::TimerBase::start(Seconds interval, bool repeat)
         if (runLoopSource.timerFd > -1) [[likely]]
             g_source_add_unix_fd(m_source.get(), runLoopSource.timerFd, G_IO_IN);
         else
-            LOG_ERROR("Could not create timerfd: %s", safeStrerror(errno).data());
+            LOG_ERROR("Could not create timerfd: %s", safeStrerror(errno));
     }
 #endif
 
@@ -386,7 +385,7 @@ void RunLoop::TimerBase::start(Seconds interval, bool repeat)
 void RunLoop::TimerBase::stop()
 {
     if (isActive())
-        releaseAssertIsCurrent(m_runLoop);
+        assertIsCurrent(m_runLoop);
     g_source_set_ready_time(m_source.get(), -1);
     m_interval = { };
     m_isRepeating = false;

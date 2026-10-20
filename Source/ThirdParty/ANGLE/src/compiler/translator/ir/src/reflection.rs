@@ -18,8 +18,6 @@ pub struct Options {
     // Some built-ins have a different name in ES100.
     pub is_es1: bool,
     pub transform_float_uniform_to_fp16: bool,
-    pub user_variable_name_prefix: char,
-    pub user_block_name_prefix: char,
 }
 
 // All reflection info bundled together
@@ -47,7 +45,12 @@ impl Info {
     }
 }
 
-pub fn collect_info(ir: &IR, options: &Options, active_variables: &HashSet<VariableId>) -> Info {
+pub fn collect_info(
+    ir: &IR,
+    options: &Options,
+    active_variables: &HashSet<VariableId>,
+    samplers_used_with_texel_fetch: &HashMap<VariableId, FieldsUsedWithTexelFetch>,
+) -> Info {
     // Go over the interface variables and extract their reflection info.
     let mut info = Info {
         inputs: vec![],
@@ -77,6 +80,7 @@ pub fn collect_info(ir: &IR, options: &Options, active_variables: &HashSet<Varia
                 &mut info,
                 options,
                 active_variables,
+                samplers_used_with_texel_fetch,
                 variable_id,
                 variable,
             );
@@ -112,7 +116,7 @@ fn collect_built_in_variable(
         return;
     }
 
-    let mut shader_variable = new_shader_variable(ir_meta, options, variable, active);
+    let mut shader_variable = new_shader_variable(ir_meta, options, variable, active, None);
     // Because `active` is forced to true, also mark `static_use` for consistency.
     if force_active {
         shader_variable.static_use = true;
@@ -299,6 +303,7 @@ fn collect_user_variable(
     info: &mut Info,
     options: &Options,
     active_variables: &HashSet<VariableId>,
+    samplers_used_with_texel_fetch: &HashMap<VariableId, FieldsUsedWithTexelFetch>,
     variable_id: VariableId,
     variable: &Variable,
 ) {
@@ -325,7 +330,13 @@ fn collect_user_variable(
             info.uniform_blocks.push(interface_block);
         }
     } else {
-        let shader_variable = new_shader_variable(ir_meta, options, variable, active);
+        let shader_variable = new_shader_variable(
+            ir_meta,
+            options,
+            variable,
+            active,
+            samplers_used_with_texel_fetch.get(&variable_id),
+        );
         if variable.decorations.has(Decoration::Input) {
             info.inputs.push(shader_variable);
         } else if variable.decorations.has(Decoration::Output)
@@ -341,14 +352,13 @@ fn collect_user_variable(
     }
 }
 
-enum MappedNamePrefix {
-    Block,
-    Other,
-}
-
-fn mapped_name(options: &Options, name: &Name, prefix_type: MappedNamePrefix) -> String {
+fn mapped_name(name: &Name, user_prefix: &'static str) -> String {
     // GLSL ES 3.00.6 section 3.9: the maximum length of an identifier is 1024 characters.
     const MAX_ESSL_IDENTIFIER_LENGTH: usize = 1024;
+
+    // Reflection info is always gathered before transformations may transform the interface
+    // variables, because those transformations shouldn't be visible to the application.
+    debug_assert!(name.suffix.is_none());
 
     let prefix = match name.source {
         // Make sure unnamed interface blocks remain unnamed.
@@ -357,19 +367,15 @@ fn mapped_name(options: &Options, name: &Name, prefix_type: MappedNamePrefix) ->
         // have as long names and could conflict.
         NameSource::ShaderInterface
             if !name.name.is_empty()
-                && name.name.len() + USER_SYMBOL_PREFIX.len() <= MAX_ESSL_IDENTIFIER_LENGTH =>
+                && name.name.len() + user_prefix.len() <= MAX_ESSL_IDENTIFIER_LENGTH =>
         {
-            let prefix = match prefix_type {
-                MappedNamePrefix::Block => options.user_block_name_prefix,
-                MappedNamePrefix::Other => options.user_variable_name_prefix,
-            };
-            format!("{}{}", USER_SYMBOL_PREFIX, prefix)
+            user_prefix
         }
         NameSource::Temporary => panic!(
             "Internal error: Should not collect reflection info for shader-private variables and \
              types"
         ),
-        _ => "".to_string(),
+        _ => "",
     };
     format!("{}{}", prefix, name.name)
 }
@@ -675,6 +681,7 @@ fn new_shader_variable(
     options: &Options,
     variable: &Variable,
     active: bool,
+    fields_used_with_texel_fetch: Option<&FieldsUsedWithTexelFetch>,
 ) -> ShaderVariable {
     new_common_shader_variable(
         ir_meta,
@@ -685,6 +692,7 @@ fn new_shader_variable(
         &variable.decorations,
         variable.is_static_use,
         Inherit::new(active, variable.decorations.has(Decoration::Uniform)),
+        fields_used_with_texel_fetch,
     )
 }
 
@@ -693,6 +701,7 @@ fn new_field(
     options: &Options,
     field: &Field,
     inherit: Inherit,
+    fields_used_with_texel_fetch: Option<&FieldsUsedWithTexelFetch>,
 ) -> ShaderVariable {
     new_common_shader_variable(
         ir_meta,
@@ -703,6 +712,7 @@ fn new_field(
         &field.decorations,
         field.is_static_use || inherit.active,
         inherit,
+        fields_used_with_texel_fetch,
     )
 }
 
@@ -715,6 +725,7 @@ fn new_common_shader_variable(
     decorations: &Decorations,
     static_use: bool,
     inherit: Inherit,
+    fields_used_with_texel_fetch: Option<&FieldsUsedWithTexelFetch>,
 ) -> ShaderVariable {
     let (gl_type, gl_precision, array_sizes) = to_gl_type(ir_meta, type_id, precision);
 
@@ -739,11 +750,16 @@ fn new_common_shader_variable(
         && is_eligible_for_fp16
         && gl_precision != gl::HIGH_FLOAT;
 
+    // If texelFetch use is marked but no subfields, this is the sampler itself which is used with
+    // texelFetch.
+    let texel_fetch_static_use =
+        fields_used_with_texel_fetch.map(|fields| fields.subfields.is_empty()).unwrap_or(false);
+
     let mut var = ShaderVariable {
         gl_type,
         gl_precision,
         name: name.name.to_string(),
-        mapped_name: mapped_name(options, name, MappedNamePrefix::Other),
+        mapped_name: mapped_name(name, USER_VARIABLE_PREFIX),
         struct_or_block_name: "".to_string(),
         mapped_struct_or_block_name: "".to_string(),
         fields: vec![],
@@ -763,11 +779,7 @@ fn new_common_shader_variable(
         raster_ordered: false,
         readonly: false,
         writeonly: false,
-        // TODO(http://anglebug.com/349994211): While gathering active variables, also find out
-        // which samplers are used in texel fetch.  Currently, there is an AST pass for this, which
-        // is not correct for samplers in structs.  It's also incorrect for sampler arrays, which
-        // indicates that returning a bool in ShaderVariable is not sufficient information.
-        texel_fetch_static_use: false,
+        texel_fetch_static_use,
         is_float16,
         is_fragment_inout: false,
         index: -1,
@@ -776,22 +788,27 @@ fn new_common_shader_variable(
     };
 
     let type_info = get_base_type(ir_meta, type_id);
-    let interface_block_fields = if let Type::Struct(struct_name, fields, specialization) =
-        type_info
-    {
-        var.struct_or_block_name = struct_name.name.to_string();
-        // Mapped name is only used for interface blocks
-        if *specialization == StructSpecialization::InterfaceBlock {
-            var.mapped_struct_or_block_name =
-                mapped_name(options, struct_name, MappedNamePrefix::Block);
-        }
-        let field_inherit = inherit.accumulate_is_patch(decorations.has(Decoration::Patch));
-        var.fields =
-            fields.iter().map(|field| new_field(ir_meta, options, field, field_inherit)).collect();
-        (*specialization == StructSpecialization::InterfaceBlock).then_some(fields)
-    } else {
-        None
-    };
+    let interface_block_fields =
+        if let Type::Struct(struct_name, fields, specialization) = type_info {
+            var.struct_or_block_name = struct_name.name.to_string();
+            // Mapped name is only used for interface blocks
+            if *specialization == StructSpecialization::InterfaceBlock {
+                var.mapped_struct_or_block_name = mapped_name(struct_name, USER_BLOCK_PREFIX);
+            }
+            let field_inherit = inherit.accumulate_is_patch(decorations.has(Decoration::Patch));
+            var.fields = fields
+                .iter()
+                .enumerate()
+                .map(|(id, field)| {
+                    let fields_used_with_texel_fetch = fields_used_with_texel_fetch
+                        .and_then(|fields| fields.subfields.get(&(id as u32)));
+                    new_field(ir_meta, options, field, field_inherit, fields_used_with_texel_fetch)
+                })
+                .collect();
+            (*specialization == StructSpecialization::InterfaceBlock).then_some(fields)
+        } else {
+            None
+        };
 
     for decoration in decorations.decorations.iter() {
         match *decoration {
@@ -883,8 +900,7 @@ fn new_common_shader_variable(
             Decoration::RasterOrdered => var.raster_ordered = true,
             // Some information is either internal, pertains only to InterfaceBlocks or not reported
             // at the API level.
-            Decoration::Precise
-            | Decoration::Interpolant
+            Decoration::Interpolant
             | Decoration::Shared
             | Decoration::Coherent
             | Decoration::Restrict
@@ -994,7 +1010,7 @@ fn new_interface_block(
 
     let mut var = InterfaceBlock {
         name: block_name.name.to_string(),
-        mapped_name: mapped_name(options, block_name, MappedNamePrefix::Block),
+        mapped_name: mapped_name(block_name, USER_BLOCK_PREFIX),
         instance_name: variable.name.name.to_string(),
         fields: vec![],
         static_use: variable.is_static_use,
@@ -1005,6 +1021,7 @@ fn new_interface_block(
         binding: get_decoration_value!(variable.decorations, Decoration::Binding)
             .map(|binding| binding as i32)
             .unwrap_or(-1),
+        is_row_major: variable.decorations.has(Decoration::MatrixPacking(MatrixPacking::RowMajor)),
         readonly: true,
         id: 0,
     };
@@ -1023,7 +1040,7 @@ fn new_interface_block(
                 var.readonly = false;
             }
 
-            new_field(ir_meta, options, field, Inherit::new(active, false))
+            new_field(ir_meta, options, field, Inherit::new(active, false), None)
         })
         .collect();
 

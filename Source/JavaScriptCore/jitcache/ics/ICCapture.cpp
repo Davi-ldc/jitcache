@@ -4,6 +4,7 @@
 #if ENABLE(JIT)
 
 #include "AccessCase.h"
+#include "ArrayProfile.h"
 #include "BaselineJITCode.h"
 #include "BytecodeStructs.h"
 #include "CallLinkInfo.h"
@@ -51,12 +52,13 @@ static CallLinkModeCode modeCode(CallLinkInfo::Mode mode)
 // The call-link half of the polymorphic bit: a Polymorphic site that GC has not cleared and whose stub holds two or more
 // slots. A stub with one slot holds closures of one executable, which a despecified status serves, so the slots are
 // counted only up to two. Counting reads the slots' cell pointers and dereferences none; the stub stays alive under the
-// CB's lock, since only a collection frees it.
-static bool isPolymorphicCallLinkSite(CallLinkInfo& callLinkInfo)
+// CB's lock, since only a collection frees it. A lazy site without data of its own never linked a callee.
+static bool isPolymorphicCallLinkSite(const CallLinkSite& site)
 {
-    if (callLinkInfo.mode() != CallLinkInfo::Mode::Polymorphic || callLinkInfo.clearedByGC())
+    CallLinkInfo* callLinkInfo = site.ownCallLinkInfo();
+    if (!callLinkInfo || callLinkInfo->mode() != CallLinkInfo::Mode::Polymorphic || callLinkInfo->clearedByGC())
         return false;
-    PolymorphicCallStubRoutine* stub = callLinkInfo.stub();
+    PolymorphicCallStubRoutine* stub = callLinkInfo->stub();
     if (!stub)
         return false;
     unsigned slotCount = 0;
@@ -135,9 +137,9 @@ static CaptureSummary readRecords(const ConcurrentJSLocker& locker, CodeBlock& c
             result.hasPolymorphicSite = true;
         propertyICSink(record);
     }
-    forEachCallLinkSite(codeBlock, [&](unsigned, unsigned, CallLinkInfo& callLinkInfo) {
-        callLinkSink(readCallLinkRecord(locker, callLinkInfo));
-        if (!result.hasPolymorphicSite && isPolymorphicCallLinkSite(callLinkInfo))
+    forEachCallLinkSite(codeBlock, [&](const CallLinkSite& site) {
+        callLinkSink(readCallLinkRecord(locker, site));
+        if (!result.hasPolymorphicSite && isPolymorphicCallLinkSite(site))
             result.hasPolymorphicSite = true;
     });
     return result;
@@ -181,19 +183,52 @@ PropertyICRecord readPropertyICRecord(const ConcurrentJSLocker& locker, const Ha
     };
 }
 
-CallLinkRecord readCallLinkRecord(const ConcurrentJSLocker&, CallLinkInfo& callLinkInfo)
+CallLinkRecord readCallLinkRecord(const ConcurrentJSLocker&, const CallLinkSite& site)
 {
     using ICCaptureInternal::bitIf;
 
-    return CallLinkRecord {
-        .bits = static_cast<uint8_t>(static_cast<uint8_t>(ICCaptureInternal::modeCode(callLinkInfo.mode()))
-            | bitIf(callLinkInfo.seenOnce(), CallLinkBit::seenOnce)
-            | bitIf(callLinkInfo.hasSeenClosure(), CallLinkBit::hasSeenClosure)
-            | bitIf(callLinkInfo.clearedByGC(), CallLinkBit::clearedByGC)
-            | bitIf(callLinkInfo.clearedByVirtual(), CallLinkBit::clearedByVirtual)),
-        // The field is a byte, saturated at maxProfiledArgumentCountIncludingThisForVarargs.
-        .maxArgumentCountIncludingThisForVarargs = static_cast<uint8_t>(callLinkInfo.maxArgumentCountIncludingThisForVarargs()),
-    };
+    CallLinkRecord record { };
+    CallLinkInfo* callLinkInfo = site.ownCallLinkInfo();
+    if (!callLinkInfo) {
+        // The site points at data the VM's sites share, whose CallLinkInfo and profile describe no site: the this
+        // structures it noted went to a profile nothing reads. Only whether it points at the executed-once data says
+        // something about it.
+        record.bits = bitIf(site.lazyInfo->hasExecutedOnce(), CallLinkBit::seenOnce);
+        return record;
+    }
+
+    record.bits = static_cast<uint8_t>(static_cast<uint8_t>(ICCaptureInternal::modeCode(callLinkInfo->mode()))
+        | bitIf(callLinkInfo->seenOnce(), CallLinkBit::seenOnce)
+        | bitIf(callLinkInfo->hasSeenClosure(), CallLinkBit::hasSeenClosure)
+        | bitIf(callLinkInfo->clearedByGC(), CallLinkBit::clearedByGC)
+        | bitIf(callLinkInfo->clearedByVirtual(), CallLinkBit::clearedByVirtual));
+    // The field is a byte, saturated at maxProfiledArgumentCountIncludingThisForVarargs.
+    record.maxArgumentCountIncludingThisForVarargs = static_cast<uint8_t>(callLinkInfo->maxArgumentCountIncludingThisForVarargs());
+
+    if (site.opcode().hasThisProfile) {
+        // A site with a this profile is lazy, and its own CallLinkInfo lives in its own CallSiteData beside the profile.
+        // Only the accumulated modes and flags are read: a pending structure sample stays where it is, undecoded. Markers
+        // and compiler threads drain array profiles without a lock, so a drain caught midway costs only the sample it was
+        // folding.
+        ArrayProfile* profile = site.lazyInfo->arrayProfile();
+        ASSERT(profile);
+        if (profile)
+            writeThisProfile(record, profile->observedArrayModes(), profile->arrayProfileFlags().toRaw());
+    }
+    return record;
+}
+
+ASCIILiteral description(CaptureCheck check)
+{
+    switch (check) {
+    case CaptureCheck::NoBaselineJITData:
+        return "no-baseline-jit-data"_s;
+    case CaptureCheck::OutputSizeMismatch:
+        return "output-size-mismatch"_s;
+    case CaptureCheck::MoldMismatch:
+        return "mold-mismatch"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 size_t baselineICsSectionSize(CodeBlock& codeBlock)
@@ -246,7 +281,7 @@ std::expected<CaptureSummary, CaptureError> captureBaselineICs(CodeBlock& codeBl
         if (!siteCount)
             continue;
         CallLinkGroup group {
-            .opcodeID = static_cast<uint32_t>(callLinkOpcodes[position]),
+            .opcodeID = static_cast<uint32_t>(callLinkOpcodes[position].opcodeID),
             .siteCount = siteCount,
         };
         memcpySpan(consumeSpan(cursor, callLinkGroupSize), asByteSpan(group));

@@ -122,6 +122,8 @@ static IntlDurationFormat::UnitData intlDurationUnitOptions(JSGlobalObject* glob
     }
     }
 
+    bool prevStyleIsNumeric = prevStyle && (prevStyle.value() == IntlDurationFormat::UnitStyle::Numeric || prevStyle.value() == IntlDurationFormat::UnitStyle::TwoDigit);
+
     IntlDurationFormat::Display displayDefault = IntlDurationFormat::Display::Always;
     IntlDurationFormat::UnitStyle style = IntlDurationFormat::UnitStyle::Short;
     if (styleValue)
@@ -131,19 +133,20 @@ static IntlDurationFormat::UnitData intlDurationUnitOptions(JSGlobalObject* glob
             if (unit != TemporalUnit::Hour && unit != TemporalUnit::Minute && unit != TemporalUnit::Second)
                 displayDefault = IntlDurationFormat::Display::Auto;
             style = digitalBase;
+        } else if (prevStyleIsNumeric) {
+            if (unit != TemporalUnit::Minute && unit != TemporalUnit::Second)
+                displayDefault = IntlDurationFormat::Display::Auto;
+            style = IntlDurationFormat::UnitStyle::Numeric;
         } else {
             displayDefault = IntlDurationFormat::Display::Auto;
-            if (prevStyle && (prevStyle.value() == IntlDurationFormat::UnitStyle::Numeric || prevStyle.value() == IntlDurationFormat::UnitStyle::TwoDigit))
-                style = IntlDurationFormat::UnitStyle::Numeric;
-            else
-                style = static_cast<IntlDurationFormat::UnitStyle>(baseStyle);
+            style = static_cast<IntlDurationFormat::UnitStyle>(baseStyle);
         }
     }
 
     IntlDurationFormat::Display display = intlOption<IntlDurationFormat::Display>(globalObject, options, displayName, { { "auto"_s, IntlDurationFormat::Display::Auto }, { "always"_s, IntlDurationFormat::Display::Always } }, "display name must be either \"auto\" or \"always\""_s, displayDefault);
     RETURN_IF_EXCEPTION(scope, { });
 
-    if (prevStyle && (prevStyle.value() == IntlDurationFormat::UnitStyle::Numeric || prevStyle.value() == IntlDurationFormat::UnitStyle::TwoDigit)) {
+    if (prevStyleIsNumeric) {
         if (style != IntlDurationFormat::UnitStyle::Numeric && style != IntlDurationFormat::UnitStyle::TwoDigit) {
             throwRangeError(globalObject, scope, "style option is inconsistent"_s);
             return { };
@@ -236,7 +239,7 @@ void IntlDurationFormat::initializeDurationFormat(JSGlobalObject* globalObject, 
 
     m_numberingSystem = resolved.extensions[static_cast<unsigned>(RelevantExtensionKey::Nu)];
     m_dataLocale = resolved.dataLocale;
-    m_dataLocaleWithExtensions = m_numberingSystem.isNull() ? m_dataLocale.utf8() : makeString(m_dataLocale, "-u-nu-"_s, m_numberingSystem).utf8();
+    m_dataLocaleWithExtensions = m_numberingSystem.isNull() ? m_dataLocale.ascii() : makeString(m_dataLocale, "-u-nu-"_s, m_numberingSystem).ascii();
 
     m_style = intlOption<Style>(globalObject, options, vm.propertyNames->style, { { "long"_s, Style::Long }, { "short"_s, Style::Short }, { "narrow"_s, Style::Narrow }, { "digital"_s, Style::Digital } }, "style must be either \"long\", \"short\", \"narrow\", or \"digital\""_s, Style::Short);
     RETURN_IF_EXCEPTION(scope, void());
@@ -283,7 +286,7 @@ void IntlDurationFormat::initializeDurationFormat(JSGlobalObject* globalObject, 
 
         // 5. Perform ! CreateDataPropertyOrThrow(lfOpts, "type", "unit").
         UErrorCode status = U_ZERO_ERROR;
-        m_listFormat = std::unique_ptr<UListFormatter, UListFormatterDeleter>(ulistfmt_openForType(m_locale.utf8().data(), ULISTFMT_TYPE_UNITS, toUListFormatterWidth(m_style), &status));
+        m_listFormat = std::unique_ptr<UListFormatter, UListFormatterDeleter>(ulistfmt_openForType(m_locale.ascii().data(), ULISTFMT_TYPE_UNITS, toUListFormatterWidth(m_style), &status));
         if (U_FAILURE(status)) {
             throwTypeError(globalObject, scope, "failed to initialize DurationFormat"_s);
             return;
@@ -298,7 +301,7 @@ const String& IntlDurationFormat::numberingSystem() const
     return m_numberingSystem;
 }
 
-static String retrieveSeparator(const CString& locale, const String& numberingSystem)
+static String retrieveSeparator(const ASCIICString& locale, const String& numberingSystem)
 {
     ASCIILiteral fallbackTimeSeparator = ":"_s;
     UErrorCode status = U_ZERO_ERROR;
@@ -311,7 +314,7 @@ static String retrieveSeparator(const CString& locale, const String& numberingSy
     if (U_FAILURE(status))
         return fallbackTimeSeparator;
 
-    auto numberingSystemBundle = std::unique_ptr<UResourceBundle, ICUDeleter<ures_close>>(ures_getByKey(numberElementsBundle.get(), numberingSystem.utf8().data(), nullptr, &status));
+    auto numberingSystemBundle = std::unique_ptr<UResourceBundle, ICUDeleter<ures_close>>(ures_getByKey(numberElementsBundle.get(), numberingSystem.ascii().data(), nullptr, &status));
     if (U_FAILURE(status))
         return fallbackTimeSeparator;
 
@@ -366,11 +369,11 @@ static String int128ToString(Int128 value)
     if (isNegative)
         value = -value;
 
-    while (value) {
+    do {
         Int128 digit = value % 10;
         resultString.append(static_cast<char>('0' + digit));
         value /= 10;
-    }
+    } while (value);
 
     if (isNegative)
         resultString.append('-');
@@ -384,36 +387,13 @@ static String buildDecimalFormat(TemporalUnit unit, Int128 ns)
 {
     ASSERT(unit == TemporalUnit::Second || unit == TemporalUnit::Millisecond || unit == TemporalUnit::Microsecond);
 
-    int flactionalDigits = 0;
-    Int128 exponent = 0;
-    if (unit == TemporalUnit::Second) {
-        flactionalDigits = 9;
-        exponent = Int128(1000000000);
-    } else if (unit == TemporalUnit::Millisecond) {
-        flactionalDigits = 6;
-        exponent = Int128(1000000);
-    } else {
-        ASSERT(unit == TemporalUnit::Microsecond);
-        flactionalDigits = 3;
-        exponent = Int128(1000);
-    }
+    ASCIILiteral exponent = "E-3"_s;
+    if (unit == TemporalUnit::Second)
+        exponent = "E-9"_s;
+    else if (unit == TemporalUnit::Millisecond)
+        exponent = "E-6"_s;
 
-    Int128 integerPart = ns / exponent;
-    ASSERT(ns % exponent >= std::numeric_limits<int64_t>::min() && ns % exponent <= std::numeric_limits<int64_t>::max());
-    int64_t fractionalPart = std::abs(static_cast<int64_t>(ns % exponent));
-
-    StringBuilder builder;
-
-    builder.append(int128ToString(integerPart));
-    builder.append("."_s);
-
-    String fractionalString = String::number(fractionalPart);
-    int zeroLength = flactionalDigits - fractionalString.length();
-    for (int i = 0; i < zeroLength; ++i)
-        builder.append("0"_s);
-    builder.append(fractionalString);
-
-    return builder.toString();
+    return makeString(int128ToString(ns), exponent);
 }
 
 static Vector<Element> collectElements(JSGlobalObject* globalObject, const IntlDurationFormat* durationFormat, ISO8601::Duration duration)
@@ -500,7 +480,8 @@ static Vector<Element> collectElements(JSGlobalObject* globalObject, const IntlD
 
         // 3.l. If value is not 0 or display is not "auto", then
         value = purifyNaN(value);
-        if (value || unitData.display() != IntlDurationFormat::Display::Auto || style == IntlDurationFormat::UnitStyle::TwoDigit || style ==  IntlDurationFormat::UnitStyle::Numeric) {
+        bool isZero = totalNanosecondsValue ? !totalNanosecondsValue.value() : !value;
+        if (!isZero || unitData.display() != IntlDurationFormat::Display::Auto || style == IntlDurationFormat::UnitStyle::TwoDigit || style ==  IntlDurationFormat::UnitStyle::Numeric) {
             auto formatToString = [&](UFormattedNumber* formattedNumber) -> String {
                 auto scope = DECLARE_THROW_SCOPE(vm);
 

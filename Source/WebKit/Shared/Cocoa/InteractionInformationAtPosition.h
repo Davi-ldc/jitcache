@@ -74,6 +74,10 @@ struct InteractionInformationAtPosition {
         bool isColorInput,
         bool isRangeInput,
         bool isARIASlider,
+        bool isCustomSlider,
+        bool hasDirectionalResizeCursor,
+        bool isInResizeControl,
+        bool isOverVideo,
         bool isNearMarkedText,
 #if PLATFORM(IOS_FAMILY)
         bool touchCalloutEnabled,
@@ -83,7 +87,7 @@ struct InteractionInformationAtPosition {
 #if PLATFORM(IOS_FAMILY)
         bool hasSaveableImage,
 #endif
-#if ENABLE(MODEL_PROCESS)
+#if ENABLE(MODEL_ELEMENT_STAGE_MODE)
         bool isInteractiveModel,
 #endif
         bool isAttachment,
@@ -92,6 +96,7 @@ struct InteractionInformationAtPosition {
         bool isPausedVideo,
         bool isElement,
         bool isContentEditable,
+        bool isOverEditableContent,
         Markable<WebCore::ScrollingNodeID>&& containerScrollingNodeID,
 #if ENABLE(DATA_DETECTION)
         bool isDataDetectorLink,
@@ -106,7 +111,9 @@ struct InteractionInformationAtPosition {
 #if PLATFORM(IOS_FAMILY)
         bool needsPointerTouchCompatibilityQuirk,
 #endif
+        bool shouldTreatLongClickAsSecondaryClickQuirk,
         WebCore::FloatPoint&& adjustedPointForNodeRespondingToClickEvents,
+        std::optional<WebCore::IntPoint>&& automationAdjustedInteractionLocation,
         URL&&,
         URL&& imageURL,
         URL&& modelURL,
@@ -148,6 +155,15 @@ struct InteractionInformationAtPosition {
     bool isColorInput { false };
     bool isRangeInput { false };
     bool isARIASlider { false };
+    bool isCustomSlider { false };
+
+    // `cursor` at the hit node is an axis-specific resize cursor (`ew-resize`, `ns-resize`, `col-resize`, `row-resize`).
+    // Web content uses this to mark something that is manipulated by dragging along that axis -- a slider, for example.
+    bool hasDirectionalResizeCursor { false };
+
+    bool isInResizeControl { false };
+
+    bool isOverVideo { false };
 
     bool isNearMarkedText { false };
 #if PLATFORM(IOS_FAMILY)
@@ -158,7 +174,7 @@ struct InteractionInformationAtPosition {
 #if PLATFORM(IOS_FAMILY)
     bool hasSaveableImage { false };
 #endif
-#if ENABLE(MODEL_PROCESS)
+#if ENABLE(MODEL_ELEMENT_STAGE_MODE)
     bool isInteractiveModel { false };
 #endif
     bool isAttachment { false };
@@ -167,6 +183,7 @@ struct InteractionInformationAtPosition {
     bool isPausedVideo { false };
     bool isElement { false };
     bool isContentEditable { false };
+    bool isOverEditableContent { false };
     Markable<WebCore::ScrollingNodeID> containerScrollingNodeID;
 #if ENABLE(DATA_DETECTION)
     bool isDataDetectorLink { false };
@@ -181,7 +198,11 @@ struct InteractionInformationAtPosition {
 #if PLATFORM(IOS_FAMILY)
     bool needsPointerTouchCompatibilityQuirk { false };
 #endif
+    bool shouldTreatLongClickAsSecondaryClickQuirk { false };
     WebCore::FloatPoint adjustedPointForNodeRespondingToClickEvents;
+
+    std::optional<WebCore::IntPoint> automationAdjustedInteractionLocation;
+
     URL url;
     URL imageURL;
     URL modelURL;
@@ -218,6 +239,13 @@ struct InteractionInformationAtPosition {
     void mergeCompatibleOptionalInformation(const InteractionInformationAtPosition& oldInformation);
 
     bool isSelectable() const { return selectability == Selectability::Selectable; }
+
+    // A focusable element can still hold selectable text: a `contenteditable` host the hit landed on
+    // directly, or a text form control, whose value lives in a shadow tree.
+    bool isFocusableWithSelectableText() const
+    {
+        return selectability == Selectability::UnselectableDueToFocusableElement && isOverEditableContent;
+    }
 #if ENABLE(DATA_DETECTION) && PLATFORM(IOS_FAMILY)
     Vector<RetainPtr<DDScannerResult>> serializableDataDetectorResults() const;
 #endif

@@ -2519,6 +2519,15 @@ public:
         return branch32(branchType ? NotEqual : Equal, dest, TrustedImm32(0x80000000));
     }
 
+    Jump branchTruncateDoubleToInt32ViaInt64(FPRegisterID src, RegisterID dest)
+    {
+        truncateDoubleToInt64(src, dest);
+        m_assembler.cmpq_ir(1, dest);
+        Jump failed(m_assembler.jo());
+        zeroExtend32ToWord(dest, dest);
+        return failed;
+    }
+
     void truncateDoubleToInt32(FPRegisterID src, RegisterID dest)
     {
         if (supportsAVX())
@@ -4723,7 +4732,7 @@ protected:
     }
 
     template<typename AddressType, typename Func>
-    void atomicStrongCAS(StatusCondition cond, RegisterID expectedAndResult, RegisterID result, AddressType& address, const Func& func)
+    void atomicStrongCAS(StatusCondition cond, RegisterID expectedAndResult, RegisterID result, AddressType& address, NOESCAPE const Func& func)
     {
         address = address.withSwappedRegister(X86Registers::eax, expectedAndResult);
         swap(expectedAndResult, X86Registers::eax);
@@ -4734,7 +4743,7 @@ protected:
     }
 
     template<typename AddressType, typename Func>
-    void atomicStrongCAS(RegisterID expectedAndResult, AddressType& address, const Func& func)
+    void atomicStrongCAS(RegisterID expectedAndResult, AddressType& address, NOESCAPE const Func& func)
     {
         address = address.withSwappedRegister(X86Registers::eax, expectedAndResult);
         swap(expectedAndResult, X86Registers::eax);
@@ -4744,7 +4753,7 @@ protected:
     }
 
     template<typename AddressType, typename Func>
-    Jump branchAtomicStrongCAS(StatusCondition cond, RegisterID expectedAndResult, AddressType& address, const Func& func)
+    Jump branchAtomicStrongCAS(StatusCondition cond, RegisterID expectedAndResult, AddressType& address, NOESCAPE const Func& func)
     {
         address = address.withSwappedRegister(X86Registers::eax, expectedAndResult);
         swap(expectedAndResult, X86Registers::eax);

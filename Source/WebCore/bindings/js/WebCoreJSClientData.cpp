@@ -41,6 +41,7 @@
 #include "JSIDBSerializationGlobalObject.h"
 #include "JSObservableArray.h"
 #include "JSPaintWorkletGlobalScope.h"
+#include "JSQuotaExceededError.h"
 #include "JSServiceWorkerGlobalScope.h"
 #include "JSShadowRealmGlobalScope.h"
 #include "JSSharedWorkerGlobalScope.h"
@@ -56,12 +57,12 @@
 #include <JavaScriptCore/MarkingConstraint.h>
 #include <JavaScriptCore/SubspaceInlines.h>
 #include <JavaScriptCore/VM.h>
+#include <JavaScriptCore/WeakGCMapInlines.h>
 #include "runtime_array.h"
 #include "runtime_method.h"
 #include "runtime_object.h"
 #include <mutex>
 #include <wtf/MainThread.h>
-#include <wtf/NeverDestroyed.h>
 
 #if PLATFORM(COCOA)
 #include "objc_runtime.h"
@@ -101,6 +102,7 @@ JSHeapData::JSHeapData(Heap& heap)
 #endif
     , m_heapCellTypeForJSIDBSerializationGlobalObject(JSC::IsoHeapCellType::Args<JSIDBSerializationGlobalObject>())
     , m_heapCellTypeForJSDOMException(JSC::IsoHeapCellType::Args<JSDOMException>())
+    , m_heapCellTypeForJSQuotaExceededError(JSC::IsoHeapCellType::Args<JSQuotaExceededError>())
 #if ENABLE(WEB_RTC)
     , m_heapCellTypeForJSRTCError(JSC::IsoHeapCellType::Args<JSRTCError>())
 #endif
@@ -137,15 +139,6 @@ void JSHeapData::reconcileWeakReferencesAtGCEnd(VM& vm, CollectionScope collecti
     }
 }
 
-JSHeapData* JSHeapData::ensureHeapData(Heap& heap)
-{
-    if (!Options::useGlobalGC())
-        return new JSHeapData(heap);
-
-    static NeverDestroyed<UniqueRef<JSHeapData>> singleton = makeUniqueRef<JSHeapData>(heap);
-    return singleton.get().ptr();
-}
-
 #define CLIENT_ISO_SUBSPACE_INIT(subspace) subspace(m_heapData->subspace)
 
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(JSVMClientData);
@@ -153,7 +146,7 @@ DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(JSVMClientData);
 JSVMClientData::JSVMClientData(VM& vm)
     : m_builtinFunctions(vm)
     , m_builtinNames(vm)
-    , m_heapData(JSHeapData::ensureHeapData(vm.heap))
+    , m_heapData(makeUniqueRef<JSHeapData>(vm.heap))
     , CLIENT_ISO_SUBSPACE_INIT(m_domBuiltinConstructorSpace)
     , CLIENT_ISO_SUBSPACE_INIT(m_domConstructorSpace)
     , CLIENT_ISO_SUBSPACE_INIT(m_domNamespaceObjectSpace)
@@ -168,6 +161,7 @@ JSVMClientData::JSVMClientData(VM& vm)
     , CLIENT_ISO_SUBSPACE_INIT(m_windowProxySpace)
     , CLIENT_ISO_SUBSPACE_INIT(m_idbSerializationSpace)
     , m_clientSubspaces(makeUniqueRef<ExtendedDOMClientIsoSubspaces>())
+    , m_jsHandleGlobalObjects(vm)
 {
 }
 

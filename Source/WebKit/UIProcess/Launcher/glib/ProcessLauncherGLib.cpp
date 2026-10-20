@@ -68,14 +68,18 @@ static bool isFlatpakSpawnUsable()
     if (ret)
         return *ret;
 
-    // For our usage to work we need flatpak >= 1.5.2 on the host and flatpak-xdg-utils > 1.0.1 in the sandbox
+    // For our usage to work we need flatpak >= 1.5.2 on the host and flatpak-xdg-utils > 1.0.1 in the sandbox.
+    // Use the same working directory as flatpakSpawn(). The current working directory might not be visible in the sub-sandbox.
     GRefPtr<GSubprocess> process = adoptGRef(g_subprocess_new(static_cast<GSubprocessFlags>(G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE),
-        nullptr, "flatpak-spawn", "--sandbox", "--sandbox-expose-path-ro-try=/this_path_doesnt_exist", "echo", nullptr));
+        nullptr, "flatpak-spawn", "--sandbox", "--directory=/", "--sandbox-expose-path-ro-try=/this_path_doesnt_exist", "echo", nullptr));
 
     if (!process.get())
         ret = false;
     else
         ret = g_subprocess_wait_check(process.get(), nullptr, nullptr);
+
+    if (!*ret)
+        g_warning("flatpak-spawn --sandbox is not usable. Sandboxed processes will be spawned without a sandbox.");
 
     return *ret;
 }
@@ -166,7 +170,7 @@ void ProcessLauncher::launchProcess()
 #endif
 
     String executablePath;
-    CString realExecutablePath;
+    UTF8CString realExecutablePath;
     switch (m_launchOptions.processType) {
     case ProcessLauncher::ProcessType::Web:
         executablePath = executablePathOfWebProcess();
@@ -188,7 +192,7 @@ void ProcessLauncher::launchProcess()
     unsigned nargs = 4; // size of the argv array for g_spawn_async()
 
 #if ENABLE(DEVELOPER_MODE)
-    Vector<CString> prefixArgs;
+    Vector<UTF8CString> prefixArgs;
     if (!m_launchOptions.processCmdPrefix.isNull()) {
         for (auto& arg : m_launchOptions.processCmdPrefix.split(' '))
             prefixArgs.append(arg.utf8());
@@ -207,9 +211,9 @@ void ProcessLauncher::launchProcess()
 #if ENABLE(DEVELOPER_MODE)
     // If there's a prefix command, put it before the rest of the args.
     for (auto& arg : prefixArgs)
-        argv[i++] = const_cast<char*>(arg.data());
+        argv[i++] = const_cast<char*>(arg.legacyCStringPointer());
 #endif
-    argv[i++] = const_cast<char*>(realExecutablePath.data());
+    argv[i++] = const_cast<char*>(realExecutablePath.legacyCStringPointer());
     argv[i++] = processIdentifier.get();
     argv[i++] = webkitSocket.get();
 #if ENABLE(DEVELOPER_MODE)

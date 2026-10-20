@@ -71,9 +71,10 @@ namespace WebPushD {
 
 ApplePushServiceConnection::ApplePushServiceConnection(const String& incomingPushServiceName)
 {
-    m_connection = adoptNS([[APSConnection alloc] initWithEnvironmentName:APSEnvironmentProduction namedDelegatePort:incomingPushServiceName.createNSString().get() queue:mainDispatchQueueSingleton()]);
-    m_delegate = adoptNS([[_WKAPSConnectionDelegate alloc] initWithConnection:this]);
-    [m_connection setDelegate:m_delegate.get()];
+    lazyInitialize(m_connection, adoptNS([[APSConnection alloc] initWithEnvironmentName:APSEnvironmentProduction namedDelegatePort:incomingPushServiceName.createNSString().get() queue:mainDispatchQueueSingleton()]));
+    RetainPtr delegate = adoptNS([[_WKAPSConnectionDelegate alloc] initWithConnection:this]);
+    lazyInitialize(m_delegate, RetainPtr { delegate });
+    [m_connection setDelegate:delegate.get()];
 }
 
 ApplePushServiceConnection::~ApplePushServiceConnection()

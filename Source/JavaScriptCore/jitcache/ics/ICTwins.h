@@ -23,8 +23,9 @@
 //
 // A snapshot reads a CB's IC and call-link state through the reader capture uses (readPropertyICRecord and
 // readCallLinkRecord in ICCapture.h), under the CB's m_lock, so a snapshot and a capture of the same state agree field
-// for field. checkRestoredBaselineICs runs right after attachPropertyICState, before any JS: it compares the snapshot
-// with the state seeding and attach must leave, then captures the CB with strict on and compares each record with the
+// for field; a call-link snapshot also says which CallSiteData its site points at. checkRestoredBaselineICs runs right
+// after attachPropertyICState, before any JS: it compares the snapshot with the state seeding and attach must leave, the
+// count of the CB's own CallSiteDatas included, then captures the CB with strict on and compares each record with the
 // recapture of the record it was restored from. It reads only the section and a CB no other thread reaches before
 // installCode, so it never skips itself, in either JIT mode.
 
@@ -59,13 +60,16 @@ struct PropertyICSnapshot {
 struct CallLinkSnapshot {
     OpcodeID opcodeID;
     unsigned metadataID;
-    CallLinkInfo::Mode mode;
+    CallSiteDataState data; // Inline, or Own, ExecutedOnce or NotExecuted by get() and hasExecutedOnce()
+    CallLinkInfo::Mode mode; // this and the fields below as readCallLinkRecord reads them
     bool seenOnce;
     bool hasSeenClosure;
     bool clearedByGC;
     bool clearedByVirtual;
     uint8_t maxArgumentCountIncludingThisForVarargs;
-    bool hasStub;
+    uint32_t thisArrayModes; // the own this profile's accumulated state, zero without one
+    uint32_t thisArrayProfileFlags;
+    bool hasStub; // false without a CallLinkInfo of the site's own
     bool hasLastSeenCallee;
     friend bool operator==(const CallLinkSnapshot&, const CallLinkSnapshot&) = default;
 };
@@ -89,8 +93,9 @@ struct BaselineICsSnapshot {
 };
 
 // One difference between the restored state and its twin. index is the IC index for PropertyIC, the call-link site
-// index in canonical order for CallLink, and the site the failed check names, or 0, for Capture. field names what
-// differs; expected and actual are its values, with booleans as 0 and 1 and enumerations by their numeric value.
+// index in canonical order for CallLink (0 for the CB's count of own CallSiteDatas), and the site the failed check names,
+// or 0, for Capture. field names what differs, a failed check by description(check); expected and actual are its
+// values, with booleans as 0 and 1 and enumerations by their numeric value.
 struct TwinMismatch {
     enum class Site : uint8_t { PropertyIC, CallLink, Capture } site;
     uint32_t index;
@@ -106,7 +111,7 @@ BaselineICsSnapshot snapshotBaselineICs(CodeBlock&);
 // through snapshotBaselineICs and then captureBaselineICs, never both at once. Allocates no cell.
 Vector<TwinMismatch> checkRestoredBaselineICs(const PreparedBaselineICs&, CodeBlock&);
 
-// The jsc shell's jitcacheICsSnapshot(fn, kind), registered by the integrator.
+// The jsc shell's jitcacheICsSnapshot(fn, kind), which the shell registers through a forwarding function.
 JSC_DECLARE_HOST_FUNCTION(functionSnapshotBaselineICs);
 
 } // namespace JSC::JITCache::ICs

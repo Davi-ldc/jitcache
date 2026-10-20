@@ -36,6 +36,7 @@
 #include "ColorSerialization.h"
 #include "DOMMatrix2DInit.h"
 #include "DOMPointInit.h"
+#include "DefaultSizing.h"
 #include "Document.h"
 #include "Element.h"
 #include "FloatPoint.h"
@@ -103,6 +104,8 @@ Ref<InspectorCanvas> InspectorCanvas::create(GPUDevice& device)
 {
     return adoptRef(*new InspectorCanvas(device));
 }
+
+InspectorCanvas::~InspectorCanvas() = default;
 
 InspectorCanvas::InspectorCanvas(CanvasRenderingContext& context)
     : m_identifier(makeString("canvas:"_s, IdentifiersFactory::createIdentifier()))
@@ -250,7 +253,7 @@ ScriptExecutionContext* InspectorCanvas::scriptExecutionContext() const
     return WTF::switchOn(m_context,
         [](const WeakRef<CanvasRenderingContext>& weakContext) {
             Ref context = weakContext;
-            return context->canvasBase().scriptExecutionContext();
+            return protect(context->canvasBase())->scriptExecutionContext();
         },
         [](const WeakRef<GPUDevice, WeakPtrImplWithEventTargetData>& weakDevice) {
             Ref device = weakDevice;
@@ -295,7 +298,7 @@ HashSet<Ref<Element>> InspectorCanvas::cssCanvasClientNodes() const
     return WTF::switchOn(m_context,
         [](const WeakRef<CanvasRenderingContext>& weakContext) {
             Ref context = weakContext;
-            return context->canvasBase().cssCanvasClients();
+            return protect(context->canvasBase())->cssCanvasClients();
         },
         [](const WeakRef<GPUDevice, WeakPtrImplWithEventTargetData>& weakDevice) {
             Ref device = weakDevice;
@@ -305,7 +308,7 @@ HashSet<Ref<Element>> InspectorCanvas::cssCanvasClientNodes() const
                 if (!context->isContextThread() || !canvasContextMatchesDevice(*context, device))
                     continue;
 
-                for (Ref cssCanvasClientNode : context->canvasBase().cssCanvasClients())
+                for (Ref cssCanvasClientNode : protect(context->canvasBase())->cssCanvasClients())
                     cssCanvasClientNodes.add(WTF::move(cssCanvasClientNode));
             }
             return cssCanvasClientNodes;
@@ -425,7 +428,7 @@ static bool shouldSnapshotWebGPUAction(RecordingSwizzleType receiverSwizzleType,
         return name == "submit"_s
             || name == "writeTexture"_s
             || name == "copyExternalImageToTexture"_s
-            || name == "copyElementImageToTexture"_s;
+            || name == "drawElementImageToTexture"_s;
     }
     return false;
 }
@@ -475,12 +478,13 @@ void InspectorCanvas::recordAction(String&& name, InspectorCanvasProcessedArgume
     }
 
     m_lastRecordedAction = buildAction(WTF::move(name), WTF::move(arguments));
+    Ref lastRecordedAction = *m_lastRecordedAction;
     if (receiver) {
-        protect(m_lastRecordedAction)->addItem(-1); // Add the result placeholder.
-        protect(m_lastRecordedAction)->addItem(receiver.releaseNonNull());
+        lastRecordedAction->addItem(-1); // Add the result placeholder.
+        lastRecordedAction->addItem(receiver.releaseNonNull());
     }
-    m_bufferUsed += protect(m_lastRecordedAction)->memoryCost();
-    protect(m_currentActions)->addItem(*m_lastRecordedAction);
+    m_bufferUsed += lastRecordedAction->memoryCost();
+    protect(m_currentActions)->addItem(lastRecordedAction);
 }
 
 static Ref<JSON::ArrayOf<int>> buildActionObject(int identifier, RecordingSwizzleType swizzleType)
@@ -493,7 +497,7 @@ static Ref<JSON::ArrayOf<int>> buildActionObject(int identifier, RecordingSwizzl
 
 void InspectorCanvas::recordAction(String&& name, InspectorCanvasProcessedArgument&& receiver, InspectorCanvasProcessedArguments&& arguments)
 {
-    auto identifier = receiver.value->asInteger();
+    auto identifier = protect(receiver.value)->asInteger();
     RELEASE_ASSERT(identifier);
 
     bool shouldSnapshot = shouldSnapshotWebGPUAction(receiver.swizzleType, name);
@@ -509,7 +513,7 @@ void InspectorCanvas::recordActionResult(InspectorCanvasProcessedArgument&& resu
     if (!m_lastRecordedAction)
         return;
 
-    auto identifier = result.value->asInteger();
+    auto identifier = protect(result.value)->asInteger();
     RELEASE_ASSERT(identifier);
 
     Ref lastRecordedAction = *m_lastRecordedAction;
@@ -795,7 +799,7 @@ Inspector::Protocol::ErrorStringOr<String> InspectorCanvas::getContentAsDataURL(
 {
     RefPtr<NativeImage> image;
     if (context.compositingResultsNeedUpdating())
-        image = context.canvasBase().copyNativeImage();
+        image = protect(context.canvasBase())->copyNativeImage();
     else
         image = context.surfaceBufferToNativeImage(CanvasRenderingContext::SurfaceBuffer::DisplayBufferForInspector);
     return encodeDataURL(WTF::move(image), "image/png"_s);
@@ -883,12 +887,8 @@ int InspectorCanvas::indexForData(DuplicateDataVariant data)
         [&](const Ref<HTMLImageElement>& imageElement) {
             String dataURL = "data:,"_s;
 
-            if (RefPtr cachedImage = imageElement->cachedImage()) {
-                RefPtr<Image> image = cachedImage->image();
-                if (image && image != &Image::nullImage()) {
-                    dataURL = encodeDataURL(image->currentNativeImage(), "image/png"_s);
-                }
-            }
+            if (RefPtr image = imageElement->sourceImage())
+                dataURL = encodeDataURL(image->currentNativeImage(DefaultSizing { }.resolve(image->naturalDimensions())), "image/png"_s);
 
             index = indexForData(dataURL);
         },
@@ -955,9 +955,8 @@ int InspectorCanvas::indexForData(DuplicateDataVariant data)
             String dataURL = "data:,"_s;
 
             if (RefPtr cachedImage = cssImageValue->image()) {
-                RefPtr image = cachedImage->image();
-                if (image && image != &Image::nullImage())
-                    dataURL = encodeDataURL(image->currentNativeImage(), "image/png"_s);
+                if (RefPtr image = cachedImage->image())
+                    dataURL = encodeDataURL(image->currentNativeImage(DefaultSizing { }.resolve(image->naturalDimensions())), "image/png"_s);
             }
 
             index = indexForData(dataURL);
@@ -1030,8 +1029,9 @@ Ref<Inspector::Protocol::Recording::InitialState> InspectorCanvas::buildInitialS
 
     if (RefPtr context = canvasContext()) {
         auto attributesPayload = JSON::Object::create();
-        attributesPayload->setInteger("width"_s, context->canvasBase().width());
-        attributesPayload->setInteger("height"_s, context->canvasBase().height());
+        Ref canvasBase = context->canvasBase();
+        attributesPayload->setInteger("width"_s, canvasBase->width());
+        attributesPayload->setInteger("height"_s, canvasBase->height());
 
         auto statesPayload = JSON::ArrayOf<JSON::Object>::create();
 

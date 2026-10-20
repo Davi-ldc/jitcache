@@ -64,8 +64,8 @@
 #import <JavaScriptCore/JSCConfig.h>
 #import <JavaScriptCore/Options.h>
 #import <JavaScriptCore/TestRunnerUtils.h>
+#import <WebCore/CookieStorageSession.h>
 #import <WebCore/LogInitialization.h>
-#import <WebCore/NetworkStorageSession.h>
 #import <WebCore/WebCoreMainThread.h>
 #import <WebKit/DOMElement.h>
 #import <WebKit/DOMExtensions.h>
@@ -1011,6 +1011,7 @@ static void initializeGlobalsFromCommandLineOptions(int argc, const char *argv[]
         {"world-leaks", no_argument, &checkForWorldLeaks, NO},
         {"webcore-logging", required_argument, nullptr, 'w'},
         {"localhost-alias", required_argument, nullptr, 'l'},
+        { "ip-address-space-overrides", required_argument, nullptr, 'i' },
         {nullptr, 0, nullptr, 0}
     };
 
@@ -1061,7 +1062,7 @@ static bool handleControlCommand(std::span<const char> command)
         unsigned resultLength = result.length();
         printf("Content-Type: text/plain\n");
         printf("Content-Length: %u\n", resultLength);
-        fwrite(result.utf8().data(), 1, resultLength, stdout);
+        fwrite(result.utf8().legacyCStringPointer(), 1, resultLength, stdout);
         printf("#EOF\n");
         fprintf(stderr, "#EOF\n");
         fflush(stdout);
@@ -1304,7 +1305,7 @@ int DumpRenderTreeMain(int argc, const char *argv[])
     atexit(atexitFunction);
 
     WTF::setProcessPrivileges(allPrivileges());
-    WebCore::NetworkStorageSession::permitProcessToUseCookieAPI(true);
+    WebCore::CookieStorageSession::permitProcessToUseCookieAPI(true);
     WebCoreTestSupport::setLinkedOnOrAfterEverythingForTesting();
 
 #if PLATFORM(IOS_FAMILY)
@@ -1938,7 +1939,7 @@ static void runTest(const std::string& inputLine)
         testPath = [url.get() absoluteString];
 
     auto message = makeString("CRASHING TEST: "_s, testPath);
-    WTF::setCrashLogMessage(message.utf8().data());
+    WTF::setCrashLogMessage(message.utf8());
 
     auto options = testOptionsForTest(command);
 

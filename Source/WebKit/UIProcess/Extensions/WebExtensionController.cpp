@@ -112,10 +112,12 @@ WebExtensionController::~WebExtensionController()
 {
     webExtensionControllers().remove(identifier());
 
+    // Unload first, since closing extension pages can call removePage(), which removes the message
+    // receiver and process pool when no other pages use the same process pool.
+    unloadAll();
+
     for (Ref pool : m_processPools)
         pool->removeMessageReceiver(Messages::WebExtensionController::messageReceiverName(), identifier());
-
-    unloadAll();
 }
 
 WebExtensionControllerParameters WebExtensionController::parameters(const API::PageConfiguration& pageConfiguration, WebProcessProxy& destinationProcess) const
@@ -152,7 +154,7 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensio
     }
 
     if (!m_extensionContextBaseURLMap.add(extensionContext.baseURL().protocolHostAndPort(), extensionContext)) {
-        RELEASE_LOG_ERROR(Extensions, "Extension context already loaded with same base URL: %" PRIVATE_LOG_STRING, extensionContext.baseURL().string().utf8().data());
+        RELEASE_LOG_ERROR(Extensions, "Extension context already loaded with same base URL: %" PRIVATE_LOG_STRING, extensionContext.baseURL().string().utf8());
         m_extensionContexts.remove(extensionContext);
         return makeUnexpected(extensionContext.createError(WebExtensionContext::Error::BaseURLAlreadyInUse));
     }
@@ -172,7 +174,7 @@ std::expected<bool, RefPtr<API::Error>> WebExtensionController::load(WebExtensio
 
     auto extensionDirectory = storageDirectory(extensionContext);
     if (!!extensionDirectory && !FileSystem::makeAllDirectories(extensionDirectory))
-        RELEASE_LOG_ERROR(Extensions, "Failed to create directory: %" PRIVATE_LOG_STRING, extensionDirectory.utf8().data());
+        RELEASE_LOG_ERROR(Extensions, "Failed to create directory: %" PRIVATE_LOG_STRING, extensionDirectory.utf8());
 
     auto loadResult = extensionContext.load(*this, extensionDirectory);
     if (!loadResult) {
@@ -460,7 +462,7 @@ String WebExtensionController::storageDirectory(const String& uniqueIdentifier) 
 
 String WebExtensionController::stateFilePath(const String& uniqueIdentifier) const
 {
-    return FileSystem::pathByAppendingComponent(storageDirectory(uniqueIdentifier), WebExtensionContext::plistFileName());
+    return FileSystem::pathByAppendingComponent(storageDirectory(uniqueIdentifier), WebExtensionContext::stateFileName());
 }
 
 HashSet<String> WebExtensionController::activeExtensionURLs() const

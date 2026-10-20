@@ -138,8 +138,8 @@ static void compressPortable(HashWords& state, std::span<const uint8_t> blocks)
 
 #if CPU(X86_64)
 
-// cpuid directly, as crc32c in runtime/CachedTypes.cpp does: __builtin_cpu_supports needs compiler-rt's __cpu_model, which
-// not every link provides. The instructions use only XMM registers, whose state every x86_64 kernel saves.
+// cpuid directly: __builtin_cpu_supports needs compiler-rt's __cpu_model, which not every link provides. The
+// instructions use only XMM registers, whose state every x86_64 kernel saves.
 static bool cpuHasSHAExtensions()
 {
     unsigned eax = 0;

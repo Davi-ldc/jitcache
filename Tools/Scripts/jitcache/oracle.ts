@@ -6,7 +6,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Build, type Launcher, type ProcessIO, type StackSizes, describeEnd, readBytes, readText } from "./build.ts";
+import { type Build, type Launcher, type ProcessIO, type StackSizes, describeEnd, keepingExitStatus, readBytes, readText } from "./build.ts";
 import {
   type Architecture,
   type EngineImage,
@@ -126,7 +126,9 @@ export function pinArguments(context: CommandContext, script: Script, sequence: 
 // JIT dump as <scratch>/pin<j>.<this|pin>.*, which pin-compare.ts also reads when run alone, and compares them. Each side
 // whose build is a twins build runs with --jitcache-test-no-shell-functions, so its global object has the pin shell's
 // properties; the side's build decides, not the session's mode, because a twins build registers the shell functions in
-// either mode and a plain build rejects the flag.
+// either mode and a plain build rejects the flag. Both sides take the environment of the runs whose leaks the runner
+// judges, where a sanitizer error ends the run by SIGABRT, which compareRuns fails as a crash, and a leak keeps the
+// run's own status.
 export async function comparePinOptionSet(setup: PinSetup, script: Script, sequence: number, options: string[], paths: SequencePaths, j: number, stacks: StackSizes | null): Promise<PinComparison> {
   const sides = [
     { side: "this", label: "this build's", build: setup.build, launcher: setup.launcher, extra: setup.pinOptions },
@@ -137,7 +139,7 @@ export async function comparePinOptionSet(setup: PinSetup, script: Script, seque
     const name = `pin${j}.${side}`;
     const dumpDirectory = join(paths.scratch, name);
     mkdirSync(dumpDirectory, { recursive: true }); // PerfLog writes its file there and cannot create the directory
-    const io: ProcessIO = { env: engineEnvironment(setup.context), cwd: paths.scratch, stdout: join(paths.scratch, `${name}.stdout`), stderr: join(paths.scratch, `${name}.stderr`) };
+    const io: ProcessIO = { env: keepingExitStatus(engineEnvironment(setup.context)), cwd: paths.scratch, stdout: join(paths.scratch, `${name}.stdout`), stderr: join(paths.scratch, `${name}.stderr`) };
     const noShellFunctions = build.twins ? ["--jitcache-test-no-shell-functions"] : [];
     const args = pinArguments(setup.context, script, sequence, options, paths, name, [...pinRunOptions(dumpDirectory), ...noShellFunctions, ...extra]);
     const end = await launcher.engine(build.jsc, args, io, stacks);

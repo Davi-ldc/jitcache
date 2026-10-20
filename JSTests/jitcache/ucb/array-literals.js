@@ -1,6 +1,4 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Off --diskCachePath=.; Producer --jitcache-delta-at-exit; Consumer --diskCachePath=.
-// jitcache-pin: off the second sequence's runs decode the jsc shell's bytecode cache, whose payload computeJSCBytecodeCacheVersion ties to this build, so the pin's build rejects it and generates where this build decodes
 
 // The constant butterflies an array literal's generation builds, which an import rebuilds in the same form. Each
 // function below holds one literal and searches it with Array.prototype.includes and indexOf:
@@ -10,19 +8,14 @@
 // - strings before a spread with a later elision, whose strings form a plain butterfly;
 // - a literal with an elision, whose elements before it form a plain butterfly;
 // - strings mixed with numbers, a plain butterfly.
-// Each is searched for its own strings, for a string no literal holds and for strings built at run time.
-// - Sequence 0: generated in the Producer and imported in the Consumer (statistics, imports), where the twin check
-//   compares every constant's form with the twin's.
-// - Sequence 1: the first run, with JITCache off, writes the jsc shell's bytecode cache (--diskCachePath; every run works
-//   in its sequence's scratch directory), the Producer generates and captures, and the Consumer decodes the functions
-//   from that cache and seeds them (statistics, seededDecodes). Seeding never rebuilds a butterfly, so the decoded ones
-//   stay plain, as in the JITCache-off run that decodes them too.
-// Every run prints the same results, which the oracle compares with the JITCache-off run.
+// Each is searched for its own strings, for a string no literal holds and for strings built at run time. Each function is
+// generated in the Producer and imported in the Consumer (statistics, imports), where the twin check compares every
+// constant's form with the twin's. Every run prints the same results, which the oracle compares with the JITCache-off
+// run.
 load("./resources/ucb.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {
     const t = ucbTest(role, scratch, artifact, sequence);
-    const decodes = t.sequence === 1 && t.role === "Consumer";
     const rounds = 400;
 
     function allStrings(s)
@@ -69,7 +62,7 @@ load("./resources/ucb.js", "caller relative");
         const first = call(searches[0]);
         const after = t.statistics();
         if (t.imports)
-            t.expect(`${name}'s first call`, t.delta(before, after), decodes ? { seededDecodes: [">=", 1] } : { imports: [">=", 1] });
+            t.expect(`${name}'s first call`, t.delta(before, after), { imports: [">=", 1] });
 
         const results = [first];
         for (let round = 0; round < rounds; ++round) {

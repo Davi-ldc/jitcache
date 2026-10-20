@@ -25,6 +25,9 @@ include(GLESv2.cmake)
 include(D3D.cmake)
 include(GL.cmake)
 include(Metal.cmake)
+include(Wgpu.cmake)
+
+option(ENABLE_WEBGL_WEBGPU "Build ANGLE's WebGPU backend" OFF)
 
 set(no_gl_prototypes
     GL_GLES_PROTOTYPES=0
@@ -43,6 +46,19 @@ set(gl_prototypes
 set(ANGLE_LIBRARY_TYPE STATIC)
 set(GLESv2_LIBRARY_TYPE STATIC)
 set(EGL_LIBRARY_TYPE STATIC)
+
+# Apple ships one libANGLE-shared.dylib, so the pieces are object libraries
+# combined below. GL_GLES_PROTOTYPES=0 would strip the visibility("default")
+# attribute the Khronos headers put on the entry points, leaving them unexported.
+set(_angle_prototypes ${no_gl_prototypes})
+set(_angle_egl_api_definition EGLAPI=)
+if (APPLE)
+    set(ANGLE_LIBRARY_TYPE OBJECT)
+    set(GLESv2_LIBRARY_TYPE OBJECT)
+    set(EGL_LIBRARY_TYPE OBJECT)
+    set(_angle_prototypes ${gl_prototypes})
+    set(_angle_egl_api_definition "")
+endif ()
 
 # ANGLE makes a number of small static libraries that are then joined into a
 # bigger library that is built shared. Rather than making the small libraries
@@ -109,6 +125,25 @@ if (WIN32)
     )
 endif ()
 
+if (ENABLE_WEBGL_WEBGPU)
+    list(APPEND ANGLE_SOURCES
+        ${wgpu_backend_sources}
+
+        ${angle_translator_lib_wgsl_sources}
+
+        WebKit/dawn/native/DawnNativeWebGPUFramework.cpp
+        WebKit/dawn/dawn_proc.h
+        WebKit/dawn/dawn_proc_table.h
+        WebKit/dawn/native/DawnNative.h
+        WebKit/dawn/webgpu.h
+        WebKit/webgpu/webgpu.h
+    )
+
+    list(APPEND ANGLE_DEFINITIONS
+        ANGLE_ENABLE_WGPU
+    )
+endif ()
+
 set(ANGLEGLESv2_LIBRARIES
     ANGLE
 )
@@ -137,7 +172,7 @@ if (USE_ANGLE_EGL OR ENABLE_WEBGL)
     )
     target_include_directories(ANGLE PRIVATE ${ANGLE_PRIVATE_INCLUDE_DIRECTORIES})
     target_compile_definitions(ANGLE PRIVATE
-        ${no_gl_prototypes}
+        ${_angle_prototypes}
         LIBANGLE_IMPLEMENTATION
     )
     target_compile_definitions(ANGLE PUBLIC ${ANGLE_DEFINITIONS})
@@ -150,8 +185,8 @@ if (USE_ANGLE_EGL OR ENABLE_WEBGL)
         ${libglesv2_sources}
     )
     target_include_directories(GLESv2 PRIVATE ${ANGLE_PRIVATE_INCLUDE_DIRECTORIES})
-    target_compile_definitions(GLESv2 PRIVATE 
-        ${no_gl_prototypes}
+    target_compile_definitions(GLESv2 PRIVATE
+        ${_angle_prototypes}
         LIBGLESV2_IMPLEMENTATION
     )
 
@@ -179,7 +214,7 @@ if (USE_ANGLE_EGL OR ENABLE_WEBGL)
         target_compile_definitions(EGL PRIVATE
             ${ANGLE_DEFINITIONS}
             ${gl_prototypes}
-            EGLAPI=
+            ${_angle_egl_api_definition}
         )
 
         target_link_libraries(EGL PRIVATE GLESv2 ${CMAKE_DL_LIBS})
@@ -197,6 +232,67 @@ if (USE_ANGLE_EGL OR ENABLE_WEBGL)
         target_link_libraries(EGLFramework INTERFACE EGL)
         add_dependencies(EGLFramework GLSLANGHeaders ANGLEHeaders)
         add_library(ANGLE::EGL ALIAS EGLFramework)
+    endif ()
+
+    if (APPLE)
+        # OptionsCocoa.cmake applies -fvisibility=hidden only to C and CXX, so the
+        # ObjC++ Metal backend would export all of rx::*Mtl from the dylib.
+        foreach (_angle_object_target IN ITEMS ANGLE GLESv2 EGL)
+            if (TARGET ${_angle_object_target})
+                target_compile_options(${_angle_object_target} PRIVATE
+                    "$<$<COMPILE_LANGUAGE:OBJC,OBJCXX>:-fvisibility=hidden>")
+            endif ()
+        endforeach ()
+
+        set(_angle_shared_objects $<TARGET_OBJECTS:ANGLE> $<TARGET_OBJECTS:GLESv2>)
+        if (USE_ANGLE_EGL)
+            list(APPEND _angle_shared_objects $<TARGET_OBJECTS:EGL>)
+        endif ()
+
+        add_library(ANGLE-shared SHARED ${_angle_shared_objects})
+        set(_angle_shared_libraries
+            ZLIB::ZLIB
+            ${CMAKE_DL_LIBS}
+            "-framework CoreGraphics"
+            "-framework Foundation"
+            "-framework IOSurface"
+            "-framework Metal"
+            "-framework QuartzCore"
+        )
+        if (WEBKIT_SDK_IS_MACOS)
+            list(APPEND _angle_shared_libraries "-framework IOKit")
+        endif ()
+        target_link_libraries(ANGLE-shared PRIVATE ${_angle_shared_libraries})
+
+        # FIXME: Only correct for iOS-family platforms. On macOS the Xcode build
+        # resolves NORMAL_UMBRELLA_FRAMEWORKS_DIR to
+        # /System/Library/Frameworks/WebKit.framework/Versions/A/Frameworks.
+        set_target_properties(ANGLE-shared PROPERTIES
+            LINKER_LANGUAGE CXX
+            MACOSX_RPATH OFF
+            BUILD_WITH_INSTALL_NAME_DIR ON
+            INSTALL_NAME_DIR "/System/Library/PrivateFrameworks/WebCore.framework/${WEBKIT_FRAMEWORK_VERSION_PATH}Frameworks"
+        )
+
+        set_property(TARGET GLESv2Framework PROPERTY INTERFACE_LINK_LIBRARIES ANGLE-shared)
+        if (USE_ANGLE_EGL)
+            set_property(TARGET EGLFramework PROPERTY INTERFACE_LINK_LIBRARIES ANGLE-shared)
+        endif ()
+
+        _WEBKIT_ADD_CODE_SIGN(ANGLE-shared)
+
+        # The ANGLE test executables use internal symbols that libANGLE-shared does
+        # not export, so they link this archive of the same objects instead. Like
+        # libANGLE.a in the Xcode build, but it also contains the public gl*/egl*
+        # entry points.
+        add_library(ANGLE-static STATIC EXCLUDE_FROM_ALL ${_angle_shared_objects})
+        set_target_properties(ANGLE-static PROPERTIES
+            OUTPUT_NAME ANGLE
+            LINKER_LANGUAGE CXX
+        )
+        target_include_directories(ANGLE-static INTERFACE ${ANGLE_PRIVATE_INCLUDE_DIRECTORIES})
+        target_compile_definitions(ANGLE-static INTERFACE ${ANGLE_DEFINITIONS} ${_angle_prototypes})
+        target_link_libraries(ANGLE-static INTERFACE ${_angle_shared_libraries})
     endif ()
 else ()
     add_library(ANGLE ${ANGLE_LIBRARY_TYPE} ${ANGLE_SOURCES})
@@ -260,7 +356,16 @@ if (COMPILER_IS_GCC_OR_CLANG)
     endforeach ()
 endif ()
 
-target_link_libraries(ANGLEFramework INTERFACE ANGLE)
+if (TARGET ANGLE-shared)
+    target_link_libraries(ANGLEFramework INTERFACE ANGLE-shared)
+else ()
+    target_link_libraries(ANGLEFramework INTERFACE ANGLE)
+endif ()
 target_include_directories(ANGLEFramework INTERFACE ${ANGLE_FRAMEWORK_HEADERS_DIR} ${ANGLE_HEADERS_DIR})
 
 add_library(ANGLE::ANGLE ALIAS ANGLEFramework)
+
+# gtest is added after ANGLE (Source/CMakeLists.txt), so check the option, not the target.
+if (is_mac AND ENABLE_API_TESTS AND TARGET ANGLE-static)
+    include(Tests.cmake)
+endif ()

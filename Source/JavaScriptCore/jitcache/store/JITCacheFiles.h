@@ -37,8 +37,9 @@ int readExactly(int fd, std::span<uint8_t> bytes, uint64_t offset);
 int writeExactly(int fd, std::span<const uint8_t> bytes, uint64_t offset);
 
 // The bytes of cache/header, read whole up to one byte more than the largest header file a reader accepts, so a larger
-// file reads as too large and fails the header's checks. The file is opened with O_NONBLOCK, so a FIFO at the name reads
-// as empty, and then fails those checks, instead of blocking the caller.
+// file reads as too large and fails the header's checks. Anything at the name but a regular file, such as a FIFO or a
+// directory, reads as empty and fails those checks too. The name is opened with O_NONBLOCK, so a FIFO there cannot block
+// the caller while it waits for a writer.
 struct HeaderFile {
     std::array<uint8_t, maximumArtifactHeaderFileBytes + 1> bytes { };
     size_t size { 0 };

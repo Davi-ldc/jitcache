@@ -2,7 +2,8 @@
 // the lane's validation that needs no CodeBlock, and the summary against the state it was built from. The checks that
 // compare a count with the CB (ArgumentCount, ValueProfileCount, FamilyCount, the instruction walk of AllocationHint and
 // the offset bound of LazyOperand) are left to the check every strict capture applies before the writer sees the bytes.
-// Each problem starts with the tag of the rule it breaks.
+// A problem that breaks a rule of the lane's validation starts with that check's token, as a fault names it after
+// "cb."; a problem in the summary's agreement with cb.state says so in words.
 //
 // Only twins builds have the shell functions this file calls, so a script loads it only when they exist and only
 // outside the Off role: load() returns the object at the end of this file and defines no global. asyncGeneratorBody also
@@ -25,18 +26,23 @@
         "A13 tail_call", "A14 iterator_open", "A15 iterator_next",
         "F16 new_array", "F17 new_array_with_size", "F18 new_array_with_species", "F19 new_array_buffer",
         "F20 iterator_open", "F21 iterator_next", "F22 async_iterator_open", "F23 async_iterator_next",
-        "F24 enumerator_next", "F25 enumerator_in_by_val", "F26 enumerator_has_own_property",
-        "F27 enumerator_put_by_val", "F28 enumerator_get_by_val", "F29 to_this", "F30 jneq_ptr",
+        "F24 iterator_close_check",
+        "F25 enumerator_next", "F26 enumerator_in_by_val", "F27 enumerator_has_own_property",
+        "F28 enumerator_put_by_val", "F29 enumerator_get_by_val", "F30 to_this", "F31 jneq_ptr",
     ];
     const numberOfFamilies = familyNames.length;
 
-    // The family ranges of cb.state's per-family arrays, from the array profiles to the branch bits, as [first, end).
+    // The family ranges of cb.state's per-family arrays, from the array profiles to the jneq_ptr bits, as [first, end).
+    // The call sites A11..A13 count as array positions, which pair cb.summary's array flags with the UnlinkedCodeBlock's
+    // copies, and hold no cb.state record: the ICs lane carries their this profile in their own CallSiteData.
     const arrayProfileFamilies = [0, 16];
+    const callSiteFamilies = [11, 14];
     const hintFamilies = [16, 20];
-    const iterationFamilies = [20, 24];
-    const enumeratorFamilies = [24, 29];
-    const toThisFamilies = [29, 30];
-    const branchFamilies = [30, 31];
+    const iterationFamilies = [20, 25];
+    const enumeratorFamilies = [25, 30];
+    const toThisFamilies = [30, 31];
+    const branchFamilies = [31, 32];
+    const isCallSiteFamily = family => family >= callSiteFamilies[0] && family < callSiteFamilies[1];
 
     const CounterMode = { NotCarried: 0, Carried: 1 };
     const OperandKind = { Argument: 0, Local: 1, Tmp: 2 };
@@ -56,8 +62,8 @@
     const writableArrayHints = [0x03, 0x05, 0x07, 0x09, 0x0b, 0x0d];
     const copyOnWriteHints = [0x15, 0x17, 0x19];
     const maximumVectorLengthHint = 25; // BASE_CONTIGUOUS_VECTOR_LEN_MAX
-    // The iteration modes the native writers of each opcode record, per family F20..F23.
-    const nativeIterationModes = [0x1fff, 0x1ff1, 0x6001, 0x2001];
+    // The iteration modes the native writers of each opcode record, per family F20..F24.
+    const nativeIterationModes = [0x1fff, 0x1ff3, 0x6001, 0x2001, 0x12];
     // The enumerator modes: IndexedMode, OwnStructureMode, GenericMode and HasSeenOwnStructureModeStructureMismatch.
     const enumeratorModeMask = 0x0f;
     // The to_this statuses: ToThisOK, ToThisConflicted and ToThisClearedByGC.
@@ -94,17 +100,32 @@
             total += counts[family];
         return total;
     };
+    // The entries of a range's families that have cb.state records, which leaves out the call sites.
+    const recordCount = (counts, [first, end]) => {
+        let total = 0;
+        for (let family = first; family < end; ++family) {
+            if (!isCallSiteFamily(family))
+                total += counts[family];
+        }
+        return total;
+    };
     const roundUpToEight = size => Math.ceil(size / 8) * 8;
 
     // Walks one family range of an array whose entries follow the families in table order, tagging each entry with its
-    // family.
+    // family. An array profile also gets its array position, which counts the call sites that have no record.
     function readFamilies(counts, range, offset, size, readEntry) {
         const records = [];
-        let position = offset;
+        let at = offset;
+        let position = 0;
         for (let family = range[0]; family < range[1]; ++family) {
-            for (let index = 0; index < counts[family]; ++index) {
-                records.push({ family, ...readEntry(position) });
-                position += size;
+            for (let index = 0; index < counts[family]; ++index, ++position) {
+                if (isCallSiteFamily(family))
+                    continue;
+                const record = { family, ...readEntry(at) };
+                if (range === arrayProfileFamilies)
+                    record.position = position;
+                records.push(record);
+                at += size;
             }
         }
         return records;
@@ -124,7 +145,7 @@
         const read = byteReader(buffer);
         const parsed = { byteLength: buffer.byteLength, problems: [] };
         if (buffer.byteLength < stateHeaderSize) {
-            parsed.problems.push(`V1: ${buffer.byteLength} bytes hold no StateHeader`);
+            parsed.problems.push(`state-header: ${buffer.byteLength} bytes hold no StateHeader`);
             return parsed;
         }
         const familyEntryCount = [];
@@ -143,7 +164,6 @@
             counterTotalCount: read.f32(24),
             counterActiveThreshold: read.i32(28),
             familyEntryCount,
-            reserved1: read.u32(156),
         };
         parsed.header = header;
 
@@ -155,21 +175,21 @@
         };
         place("arguments", header.numArguments, 8);
         place("values", header.numValueProfiles, 8);
-        place("arrayProfiles", sum(familyEntryCount, arrayProfileFamilies), 8);
+        place("arrayProfiles", recordCount(familyEntryCount, arrayProfileFamilies), 8);
         place("lazyOperands", header.numLazyOperandProfiles, lazyOperandRecordSize);
-        place("hints", sum(familyEntryCount, hintFamilies), 2);
-        place("iterationModes", sum(familyEntryCount, iterationFamilies), 2);
-        place("enumeratorModes", sum(familyEntryCount, enumeratorFamilies), 1);
+        place("hints", recordCount(familyEntryCount, hintFamilies), 2);
+        place("iterationModes", recordCount(familyEntryCount, iterationFamilies), 2);
+        place("enumeratorModes", recordCount(familyEntryCount, enumeratorFamilies), 1);
         place("toThis", familyEntryCount[toThisFamilies[0]], 1);
         place("branchBits", familyEntryCount[branchFamilies[0]], 1);
         const size = roundUpToEight(end);
         if (buffer.byteLength !== size) {
-            parsed.problems.push(`V5: the section has ${buffer.byteLength} bytes, and its header gives ${size}`);
+            parsed.problems.push(`state-length: the section has ${buffer.byteLength} bytes, and its header gives ${size}`);
             return parsed;
         }
         const padding = zeroPaddingProblem(read, end, size);
         if (padding)
-            parsed.problems.push(`V5: ${padding}`);
+            parsed.problems.push(`state-length: ${padding}`);
 
         const predictions = (offset, count) => {
             const values = [];
@@ -213,7 +233,7 @@
         const read = byteReader(buffer);
         const parsed = { byteLength: buffer.byteLength, problems: [] };
         if (buffer.byteLength < summaryHeaderSize) {
-            parsed.problems.push(`summary V1: ${buffer.byteLength} bytes hold no SummaryHeader`);
+            parsed.problems.push(`summary-header: ${buffer.byteLength} bytes hold no SummaryHeader`);
             return parsed;
         }
         const header = {
@@ -231,12 +251,12 @@
         const end = summaryHeaderSize + 8 * categories + header.numArrayProfiles;
         const size = roundUpToEight(end);
         if (buffer.byteLength !== size) {
-            parsed.problems.push(`summary V5: the section has ${buffer.byteLength} bytes, and its header gives ${size}`);
+            parsed.problems.push(`summary-length: the section has ${buffer.byteLength} bytes, and its header gives ${size}`);
             return parsed;
         }
         const padding = zeroPaddingProblem(read, end, size);
         if (padding)
-            parsed.problems.push(`summary V5: ${padding}`);
+            parsed.problems.push(`summary-length: ${padding}`);
         let offset = summaryHeaderSize;
         const take = count => {
             const values = [];
@@ -267,62 +287,60 @@
     }
 
     // Every rule of validateState that needs no CodeBlock: the header, the length and padding, the predictions, array
-    // profiles, allocation hints by type and vector length, iteration and enumerator modes, to_this statuses, branch bits,
-    // lazy operands without their offset bound, the tier-up history and the counter, whose progress must also not be
-    // negative under a finite threshold.
+    // profiles, allocation hints by type and vector length, iteration and enumerator modes, to_this statuses, jneq_ptr
+    // bits, lazy operands without their offset bound, the tier-up history and the counter, whose progress under a finite
+    // threshold must also not be negative beyond the float rounding of its total.
     function stateProblems(state) {
         const problems = [...state.problems];
         const header = state.header;
         if (!header || problems.length)
             return problems;
         if (header.layoutVersion !== 1)
-            problems.push(`V1: layout version ${header.layoutVersion}`);
+            problems.push(`state-header: layout version ${header.layoutVersion}`);
         if (header.tier !== 1)
-            problems.push(`V1: tier ${header.tier}`);
+            problems.push(`state-header: tier ${header.tier}`);
         if (header.counterMode !== CounterMode.NotCarried && header.counterMode !== CounterMode.Carried)
-            problems.push(`V1: counter mode ${header.counterMode}`);
-        if (header.reserved1)
-            problems.push(`V1: reserved1 is ${header.reserved1}`);
+            problems.push(`state-header: counter mode ${header.counterMode}`);
         state.arguments.forEach((prediction, index) => {
             if (outside(prediction, specBytecodeTop))
-                problems.push(`V6: argument ${index} predicts ${hex(prediction)}`);
+                problems.push(`state-value-prediction: argument ${index} predicts ${hex(prediction)}`);
         });
         state.values.forEach((prediction, index) => {
             if (outside(prediction, specBytecodeTop))
-                problems.push(`V6: value profile ${index + 1} predicts ${hex(prediction)}`);
+                problems.push(`state-value-prediction: value profile ${index + 1} predicts ${hex(prediction)}`);
         });
         state.arrayProfiles.forEach(record => {
             if (record.modes & ~allArrayModes)
-                problems.push(`V7: ${familyNames[record.family]} has array modes ${hex(record.modes)}`);
+                problems.push(`state-array-profile: ${familyNames[record.family]} has array modes ${hex(record.modes)}`);
             if (record.flags & ~arrayProfileFlagMask)
-                problems.push(`V7: ${familyNames[record.family]} has flags ${hex(record.flags)}`);
+                problems.push(`state-array-profile: ${familyNames[record.family]} has flags ${hex(record.flags)}`);
         });
         state.hints.forEach(record => {
             const allowed = record.family === hintFamilies[1] - 1 ? copyOnWriteHints : writableArrayHints;
             if (!allowed.includes(record.indexingType))
-                problems.push(`V8: ${familyNames[record.family]} hints indexing type ${hex(record.indexingType)}`);
+                problems.push(`state-allocation-hint: ${familyNames[record.family]} hints indexing type ${hex(record.indexingType)}`);
             if (record.vectorLength > maximumVectorLengthHint)
-                problems.push(`V8: ${familyNames[record.family]} hints vector length ${record.vectorLength}`);
+                problems.push(`state-allocation-hint: ${familyNames[record.family]} hints vector length ${record.vectorLength}`);
         });
         state.iterationModes.forEach(record => {
             const allowed = nativeIterationModes[record.family - iterationFamilies[0]];
             if (record.modes & ~allowed)
-                problems.push(`V9: ${familyNames[record.family]} holds modes ${hex(record.modes)}, outside ${hex(allowed)}`);
+                problems.push(`state-iteration-modes: ${familyNames[record.family]} holds modes ${hex(record.modes)}, outside ${hex(allowed)}`);
         });
         state.enumeratorModes.forEach(record => {
             if (record.modes & ~enumeratorModeMask)
-                problems.push(`V10: ${familyNames[record.family]} holds ${hex(record.modes)}`);
+                problems.push(`state-enumerator-modes: ${familyNames[record.family]} holds ${hex(record.modes)}`);
         });
         state.toThis.forEach(record => {
             if (record.status > ToThisStatus.ClearedByGC)
-                problems.push(`V11: to_this status ${record.status}`);
+                problems.push(`state-to-this-status: to_this status ${record.status}`);
         });
         state.branchBits.forEach(record => {
             if (record.bit > 1)
-                problems.push(`V12: branch bit ${record.bit}`);
+                problems.push(`state-branch-bit: jneq_ptr bit ${record.bit}`);
         });
         state.lazyOperands.forEach((record, index) => {
-            const where = `V13: lazy-operand record ${index}`;
+            const where = `state-lazy-operand: lazy-operand record ${index}`;
             if (record.reserved)
                 problems.push(`${where} has reserved ${record.reserved}`);
             if (outside(record.prediction, specBytecodeTop))
@@ -347,73 +365,76 @@
             }
         });
         if (header.optimizationDelayCounter > maximumOptimizationDelay)
-            problems.push(`V14: optimization delay ${header.optimizationDelayCounter}`);
+            problems.push(`state-tier-up-history: optimization delay ${header.optimizationDelayCounter}`);
         if (header.reoptimizationRetryCounter > reoptimizationRetryCounterMax)
-            problems.push(`V14: reoptimization count ${header.reoptimizationRetryCounter}`);
+            problems.push(`state-tier-up-history: reoptimization count ${header.reoptimizationRetryCounter}`);
         if (header.counterMode === CounterMode.Carried) {
             if (header.counterActiveThreshold < 0)
-                problems.push(`V15: threshold ${header.counterActiveThreshold}`);
+                problems.push(`state-counter: threshold ${header.counterActiveThreshold}`);
             if (!Number.isFinite(header.counterTotalCount) || header.counterTotalCount < 0)
-                problems.push(`V15: total count ${header.counterTotalCount}`);
-            if (header.counterActiveThreshold !== int32Max && header.counterTotalCount + header.counterValue < 0)
-                problems.push(`S3: progress ${header.counterTotalCount + header.counterValue} under the finite threshold ${header.counterActiveThreshold}`);
+                problems.push(`state-counter: total count ${header.counterTotalCount}`);
+            // A native total is the float nearest a sum at least -counterValue, so it is never below the float nearest
+            // -counterValue, though their difference, the progress, can be slightly negative.
+            if (header.counterActiveThreshold !== int32Max && header.counterTotalCount < Math.fround(-header.counterValue))
+                problems.push(`strict-counter: progress ${header.counterTotalCount + header.counterValue} under the finite threshold ${header.counterActiveThreshold}`);
         } else if (header.counterValue || header.counterTotalCount || header.counterActiveThreshold) {
-            problems.push(`V15: a NotCarried counter holds ${header.counterValue}, ${header.counterTotalCount}, ${header.counterActiveThreshold}`);
+            problems.push(`state-counter: a NotCarried counter holds ${header.counterValue}, ${header.counterTotalCount}, ${header.counterActiveThreshold}`);
         }
         return problems;
     }
 
     // decodeSummary's rules, then the summary against the state of the same capture: equal counts and counter mode, every
-    // slot a superset of its cb.state slot (equal for lazy operands, which have no UCB copy), every array flag byte a
-    // superset of the CB's flags, and the counterProgress capture computes.
+    // slot a superset of its cb.state slot (equal for lazy operands, which have no UCB copy), every array flag byte at a
+    // record's array position a superset of the CB's flags, and the counterProgress capture computes. A call site's flag
+    // byte has no record to cover.
     function summaryProblems(summary, state) {
         const problems = [...summary.problems];
         const header = summary.header;
         if (!header || problems.length)
             return problems;
         if (header.layoutVersion !== 1 || header.tier !== 1 || (header.counterMode !== CounterMode.NotCarried && header.counterMode !== CounterMode.Carried))
-            problems.push(`summary V1: version ${header.layoutVersion}, tier ${header.tier}, counter mode ${header.counterMode}`);
+            problems.push(`summary-header: version ${header.layoutVersion}, tier ${header.tier}, counter mode ${header.counterMode}`);
         for (const [name, categories] of [["argument", summary.arguments], ["value", summary.values], ["lazy-operand", summary.lazyOperands]]) {
             categories.forEach((category, index) => {
                 if (outside(category, specBytecodeTop))
-                    problems.push(`summary V6: ${name} category ${index} is ${hex(category)}`);
+                    problems.push(`summary-value: ${name} category ${index} is ${hex(category)}`);
             });
         }
         if (header.counterProgress > int32Max)
-            problems.push(`summary: counterProgress ${header.counterProgress}`);
+            problems.push(`summary-value: counterProgress ${header.counterProgress}`);
         if (header.counterMode === CounterMode.NotCarried && header.counterProgress)
-            problems.push(`summary: a NotCarried summary has counterProgress ${header.counterProgress}`);
+            problems.push(`summary-value: a NotCarried summary has counterProgress ${header.counterProgress}`);
         if (!state.header || state.problems.length)
             return problems;
 
         const stateHeader = state.header;
         const arrayProfileCount = sum(stateHeader.familyEntryCount, arrayProfileFamilies);
         if (header.counterMode !== stateHeader.counterMode)
-            problems.push(`I16: the summary's counter mode ${header.counterMode} differs from cb.state's ${stateHeader.counterMode}`);
+            problems.push(`the summary's counter mode ${header.counterMode} differs from cb.state's ${stateHeader.counterMode}`);
         if (header.numArguments !== stateHeader.numArguments || header.numValueProfiles !== stateHeader.numValueProfiles
             || header.numLazyOperandProfiles !== stateHeader.numLazyOperandProfiles || header.numArrayProfiles !== arrayProfileCount) {
-            problems.push("I8: the summary's counts differ from cb.state's");
+            problems.push("the summary's counts differ from cb.state's");
             return problems;
         }
         const covers = (name, categories, predictions) => {
             predictions.forEach((prediction, index) => {
                 if (prediction & ~categories[index])
-                    problems.push(`I8: ${name} category ${index} ${hex(categories[index])} misses cb.state's ${hex(prediction)}`);
+                    problems.push(`summary ${name} category ${index} ${hex(categories[index])} misses cb.state's ${hex(prediction)}`);
             });
         };
         covers("argument", summary.arguments, state.arguments);
         covers("value", summary.values, state.values);
         state.lazyOperands.forEach((record, index) => {
             if (summary.lazyOperands[index] !== record.prediction)
-                problems.push(`I8: lazy-operand category ${index} ${hex(summary.lazyOperands[index])} is not cb.state's ${hex(record.prediction)}`);
+                problems.push(`summary lazy-operand category ${index} ${hex(summary.lazyOperands[index])} is not cb.state's ${hex(record.prediction)}`);
         });
-        state.arrayProfiles.forEach((record, index) => {
-            if (record.flags & ~summary.arrayFlags[index])
-                problems.push(`I8: array flags ${index} ${hex(summary.arrayFlags[index])} miss cb.state's ${hex(record.flags)}`);
+        state.arrayProfiles.forEach(record => {
+            if (record.flags & ~summary.arrayFlags[record.position])
+                problems.push(`summary array flags ${record.position} ${hex(summary.arrayFlags[record.position])} miss cb.state's ${hex(record.flags)}`);
         });
         const progress = counterProgressOf(stateHeader);
         if (header.counterProgress !== progress)
-            problems.push(`I8: counterProgress ${header.counterProgress}, and cb.state's counter gives ${progress}`);
+            problems.push(`summary counterProgress ${header.counterProgress}, and cb.state's counter gives ${progress}`);
         return problems;
     }
 

@@ -24,6 +24,7 @@
 #include <wtf/SafeStrerror.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
+#include <wtf/posix/POSIXExtras.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringView.h>
@@ -55,14 +56,14 @@ namespace PlacementInternal {
 
 [[noreturn]] static void exitAfterMalformedLine(const String& path, std::span<const char> line)
 {
-    SAFE_FPRINTF(stderr, "JITCache: %s: %s in line \"%s\"\n", path.utf8(), safeStrerror(EINVAL), CString { line });
+    SAFE_FPRINTF(stderr, "JITCache: %s: %s in line \"%s\"\n", path.utf8(), safeStrerror(EINVAL), UTF8CString::fromUTF8(line));
     exit(1);
 }
 
 // The whole file, or the errno of the call that failed.
-static std::expected<Vector<char>, int> readWholeFile(const CString& path)
+static std::expected<Vector<char>, int> readWholeFile(const UTF8CString& path)
 {
-    int fd = ::open(path.data(), O_RDONLY | O_CLOEXEC);
+    int fd = posixOpen(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
         return std::unexpected(errno);
     Vector<char> contents;
@@ -157,7 +158,7 @@ static constexpr ASCIILiteral mapsPath = "/proc/self/maps"_s;
 // The process's mappings in address order, as /proc/self/maps lists them.
 static Vector<AddressRange> readMappings()
 {
-    auto contents = readWholeFile(CString { mapsPath.span() });
+    auto contents = readWholeFile(mapsPath);
     if (!contents)
         exitAfterError(String { mapsPath }, contents.error());
     Vector<AddressRange> mappings;
@@ -239,10 +240,10 @@ static void placePlaceholders(const String& path, AddressRange range)
 
 } // namespace PlacementInternal
 
-void writeTestFile(const String& path, const CString& bytes, TestFileWrite mode)
+void writeTestFile(const String& path, const UTF8CString& bytes, TestFileWrite mode)
 {
     int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (mode == TestFileWrite::Append ? O_APPEND : O_TRUNC);
-    int fd = ::open(path.utf8().data(), flags, 0644);
+    int fd = posixOpen(path.utf8(), flags, 0644);
     if (fd < 0)
         PlacementInternal::exitAfterError(path, errno);
     auto remaining = bytes.span();

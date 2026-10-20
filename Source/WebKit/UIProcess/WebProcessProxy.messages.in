@@ -40,6 +40,7 @@ messages -> WebProcessProxy WantsDispatchMessage {
 #if ENABLE(GPU_PROCESS)
     CreateGPUProcessConnection(WebKit::GPUProcessConnectionIdentifier identifier, IPC::ConnectionHandle connectionHandle) AllowedWhenWaitingForSyncReply
     GPUProcessConnectionDidBecomeUnresponsive(WebKit::GPUProcessConnectionIdentifier identifier)
+    [EnabledBy=SiteIsolationEnabled] DrawFrameToSnapshot(WebCore::FrameIdentifier frameID, WebCore::IntRect rect, WebKit::RemoteSnapshotIdentifier snapshotIdentifier, WebCore::RenderingMode renderingMode) AllowedWhenWaitingForSyncReply
 #endif
 
 #if ENABLE(MODEL_PROCESS)
@@ -65,6 +66,7 @@ messages -> WebProcessProxy WantsDispatchMessage {
 #if PLATFORM(COCOA)
     CacheMediaMIMETypes(Vector<String> types)
     CacheMediaSourceTypeSupported(String type, bool isSupported)
+    SetTaskNamePort(MachSendRight taskNamePort)
 #endif
 
 #if HAVE(DISPLAY_LINK)
@@ -86,6 +88,8 @@ messages -> WebProcessProxy WantsDispatchMessage {
 #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
     IsAXAuthenticated(struct WebKit::CoreIPCAuditToken auditToken) -> (bool authenticated) Synchronous
 #endif
+
+    AccessibilityModeDidChange(enum:uint8_t WebCore::AccessibilityMode mode)
 
 #if HAVE(MEDIA_ACCESSIBILITY_FRAMEWORK)
     SetCaptionDisplayMode(enum:uint8_t WebCore::CaptionUserPreferencesDisplayMode mode)
@@ -125,5 +129,11 @@ messages -> WebProcessProxy WantsDispatchMessage {
 
 #if ENABLE(IPC_TESTING_API)
     TakeInvalidMessageStringForTesting() -> (String error) Synchronous
+#endif
+
+#if ENABLE(OFFSCREEN_CANVAS) && ENABLE(GPU_PROCESS)
+    OffscreenCanvasPlaceholderCreated(WebCore::PlaceholderRenderingContextIdentifier identifier)
+    OffscreenCanvasPlaceholderDestroyed(WebCore::PlaceholderRenderingContextIdentifier identifier)
+    CommitOffscreenCanvasPlaceholderFrame(WebCore::RemotePlaceholderRenderingContextIdentifier identifier, struct WebCore::ImageBufferTransferHandle transferHandle, std::optional<WebKit::ImageBufferBackendHandle> layerContentsHandle, bool originClean, bool opaque) -> (bool placeholderMayExist)
 #endif
 }

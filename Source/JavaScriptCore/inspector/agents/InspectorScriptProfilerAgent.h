@@ -38,10 +38,16 @@ class Profile;
 
 namespace Inspector {
 
-class JS_EXPORT_PRIVATE InspectorScriptProfilerAgent final : public InspectorAgentBase, public ScriptProfilerBackendDispatcherHandler, public JSC::Debugger::ProfilingClient {
+// Note: This uses CanMakeThreadSafeCheckedPtr because a JSC::JSGlobalObject (and thus its
+// JSGlobalObjectInspectorController, which keeps CheckedPtrs to its agents) may get destroyed
+// on a different thread than the one it got created on, when the VM is torn down.
+class JS_EXPORT_PRIVATE InspectorScriptProfilerAgent final : public InspectorAgentBase, public ScriptProfilerBackendDispatcherHandler, public JSC::Debugger::ProfilingClient, public CanMakeThreadSafeCheckedPtr<InspectorScriptProfilerAgent> {
     WTF_MAKE_NONCOPYABLE(InspectorScriptProfilerAgent);
     WTF_MAKE_TZONE_ALLOCATED(InspectorScriptProfilerAgent);
+    WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(InspectorScriptProfilerAgent);
 public:
+    OVERRIDE_ABSTRACT_CAN_MAKE_CHECKEDPTR(CanMakeThreadSafeCheckedPtr);
+
     InspectorScriptProfilerAgent(AgentContext&);
     ~InspectorScriptProfilerAgent() final;
 
@@ -58,7 +64,14 @@ public:
     Seconds willEvaluateScript() final;
     void didEvaluateScript(Seconds, JSC::ProfilingReason) final;
 
+    // Called when a debugger comes into existence after tracking has already started, so that
+    // scripts evaluated against it are recorded for the rest of the session.
+    void installProfilingClientIfTracking(JSC::Debugger&);
+
 private:
+    void installProfilingClient(JSC::Debugger&);
+    void installProfilingClientOnCoveredDebuggers();
+    void clearProfilingClientFromAllDebuggers();
     void addEvent(Seconds startTime, Seconds endTime, JSC::ProfilingReason);
     void trackingComplete();
     void stopSamplingWhenDisconnecting();

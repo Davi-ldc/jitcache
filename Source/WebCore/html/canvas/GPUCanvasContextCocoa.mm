@@ -31,6 +31,7 @@
 #include "ColorSpace.h"
 #include "Document.h"
 #include "DocumentPage.h"
+#include "EventLoop.h"
 #include "GPUAdapter.h"
 #include "GPUCanvasConfiguration.h"
 #include "GPUDevice.h"
@@ -74,7 +75,7 @@ public:
             layer.setOpaque(m_isOpaque);
         if (m_displayBuffer) {
             layer.setContentsFormat(m_contentsFormat);
-            layer.setDelegatedContents({ MachSendRight { m_displayBuffer }, { }, std::nullopt });
+            layer.setDelegatedContents({ MachSendRight { m_displayBuffer }, { } });
         } else
             layer.clearContents();
     }
@@ -192,23 +193,20 @@ GPUCanvasContextCocoa::GPUCanvasContextCocoa(CanvasBase& canvas, Ref<GPUComposit
     , m_presentationContext(WTF::move(presentationContext))
     , m_width(getCanvasWidth(htmlOrOffscreenCanvas()))
     , m_height(getCanvasHeight(htmlOrOffscreenCanvas()))
-#if HAVE(SUPPORT_HDR_DISPLAY)
-    , m_screenPropertiesChangedObserver(ScreenPropertiesChangedObserver::create([weakThis = WeakPtr { *this }](PlatformDisplayID displayID) {
-        RefPtr protectedThis = weakThis.get();
-        if (!protectedThis)
-            return;
-
-        Ref screen = PlatformScreen::singleton();
-        if (auto* screenData = screen->screenData(displayID))
-            protectedThis->updateScreenHeadroom(screenData->currentEDRHeadroom, screenData->suppressEDR);
-    }))
-#endif // HAVE(SUPPORT_HDR_DISPLAY)
 {
 #if HAVE(SUPPORT_HDR_DISPLAY)
-    if (document)
-        document->addScreenPropertiesChangedObserver(protect(*m_screenPropertiesChangedObserver));
-    else
-        m_screenPropertiesChangedObserver = nullptr;
+    if (document) {
+        lazyInitialize(m_screenPropertiesChangedObserver, ScreenPropertiesChangedObserver::create([weakThis = WeakPtr { *this }](PlatformDisplayID displayID) {
+            RefPtr protectedThis = weakThis.get();
+            if (!protectedThis)
+                return;
+
+            Ref screen = PlatformScreen::singleton();
+            if (auto* screenData = screen->screenData(displayID))
+                protectedThis->updateScreenHeadroom(screenData->currentEDRHeadroom, screenData->suppressEDR);
+        }));
+        document->addScreenPropertiesChangedObserver(*m_screenPropertiesChangedObserver);
+    }
 #else
     UNUSED_PARAM(document);
 #endif
@@ -460,9 +458,23 @@ RefPtr<ImageBuffer> GPUCanvasContextCocoa::transferToImageBuffer()
         return nullptr;
     Ref<ImageBuffer> bufferRef = buffer.releaseNonNull();
     if (m_configuration) {
-        m_compositorIntegration->paintCompositedResultsToCanvas(bufferRef, m_configuration->frameCount);
+        auto frameCount = m_configuration->frameCount;
         m_currentTexture = nullptr;
-        m_presentationContext->present(m_configuration->frameCount, true);
+        // The frame has to be presented before it can be read. For a texture format the surface
+        // cannot hold as it stands, such as rgba16float, presenting is the step that converts the
+        // rendered frame into the surface being read here, so reading first hands back a frame
+        // that has not been drawn yet.
+        m_compositorIntegration->prepareForDisplay(frameCount, [weakThis = WeakPtr { *this }, frameCount, bufferRef] mutable {
+            RefPtr protectedThis = weakThis.get();
+            if (!protectedThis)
+                return;
+            bufferRef->flushDrawingContext();
+            protectedThis->m_compositorIntegration->paintCompositedResultsToCanvas(bufferRef, frameCount);
+        });
+        // Transferring a frame away ends it, so the texture the page drew into expires and the next
+        // getCurrentTexture() has to hand back a new one. The backing has already been presented by
+        // preparing for display, so it must not be presented a second time here.
+        m_presentationContext->present(frameCount, /* presentBacking */ false);
         m_configuration->lastPresentedFrameIndex = std::nullopt;
         m_readDisplayBuffer = nullptr;
         m_readDisplayBufferImage = nullptr;
@@ -642,6 +654,23 @@ ExceptionOr<Ref<GPUTexture>> GPUCanvasContextCocoa::getCurrentTexture()
     willUpdateDisplayBufferContents();
     m_currentTexture = m_presentationContext->getCurrentTexture(m_configuration->frameCount);
     currentTexture = m_currentTexture;
+
+    // The texture expires once the task it was handed out in has run to completion, so that the
+    // next task draws a new frame instead of drawing over the frame this one has finished. Presenting
+    // expires it too, but that happens later in the rendering update than the animation frame
+    // callbacks do, so waiting for it would hand the same texture, and the previous frame's contents,
+    // to the first animation frame callback that asks for one.
+    if (RefPtr scriptExecutionContext = protect(canvasBase())->scriptExecutionContext()) {
+        protect(scriptExecutionContext->eventLoop())->queueTask(TaskSource::WebGPU, [weakThis = WeakPtr { *this }, texture = currentTexture] {
+            RefPtr protectedThis = weakThis.get();
+            // Anything which expired the texture in the meantime, presenting above all, has already
+            // moved on to a new frame.
+            if (!protectedThis || protectedThis->m_currentTexture != texture)
+                return;
+            protectedThis->expireCurrentTexture();
+        });
+    }
+
     return currentTexture.releaseNonNull();
 }
 
@@ -674,6 +703,13 @@ RefPtr<GraphicsLayerContentsDisplayDelegate> GPUCanvasContextCocoa::layerContent
     return m_layerContentsDisplayDelegate.ptr();
 }
 
+void GPUCanvasContextCocoa::expireCurrentTexture()
+{
+    if (RefPtr currentTexture = m_currentTexture)
+        currentTexture->destroy();
+    m_currentTexture = nullptr;
+}
+
 void GPUCanvasContextCocoa::present(uint32_t frameIndex)
 {
     if (!m_configuration)
@@ -682,9 +718,7 @@ void GPUCanvasContextCocoa::present(uint32_t frameIndex)
     m_compositingResultsNeedsUpdating = false;
     m_configuration->lastPresentedFrameIndex = frameIndex;
     m_configuration->frameCount = (m_configuration->frameCount + 1) % m_configuration->renderBuffers.size();
-    if (RefPtr currentTexture = m_currentTexture)
-        currentTexture->destroy();
-    m_currentTexture = nullptr;
+    expireCurrentTexture();
     m_presentationContext->present(frameIndex);
 }
 
@@ -727,7 +761,8 @@ void GPUCanvasContextCocoa::updateFramePacing()
 
     auto now = MonotonicTime::now();
     auto gpuCost = m_compositorIntegration->lastFrameGPUCost();
-    m_framePacer.recordFrame(gpuCost, now);
+    auto presentStall = m_compositorIntegration->lastFramePresentStall();
+    m_framePacer.recordFrame(gpuCost, presentStall, now);
 
     if (!m_isRegisteredForPacing) {
         page->addGPUCanvasRequestingRenderingUpdatePacing(*this);
@@ -762,8 +797,8 @@ void GPUCanvasContextCocoa::updateMemoryCost() const
 {
     // Computes only a rough ballpark figure to drive garbage collection.
     size_t newMemoryCost = 0;
-    if (m_readDisplayBuffer)
-        newMemoryCost += m_readDisplayBuffer->memoryCost();
+    if (RefPtr readDisplayBuffer = m_readDisplayBuffer)
+        newMemoryCost += readDisplayBuffer->memoryCost();
     if (RefPtr image = m_readDisplayBufferImage)
         newMemoryCost += image->sizeInBytes();
     if (m_currentTexture)

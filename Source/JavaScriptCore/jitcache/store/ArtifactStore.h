@@ -82,6 +82,11 @@ int removeReplacedArtifact(int parentFd, uint64_t& bytesRemoved);
 // temporary is left.
 int createEmptyPack(int cacheFd, std::span<const uint8_t, 16> headerDigest);
 
+// Marks the file at cache/pack retired, under the producer lock, before that file is unlinked or a new pack is renamed
+// over it, so every object that maps it looks at the path again at its next read. Returns 0, also when there is no pack,
+// or the errno of the call that failed.
+int retirePack(int cacheFd);
+
 // Whether a header-less cache/'s pack may hold a committed body: false only for a pack whose root is the one a new
 // artifact's pack starts with, the end of an empty full index right after the prefix. A pack that cannot be read counts
 // as holding bodies.
@@ -107,7 +112,8 @@ class MappedPack final : public ThreadSafeRefCounted<MappedPack> {
 public:
     // cacheFd's pack, mapped with room for at least minimumCapacity bytes, and its root as loaded once mapped, which the
     // file's size, taken after that load, bounds: a root past the file is damage, never a read past it. ENOENT when
-    // cacheFd holds no pack.
+    // cacheFd holds no pack; damage when the name holds anything but a regular file, a FIFO included, which the open
+    // does not wait on.
     static std::expected<PackMapping, ArtifactReadFailure> map(int cacheFd, std::span<const uint8_t, 16> headerDigest, uint64_t minimumCapacity);
     ~MappedPack();
 
@@ -199,9 +205,9 @@ std::expected<PackIndexRead, PackRejection> readPackIndex(uint64_t validEnd, std
 // bytes, superseded records, tombstoned ones and index blocks, are dead.
 uint64_t packLiveBytes(const PackIndex&);
 
-// The outcomes of the store's two reads of a body:
+// The outcomes of the store's three reads of a body:
 //   Absent       the index lists no body for the key
-//   Unavailable  the fault hook of test builds failed the read with EMFILE, ENFILE or ENOMEM
+//   Unavailable  the fault hook of test builds failed the read with EMFILE, ENFILE or ENOMEM; never readSection's
 //   Invalid      the pack failed its own checks (container.pack), or the body failed the first of the body checks of
 //                JITCacheContainer.h that the read's mode runs, or, in Full mode, its index entry does not repeat its
 //                envelope (container.pack)
@@ -270,6 +276,13 @@ struct SavedSummaryRead {
     StoreFailure failure;
 };
 
+struct SectionRead {
+    StoreOutcome outcome;
+    RefPtr<MappedPack> pack; // Found: keeps the section's bytes mapped
+    std::span<const uint8_t> section; // Found: the section, empty when the body lacks it
+    StoreFailure failure;
+};
+
 // An opened artifact, which the VMs of a process that open one artifact share. It maps the pack once and follows its root:
 // every read first loads the root from the mapping, and only when the valid end grew does it apply the index blocks
 // appended since, or, when the mapped pack was retired or outgrew its mapping, map the path again and read the whole
@@ -287,6 +300,9 @@ public:
     uint64_t token(const BodyKey&); // the commit identifier of the key's newest body, 0 when it has none; no system call
     BodyOpen open(const BodyKey&, ValidationMode); // borrows the body from the mapping and validates it
     SavedSummaryRead readSavedSummaries(const BodyKey&, ValidationMode); // the key's body through the current root
+    // One section of the key's body through the current root: the envelope's and the directory's checks in the mode, and
+    // the CRC of that section alone, since the open that reads the body moments later checks the rest.
+    SectionRead readSection(const BodyKey&, SectionKind, ValidationMode);
     bool containsKey(const BodyKey&);
     uint64_t indexedBodies(); // without following the root: status and the start bench event
     IndexStatistics statistics(); // without following the root
@@ -299,6 +315,7 @@ private:
     friend class ArtifactWriter; // reads the current root and pack under m_indexLock and follows its own commits
     static std::expected<Ref<OpenedArtifact>, ArtifactReadFailure> create(int parentFd, int cacheFd, std::span<const uint8_t> headerBytes);
     OpenedArtifact(int parentFd, int cacheFd, const std::array<uint8_t, 16>& headerDigest);
+    bool isGone(); // follows the root, then whether the retired pack's path held no pack of this header
 
     // Follows the root: returns the failure that makes every read Invalid, which stays once set.
     std::optional<StoreFailure> follow() WTF_REQUIRES_LOCK(m_indexLock);
@@ -317,16 +334,18 @@ private:
     uint64_t m_liveBytes WTF_GUARDED_BY_LOCK(m_indexLock) { packPrefixBytes };
     uint64_t m_deltasSinceFull WTF_GUARDED_BY_LOCK(m_indexLock) { 0 };
     std::optional<StoreFailure> m_damage WTF_GUARDED_BY_LOCK(m_indexLock);
-    bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false }; // the retired pack's path holds no pack: every key misses
+    bool m_gone WTF_GUARDED_BY_LOCK(m_indexLock) { false }; // the retired pack's path holds no pack of this header: every key misses
     MonotonicTime m_nextRetiredReopen WTF_GUARDED_BY_LOCK(m_indexLock);
     MonotonicTime m_retiredSince WTF_GUARDED_BY_LOCK(m_indexLock); // when a read first met the mapped pack's retired mark with the path unchanged
 
     IndexStatistics m_statistics WTF_GUARDED_BY_LOCK(m_indexLock);
 };
 
-// The process-wide registry of opened artifacts, keyed by the cache/ directory's (st_dev, st_ino). take holds m_lock only
-// to look the key up and to register a new object, and builds an object outside it, so the lock is a leaf; when two VMs
-// build an object for one directory at once, the second to register takes the first's and destroys its own.
+// The process-wide registry of opened artifacts, keyed by the cache/ directory's (st_dev, st_ino). take returns the live
+// object registered for the directory only when its header digest is that of the header bytes the VM checked and it is not
+// gone; otherwise it builds a new object and registers it in place of the old one. take holds m_lock only to look the key
+// up and to register a new object, and builds an object outside it, so the lock is a leaf; when two VMs build an object
+// for one directory and header at once, the second to register takes the first's and destroys its own.
 class ArtifactRegistry {
     WTF_MAKE_NONCOPYABLE(ArtifactRegistry);
 public:

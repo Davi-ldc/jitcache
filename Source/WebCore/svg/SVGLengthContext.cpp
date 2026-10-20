@@ -324,18 +324,18 @@ static inline const Style::ComputedStyle* NODELETE rootRenderStyleForLengthResol
 
 std::optional<CSSToLengthConversionData> SVGLengthContext::cssConversionData() const
 {
-    auto element = m_context;
+    RefPtr element = m_context.get();
     if (!element)
         return std::nullopt;
 
-    auto* currentStyle = renderStyleForLengthResolving(element.get());
+    CheckedPtr currentStyle = renderStyleForLengthResolving(element.get());
     if (!currentStyle)
         return std::nullopt;
 
-    auto* rootStyle = rootRenderStyleForLengthResolving(element.get());
+    CheckedPtr rootStyle = rootRenderStyleForLengthResolving(element.get());
 
-    const Style::ComputedStyle* parentStyle = nullptr;
-    if (auto* renderer = element->renderer())
+    CheckedPtr<const Style::ComputedStyle> parentStyle;
+    if (CheckedPtr renderer = element->renderer())
         parentStyle = renderer->parentStyle();
 
     return CSSToLengthConversionData {
@@ -349,7 +349,7 @@ std::optional<CSSToLengthConversionData> SVGLengthContext::cssConversionData() c
 
 ExceptionOr<float> SVGLengthContext::convertValueFromUserUnitsToEXS(float value) const
 {
-    auto* style = renderStyleForLengthResolving(m_context.get());
+    CheckedPtr style = renderStyleForLengthResolving(m_context.get());
     if (!style) {
         // No associated element: x-height falls back to 0.5em per CSS Values spec.
         if (m_context)
@@ -358,9 +358,7 @@ ExceptionOr<float> SVGLengthContext::convertValueFromUserUnitsToEXS(float value)
         return value / initialXHeightPx;
     }
 
-    // Use of ceil allows a pixel match to the W3Cs expected output of coords-units-03-b.svg
-    // if this causes problems in real world cases maybe it would be best to remove this
-    float xHeight = std::ceil(style->metricsOfPrimaryFont().xHeight().value_or(0));
+    float xHeight = style->metricsOfPrimaryFont().xHeight().value_or(0);
     if (!xHeight)
         return Exception { ExceptionCode::NotSupportedError };
 
@@ -369,7 +367,7 @@ ExceptionOr<float> SVGLengthContext::convertValueFromUserUnitsToEXS(float value)
 
 ExceptionOr<float> SVGLengthContext::convertValueFromEXSToUserUnits(float value) const
 {
-    auto* style = renderStyleForLengthResolving(m_context.get());
+    CheckedPtr style = renderStyleForLengthResolving(m_context.get());
     if (!style) {
         // No associated element: x-height falls back to 0.5em per CSS Values spec.
         if (m_context)
@@ -378,9 +376,7 @@ ExceptionOr<float> SVGLengthContext::convertValueFromEXSToUserUnits(float value)
         return value * initialXHeightPx;
     }
 
-    // Use of ceil allows a pixel match to the W3Cs expected output of coords-units-03-b.svg
-    // if this causes problems in real world cases maybe it would be best to remove this
-    return value * std::ceil(style->metricsOfPrimaryFont().xHeight().value_or(0));
+    return value * style->metricsOfPrimaryFont().xHeight().value_or(0);
 }
 
 std::optional<FloatSize> SVGLengthContext::viewportSize() const

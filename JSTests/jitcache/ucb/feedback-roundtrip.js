@@ -15,6 +15,9 @@
 //   reaches the baseline in another realm;
 // - frMakeAdder creates its closure frAdder, and with it the lexical environment frAdder reads, many times.
 // A module written into the scratch directory under two names is one UCB whose module environment is created twice.
+// frArrays's body, which has an image, carries its UCB's value predictions and array profiles, which the import seeds
+// before the first CodeBlock; Array.prototype.every, a builtin run until it compiles, has value and array profiles too,
+// but a builtin's UCB keeps no copy of them, so its body carries none and its import allocates none.
 //
 // The Producer shapes that state in extra realms, captures it with jitcacheDelta while they live (twins runs) and with
 // delta at exit, and then runs the part every role runs. In the Consumer each first call imports (statistics), and
@@ -173,9 +176,21 @@ load("./resources/sections.js", "caller relative");
         total += realm.frDead({ p: i });
     lines.push(`dead ${total}`);
 
+    const everyArguments = [[1, 2, 3], [4, , 6], [7, -8]];
+    const positive = x => x > 0;
+    total = Number(firstCall("Array.prototype.every's first call", () => [1].every(positive)));
+    for (let i = 0; i < 400; ++i)
+        total += everyArguments[i % everyArguments.length].every(positive) ? 1 : 0;
+    lines.push(`every ${total}`);
+
     // What travelled, read from the bodies the Consumer imported.
     if (t.twins && t.imports) {
         const feedbackOf = fn => ucbSections.feedback(t.readSection(t.bodyKey(fn), "ucb.feedback"));
+        const arrays = feedbackOf(realm.frArrays);
+        t.check(arrays.copies === 1 && arrays.counts.valueProfiles >= 1 && arrays.counts.arrayProfiles >= 1, () => `frArrays's body carries copies ${arrays.copies} of ${arrays.counts.valueProfiles} value and ${arrays.counts.arrayProfiles} array profiles`);
+        const everyKey = t.bodyKey(Array.prototype.every);
+        t.check(t.readSection(everyKey, "image.baseline") !== null, "Array.prototype.every's body holds no image");
+        t.check(feedbackOf(Array.prototype.every).copies === 0, "Array.prototype.every's body carries UCB copies");
         const exit = feedbackOf(realm.frExit);
         t.check(exit.counts.exitSites >= 1, `frExit's body carries ${exit.counts.exitSites} exit sites`);
         t.check(exit.bytes[37] === 0, `frExit's quick DFG bit is ${exit.bytes[37]}`);

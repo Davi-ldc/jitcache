@@ -5,7 +5,8 @@
 // thunks, whose keys the native selection fixes. Closures read variables one to twelve scopes up, below and above the
 // depth of eight at which resolve_scope loops, and their ClosureVar shapes are baked facts. with makes a dynamic scope;
 // a sloppy direct eval injects a var, which turns the accesses around it into their var-injection forms; direct eval
-// also runs as call_direct_eval, whose slow case falls back to a virtual call when eval is shadowed. new Function, an
+// also runs as call_direct_eval, whose slow case falls back to a virtual call when eval is shadowed, after it gives a
+// site whose call data the VM still shares data of its own through operationEnsureCallLinkInfo. new Function, an
 // indirect eval and the eval code are roots and children of their own. A function a tainted source defines enters with
 // the taint store of op_enter when $vm.runTaintedString exists, as in twins runs.
 // The consumer checks that its images carry: the resolve_scope thunks of the global var, property and lexical var
@@ -132,9 +133,9 @@ globalThis.globalProperty = 3;
     print(total);
     print(text);
 
-    // The case happened (HARNESS.md, Tests): the producer compiled every function the loop calls, each 60 times, and both
-    // readers of injected share one executable, so each ran its import here. A function's ClosureVar accesses are resolved
-    // when its first CodeBlock links, from the same scopes in every run, so the baked facts match.
+    // The case happened: the producer compiled every function the loop calls, each 60 times, and both readers of injected
+    // share one executable, so each ran its import here. A function's ClosureVar accesses are resolved when its first
+    // CodeBlock links, from the same scopes in every run, so the baked facts match.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const bodies = {
@@ -143,17 +144,23 @@ globalThis.globalProperty = 3;
         };
         sections.expectImports(role, bodies);
         sections.expectTargets(role, { call: bodies }, [
-            { site: "D3", kind: "BaselineThunk", a: "ResolveScopeGlobalVar", form: "Call" },
-            { site: "D3", kind: "BaselineThunk", a: "ResolveScopeGlobalProperty", form: "Call" },
-            { site: "D3", kind: "BaselineThunk", a: "ResolveScopeGlobalLexicalVar", form: "Call" },
-            { site: "D3", kind: "BaselineThunk", a: "ResolveScopeGlobalVarWithVarInjectionChecks", form: "Call" },
-            { site: "D4", kind: "BaselineThunk", a: "GetFromScopeGlobalVar", form: "Call" },
-            { site: "D4", kind: "BaselineThunk", a: "GetFromScopeGlobalProperty", form: "Call" },
-            { site: "D4", kind: "BaselineThunk", a: "GetFromScopeGlobalLexicalVar", form: "Call" },
-            { site: "D4", kind: "BaselineThunk", a: "GetFromScopeGlobalVarWithVarInjectionChecks", form: "Call" },
-            { site: "D6", kind: "BaselineThunk", a: "SlowOpPutToScope", form: "Call" },
-            { site: "A11, E3", kind: "VirtualCallThunk", a: "Regular", form: "Call" },
-            { site: "C16", kind: "VMAddress", a: "MightBeExecutingTaintedCode", form: "Pointer" },
+            { site: "resolve_scope's thunk call", kind: "BaselineThunk", a: "ResolveScopeGlobalVar", form: "Call" },
+            { site: "resolve_scope's thunk call", kind: "BaselineThunk", a: "ResolveScopeGlobalProperty", form: "Call" },
+            { site: "resolve_scope's thunk call", kind: "BaselineThunk", a: "ResolveScopeGlobalLexicalVar", form: "Call" },
+            {
+                site: "resolve_scope's thunk call",
+                kind: "BaselineThunk", a: "ResolveScopeGlobalVarWithVarInjectionChecks", form: "Call",
+            },
+            { site: "get_from_scope's thunk call", kind: "BaselineThunk", a: "GetFromScopeGlobalVar", form: "Call" },
+            { site: "get_from_scope's thunk call", kind: "BaselineThunk", a: "GetFromScopeGlobalProperty", form: "Call" },
+            { site: "get_from_scope's thunk call", kind: "BaselineThunk", a: "GetFromScopeGlobalLexicalVar", form: "Call" },
+            {
+                site: "get_from_scope's thunk call",
+                kind: "BaselineThunk", a: "GetFromScopeGlobalVarWithVarInjectionChecks", form: "Call",
+            },
+            { site: "put_to_scope's slow-path thunk call", kind: "BaselineThunk", a: "SlowOpPutToScope", form: "Call" },
+            { site: "direct eval's slow-case virtual call", kind: "VirtualCallThunk", a: "Regular", form: "Call" },
+            { site: "enter's tainted-code flag store", kind: "VMAddress", a: "MightBeExecutingTaintedCode", form: "Pointer" },
         ]);
     }
 })(...arguments);

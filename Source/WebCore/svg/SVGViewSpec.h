@@ -43,12 +43,12 @@ public:
     void reset();
     void resetContextElement() { m_contextElement = nullptr; }
 
-    String transformString() const { return m_transform->valueAsString(); }
+    String transformString() const { return protect(m_transform)->valueAsString(); }
     Ref<SVGTransformList>& transform() { return m_transform; }
 
     SVGElement* contextElementConcurrently() const { return m_contextElement; }
 
-    using PropertyRegistry = SVGPropertyOwnerRegistry<SVGViewSpec, SVGFitToViewBox>;
+    using PropertyRegistry = SVGPropertyOwnerRegistryBase<SVGViewSpec, SVGFitToViewBox>;
 
 private:
     explicit SVGViewSpec(SVGElement&);

@@ -68,6 +68,6 @@ JS_EXPORT_PRIVATE Report compact(const String& parentPath, double ratio, const C
 enum class RatioArgument : uint8_t { Required, Optional };
 // "compact <ratio> [<path>] [--yes | --no]", or "compact [<ratio>] [<path>] [--yes | --no]" with
 // RatioArgument::Optional; returns the process exit code.
-JS_EXPORT_PRIVATE int runCommandLine(std::span<const CString> arguments, FILE* in, FILE* out, FILE* err, RatioArgument = RatioArgument::Required);
+JS_EXPORT_PRIVATE int runCommandLine(std::span<const UTF8CString> arguments, FILE* in, FILE* out, FILE* err, RatioArgument = RatioArgument::Required);
 
 } // namespace JSC::JITCache::Maintenance

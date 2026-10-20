@@ -42,7 +42,7 @@ WebValidationMessageClient::WebValidationMessageClient(WebView* view)
 WebValidationMessageClient::~WebValidationMessageClient()
 {
     if (m_currentAnchor)
-        hideValidationMessage(*m_currentAnchor);
+        hideValidationMessage(protect(*m_currentAnchor));
 }
 
 void WebValidationMessageClient::documentDetached(WebCore::Document& document)
@@ -50,17 +50,17 @@ void WebValidationMessageClient::documentDetached(WebCore::Document& document)
     if (!m_currentAnchor)
         return;
     if (&m_currentAnchor->document() == &document)
-        hideValidationMessage(*m_currentAnchor);
+        hideValidationMessage(protect(*m_currentAnchor));
 }
 
 void WebValidationMessageClient::showValidationMessage(const WebCore::Element& anchor, String&& message)
 {
     if (m_currentAnchor)
-        hideValidationMessage(*m_currentAnchor);
+        hideValidationMessage(protect(*m_currentAnchor));
 
     m_currentAnchor = &anchor;
     m_currentAnchorRect = anchor.boundingBoxInRootViewCoordinates();
-    [m_view showFormValidationMessage:message.createNSString().get() withAnchorRect:m_currentAnchorRect];
+    [protect(m_view) showFormValidationMessage:message.createNSString().get() withAnchorRect:m_currentAnchorRect];
 }
 
 void WebValidationMessageClient::hideValidationMessage(const WebCore::Element& anchor)
@@ -70,7 +70,7 @@ void WebValidationMessageClient::hideValidationMessage(const WebCore::Element& a
 
     m_currentAnchor = nullptr;
     m_currentAnchorRect = { };
-    [m_view hideFormValidationMessage];
+    [protect(m_view) hideFormValidationMessage];
 }
 
 void WebValidationMessageClient::hideAnyValidationMessage()
@@ -80,7 +80,7 @@ void WebValidationMessageClient::hideAnyValidationMessage()
 
     m_currentAnchor = nullptr;
     m_currentAnchorRect = { };
-    [m_view hideFormValidationMessage];
+    [protect(m_view) hideFormValidationMessage];
 }
 
 bool WebValidationMessageClient::isValidationMessageVisible(const WebCore::Element& anchor)
@@ -95,6 +95,7 @@ void WebValidationMessageClient::updateValidationBubbleStateIfNeeded()
 
     // We currently hide the validation bubble if its position is outdated instead of trying
     // to update its position.
-    if (m_currentAnchorRect != m_currentAnchor->boundingBoxInRootViewCoordinates())
-        hideValidationMessage(*m_currentAnchor);
+    Ref currentAnchor = *m_currentAnchor;
+    if (m_currentAnchorRect != currentAnchor->boundingBoxInRootViewCoordinates())
+        hideValidationMessage(currentAnchor);
 }

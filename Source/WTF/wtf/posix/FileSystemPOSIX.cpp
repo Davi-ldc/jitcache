@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <wtf/FileHandle.h>
 #include <wtf/SafeStrerror.h>
+#include <wtf/posix/POSIXExtras.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringBuilder.h>
@@ -57,7 +58,7 @@ namespace FileSystemImpl {
 
 FileHandle openFile(const String& path, FileOpenMode mode, FileAccessPermission permission, OptionSet<FileLockMode> lockMode, bool failIfFileExists)
 {
-    CString fsRep = fileSystemRepresentation(path);
+    auto fsRep = fileSystemRepresentation(path);
 
     if (fsRep.isNull())
         return { };
@@ -89,27 +90,27 @@ FileHandle openFile(const String& path, FileOpenMode mode, FileAccessPermission 
     else if (permission == FileAccessPermission::All)
         permissionFlag |= (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
 
-    return FileHandle::adopt(open(fsRep.data(), platformFlag, permissionFlag), lockMode);
+    return FileHandle::adopt(posixOpen(fsRep, platformFlag, permissionFlag), lockMode);
 }
 
 std::optional<WallTime> fileCreationTime(const String& path)
 {
 #if (OS(LINUX) && HAVE(STATX)) || OS(DARWIN) || OS(OPENBSD) || OS(NETBSD) || OS(FREEBSD)
-    CString fsRep = fileSystemRepresentation(path);
-    if (!fsRep.data() || fsRep.data()[0] == '\0')
+    auto fsRep = fileSystemRepresentation(path);
+    if (fsRep.isEmpty())
         return std::nullopt;
 
 #if OS(LINUX) && HAVE(STATX)
     struct statx fileInfo;
 
-    if (statx(-1, fsRep.data(), 0, STATX_BTIME, &fileInfo) == -1)
+    if (posixStatx(-1, fsRep, 0, STATX_BTIME, &fileInfo) == -1)
         return std::nullopt;
 
     return WallTime::fromRawSeconds(fileInfo.stx_btime.tv_sec);
 #elif OS(DARWIN) || OS(OPENBSD) || OS(NETBSD) || OS(FREEBSD) || OS(HAIKU)
     struct stat fileInfo;
 
-    if (stat(fsRep.data(), &fileInfo) == -1)
+    if (statFile(fsRep.spanIncludingNullTerminator(), fileInfo) == -1)
         return std::nullopt;
 
     return WallTime::fromRawSeconds(fileInfo.st_birthtime);
@@ -128,22 +129,22 @@ bool fileIDsAreEqual(std::optional<PlatformFileID> a, std::optional<PlatformFile
 std::optional<uint32_t> volumeFileBlockSize(const String& path)
 {
     struct statvfs fileStat;
-    if (!statvfs(fileSystemRepresentation(path).data(), &fileStat))
+    if (!posixStatvfs(fileSystemRepresentation(path), &fileStat))
         return fileStat.f_frsize;
 
     return std::nullopt;
 }
 
 #if !USE(CF)
-String stringFromFileSystemRepresentation(const char* path)
+String stringFromFileSystemRepresentation(UTF8CStringView path)
 {
-    if (!path)
+    if (path.isNull())
         return String();
 
-    return String::fromUTF8(path);
+    return String::fromUTF8(path.span());
 }
 
-CString fileSystemRepresentation(const String& path)
+UTF8CString fileSystemRepresentation(const String& path)
 {
     return path.utf8();
 }
@@ -179,20 +180,15 @@ std::pair<String, FileHandle> openTemporaryFile(StringView prefix, StringView su
     // This is OK for now since the code using it is built on macOS only.
     ASSERT_UNUSED(suffix, suffix.isEmpty());
 
-    const auto temporaryDirectoryUtf8 = temporaryDirectory.utf8();
-    IGNORE_CLANG_WARNINGS_BEGIN("unsafe-buffer-usage-in-libc-call")
-    const char* directory = !temporaryDirectory.isEmpty() ? temporaryDirectoryUtf8.data() : temporaryFileDirectory();
-    CString prefixUTF8 = prefix.utf8();
-    size_t length = strlen(directory) + 1 + prefixUTF8.length() + 1 + 6 + 1;
-    auto buffer = MallocSpan<char>::malloc(length);
-    snprintf(buffer.mutableSpan().data(), length, "%s/%s-XXXXXX", directory, prefixUTF8.data());
-    IGNORE_CLANG_WARNINGS_END
+    auto directory = !temporaryDirectory.isEmpty() ? temporaryDirectory : String::fromUTF8(temporaryFileDirectory());
+    // mkostemp overwrites the XXXXXX in place, so this needs to be a mutable buffer.
+    auto path = makeString(directory, '/', prefix, "-XXXXXX"_s).utf8();
 
-    auto handle = FileHandle::adopt(mkostemp(buffer.mutableSpan().data(), O_CLOEXEC));
+    auto handle = FileHandle::adopt(mkostemp(byteCast<char>(path.mutableSpan()).data(), O_CLOEXEC));
     if (!handle)
         return { String(), FileHandle() };
 
-    return { String::fromUTF8(buffer.span().data()), WTF::move(handle) };
+    return { String { path }, WTF::move(handle) };
 }
 #endif // !PLATFORM(COCOA)
 
@@ -203,7 +199,7 @@ std::optional<int32_t> getFileDeviceId(const String& path)
         return std::nullopt;
 
     struct stat fileStat;
-    if (stat(fsFile.data(), &fileStat) == -1)
+    if (statFile(fsFile.spanIncludingNullTerminator(), fileStat) == -1)
         return std::nullopt;
 
     return fileStat.st_dev;
@@ -215,15 +211,15 @@ std::optional<int32_t> getFileDeviceId(const String& path)
 
 bool fileExists(const String& path)
 {
-    return access(fileSystemRepresentation(path).data(), F_OK) != -1;
+    return posixAccess(fileSystemRepresentation(path), F_OK) != -1;
 }
 
 bool deleteFile(const String& path)
 {
     // unlink(...) returns 0 on successful deletion of the path and non-zero in any other case (including invalid permissions or non-existent file)
-    bool unlinked = !unlink(fileSystemRepresentation(path).data());
+    bool unlinked = !posixUnlink(fileSystemRepresentation(path));
     if (!unlinked && errno != ENOENT)
-        LOG_ERROR("File failed to delete. Error message: %s", safeStrerror(errno).data());
+        LOG_ERROR("File failed to delete. Error message: %s", safeStrerror(errno));
 
     return unlinked;
 }
@@ -235,24 +231,24 @@ bool makeAllDirectories(const String& path)
     if (!length)
         return false;
 
-    if (!access(fullPath.data(), F_OK))
+    if (!posixAccess(fullPath, F_OK))
         return true;
 
-    auto p = fullPath.mutableSpanIncludingNullTerminator().subspan(1);
+    auto p = byteCast<char>(fullPath.mutableSpanIncludingNullTerminator()).subspan(1);
     if (p[length - 1] == '/')
         p[length - 1] = '\0';
     for (; p[0]; skip(p, 1)) {
         if (p[0] == '/') {
             p[0] = '\0';
-            if (access(fullPath.data(), F_OK)) {
-                if (mkdir(fullPath.data(), S_IRWXU))
+            if (posixAccess(fullPath, F_OK)) {
+                if (posixMkdir(fullPath, S_IRWXU))
                     return false;
             }
             p[0] = '/';
         }
     }
-    if (access(fullPath.data(), F_OK)) {
-        if (mkdir(fullPath.data(), S_IRWXU))
+    if (posixAccess(fullPath, F_OK)) {
+        if (posixMkdir(fullPath, S_IRWXU))
             return false;
     }
 

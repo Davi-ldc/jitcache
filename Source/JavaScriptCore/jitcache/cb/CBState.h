@@ -41,15 +41,15 @@ class TwinReport; // the integrator's sink for twin differences
 enum class CBFaultKind : uint8_t { InvalidMaterial, RecordingFault };
 
 enum class CBCheck : uint8_t {
-    // validateState's checks of cb.state, in the order it runs them.
+    // cb.state's rules, in validateState's order
     StateHeader, ArgumentCount, ValueProfileCount, FamilyCount, StateLength,
     ValuePrediction, ArrayProfile, AllocationHint, IterationModes, EnumeratorModes,
     ToThisStatus, BranchBit, LazyOperand, TierUpHistory, Counter,
-    // validateSummary's checks of cb.summary.
+    // cb.summary's rules
     SummaryHeader, SummaryLength, SummaryValue,
-    // prepare's strict checks of the CodeBlock and of the captured counter, after validateState.
+    // what prepare assumes of the newborn CodeBlock and of the captured counter
     StrictNewborn, StrictLinkState, StrictCounter,
-    // capture's and scoreLive's own failures.
+    // capture's own checks
     CapturePairing, CaptureCharge, CaptureStrict,
 };
 
@@ -58,19 +58,22 @@ struct CBFault {
     CBCheck check;
 };
 
-ASCIILiteral description(CBCheck); // names the failing step for status(vm)
+// The check's name in a fault's step, after "cb.": one lowercase token, its words joined by '-'.
+ASCIILiteral description(CBCheck);
+// What the check rejected, in plain words, for the fault's detail.
+ASCIILiteral faultDetail(CBCheck);
 
-// The structural rules of the two sections, which a strict capture applies to what it built and a strict prepare or
-// decodeSummary to what it reads. Each reads the span (and the CB) in place, allocates nothing and returns the first
-// failing check, or nothing.
+// Shared by capture's strict check and the readers of saved sections. Each reads the span (and the CB) in place,
+// allocates nothing and returns the first failing check, or nothing.
 std::optional<CBCheck> validateState(std::span<const uint8_t> stateSection, CodeBlock&);
 std::optional<CBCheck> validateSummary(std::span<const uint8_t> summarySection);
-// Whether a carried counter keeps the native invariant: its progress is not negative unless its threshold is infinite.
+// True when the captured counter's threshold is infinite, or its total is at least the float nearest -counterValue: a
+// progress that is not negative, up to the float rounding native counters apply to the total.
 bool counterObeysNativeInvariant(const CBFormat::StateHeader&);
 
 struct CBScore {
     uint64_t richnessUnits { 0 };
-    bool counterWithheld { false }; // CounterMode::NotCarried: a polymorphic site kept the counter from traveling
+    bool counterWithheld { false }; // the counter did not travel (CounterMode::NotCarried)
     uint32_t counterProgress { 0 };
 };
 
@@ -82,6 +85,7 @@ struct CBCounterRestore {
     // not carried: the slice setup armed
     int64_t nativeSlice { 0 };
     int64_t slice { 0 }; // the slice the counter holds: max(nativeSlice, floor) when carried, else nativeSlice
+    double startupDeferralScale { 1 }; // carried: the VM's scale finishCounter passed to the check; not carried: 1
 };
 
 class CBStateCapture {
@@ -132,7 +136,7 @@ public:
     static std::expected<CBStateImport, CBFault> prepare(std::span<const uint8_t> stateSection, CodeBlock&, bool strict);
 
     void seedLinkedState(CodeBlock&) const; // after linking, before the CB has a JIT type; infallible
-    CBCounterRestore finishCounter(CodeBlock&) const; // after native setup and the ICs lane's attach; infallible
+    CBCounterRestore finishCounter(CodeBlock&) const; // after native setup; infallible
 
 #if ENABLE(JITCACHE_TWINS)
     // After finishCounter, with its result, and before installCode, after which a concurrent marker can merge into the
@@ -141,9 +145,9 @@ public:
 #endif
 
 private:
-    std::span<const uint8_t> m_bytes; // borrowed from the integrator, 8-byte aligned, alive until the last step returns
+    std::span<const uint8_t> m_bytes; // borrowed from the body until finishCounter and verifyTwins return
     const CBFormat::StateHeader* m_header { nullptr };
-    std::array<uint32_t, 9> m_arrayOffsets { }; // the offsets of cb.state's nine arrays, in CBFormat::StateArray order
+    std::array<uint32_t, 9> m_arrayOffsets { }; // where each of the nine arrays after the header starts
 };
 
 } // namespace JSC::JITCache

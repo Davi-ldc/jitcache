@@ -29,12 +29,14 @@
 #import "APIConversions.h"
 #import "BindGroupLayout.h"
 #import "Device.h"
+#import "Instance.h"
 #import "IsValidToUseWith.h"
 #import "Pipeline.h"
 #import "RenderBundleEncoder.h"
 #import "TextureOrTextureView.h"
 #import "WGSLShaderModule.h"
 #import <wtf/IndexedRange.h>
+#import <wtf/Scope.h>
 #import <wtf/TZoneMallocInlines.h>
 
 // FIXME: remove after radar://104903411 or after we place the mask into the last buffer
@@ -42,7 +44,7 @@
 - (void)setSampleMask:(NSUInteger)mask;
 @end
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 static MTLBlendOperation NODELETE blendOperation(WGPUBlendOperation operation)
 {
@@ -98,7 +100,7 @@ static MTLBlendFactor NODELETE blendFactor(WGPUBlendFactor factor)
     }
 }
 
-static MTLColorWriteMask NODELETE colorWriteMask(WGPUColorWriteMaskFlags mask)
+static MTLColorWriteMask NODELETE colorWriteMask(WGPUColorWriteMask mask)
 {
     MTLColorWriteMask mtlMask = MTLColorWriteMaskNone;
 
@@ -630,7 +632,7 @@ static bool NODELETE matchesFormat(const ShaderModule::VertexStageIn& stageIn, u
     return formatType(it->value) == formatType(format);
 }
 
-static MTLVertexDescriptor *createVertexDescriptor(WGPUVertexState vertexState, const WGPULimits& limits, const ShaderModule::VertexStageIn& stageIn, RenderPipeline::RequiredBufferIndicesContainer& requiredBufferIndices, NSString** error, ShaderModule::VertexStageIn& outShaderLocations)
+static MTLVertexDescriptor *createVertexDescriptor(WGPUVertexState vertexState, const Limits& limits, const ShaderModule::VertexStageIn& stageIn, RenderPipeline::RequiredBufferIndicesContainer& requiredBufferIndices, NSString** error, ShaderModule::VertexStageIn& outShaderLocations)
 {
     MTLVertexDescriptor *vertexDescriptor = [MTLVertexDescriptor new];
     Checked<uint32_t> totalAttributeCount = 0;
@@ -642,7 +644,7 @@ static MTLVertexDescriptor *createVertexDescriptor(WGPUVertexState vertexState, 
     }
 
     ShaderModule::VertexStageIn shaderLocations;
-    for (auto [ bufferIndex, buffer ] : indexedRange(vertexState.buffersSpan())) {
+    for (auto [ bufferIndex, buffer ] : indexedRange(buffersSpan(vertexState))) {
         if (buffer.arrayStride == WGPU_COPY_STRIDE_UNDEFINED)
             continue;
 
@@ -669,7 +671,7 @@ static MTLVertexDescriptor *createVertexDescriptor(WGPUVertexState vertexState, 
         vertexDescriptor.layouts[bufferIndex].stepFunction = stepFunction(buffer.stepMode, buffer.arrayStride);
         if (vertexDescriptor.layouts[bufferIndex].stepFunction == MTLVertexStepFunctionConstant)
             vertexDescriptor.layouts[bufferIndex].stepRate = 0;
-        for (auto& attribute : buffer.attributesSpan()) {
+        for (auto& attribute : attributesSpan(buffer)) {
             auto formatSize = vertexFormatSize(attribute.format);
             auto offsetPlusFormatSize = checkedSum<uint64_t>(attribute.offset, formatSize);
             if (offsetPlusFormatSize.hasOverflowed()) {
@@ -772,9 +774,9 @@ static WGPUSamplerBindingType NODELETE convertSamplerBindingType(WGSL::SamplerBi
     }
 }
 
-static WGPUShaderStageFlags NODELETE convertVisibility(const OptionSet<WGSL::ShaderStage>& visibility)
+static WGPUShaderStage NODELETE convertVisibility(const OptionSet<WGSL::ShaderStage>& visibility)
 {
-    WGPUShaderStageFlags flags = 0;
+    WGPUShaderStage flags = 0;
     if (visibility & WGSL::ShaderStage::Vertex)
         flags |= WGPUShaderStage_Vertex;
     if (visibility & WGSL::ShaderStage::Fragment)
@@ -921,34 +923,39 @@ static auto makeBindingLayout(WGPUBindGroupLayoutEntry& newEntry, auto& bindingM
 {
     using Result = BindGroupLayout::Entry::BindingLayout;
     return WTF::switchOn(bindingMember, [&](const WGSL::BufferBindingLayout& bufferBinding) -> Result {
-        return newEntry.buffer = WGPUBufferBindingLayout {
+        newEntry.buffer = WGPUBufferBindingLayout {
             .type = (bufferTypeOverride != WGPUBufferBindingType_Undefined) ? bufferTypeOverride : convertBindingType(bufferBinding.type),
             .hasDynamicOffset = bufferBinding.hasDynamicOffset,
             .minBindingSize = bufferBinding.minBindingSize,
             .bufferSizeForBinding = bufferSizeForBinding,
         };
+        return BindGroupLayout::bindingLayoutFromAPI(newEntry.buffer);
     }, [&](const WGSL::SamplerBindingLayout& sampler) -> Result {
-        return newEntry.sampler = WGPUSamplerBindingLayout {
+        newEntry.sampler = WGPUSamplerBindingLayout {
             .type = convertSamplerBindingType(sampler.type)
         };
+        return BindGroupLayout::bindingLayoutFromAPI(newEntry.sampler);
     }, [&](const WGSL::TextureBindingLayout& texture) -> Result {
-        return newEntry.texture = WGPUTextureBindingLayout {
+        newEntry.texture = WGPUTextureBindingLayout {
             .sampleType = convertSampleType(texture.sampleType),
             .viewDimension = convertViewDimension(texture.viewDimension),
             .multisampled = texture.multisampled
         };
+        return BindGroupLayout::bindingLayoutFromAPI(newEntry.texture);
     }, [&](const WGSL::StorageTextureBindingLayout& storageTexture) -> Result {
-        return newEntry.storageTexture = WGPUStorageTextureBindingLayout {
+        newEntry.storageTexture = WGPUStorageTextureBindingLayout {
             .access = convertAccess(storageTexture.access),
             .format = convertFormat(storageTexture.format),
             .viewDimension = convertViewDimension(storageTexture.viewDimension)
         };
+        return BindGroupLayout::bindingLayoutFromAPI(newEntry.storageTexture);
     }, [&](const WGSL::ExternalTextureBindingLayout&) -> Result {
-        return newEntry.texture = WGPUTextureBindingLayout {
+        newEntry.texture = WGPUTextureBindingLayout {
             .sampleType = static_cast<WGPUTextureSampleType>(WGPUTextureSampleType_ExternalTexture),
             .viewDimension = WGPUTextureViewDimension_2D,
             .multisampled = false
         };
+        return BindGroupLayout::bindingLayoutFromAPI(newEntry.texture);
     });
 }
 
@@ -956,13 +963,13 @@ static BindGroupLayout::Entry::BindingLayout toBindingLayout(const WGPUBindGroup
 {
     BindGroupLayout::Entry::BindingLayout result;
     if (BindGroupLayout::isPresent(entry.buffer))
-        result = entry.buffer;
+        result = BindGroupLayout::bindingLayoutFromAPI(entry.buffer);
     else if (BindGroupLayout::isPresent(entry.sampler))
-        result = entry.sampler;
+        result = BindGroupLayout::bindingLayoutFromAPI(entry.sampler);
     else if (BindGroupLayout::isPresent(entry.texture))
-        result = entry.texture;
+        result = BindGroupLayout::bindingLayoutFromAPI(entry.texture);
     else if (BindGroupLayout::isPresent(entry.storageTexture))
-        result = entry.storageTexture;
+        result = BindGroupLayout::bindingLayoutFromAPI(entry.storageTexture);
 
     return result;
 }
@@ -1053,12 +1060,12 @@ NSString* Device::addPipelineLayouts(Vector<Vector<WGPUBindGroupLayoutEntry>>& p
 Ref<PipelineLayout> Device::generatePipelineLayout(const Vector<Vector<WGPUBindGroupLayoutEntry>> &bindGroupEntries)
 {
     Vector<WGPUBindGroupLayout> bindGroupLayouts;
-    Vector<Ref<WebGPU::BindGroupLayout>> bindGroupLayoutsRefs;
+    Vector<Ref<WebGPU::Metal::BindGroupLayout>> bindGroupLayoutsRefs;
     bindGroupLayoutsRefs.reserveInitialCapacity(bindGroupEntries.size());
     bindGroupLayouts.reserveInitialCapacity(bindGroupEntries.size());
     for (auto& entries : bindGroupEntries) {
         WGPUBindGroupLayoutDescriptor bindGroupLayoutDescriptor = { };
-        bindGroupLayoutDescriptor.label = "getBindGroup() generated layout";
+        bindGroupLayoutDescriptor.label = toAPI("getBindGroup() generated layout"_s);
         bindGroupLayoutDescriptor.entryCount = entries.size();
         bindGroupLayoutDescriptor.entries = entries.size() ? &entries[0] : nullptr;
         auto bindGroupLayout = createBindGroupLayout(bindGroupLayoutDescriptor, true);
@@ -1069,7 +1076,7 @@ Ref<PipelineLayout> Device::generatePipelineLayout(const Vector<Vector<WGPUBindG
     }
 
     auto generatedPipelineLayout = createPipelineLayout(WGPUPipelineLayoutDescriptor {
-        .label = "generated pipeline layout",
+        .label = toAPI("generated pipeline layout"_s),
         .bindGroupLayoutCount = static_cast<uint32_t>(bindGroupLayouts.size()),
         .bindGroupLayouts = bindGroupLayouts.size() ? &bindGroupLayouts[0] : nullptr
     }, true);
@@ -1077,14 +1084,38 @@ Ref<PipelineLayout> Device::generatePipelineLayout(const Vector<Vector<WGPUBindG
     return generatedPipelineLayout;
 }
 
-static std::pair<Ref<RenderPipeline>, NSString*> returnInvalidRenderPipeline(WebGPU::Device &object, bool isAsync, NSString* error)
+static Vector<WGPUTextureFormat> colorTargetFormats(const WGPURenderPipelineDescriptor& descriptor)
+{
+    if (!descriptor.fragment)
+        return { };
+    return WTF::map(targetsSpan(*descriptor.fragment), [](const auto& target) {
+        return target.format;
+    });
+}
+
+static bool writesStencil(const WGPURenderPipelineDescriptor& descriptor)
+{
+    auto* depthStencil = descriptor.depthStencil;
+    if (!depthStencil || !depthStencil->stencilWriteMask)
+        return false;
+    const auto& stencilFront = depthStencil->stencilFront;
+    const auto& stencilBack = depthStencil->stencilBack;
+    const auto& cullMode = descriptor.primitive.cullMode;
+    if (cullMode != WGPUCullMode_Front && (stencilFront.passOp != WGPUStencilOperation_Keep || stencilFront.depthFailOp != WGPUStencilOperation_Keep || stencilFront.failOp != WGPUStencilOperation_Keep))
+        return true;
+    if (cullMode != WGPUCullMode_Back && (stencilBack.passOp != WGPUStencilOperation_Keep || stencilBack.depthFailOp != WGPUStencilOperation_Keep || stencilBack.failOp != WGPUStencilOperation_Keep))
+        return true;
+    return false;
+}
+
+static std::pair<Ref<RenderPipeline>, NSString*> returnInvalidRenderPipeline(WebGPU::Metal::Device &object, bool isAsync, NSString* error)
 {
     if (!isAsync)
         object.generateAValidationError(error);
     return std::make_pair(RenderPipeline::createInvalid(object), error);
 }
 
-static std::pair<Ref<RenderPipeline>, NSString*> returnInvalidRenderPipeline(WebGPU::Device &object, bool isAsync, String&& error)
+static std::pair<Ref<RenderPipeline>, NSString*> returnInvalidRenderPipeline(WebGPU::Metal::Device &object, bool isAsync, String&& error)
 {
     return returnInvalidRenderPipeline(object, isAsync, error.createNSString().get());
 }
@@ -1126,7 +1157,7 @@ static NSString* errorValidatingDepthStencilState(const WGPUDepthStencilState& d
         return ERROR_STRING(@"Color format passed to depth / stencil format");
 
     auto depthFormat = Texture::depthOnlyAspectMetalFormat(depthStencil.format);
-    if ((depthStencil.depthWriteEnabled && *depthStencil.depthWriteEnabled) || (depthStencil.depthCompare != WGPUCompareFunction_Undefined && depthStencil.depthCompare != WGPUCompareFunction_Always)) {
+    if (depthStencil.depthWriteEnabled == WGPUOptionalBool_True || (depthStencil.depthCompare != WGPUCompareFunction_Undefined && depthStencil.depthCompare != WGPUCompareFunction_Always)) {
         if (!depthFormat)
             return ERROR_STRING(@"depth-stencil state missing format");
     }
@@ -1142,10 +1173,10 @@ static NSString* errorValidatingDepthStencilState(const WGPUDepthStencilState& d
     }
 
     if (depthFormat) {
-        if (!depthStencil.depthWriteEnabled)
+        if (depthStencil.depthWriteEnabled == WGPUOptionalBool_Undefined)
             return ERROR_STRING(@"depthWrite must be provided");
 
-        bool depthWriteEnabled = *depthStencil.depthWriteEnabled;
+        bool depthWriteEnabled = depthStencil.depthWriteEnabled == WGPUOptionalBool_True;
         if (depthWriteEnabled || depthStencil.stencilFront.depthFailOp != WGPUStencilOperation_Keep || depthStencil.stencilBack.depthFailOp != WGPUStencilOperation_Keep) {
             if (depthStencil.depthCompare == WGPUCompareFunction_Undefined)
                 return ERROR_STRING(@"Depth compare must be provided");
@@ -1384,7 +1415,7 @@ static uint32_t NODELETE componentsForDataType(MTLDataType dataType)
     }
 }
 
-static NSString* errorValidatingInterstageShaderInterfaces(WebGPU::Device &device, const WGPURenderPipelineDescriptor& descriptor, const ShaderModule::VertexOutputs* vertexOutputs, uint32_t vertexClipDistancesCount, const ShaderModule::FragmentInputs* fragmentInputs, const ShaderModule::FragmentOutputs* fragmentOutputs, const ShaderModule* fragmentModule, auto* fragmentDescriptor)
+static NSString* errorValidatingInterstageShaderInterfaces(WebGPU::Metal::Device &device, const WGPURenderPipelineDescriptor& descriptor, const ShaderModule::VertexOutputs* vertexOutputs, uint32_t vertexClipDistancesCount, const ShaderModule::FragmentInputs* fragmentInputs, const ShaderModule::FragmentOutputs* fragmentOutputs, const ShaderModule* fragmentModule, auto* fragmentDescriptor)
 {
     if (!vertexOutputs)
         return @"vertex shader has no outputs";
@@ -1507,8 +1538,19 @@ static NSString* errorValidatingVertexStageIn(const ShaderModule::VertexStageIn*
 
 std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGPURenderPipelineDescriptor& descriptor, bool isAsync, const RenderPipeline* pipelineToReplace)
 {
+    std::optional<std::pair<Ref<RenderPipeline>, NSString*>> result;
+    createRenderPipeline(descriptor, isAsync, pipelineToReplace, LibraryCompilation::Synchronous, [&](std::pair<Ref<RenderPipeline>, NSString*>&& pipelineAndError) {
+        result = WTF::move(pipelineAndError);
+    });
+    // LibraryCompilation::Synchronous never defers the completion handler.
+    RELEASE_ASSERT(result);
+    return WTF::move(*result);
+}
+
+void Device::createRenderPipeline(const WGPURenderPipelineDescriptor& descriptor, bool isAsync, const RenderPipeline* pipelineToReplace, LibraryCompilation libraryCompilation, CompletionHandler<void(std::pair<Ref<RenderPipeline>, NSString*>&&)>&& callback)
+{
     if (!validateRenderPipeline(descriptor) || !isValid())
-        return returnInvalidRenderPipeline(*this, isAsync, "device or descriptor is not valid"_s);
+        return callback(returnInvalidRenderPipeline(*this, isAsync, "device or descriptor is not valid"_s));
 
     MTLRenderPipelineDescriptor* mtlRenderPipelineDescriptor = [MTLRenderPipelineDescriptor new];
 #if ENABLE(WEBGPU_BY_DEFAULT)
@@ -1523,11 +1565,11 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     if (pipelineToReplace) {
         pipelineLayout = &pipelineToReplace->pipelineLayout();
         if (!isValidToUseWithDevice(*pipelineLayout, *this))
-            return returnInvalidRenderPipeline(*this, isAsync, "Pipeline layout is not valid or created from different device"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Pipeline layout is not valid or created from different device"_s));
     } else if (descriptor.layout) {
-        Ref layout = WebGPU::fromAPI(descriptor.layout);
+        Ref layout = WebGPU::Metal::fromAPI(descriptor.layout);
         if (!isValidToUseWithDevice(layout.get(), *this))
-            return returnInvalidRenderPipeline(*this, isAsync, "Pipeline layout is not valid or created from different device"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Pipeline layout is not valid or created from different device"_s));
 
         if (!layout->isAutoLayout())
             pipelineLayout = layout.ptr();
@@ -1538,34 +1580,33 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     uint32_t vertexClipDistancesCount = 0;
     BufferBindingSizesForPipeline minimumBufferSizes;
     uint32_t vertexShaderBindingCount = 0;
-    String vertexShaderSource, fragmentShaderSource;
+    std::optional<PreparedLibrary> preparedVertexLibrary;
+    std::optional<PreparedLibrary> preparedFragmentLibrary;
     ShaderModule::VertexStageIn shaderLocations;
     {
-        Ref vertexModule = WebGPU::fromAPI(descriptor.vertex.module);
+        Ref vertexModule = WebGPU::Metal::fromAPI(descriptor.vertex.module);
         if (!vertexModule->isValid() || !vertexModule->ast())
-            return returnInvalidRenderPipeline(*this, isAsync, "Vertex module is not valid"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Vertex module is not valid"_s));
         if (&vertexModule->device() != this)
-            return returnInvalidRenderPipeline(*this, isAsync, "Vertex module was created with a different device"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Vertex module was created with a different device"_s));
 
         const auto& vertexEntryPoint = descriptor.vertex.entryPoint ? fromAPI(descriptor.vertex.entryPoint) : vertexModule->defaultVertexEntryPoint();
         vertexStageIn = vertexModule->stageInTypesForEntryPoint(vertexEntryPoint);
         if (NSString* error = errorValidatingVertexStageIn(vertexStageIn, *this))
-            return returnInvalidRenderPipeline(*this, isAsync, error);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, error));
         NSError *error = nil;
-        auto libraryCreationResult = createLibrary(m_device, vertexModule, pipelineLayout.get(), vertexEntryPoint, label.get(), descriptor.vertex.constantsSpan(), minimumBufferSizes, &error, vertexShaderSource);
-        if (!libraryCreationResult)
-            return returnInvalidRenderPipeline(*this, isAsync, error.localizedDescription ?: @"Vertex library failed creation");
+        preparedVertexLibrary = prepareLibrary(vertexModule, pipelineLayout.get(), vertexEntryPoint, label.get(), constantsSpan(descriptor.vertex), minimumBufferSizes, &error);
+        if (!preparedVertexLibrary)
+            return callback(returnInvalidRenderPipeline(*this, isAsync, error.localizedDescription ?: @"Vertex library failed creation"));
 
-        vertexShaderBindingCount = std::min<uint32_t>(libraryCreationResult->entryPointInformation.bindingCount, std::numeric_limits<uint32_t>::max());
-        const auto& entryPointInformation = libraryCreationResult->entryPointInformation;
+        const auto& entryPointInformation = preparedVertexLibrary->entryPointInformation;
+        vertexShaderBindingCount = std::min<uint32_t>(entryPointInformation.bindingCount, std::numeric_limits<uint32_t>::max());
         if (!pipelineLayout) {
             if (NSString* error = addPipelineLayouts(bindGroupEntries, entryPointInformation.defaultLayout))
-                return returnInvalidRenderPipeline(*this, isAsync, error);
+                return callback(returnInvalidRenderPipeline(*this, isAsync, error));
         }
-        auto vertexFunction = createFunction(libraryCreationResult->library, entryPointInformation, label.get());
-        if (!vertexFunction || vertexFunction.functionType != MTLFunctionTypeVertex || entryPointInformation.specializationConstants.size() != libraryCreationResult->wgslConstantValues.size())
-            return returnInvalidRenderPipeline(*this, isAsync, "Vertex function could not be created"_s);
-        mtlRenderPipelineDescriptor.vertexFunction = vertexFunction;
+        if (entryPointInformation.specializationConstants.size() != preparedVertexLibrary->wgslConstantValues.size())
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Vertex function could not be created"_s));
         vertexOutputs = vertexModule->vertexReturnTypeForEntryPoint(vertexEntryPoint);
         vertexClipDistancesCount = vertexModule->clipDistancesCount(vertexEntryPoint);
     }
@@ -1580,12 +1621,12 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     if (descriptor.fragment) {
         const auto& fragmentDescriptor = *descriptor.fragment;
 
-        fragmentModule = protect(WebGPU::fromAPI(fragmentDescriptor.module)).ptr();
+        fragmentModule = protect(WebGPU::Metal::fromAPI(fragmentDescriptor.module)).ptr();
         if (!fragmentModule->isValid() || !fragmentModule->ast())
-            return returnInvalidRenderPipeline(*this, isAsync, "Fragment module is invalid"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Fragment module is invalid"_s));
 
         if (&fragmentModule->device() != this)
-            return returnInvalidRenderPipeline(*this, isAsync, "Fragment module was created with a different device"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Fragment module was created with a different device"_s));
 
         auto fragmentShaderModule = fragmentModule->ast();
         RELEASE_ASSERT(fragmentShaderModule);
@@ -1599,12 +1640,12 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     }
 
     if (NSString* error = errorValidatingInterstageShaderInterfaces(*this, descriptor, vertexOutputs, vertexClipDistancesCount, fragmentInputs, fragmentReturnTypes, fragmentModule.get(), descriptor.fragment))
-        return returnInvalidRenderPipeline(*this, isAsync, error);
+        return callback(returnInvalidRenderPipeline(*this, isAsync, error));
 
     if (descriptor.fragment) {
         uint32_t bytesPerSample = 0;
         const auto& fragmentDescriptor = *descriptor.fragment;
-        for (auto [ i, targetDescriptor ] : indexedRange(fragmentDescriptor.targetsSpan())) {
+        for (auto [ i, targetDescriptor ] : indexedRange(targetsSpan(fragmentDescriptor))) {
             if (targetDescriptor.format == WGPUTextureFormat_Undefined)
                 continue;
 
@@ -1616,7 +1657,7 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
             const auto& mtlColorAttachment = mtlRenderPipelineDescriptor.colorAttachments[i];
 
             if (Texture::isDepthOrStencilFormat(targetDescriptor.format) || !Texture::isRenderableFormat(targetDescriptor.format, *this))
-                return returnInvalidRenderPipeline(*this, isAsync, "Depth / stencil format passed to color format"_s);
+                return callback(returnInvalidRenderPipeline(*this, isAsync, "Depth / stencil format passed to color format"_s));
 
             bytesPerSample = roundUpToMultipleOfNonPowerOfTwo(Texture::renderTargetPixelByteAlignment(targetDescriptor.format), bytesPerSample);
             bytesPerSample += Texture::renderTargetPixelByteCost(targetDescriptor.format);
@@ -1624,13 +1665,13 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
 
             hasAtLeastOneColorTarget = true;
             if (targetDescriptor.writeMask > WGPUColorWriteMask_All || (fragmentFunctionReturnType == MTLDataTypeNone && targetDescriptor.writeMask))
-                return returnInvalidRenderPipeline(*this, isAsync, "writeMask is invalid"_s);
+                return callback(returnInvalidRenderPipeline(*this, isAsync, "writeMask is invalid"_s));
             mtlColorAttachment.writeMask = colorWriteMask(targetDescriptor.writeMask);
 
             bool readsAlpha = false;
             if (targetDescriptor.blend) {
                 if (!Texture::supportsBlending(targetDescriptor.format, *this))
-                    return returnInvalidRenderPipeline(*this, isAsync, "Color target attempted to use blending on non-blendable format"_s);
+                    return callback(returnInvalidRenderPipeline(*this, isAsync, "Color target attempted to use blending on non-blendable format"_s));
                 mtlColorAttachment.blendingEnabled = YES;
 
                 const auto& alphaBlend = targetDescriptor.blend->alpha;
@@ -1641,7 +1682,7 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
                     return true;
                 };
                 if (!validateBlend(alphaBlend) || !validateBlend(colorBlend))
-                    return returnInvalidRenderPipeline(*this, isAsync, "Blend states are not valid"_s);
+                    return callback(returnInvalidRenderPipeline(*this, isAsync, "Blend states are not valid"_s));
                 mtlColorAttachment.alphaBlendOperation = blendOperation(alphaBlend.operation);
                 mtlColorAttachment.sourceAlphaBlendFactor = blendFactor(alphaBlend.srcFactor);
                 mtlColorAttachment.destinationAlphaBlendFactor = blendFactor(alphaBlend.dstFactor);
@@ -1654,35 +1695,33 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
                 mtlColorAttachment.blendingEnabled = NO;
 
             if (!textureFormatAllowedForRetunType(targetDescriptor.format, fragmentFunctionReturnType, readsAlpha))
-                return returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"pipeline creation - color target pixel format(%lu) for location(%zu) is incompatible with shader output data type of %zu", i, mtlColorAttachment.pixelFormat, fragmentFunctionReturnType]);
+                return callback(returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"pipeline creation - color target pixel format(%lu) for location(%zu) is incompatible with shader output data type of %zu", i, mtlColorAttachment.pixelFormat, fragmentFunctionReturnType]));
         }
 
         if (bytesPerSample > deviceLimits.maxColorAttachmentBytesPerSample)
-            return returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"Bytes per sample(%u) exceeded maximum allowed limit(%u)", bytesPerSample, deviceLimits.maxColorAttachmentBytesPerSample]);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"Bytes per sample(%u) exceeded maximum allowed limit(%u)", bytesPerSample, deviceLimits.maxColorAttachmentBytesPerSample]));
 
         NSError *error = nil;
         const auto& fragmentEntryPoint = fragmentDescriptor.entryPoint ? fromAPI(fragmentDescriptor.entryPoint) : fragmentModule->defaultFragmentEntryPoint();
-        auto libraryCreationResult = createLibrary(m_device, *fragmentModule, pipelineLayout.get(), fragmentEntryPoint, label.get(), fragmentDescriptor.constantsSpan(), minimumBufferSizes, &error, fragmentShaderSource);
-        if (!libraryCreationResult)
-            return returnInvalidRenderPipeline(*this, isAsync, error.localizedDescription ?: @"Fragment library could not be created");
+        preparedFragmentLibrary = prepareLibrary(*fragmentModule, pipelineLayout.get(), fragmentEntryPoint, label.get(), constantsSpan(fragmentDescriptor), minimumBufferSizes, &error);
+        if (!preparedFragmentLibrary)
+            return callback(returnInvalidRenderPipeline(*this, isAsync, error.localizedDescription ?: @"Fragment library could not be created"));
 
-        const auto& entryPointInformation = libraryCreationResult->entryPointInformation;
+        const auto& entryPointInformation = preparedFragmentLibrary->entryPointInformation;
         if (!pipelineLayout) {
             if (NSString* error = addPipelineLayouts(bindGroupEntries, entryPointInformation.defaultLayout))
-                return returnInvalidRenderPipeline(*this, isAsync, error);
+                return callback(returnInvalidRenderPipeline(*this, isAsync, error));
         }
 
-        auto fragmentFunction = createFunction(libraryCreationResult->library, entryPointInformation, label.get());
-        if (!fragmentFunction || fragmentFunction.functionType != MTLFunctionTypeFragment || entryPointInformation.specializationConstants.size() != libraryCreationResult->wgslConstantValues.size())
-            return returnInvalidRenderPipeline(*this, isAsync, "Fragment function failed creation"_s);
-        mtlRenderPipelineDescriptor.fragmentFunction = fragmentFunction;
+        if (entryPointInformation.specializationConstants.size() != preparedFragmentLibrary->wgslConstantValues.size())
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Fragment function failed creation"_s));
     }
 
     MTLDepthStencilDescriptor *depthStencilDescriptor = nil;
     float depthBias = 0.f, depthBiasSlopeScale = 0.f, depthBiasClamp = 0.f;
     if (auto depthStencil = descriptor.depthStencil) {
         if (NSString *error = errorValidatingDepthStencilState(*depthStencil))
-            return returnInvalidRenderPipeline(*this, isAsync, error);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, error));
 
         MTLPixelFormat depthStencilFormat = Texture::pixelFormat(depthStencil->format);
         bool isStencilOnlyFormat = Device::isStencilOnlyFormat(depthStencilFormat);
@@ -1692,32 +1731,42 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
 
         depthStencilDescriptor = [MTLDepthStencilDescriptor new];
         depthStencilDescriptor.depthCompareFunction = convertToMTLCompare(depthStencil->depthCompare);
-        depthStencilDescriptor.depthWriteEnabled = depthStencil->depthWriteEnabled.value_or(false);
+        depthStencilDescriptor.depthWriteEnabled = depthStencil->depthWriteEnabled == WGPUOptionalBool_True;
         populateStencilOperation(depthStencilDescriptor.frontFaceStencil, depthStencil->stencilFront, depthStencil->stencilReadMask, depthStencil->stencilWriteMask);
         populateStencilOperation(depthStencilDescriptor.backFaceStencil, depthStencil->stencilBack, depthStencil->stencilReadMask, depthStencil->stencilWriteMask);
         depthBias = depthStencil->depthBias;
         depthBiasSlopeScale = depthStencil->depthBiasSlopeScale;
         depthBiasClamp = depthStencil->depthBiasClamp;
+
+        // Depth bias is derived from the slope of the primitive being rasterized, which only points
+        // and lines lack, so for those topologies it has to be left at zero.
+        auto topology = descriptor.primitive.topology;
+        if (topology != WGPUPrimitiveTopology_TriangleList && topology != WGPUPrimitiveTopology_TriangleStrip) {
+            if (depthBias || depthBiasSlopeScale || depthBiasClamp)
+                return callback(returnInvalidRenderPipeline(*this, isAsync, "depthBias, depthBiasSlopeScale, and depthBiasClamp must be 0 unless primitive.topology is a triangle topology"_s));
+        }
     }
 
-    if (descriptor.fragment && !hasAtLeastOneColorTarget && !descriptor.depthStencil)
-        return returnInvalidRenderPipeline(*this, isAsync, "No color targets or depth stencil were specified in the descriptor"_s);
+    // A render pipeline needs somewhere to render to. hasAtLeastOneColorTarget can only be set from
+    // the fragment state's targets, so a vertex-only pipeline has to bring its own depth-stencil.
+    if (!hasAtLeastOneColorTarget && !descriptor.depthStencil)
+        return callback(returnInvalidRenderPipeline(*this, isAsync, "No color targets or depth stencil were specified in the descriptor"_s));
     if (usesFragDepth && mtlRenderPipelineDescriptor.depthAttachmentPixelFormat == MTLPixelFormatInvalid)
-        return returnInvalidRenderPipeline(*this, isAsync, "Shader writes to frag depth but no depth texture set"_s);
+        return callback(returnInvalidRenderPipeline(*this, isAsync, "Shader writes to frag depth but no depth texture set"_s));
 
     if (descriptor.multisample.count != 1 && descriptor.multisample.count != 4)
-        return returnInvalidRenderPipeline(*this, isAsync, "multisample count must be either 1 or 4"_s);
+        return callback(returnInvalidRenderPipeline(*this, isAsync, "multisample count must be either 1 or 4"_s));
     mtlRenderPipelineDescriptor.rasterSampleCount = descriptor.multisample.count;
     mtlRenderPipelineDescriptor.alphaToCoverageEnabled = descriptor.multisample.alphaToCoverageEnabled;
     if (descriptor.multisample.alphaToCoverageEnabled) {
         if (usesSampleMask)
-            return returnInvalidRenderPipeline(*this, isAsync, "Can not use sampleMask with alphaToCoverage"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Can not use sampleMask with alphaToCoverage"_s));
         if (!descriptor.fragment)
-            return returnInvalidRenderPipeline(*this, isAsync, "Using alphaToCoverage requires a fragment state"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Using alphaToCoverage requires a fragment state"_s));
         if (!descriptor.fragment->targetCount || !hasAlphaChannel(descriptor.fragment->targets[0].format) || !Texture::supportsBlending(descriptor.fragment->targets[0].format, *this))
-            return returnInvalidRenderPipeline(*this, isAsync, "Using alphaToCoverage requires a fragment state"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Using alphaToCoverage requires a fragment state"_s));
         if (descriptor.multisample.count == 1)
-            return returnInvalidRenderPipeline(*this, isAsync, "Using alphaToCoverage requires multisampling"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "Using alphaToCoverage requires multisampling"_s));
     }
 
     RELEASE_ASSERT([mtlRenderPipelineDescriptor respondsToSelector:@selector(setSampleMask:)]);
@@ -1731,23 +1780,23 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     RenderPipeline::RequiredBufferIndicesContainer requiredBufferIndices;
     if (descriptor.vertex.bufferCount) {
         if (!vertexStageIn)
-            return returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"Vertex shader has no stageIn parameters but buffer count was %zu and attribute count was %zu", descriptor.vertex.bufferCount, descriptor.vertex.buffers[0].attributeCount]);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"Vertex shader has no stageIn parameters but buffer count was %zu and attribute count was %zu", descriptor.vertex.bufferCount, descriptor.vertex.buffers[0].attributeCount]));
         NSString *error = nil;
         MTLVertexDescriptor *vertexDecriptor = createVertexDescriptor(descriptor.vertex, deviceLimits, *vertexStageIn, requiredBufferIndices, &error, shaderLocations);
         if (error)
-            return returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"vertex descriptor creation failed %@", error]);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, [NSString stringWithFormat:@"vertex descriptor creation failed %@", error]));
 
         ASSERT(vertexDecriptor);
         mtlRenderPipelineDescriptor.vertexDescriptor = vertexDecriptor;
     }
 
     if (vertexStageIn && vertexStageIn->size() && !descriptor.vertex.bufferCount)
-        return returnInvalidRenderPipeline(*this, isAsync, @"Vertex descriptor passed zero buffers for stage_in but shader requires buffers for stage_in");
+        return callback(returnInvalidRenderPipeline(*this, isAsync, @"Vertex descriptor passed zero buffers for stage_in but shader requires buffers for stage_in"));
 
     MTLDepthClipMode mtlDepthClipMode = MTLDepthClipModeClip;
     if (descriptor.primitive.unclippedDepth) {
         if (!hasFeature(WGPUFeatureName_DepthClipControl))
-            return returnInvalidRenderPipeline(*this, isAsync, "unclippedDepth used without enabling depth-clip-control feature"_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "unclippedDepth used without enabling depth-clip-control feature"_s));
 
         mtlDepthClipMode = MTLDepthClipModeClamp;
     }
@@ -1760,7 +1809,7 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     auto primitiveTopology = descriptor.primitive.topology;
     if (primitiveTopology != WGPUPrimitiveTopology_LineStrip && primitiveTopology != WGPUPrimitiveTopology_TriangleStrip) {
         if (descriptor.primitive.stripIndexFormat != WGPUIndexFormat_Undefined)
-            return returnInvalidRenderPipeline(*this, isAsync, "If primitive.topology is not line-strip or triangle-strip, primitive.stripIndexFormat must be undefined."_s);
+            return callback(returnInvalidRenderPipeline(*this, isAsync, "If primitive.topology is not line-strip or triangle-strip, primitive.stripIndexFormat must be undefined."_s));
     }
 
     auto mtlPrimitiveType = primitiveType(primitiveTopology);
@@ -1768,60 +1817,120 @@ std::pair<Ref<RenderPipeline>, NSString*> Device::createRenderPipeline(const WGP
     auto mtlFrontFace = frontFace(descriptor.primitive.frontFace);
     auto mtlCullMode = cullMode(descriptor.primitive.cullMode);
 
-    NSError *error = nil;
-#if !defined(NDEBUG) || (defined(ENABLE_LIBFUZZER) && ENABLE_LIBFUZZER && defined(ASAN_ENABLED) && ASAN_ENABLED)
-    if (dumpMetalReproCaseRenderPSO(WTF::move(vertexShaderSource), mtlRenderPipelineDescriptor.vertexFunction.name, WTF::move(fragmentShaderSource), mtlRenderPipelineDescriptor.fragmentFunction.name, mtlRenderPipelineDescriptor, shaderLocations, *this)) {
-        mtlRenderPipelineDescriptor.supportIndirectCommandBuffers = YES;
-        id<MTLRenderPipelineState> renderPipelineState = [m_device newRenderPipelineStateWithDescriptor:mtlRenderPipelineDescriptor error:&error];
-        UNUSED_PARAM(renderPipelineState);
-        clearMetalPSORepro();
-    }
-#endif
-    if (error)
-        return returnInvalidRenderPipeline(*this, isAsync, error.localizedDescription);
-
     if (m_pipelineId == Device::maxPipelines) {
         loseTheDevice(WGPUDeviceLostReason_Undefined);
-        return returnInvalidRenderPipeline(*this, isAsync, @"too many render pipelines");
-    }
-    if (!pipelineLayout) {
-        auto generatedPipelineLayout = generatePipelineLayout(bindGroupEntries);
-        if (!generatedPipelineLayout->isValid())
-            return returnInvalidRenderPipeline(*this, isAsync, "Generated pipeline layout is not valid"_s);
-
-        return std::make_pair(RenderPipeline::create(mtlPrimitiveType, mtlIndexType, mtlFrontFace, mtlCullMode, mtlDepthClipMode, depthStencilDescriptor, WTF::move(generatedPipelineLayout), depthBias, depthBiasSlopeScale, depthBiasClamp, sampleMask, mtlRenderPipelineDescriptor, colorAttachmentCount, descriptor, WTF::move(requiredBufferIndices), WTF::move(minimumBufferSizes), ++m_pipelineId, vertexShaderBindingCount, *this), nil);
+        return callback(returnInvalidRenderPipeline(*this, isAsync, @"too many render pipelines"));
     }
 
-    return std::make_pair(RenderPipeline::create(mtlPrimitiveType, mtlIndexType, mtlFrontFace, mtlCullMode, mtlDepthClipMode, depthStencilDescriptor, const_cast<PipelineLayout&>(*pipelineLayout), depthBias, depthBiasSlopeScale, depthBiasClamp, sampleMask, mtlRenderPipelineDescriptor, colorAttachmentCount, descriptor, WTF::move(requiredBufferIndices), WTF::move(minimumBufferSizes), ++m_pipelineId, vertexShaderBindingCount, *this), nil);
+    Ref<PipelineLayout> finalPipelineLayout = pipelineLayout ? Ref { const_cast<PipelineLayout&>(*pipelineLayout) } : generatePipelineLayout(bindGroupEntries);
+    if (!pipelineLayout && !finalPipelineLayout->isValid())
+        return callback(returnInvalidRenderPipeline(*this, isAsync, "Generated pipeline layout is not valid"_s));
+
+    // The pipeline is created before its shaders have been compiled: it only holds on to
+    // mtlRenderPipelineDescriptor, and its MTLRenderPipelineState is installed (or, for the
+    // synchronous path, left to be compiled on demand) once Metal is done with the MSL. Everything
+    // which reads `descriptor` has to happen here, before that.
+    Ref pipeline = RenderPipeline::create(mtlPrimitiveType, mtlIndexType, mtlFrontFace, mtlCullMode, mtlDepthClipMode, depthStencilDescriptor, WTF::move(finalPipelineLayout), depthBias, depthBiasSlopeScale, depthBiasClamp, sampleMask, mtlRenderPipelineDescriptor, colorAttachmentCount, primitiveTopology, descriptor.primitive.stripIndexFormat, descriptor.multisample.count, !!descriptor.fragment, colorTargetFormats(descriptor), descriptor.depthStencil ? std::optional { descriptor.depthStencil->format } : std::nullopt, writesStencil(descriptor), WTF::move(requiredBufferIndices), WTF::move(minimumBufferSizes), ++m_pipelineId, vertexShaderBindingCount, *this);
+
+    auto vertexCompileRequest = libraryCompileRequest(*preparedVertexLibrary);
+    std::optional<LibraryCompileRequest> fragmentCompileRequest;
+    if (preparedFragmentLibrary)
+        fragmentCompileRequest = libraryCompileRequest(*preparedFragmentLibrary);
+
+    CompletionHandler<void(id<MTLLibrary>, id<MTLLibrary>, NSError *)> finishCreation = [protectedThis = protect(*this), isAsync, suppressErrors = m_supressAllErrors, libraryCompilation, label = WTF::move(label), renderPipelineDescriptor = RetainPtr { mtlRenderPipelineDescriptor }, pipeline = WTF::move(pipeline), vertexLibraryInfo = WTF::move(*preparedVertexLibrary), fragmentLibraryInfo = WTF::move(preparedFragmentLibrary), shaderLocations = WTF::move(shaderLocations), callback = WTF::move(callback)](id<MTLLibrary> vertexLibrary, id<MTLLibrary> fragmentLibrary, NSError *libraryError) mutable {
+        auto errorReporting = scopedErrorReporting(protectedThis, suppressErrors);
+
+        if (!vertexLibrary)
+            return callback(returnInvalidRenderPipeline(protectedThis, isAsync, libraryError.localizedDescription ?: @"Vertex library failed creation"));
+
+        auto vertexFunction = createFunction(vertexLibrary, vertexLibraryInfo.entryPointInformation, label.get());
+        if (!vertexFunction || vertexFunction.functionType != MTLFunctionTypeVertex)
+            return callback(returnInvalidRenderPipeline(protectedThis, isAsync, "Vertex function could not be created"_s));
+        renderPipelineDescriptor.get().vertexFunction = vertexFunction;
+
+        if (fragmentLibraryInfo) {
+            if (!fragmentLibrary)
+                return callback(returnInvalidRenderPipeline(protectedThis, isAsync, libraryError.localizedDescription ?: @"Fragment library could not be created"));
+
+            auto fragmentFunction = createFunction(fragmentLibrary, fragmentLibraryInfo->entryPointInformation, label.get());
+            if (!fragmentFunction || fragmentFunction.functionType != MTLFunctionTypeFragment)
+                return callback(returnInvalidRenderPipeline(protectedThis, isAsync, "Fragment function failed creation"_s));
+            renderPipelineDescriptor.get().fragmentFunction = fragmentFunction;
+        }
+
+        NSError *error = nil;
+#if !defined(NDEBUG) || (defined(ENABLE_LIBFUZZER) && ENABLE_LIBFUZZER && defined(ASAN_ENABLED) && ASAN_ENABLED)
+        if (dumpMetalReproCaseRenderPSO(WTF::move(vertexLibraryInfo.msl), renderPipelineDescriptor.get().vertexFunction.name, fragmentLibraryInfo ? WTF::move(fragmentLibraryInfo->msl) : String { }, renderPipelineDescriptor.get().fragmentFunction.name, renderPipelineDescriptor.get(), shaderLocations, protectedThis)) {
+            renderPipelineDescriptor.get().supportIndirectCommandBuffers = YES;
+            id<MTLRenderPipelineState> renderPipelineState = [protectedThis->m_device newRenderPipelineStateWithDescriptor:renderPipelineDescriptor.get() error:&error];
+            UNUSED_PARAM(renderPipelineState);
+            clearMetalPSORepro();
+        }
+#else
+        UNUSED_PARAM(shaderLocations);
+#endif
+        if (error)
+            return callback(returnInvalidRenderPipeline(protectedThis, isAsync, error.localizedDescription));
+
+        RefPtr protectedInstance = protectedThis->instance();
+        if (libraryCompilation == LibraryCompilation::Synchronous || !protectedInstance)
+            return callback(std::make_pair(WTF::move(pipeline), nil));
+
+        // Compile the pipeline state now rather than leaving it to the first draw. This is only an
+        // optimization: nothing here can invalidate the pipeline, and if the compile fails the lazy
+        // renderPipelineState() path still runs, and reports the failure, at first use.
+        createRenderPipelineStateAsync(protectedThis->m_device, *protectedInstance, renderPipelineDescriptor.get(), [pipeline = WTF::move(pipeline), callback = WTF::move(callback)](id<MTLRenderPipelineState> renderPipelineState, NSError *) mutable {
+            if (renderPipelineState)
+                pipeline->setPrecompiledRenderPipelineState(renderPipelineState);
+            callback(std::make_pair(WTF::move(pipeline), nil));
+        });
+    };
+
+    // Compile the fragment MSL once the vertex MSL is done. The two stages of one pipeline are
+    // serialized, but independent pipelines still compile concurrently, which is the point.
+    compileLibrary(vertexCompileRequest, libraryCompilation, [protectedThis = protect(*this), libraryCompilation, fragmentCompileRequest = WTF::move(fragmentCompileRequest), finishCreation = WTF::move(finishCreation)](id<MTLLibrary> vertexLibrary, NSError *vertexError) mutable {
+        if (!vertexLibrary || !fragmentCompileRequest) {
+            finishCreation(vertexLibrary, nil, vertexError);
+            return;
+        }
+
+        protectedThis->compileLibrary(*fragmentCompileRequest, libraryCompilation, [vertexLibrary, finishCreation = WTF::move(finishCreation)](id<MTLLibrary> fragmentLibrary, NSError *fragmentError) mutable {
+            finishCreation(vertexLibrary, fragmentLibrary, fragmentError);
+        });
+    });
+}
+
+static CompletionHandler<void(std::pair<Ref<RenderPipeline>, NSString*>&&)> asyncRenderPipelineCompletion(Device& device, CompletionHandler<void(WGPUCreatePipelineAsyncStatus, Ref<RenderPipeline>&&, String&& message)>&& callback)
+{
+    return [protectedDevice = protect(device), callback = WTF::move(callback)](std::pair<Ref<RenderPipeline>, NSString*>&& pipelineAndError) mutable {
+        auto reportResult = [protectedDevice, callback = WTF::move(callback), pipeline = WTF::move(pipelineAndError.first), message = String { pipelineAndError.second }]() mutable {
+            callback((protectedDevice->isDestroyed() || pipeline->isValid()) ? WGPUCreatePipelineAsyncStatus_Success : WGPUCreatePipelineAsyncStatus_ValidationError, WTF::move(pipeline), WTF::move(message));
+        };
+
+        // Resolve on a later turn of the WebGPU thread, never re-entrantly from the caller.
+        if (RefPtr protectedInstance = protectedDevice->instance()) {
+            protectedInstance->scheduleWork(WTF::move(reportResult));
+            return;
+        }
+        reportResult();
+    };
 }
 
 void Device::createRenderPipelineAsync(const WGPURenderPipelineDescriptor& descriptor, CompletionHandler<void(WGPUCreatePipelineAsyncStatus, Ref<RenderPipeline>&&, String&& message)>&& callback)
 {
-    auto pipelineAndError = createRenderPipeline(descriptor, true);
-    if (auto inst = instance(); inst.get()) {
-        inst->scheduleWork([protectedThis = protect(*this), pipeline = WTF::move(pipelineAndError.first), callback = WTF::move(callback), error = WTF::move(pipelineAndError.second)]() mutable {
-            callback((protectedThis->isDestroyed() || pipeline->isValid()) ? WGPUCreatePipelineAsyncStatus_Success : WGPUCreatePipelineAsyncStatus_ValidationError, WTF::move(pipeline), WTF::move(error));
-        });
-    } else
-        callback(WGPUCreatePipelineAsyncStatus_ValidationError, WTF::move(pipelineAndError.first), WTF::move(pipelineAndError.second));
+    createRenderPipeline(descriptor, true, nullptr, asynchronousIfPossible(), asyncRenderPipelineCompletion(*this, WTF::move(callback)));
 }
 
 void Device::createRenderPipelineWithPipelineLayoutFromPipelineAsync(const WGPURenderPipelineDescriptor& descriptor, const RenderPipeline& pipelineToReplace, CompletionHandler<void(WGPUCreatePipelineAsyncStatus, Ref<RenderPipeline>&&, String&& message)>&& callback)
 {
     bool wasErrorReportingPaused = pauseErrorReporting(true);
-    auto pipelineAndError = createRenderPipeline(descriptor, true, &pipelineToReplace);
+    createRenderPipeline(descriptor, true, &pipelineToReplace, asynchronousIfPossible(), asyncRenderPipelineCompletion(*this, WTF::move(callback)));
     pauseErrorReporting(wasErrorReportingPaused);
-    if (auto inst = instance(); inst.get()) {
-        inst->scheduleWork([protectedThis = protect(*this), pipeline = WTF::move(pipelineAndError.first), callback = WTF::move(callback), error = WTF::move(pipelineAndError.second)]() mutable {
-            callback((protectedThis->isDestroyed() || pipeline->isValid()) ? WGPUCreatePipelineAsyncStatus_Success : WGPUCreatePipelineAsyncStatus_ValidationError, WTF::move(pipeline), WTF::move(error));
-        });
-    } else
-        callback(WGPUCreatePipelineAsyncStatus_ValidationError, WTF::move(pipelineAndError.first), WTF::move(pipelineAndError.second));
 }
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderPipeline);
 
-RenderPipeline::RenderPipeline(MTLPrimitiveType primitiveType, std::optional<MTLIndexType> indexType, MTLWinding frontFace, MTLCullMode cullMode, MTLDepthClipMode clipMode, MTLDepthStencilDescriptor *depthStencilDescriptor, Ref<PipelineLayout>&& pipelineLayout, float depthBias, float depthBiasSlopeScale, float depthBiasClamp, uint32_t sampleMask, MTLRenderPipelineDescriptor* renderPipelineDescriptor, uint32_t colorAttachmentCount, const WGPURenderPipelineDescriptor& descriptor, RequiredBufferIndicesContainer&& requiredBufferIndices, BufferBindingSizesForPipeline&& minimumBufferSizes, uint64_t uniqueId, uint32_t vertexShaderBindingCount, Device& device)
+RenderPipeline::RenderPipeline(MTLPrimitiveType primitiveType, std::optional<MTLIndexType> indexType, MTLWinding frontFace, MTLCullMode cullMode, MTLDepthClipMode clipMode, MTLDepthStencilDescriptor *depthStencilDescriptor, Ref<PipelineLayout>&& pipelineLayout, float depthBias, float depthBiasSlopeScale, float depthBiasClamp, uint32_t sampleMask, MTLRenderPipelineDescriptor* renderPipelineDescriptor, uint32_t colorAttachmentCount, WGPUPrimitiveTopology primitiveTopology, WGPUIndexFormat stripIndexFormat, uint32_t sampleCount, bool hasFragment, Vector<WGPUTextureFormat>&& colorTargetFormats, std::optional<WGPUTextureFormat> depthStencilFormat, bool writesStencil, RequiredBufferIndicesContainer&& requiredBufferIndices, BufferBindingSizesForPipeline&& minimumBufferSizes, uint64_t uniqueId, uint32_t vertexShaderBindingCount, Device& device)
     : m_device(device)
     , m_primitiveType(primitiveType)
     , m_indexType(indexType)
@@ -1838,30 +1947,17 @@ RenderPipeline::RenderPipeline(MTLPrimitiveType primitiveType, std::optional<MTL
     , m_depthStencilState(depthStencilDescriptor ? [device.device() newDepthStencilStateWithDescriptor:depthStencilDescriptor] : nil)
     , m_requiredBufferIndices(WTF::move(requiredBufferIndices))
     , m_pipelineLayout(WTF::move(pipelineLayout))
-    , m_descriptor(descriptor)
-    , m_descriptorDepthStencil(descriptor.depthStencil ? *descriptor.depthStencil : WGPUDepthStencilState())
-    , m_descriptorFragment(descriptor.fragment ? *descriptor.fragment : WGPUFragmentState())
-    , m_descriptorTargets(descriptor.fragment && descriptor.fragment->targetCount ? Vector<WGPUColorTargetState>(unsafeMakeSpan(descriptor.fragment->targets, descriptor.fragment->targetCount)) : Vector<WGPUColorTargetState>())
+    , m_primitiveTopology(primitiveTopology)
+    , m_stripIndexFormat(stripIndexFormat)
+    , m_sampleCount(sampleCount)
+    , m_hasFragment(hasFragment)
+    , m_colorTargetFormats(WTF::move(colorTargetFormats))
+    , m_depthStencilFormat(depthStencilFormat)
     , m_minimumBufferSizes(minimumBufferSizes)
     , m_uniqueId(uniqueId)
     , m_vertexShaderBindingCount(vertexShaderBindingCount)
+    , m_writesStencil(writesStencil)
 {
-    if (descriptor.depthStencil)
-        m_descriptor.depthStencil = &m_descriptorDepthStencil;
-    if (m_descriptorTargets.size())
-        m_descriptorFragment.targets = &m_descriptorTargets[0];
-    if (descriptor.fragment)
-        m_descriptor.fragment = &m_descriptorFragment;
-
-    if (auto* depthStencil = descriptor.depthStencil; depthStencil && depthStencil->stencilWriteMask) {
-        const auto& stencilFront = depthStencil->stencilFront;
-        const auto& stencilBack = depthStencil->stencilBack;
-        const auto& cullMode = descriptor.primitive.cullMode;
-        if (cullMode != WGPUCullMode_Front && (stencilFront.passOp != WGPUStencilOperation_Keep || stencilFront.depthFailOp != WGPUStencilOperation_Keep || stencilFront.failOp != WGPUStencilOperation_Keep))
-            m_writesStencil = true;
-        else if (cullMode != WGPUCullMode_Back && (stencilBack.passOp != WGPUStencilOperation_Keep || stencilBack.depthFailOp != WGPUStencilOperation_Keep || stencilBack.failOp != WGPUStencilOperation_Keep))
-            m_writesStencil = true;
-    }
 }
 
 RenderPipeline::RenderPipeline(Device& device)
@@ -1926,15 +2022,15 @@ bool RenderPipeline::validateDepthStencilState(bool depthReadOnly, bool stencilR
     return true;
 }
 
-NSString* RenderPipeline::errorValidatingColorDepthStencilTargets(const WGPURenderPassDescriptor& descriptor, const Vector<TextureOrTextureView>& colorAttachmentViews, const std::optional<TextureOrTextureView>& depthStencilView) const
+NSString* RenderPipeline::errorValidatingColorDepthStencilTargets(const Vector<TextureOrTextureView>& colorAttachmentViews, const std::optional<TextureOrTextureView>& depthStencilView) const
 {
-    if (!m_descriptor.fragment) {
-        if (descriptor.colorAttachmentCount)
+    if (!m_hasFragment) {
+        if (colorAttachmentViews.size())
             return @"No fragment shader but render pass has color attachments";
     } else {
-        for (size_t i = 0, maxCount = std::max<size_t>(m_descriptorTargets.size(), colorAttachmentViews.size()); i < maxCount; ++i) {
+        for (size_t i = 0, maxCount = std::max<size_t>(m_colorTargetFormats.size(), colorAttachmentViews.size()); i < maxCount; ++i) {
             auto* attachmentView = i < colorAttachmentViews.size() ? &colorAttachmentViews[i] : nullptr;
-            auto descriptorTargetFormat = i < m_descriptorTargets.size() ? m_descriptorTargets[i].format : WGPUTextureFormat_Undefined;
+            auto descriptorTargetFormat = i < m_colorTargetFormats.size() ? m_colorTargetFormats[i] : WGPUTextureFormat_Undefined;
             if (!attachmentView || !*attachmentView) {
                 if (descriptorTargetFormat == WGPUTextureFormat_Undefined)
                     continue;
@@ -1942,62 +2038,61 @@ NSString* RenderPipeline::errorValidatingColorDepthStencilTargets(const WGPURend
             }
             if (descriptorTargetFormat != attachmentView->format())
                 return [NSString stringWithFormat:@"descriptorTargetFormat(%d) != attachmentView->format(%d)", descriptorTargetFormat, attachmentView->format()];
-            if (attachmentView->sampleCount() != m_descriptor.multisample.count)
-                return [NSString stringWithFormat:@"attachmentView->sampleCount(%d) != m_descriptor.multisample.count(%d)", attachmentView->sampleCount(), m_descriptor.multisample.count];
+            if (attachmentView->sampleCount() != m_sampleCount)
+                return [NSString stringWithFormat:@"attachmentView->sampleCount(%d) != m_sampleCount(%d)", attachmentView->sampleCount(), m_sampleCount];
         }
     }
 
-    if (!m_descriptor.depthStencil) {
-        if (!descriptor.depthStencilAttachment)
+    if (!m_depthStencilFormat) {
+        if (!depthStencilView)
             return nil;
 
         return @"depthStencil is missing but render pass has a depth stencil attachment";
     }
 
-    if (descriptor.depthStencilAttachment) {
-        if (!depthStencilView || !*depthStencilView)
+    if (depthStencilView) {
+        if (!*depthStencilView)
             return @"depthStencilAttachment exists but no depthStencilView";
         auto& texture = *depthStencilView;
-        if (texture.format() != m_descriptor.depthStencil->format)
-            return [NSString stringWithFormat:@"texture.format(%d) != m_descriptor.depthStencil->format(%d)", texture.format(), m_descriptor.depthStencil->format];
+        if (texture.format() != *m_depthStencilFormat)
+            return [NSString stringWithFormat:@"texture.format(%d) != m_depthStencilFormat(%d)", texture.format(), *m_depthStencilFormat];
         auto mtlPixelFormat = texture.texture().pixelFormat;
-        auto descriptorFormat = m_descriptor.depthStencil->format;
+        auto descriptorFormat = *m_depthStencilFormat;
         if (mtlPixelFormat == MTLPixelFormatX32_Stencil8 && descriptorFormat == WGPUTextureFormat_Stencil8)
             return @"mtlPixelFormat == MTLPixelFormatX32_Stencil8 && descriptorFormat == WGPUTextureFormat_Stencil8";
         if (mtlPixelFormat == MTLPixelFormatDepth32Float_Stencil8 && (descriptorFormat == WGPUTextureFormat_Depth32Float || descriptorFormat == WGPUTextureFormat_Depth24Plus))
             return @"mtlPixelFormat == MTLPixelFormatDepth32Float_Stencil8 && (descriptorFormat == WGPUTextureFormat_Depth32Float || descriptorFormat == WGPUTextureFormat_Depth24Plus)";
-        if (texture.sampleCount() != m_descriptor.multisample.count)
-            return [NSString stringWithFormat:@"texture.sampleCount(%d) != m_descriptor.multisample.count(%d)", texture.sampleCount(), m_descriptor.multisample.count];
-    } else if (m_descriptor.depthStencil->format != WGPUTextureFormat_Undefined)
-        return [NSString stringWithFormat:@"m_descriptor.depthStencil->format(%d) != WGPUTextureFormat_Undefined", m_descriptor.depthStencil->format];
+        if (texture.sampleCount() != m_sampleCount)
+            return [NSString stringWithFormat:@"texture.sampleCount(%d) != m_sampleCount(%d)", texture.sampleCount(), m_sampleCount];
+    } else if (*m_depthStencilFormat != WGPUTextureFormat_Undefined)
+        return [NSString stringWithFormat:@"m_depthStencilFormat(%d) != WGPUTextureFormat_Undefined", *m_depthStencilFormat];
 
     return nil;
 }
 
-bool RenderPipeline::validateRenderBundle(const WGPURenderBundleEncoderDescriptor& descriptor) const
+bool RenderPipeline::validateRenderBundle(bool depthReadOnly, bool stencilReadOnly, uint32_t sampleCount, std::span<const WGPUTextureFormat> colorFormats, WGPUTextureFormat depthStencilFormat) const
 {
-    if (!validateDepthStencilState(descriptor.depthReadOnly, descriptor.stencilReadOnly))
+    if (!validateDepthStencilState(depthReadOnly, stencilReadOnly))
         return false;
 
-    if (descriptor.sampleCount != m_descriptor.multisample.count)
+    if (sampleCount != m_sampleCount)
         return false;
 
-    size_t fragmentTargetCount = m_descriptor.fragment ? m_descriptor.fragment->targetCount : 0;
-    for (size_t i = 0, maxTargetCount = std::max<size_t>(fragmentTargetCount, descriptor.colorFormatCount); i < maxTargetCount; ++i) {
-        auto colorFormat = i < descriptor.colorFormatCount ? descriptor.colorFormatsSpan()[i] : WGPUTextureFormat_Undefined;
-        auto descriptorFormat = i < m_descriptorTargets.size() ? m_descriptorTargets[i].format : WGPUTextureFormat_Undefined;
+    for (size_t i = 0, maxTargetCount = std::max<size_t>(m_colorTargetFormats.size(), colorFormats.size()); i < maxTargetCount; ++i) {
+        auto colorFormat = i < colorFormats.size() ? colorFormats[i] : WGPUTextureFormat_Undefined;
+        auto descriptorFormat = i < m_colorTargetFormats.size() ? m_colorTargetFormats[i] : WGPUTextureFormat_Undefined;
         if (descriptorFormat != colorFormat)
             return false;
     }
 
-    if (!m_descriptor.depthStencil) {
-        if (descriptor.depthStencilFormat == WGPUTextureFormat_Undefined)
+    if (!m_depthStencilFormat) {
+        if (depthStencilFormat == WGPUTextureFormat_Undefined)
             return true;
 
         return false;
     }
 
-    if (descriptor.depthStencilFormat != m_descriptor.depthStencil->format)
+    if (depthStencilFormat != *m_depthStencilFormat)
         return false;
 
     return true;
@@ -2025,7 +2120,7 @@ RefPtr<RenderPipeline> RenderPipeline::recomputeLastStrideAsStride() const
     }
 
     auto minimumBufferSizes = m_minimumBufferSizes;
-    m_lastStrideAsStridePipeline = RenderPipeline::create(m_primitiveType, m_indexType, m_frontFace, m_cullMode, m_clipMode, m_depthStencilDescriptor, m_pipelineLayout.copyRef(), m_depthBias, m_depthBiasSlopeScale, m_depthBiasClamp, m_sampleMask, clonedRenderPipelineDescriptor, m_colorAttachmentCount, m_descriptor, WTF::move(requiredBufferIndices), WTF::move(minimumBufferSizes), m_uniqueId, m_vertexShaderBindingCount, m_device);
+    m_lastStrideAsStridePipeline = RenderPipeline::create(m_primitiveType, m_indexType, m_frontFace, m_cullMode, m_clipMode, m_depthStencilDescriptor, m_pipelineLayout.copyRef(), m_depthBias, m_depthBiasSlopeScale, m_depthBiasClamp, m_sampleMask, clonedRenderPipelineDescriptor, m_colorAttachmentCount, m_primitiveTopology, m_stripIndexFormat, m_sampleCount, m_hasFragment, Vector { m_colorTargetFormats }, m_depthStencilFormat, m_writesStencil, WTF::move(requiredBufferIndices), WTF::move(minimumBufferSizes), m_uniqueId, m_vertexShaderBindingCount, m_device);
 
     return m_lastStrideAsStridePipeline;
 }
@@ -2042,6 +2137,12 @@ id<MTLRenderPipelineState> RenderPipeline::renderPipelineState() const
     return m_renderPipelineState;
 }
 
+void RenderPipeline::setPrecompiledRenderPipelineState(id<MTLRenderPipelineState> renderPipelineState)
+{
+    ASSERT(!m_renderPipelineState);
+    m_renderPipelineState = renderPipelineState;
+}
+
 id<MTLRenderPipelineState> RenderPipeline::icbRenderPipelineState() const
 {
     if (m_renderPipelineState && m_renderPipelineDescriptor.supportIndirectCommandBuffers)
@@ -2055,26 +2156,26 @@ id<MTLRenderPipelineState> RenderPipeline::icbRenderPipelineState() const
     return m_renderPipelineState;
 }
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuRenderPipelineReference(WGPURenderPipeline renderPipeline)
+void NODELETE wgpuRenderPipelineAddRef(WGPURenderPipeline renderPipeline)
 {
-    WebGPU::fromAPI(renderPipeline).ref();
+    WebGPU::Metal::fromAPI(renderPipeline).ref();
 }
 
 void wgpuRenderPipelineRelease(WGPURenderPipeline renderPipeline)
 {
-    WebGPU::fromAPI(renderPipeline).deref();
+    WebGPU::Metal::fromAPI(renderPipeline).deref();
 }
 
 WGPUBindGroupLayout wgpuRenderPipelineGetBindGroupLayout(WGPURenderPipeline renderPipeline, uint32_t groupIndex)
 {
-    return WebGPU::releaseToAPI(protect(WebGPU::fromAPI(renderPipeline))->getBindGroupLayout(groupIndex));
+    return WebGPU::Metal::releaseToAPI(protect(WebGPU::Metal::fromAPI(renderPipeline))->getBindGroupLayout(groupIndex));
 }
 
-void wgpuRenderPipelineSetLabel(WGPURenderPipeline renderPipeline, const char* label)
+void wgpuRenderPipelineSetLabel(WGPURenderPipeline renderPipeline, WGPUStringView label)
 {
-    WebGPU::fromAPI(renderPipeline).setLabel(WebGPU::fromAPI(label));
+    WebGPU::Metal::fromAPI(renderPipeline).setLabel(WebGPU::Metal::fromAPI(label));
 }

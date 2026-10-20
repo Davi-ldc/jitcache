@@ -84,6 +84,7 @@
 #include <wtf/Threading.h>
 #include <wtf/WTFProcess.h>
 #include <wtf/text/StringCommon.h>
+#include <wtf/text/UTF8CStringView.h>
 
 // We don't have a NO_RETURN_DUE_TO_EXIT, nor should we. That's ridiculous.
 inline bool hiddenTruthBecauseNoReturnIsStupid() { return true; }
@@ -124,7 +125,7 @@ extern Lock crashLock;
     if (__x == __y) \
         break; \
     crashLock.lock(); \
-    WTFReportAssertionFailure(__FILE__, __LINE__, WTF_PRETTY_FUNCTION, toCString(#x " == " #y, " (" #x " == ", __x, ", " #y " == ", __y, ")").data()); \
+    WTFReportAssertionFailure(__FILE__, __LINE__, WTF_PRETTY_FUNCTION, toUTF8CString(#x " == " #y, " (" #x " == ", __x, ", " #y " == ", __y, ")").legacyCStringPointer()); \
     CRASH(); \
 } while (false)
 
@@ -132,28 +133,28 @@ extern Lock crashLock;
 
 #define RUN(test)                                           \
     do {                                                    \
-        CString testStr = toCString(PREFIX #test);          \
-        if (!shouldRun(config, testStr.data()))             \
+        auto testStr = toUTF8CString(PREFIX #test);          \
+        if (!shouldRun(config, testStr))                    \
             break;                                          \
         tasks.append(                                       \
             createSharedTask<void()>(                       \
                 [=]() {                                     \
-                    dataLog(toCString(testStr, "...\n"));   \
+                    dataLog(toUTF8CString(testStr, "...\n"));   \
                     test;                                   \
-                    dataLog(toCString(testStr, ": OK!\n")); \
+                    dataLog(toUTF8CString(testStr, ": OK!\n")); \
                 }));                                        \
     } while (false);
 
 #define RUN_UNARY(test, values) \
     for (auto a : values) {                             \
-        CString testStr = toCString(PREFIX #test, "(", a.name, ")"); \
-        if (!shouldRun(config, testStr.data()))         \
+        auto testStr = toUTF8CString(PREFIX #test, "(", a.name, ")"); \
+        if (!shouldRun(config, testStr))                \
             continue;                                   \
         tasks.append(createSharedTask<void()>(          \
             [=] () {                                    \
-                dataLog(toCString(testStr, "...\n"));   \
+                dataLog(toUTF8CString(testStr, "...\n"));   \
                 test(a.value);                          \
-                dataLog(toCString(testStr, ": OK!\n")); \
+                dataLog(toUTF8CString(testStr, ": OK!\n")); \
             }));                                        \
     }
 
@@ -165,7 +166,7 @@ extern Lock crashLock;
 #endif
 
 #define RUN_NOW(test) do {                      \
-        if (!shouldRun(config, #test))          \
+        if (!shouldRun(config, #test ""_s))     \
             break;                              \
         dataLog(PREFIX #test "...\n");          \
         {                                       \
@@ -178,14 +179,14 @@ extern Lock crashLock;
 #define RUN_BINARY(test, valuesA, valuesB) \
     for (auto a : valuesA) {                                \
         for (auto b : valuesB) {                            \
-            CString testStr = toCString(PREFIX #test, "(", a.name, ", ", b.name, ")"); \
-            if (!shouldRun(config, testStr.data()))         \
+            auto testStr = toUTF8CString(PREFIX #test, "(", a.name, ", ", b.name, ")"); \
+            if (!shouldRun(config, testStr))                \
                 continue;                                   \
             tasks.append(createSharedTask<void()>(          \
                 [=] () {                                    \
-                    dataLog(toCString(testStr, "...\n"));   \
+                    dataLog(toUTF8CString(testStr, "...\n"));   \
                     test(a.value, b.value);                 \
-                    dataLog(toCString(testStr, ": OK!\n")); \
+                    dataLog(toUTF8CString(testStr, ": OK!\n")); \
                 }));                                        \
         }                                                   \
     }
@@ -193,14 +194,14 @@ extern Lock crashLock;
     for (auto a : valuesA) {                                    \
         for (auto b : valuesB) {                                \
             for (auto c : valuesC) {                            \
-                CString testStr = toCString(PREFIX #test, "(", a.name, ", ", b.name, ",", c.name, ")"); \
-                if (!shouldRun(config, testStr.data()))         \
+                auto testStr = toUTF8CString(PREFIX #test, "(", a.name, ", ", b.name, ",", c.name, ")"); \
+                if (!shouldRun(config, testStr))                \
                     continue;                                   \
                 tasks.append(createSharedTask<void()>(          \
                     [=] () {                                    \
-                        dataLog(toCString(testStr, "...\n"));   \
+                        dataLog(toUTF8CString(testStr, "...\n"));   \
                         test(a.value, b.value, c.value);        \
-                        dataLog(toCString(testStr, ": OK!\n")); \
+                        dataLog(toUTF8CString(testStr, ": OK!\n")); \
                     }));                                        \
             }                                                   \
         }                                                       \
@@ -266,10 +267,10 @@ inline void lowerToAirForTesting(Procedure& proc)
 }
 
 template<typename Func>
-void checkDisassembly(Compilation& compilation, const Func& func, const CString& failText)
+void checkDisassembly(Compilation& compilation, NOESCAPE const Func& func, const UTF8CString& failText)
 {
-    CString disassembly = compilation.disassembly();
-    if (func(disassembly.data()))
+    auto disassembly = compilation.disassembly();
+    if (func(disassembly))
         return;
     
     crashLock.lock();
@@ -284,22 +285,22 @@ inline void checkUsesInstruction(Compilation& compilation, const char* text, boo
 {
     checkDisassembly(
         compilation,
-        [&] (const char* disassembly) -> bool {
+        [&] (UTF8CStringView disassembly) -> bool {
             if (regex)
-                return std::regex_match(disassembly, std::regex(text, std::regex::extended));
-            return strstr(disassembly, text);
+                return std::regex_match(disassembly.utf8(), std::regex(text, std::regex::extended));
+            return contains(disassembly.span(), byteCast<char8_t>(unsafeSpan(text)));
         },
-        toCString("Expected to find ", text, " but didnt!"));
+        toUTF8CString("Expected to find ", text, " but didnt!"));
 }
 
 inline void checkDoesNotUseInstruction(Compilation& compilation, const char* text)
 {
     checkDisassembly(
         compilation,
-        [&] (const char* disassembly) -> bool {
-            return !strstr(disassembly, text);
+        [&] (UTF8CStringView disassembly) -> bool {
+            return !contains(disassembly.span(), byteCast<char8_t>(unsafeSpan(text)));
         },
-        toCString("Did not expected to find ", text, " but it's there!"));
+        toUTF8CString("Did not expected to find ", text, " but it's there!"));
 }
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
@@ -664,6 +665,8 @@ void testCheckSelect();
 void testCheckSelectCheckSelect();
 void testCheckSelectAndCSE();
 void testCheckSelectAndDeadCheckCSE();
+void testCheckSelectWithPhiBeforeCheck();
+void testCheckSelectWithUpsilonBeforeCheck();
 void testPowDoubleByIntegerLoop(double xOperand, int32_t yOperand);
 double b3Pow(double x, int y);
 void testTruncOrHigh();
@@ -998,6 +1001,7 @@ void testPatchpointWithAnyResult();
 void testSimpleCheck();
 void testCheckFalse();
 void testCheckTrue();
+void testCheckTrueBeforeTerminalWithResult();
 void testCheckLessThan();
 void testCheckMegaCombo();
 void testCheckTrickyMegaCombo();
@@ -1138,6 +1142,14 @@ void testMulArgDouble(double);
 void testMulArgsDouble(double, double);
 void testMulNegArgsDouble();
 void testMulNegArgsFloat();
+void testMulNegArgArgDouble();
+void testMulArgNegArgDouble();
+void testMulNegArgArgFloat();
+void testMulArgNegArgFloat();
+void testMulNegArgArgInt32();
+void testMulNegNegArgsDouble();
+void testMulNegArgArgDoubleMultiUse();
+void testMulNegArgArgDoubleAcrossBlocks(bool);
 void testCallSimpleDouble(double, double);
 void testCallSimpleFloat(float, float);
 void testCallFunctionWithHellaDoubleArguments();
@@ -1194,6 +1206,7 @@ void testSwitchSameCaseAsDefault();
 void testSwitchChillDiv(unsigned degree, unsigned gap);
 void testSwitchTargettingSameBlock();
 void testSwitchTargettingSameBlockFoldPathConstant();
+void testSwitchOnConstant(int64_t key, bool is64Bit);
 void testSwitchSparseI64RangeOverflow();
 void testTruncFold(int64_t value);
 void testZExt32(int32_t value);
@@ -1282,6 +1295,7 @@ void testWasmBoundsCheck(unsigned offset);
 void testWasmAddress();
 void testWasmAddressZeroExtendScaledIndex();
 void testWasmAddressZeroExtend32BitShiftWraps();
+void testWasmAddressScaledIndexWithLockedShlChild();
 void testFastTLSLoad();
 void testFastTLSStore();
 void testDoubleLiteralComparison(double, double);
@@ -1381,7 +1395,7 @@ void testCSELoadAfterStoreDiamond(bool flag);
 void testCSELoadAcrossLoopBackEdge(unsigned count);
 void testCSELoopHeaderLoadFromBackEdgeStore(unsigned count);
 
-bool shouldRun(const TestConfig*, const char* testName);
+bool shouldRun(const TestConfig*, UTF8CStringView testName);
 
 void testLoadPreIndex32();
 void testLoadPreIndex64();

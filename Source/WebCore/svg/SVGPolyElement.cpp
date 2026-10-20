@@ -38,7 +38,7 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGPolyElement);
 
 SVGPolyElement::SVGPolyElement(const QualifiedName& tagName, Document& document)
-    : SVGGeometryElement(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGGeometryElement(tagName, document, PropertyRegistry::singleton())
 {
     static bool didRegistration = false;
     if (!didRegistration) [[unlikely]] {
@@ -50,7 +50,7 @@ SVGPolyElement::SVGPolyElement(const QualifiedName& tagName, Document& document)
 void SVGPolyElement::attributeChanged(const QualifiedName& name, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason attributeModificationReason)
 {
     if (name == SVGNames::pointsAttr) {
-        if (!protect(m_points)->baseVal()->parse(newValue))
+        if (!protect(protect(m_points)->baseVal())->parse(newValue))
             protect(protect(document())->svgExtensions())->reportError(makeString("Problem parsing points=\""_s, newValue, "\""_s));
     }
 

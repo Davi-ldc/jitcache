@@ -5,7 +5,7 @@ include(WebKitVersion)
 # match. Without this CMake compiles .mm as CXX, CMAKE_OBJCXX_FLAGS are
 # ignored, and WEBKIT_ADD_PREFIX_HEADER produces no OBJCXX precompiled
 # header for .mm sources.
-enable_language(OBJC OBJCXX)
+WEBKIT_ENABLE_LANGUAGE(OBJC OBJCXX)
 
 WEBKIT_OPTION_BEGIN()
 
@@ -23,7 +23,6 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_APPLICATION_MANIFEST PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_ASYNC_SCROLLING PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_ATTACHMENT_ELEMENT PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_AV1 PRIVATE ON)
-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_AVF_CAPTIONS PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_CACHE_PARTITIONING PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_CONTENT_EXTENSIONS PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_CONTENT_FILTERING PRIVATE ON)
@@ -49,7 +48,6 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_STREAM PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEMORY_SAMPLER PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MOUSE_CURSOR_SCALE PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PAYMENT_REQUEST PRIVATE ON)
-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PDFKIT_PLUGIN PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PICTURE_IN_PICTURE_API PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_POINTER_LOCK PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_RESOURCE_USAGE PRIVATE ON)
@@ -59,13 +57,12 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SHAREABLE_RESOURCE PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SPEECH_SYNTHESIS PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_STREAMING_IPC_IN_LOG_FORWARDING PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_TELEPHONE_NUMBER_DETECTION PRIVATE ON)
-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_TEXT_AUTOSIZING PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VARIATION_FONTS PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO_PRESENTATION_MODE PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_KEYBOARD_INTERACTIONS PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_MOUSE_INTERACTIONS PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_WHEEL_INTERACTIONS PRIVATE ON)
-if (WEBKIT_SDK_TARGET_OS STREQUAL "xros")
+if (WEBKIT_SDK_IS_XROS)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBXR PRIVATE ON)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBXR_LAYERS PRIVATE ON)
 else ()
@@ -81,13 +78,16 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WIRELESS_PLAYBACK_TARGET PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_ACCESSIBILITY_ISOLATED_TREE PRIVATE ON)
 
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGPU PRIVATE ON)
+WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGPU_SWIFT PRIVATE ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_AVIF PRIVATE OFF)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_JPEGXL PRIVATE OFF)
 # Cocoa uses ColorSync, not Little CMS; CoreText handles WOFF2 natively.
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_LCMS PRIVATE OFF)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_WOFF2 PRIVATE OFF)
 
-# SDK-gated features that PlatformEnableCocoa.h owns. Bug 312033.
+# Features whose values is controlled by <wtf/Platform.h>. In general, new
+# features should go here unless their value needs to be resolved by CMake at
+# configure time.
 WEBKIT_OPTION_OWNED_BY_PLATFORM_H(
     ENABLE_APPLE_PAY_AUTOMATIC_RELOAD_LINE_ITEM
     ENABLE_APPLE_PAY_AUTOMATIC_RELOAD_PAYMENTS
@@ -106,13 +106,21 @@ WEBKIT_OPTION_OWNED_BY_PLATFORM_H(
     ENABLE_APPLE_PAY_SELECTED_SHIPPING_METHOD
     ENABLE_APPLE_PAY_SHIPPING_CONTACT_EDITING_MODE
     ENABLE_APPLE_PAY_SHIPPING_METHOD_DATE_COMPONENTS_RANGE
+    ENABLE_AVF_CAPTIONS
     ENABLE_CURSOR_VISIBILITY
+    ENABLE_DEVICE_ORIENTATION
+    ENABLE_MAC_GESTURE_EVENTS
     ENABLE_MEDIA_SOURCE_IN_WORKERS
+    ENABLE_NAVIGATOR_STANDALONE
+    ENABLE_PDFKIT_PLUGIN
     ENABLE_PDF_HUD
     ENABLE_PDF_PLUGIN
-    ENABLE_PERIODIC_MEMORY_MONITOR
     ENABLE_PREDEFINED_COLOR_SPACE_DISPLAY_P3
+    ENABLE_SMOOTH_SCROLLING
+    ENABLE_SWIFT_BASE_CLASS_ANNOTATIONS
+    ENABLE_UIPROCESS_PERIODIC_MEMORY_MONITOR
     ENABLE_UNIFIED_PDF
+    ENABLE_WEBDRIVER_BIDI
 )
 
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_OFFSCREEN_CANVAS PRIVATE ON)
@@ -145,15 +153,19 @@ if (WEBKIT_SDK_IS_IOS_FAMILY)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_BACK_FORWARD_LIST_SWIFT PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MINIBROWSER PUBLIC OFF)
     # Mac-only features absent on the iOS family.
-    WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_AV1 PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SESSION_COORDINATOR PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SESSION_PLAYLIST PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MOUSE_CURSOR_SCALE PRIVATE OFF)
-    WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PDFKIT_PLUGIN PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SERVICE_CONTROLS PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_MOUSE_INTERACTIONS PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBDRIVER_WHEEL_INTERACTIONS PRIVATE OFF)
     WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_IPC_TESTING_SWIFT PRIVATE OFF)
+endif ()
+
+# iOS launches the auxiliary processes as ExtensionKit extensions; every other
+# platform launches them as XPC services.
+if (WEBKIT_SDK_IS_IOS)
+    WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_EXTENSIONKIT PRIVATE ON)
 endif ()
 
 WEBKIT_OPTION_END()
@@ -168,23 +180,6 @@ WEBKIT_OPTION_END()
 # Shared Cocoa configuration.
 # ---------------------------------------------------------------------------
 set(SWIFT_REQUIRED ON)
-
-# Configure module building
-add_compile_options(
-    "$<$<COMPILE_LANGUAGE:Swift>:-explicit-module-build>"
-    # Needed for compatibility with modules in the (internal) SDK:
-    # https://bugs.webkit.org/show_bug.cgi?id=312083
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xcc -fexperimental-bounds-safety-attributes>"
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xcc -fexperimental-late-parse-attributes>"
-    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-module-cache-path ${CMAKE_BINARY_DIR}/SwiftModuleCache>"
-)
-set_property(DIRECTORY "${CMAKE_BINARY_DIR}" APPEND PROPERTY
-    ADDITIONAL_CLEAN_FILES "${CMAKE_BINARY_DIR}/SwiftModuleCache")
-
-# FIXME: Consider building with -wmo in release / performance builds.
-add_compile_options(
-    "$<$<COMPILE_LANGUAGE:Swift>:-enable-batch-mode>"
-)
 
 if (WEBKIT_SDK_IS_MACOS AND USE_APPLE_INTERNAL_SDK)
     set(WEBKIT_CODE_SIGN_IDENTITY "Safari Engineering")
@@ -207,22 +202,11 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(WebKitTestRunner_DERIVED_SOURCES_DIR "${CMAKE_BINARY_DIR}/DerivedSources/WebKitTestRunner")
 set(TestRunnerShared_DERIVED_SOURCES_DIR "${CMAKE_BINARY_DIR}/DerivedSources/TestRunnerShared")
 
-SET_AND_EXPOSE_TO_BUILD(USE_LIBWEBRTC TRUE)
+# The code generators don't include wtf/Platform.h; they read its feature
+# defines from here. See webkit_generate_platform_feature_defines_file().
+set(WEBKIT_PLATFORM_FEATURE_DEFINES_FILE "${CMAKE_BINARY_DIR}/DerivedSources/platform-feature-defines.txt")
 
-if (NOT ENABLE_WEBGPU)
-    set(_webgpu_fwd "${CMAKE_BINARY_DIR}/WebGPU-stub/WebGPU")
-    file(MAKE_DIRECTORY "${_webgpu_fwd}")
-    foreach (_h WebGPU.h WebGPUExt.h)
-        if (NOT EXISTS "${_webgpu_fwd}/${_h}")
-            file(CREATE_LINK "${CMAKE_SOURCE_DIR}/Source/WebGPU/WebGPU/${_h}" "${_webgpu_fwd}/${_h}" SYMBOLIC)
-        endif ()
-    endforeach ()
-    include_directories(SYSTEM "${CMAKE_BINARY_DIR}/WebGPU-stub")
-    unset(_webgpu_fwd)
-    unset(_h)
-else ()
-    include_directories(SYSTEM "${CMAKE_BINARY_DIR}/WebGPU/Headers")
-endif ()
+SET_AND_EXPOSE_TO_BUILD(USE_LIBWEBRTC TRUE)
 
 set(ENABLE_WEBKIT_LEGACY ON)
 set(ENABLE_WEBKIT ON)
@@ -236,6 +220,10 @@ set(USE_ANGLE_EGL ON)
 
 # FIXME: CMake is not used for Production at this moment. https://bugs.webkit.org/show_bug.cgi?id=322112
 SET_AND_EXPOSE_TO_BUILD(ENGINEERING_BUILD ON)
+
+if (CMAKE_BUILD_TYPE STREQUAL "Debug" OR ENABLE_SANITIZERS)
+    SET_AND_EXPOSE_TO_BUILD(ENABLE_CONJECTURE_ASSERT ON)
+endif ()
 
 function(WEBKIT_ADD_SDK_IMPORTED_LIBRARY _target _library)
     if (NOT TARGET ${_target})
@@ -310,6 +298,13 @@ add_compile_options(
     "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-Wno-objc-signed-char-bool-implicit-float-conversion>"
     "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-Wno-unused-parameter>"
 )
+# BOOL is `signed char` on x86_64 and raises additional warnings.
+if (WTF_CPU_X86_64)
+    add_compile_options(
+        "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-Wno-objc-signed-char-bool-implicit-int-conversion>"
+    )
+endif ()
+
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-cast-align>")
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-undefined-inline>")
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-nonportable-include-path>")
@@ -317,10 +312,14 @@ add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-missing-field-initi
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-null-conversion>")
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-fobjc-weak>")
 
-# Per-target ObjC visibility; global -fvisibility=hidden hides _OBJC_CLASS_$_ symbols.
+# Hide symbols by default in Objective-C and Objective-C++. Otherwise, every
+# template instantiation an Objective-C++ file emits is an exported weak
+# definition. Inline functions are hidden as well, which is important for
+# correctness since an inline function from an ARC translation unit cannot be
+# linked into a non-ARC TU.
 add_compile_options(
-    "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility=hidden>"
-    "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility-inlines-hidden>"
+    "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fvisibility=hidden>"
+    "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:-fvisibility-inlines-hidden>"
 )
 
 if (CMAKE_OSX_SYSROOT MATCHES "\\.Internal\\.sdk$")
@@ -342,6 +341,27 @@ if (RELATIVE_DEBUG_INFO)
         "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-fdebug-prefix-map=${CMAKE_BINARY_DIR}=build>"
         "$<$<COMPILE_LANGUAGE:C,CXX,OBJC,OBJCXX>:-ffile-prefix-map=${CMAKE_SOURCE_DIR}=.>"
     )
+endif ()
+
+option(GENERATE_DSYM "Extract debug info from linked binaries into corresponding .dSYM bundles." OFF)
+
+if (GENERATE_DSYM)
+    WEBKIT_RESOLVE_TOOL(DSYMUTIL_EXECUTABLE "dsymutil")
+    WEBKIT_RESOLVE_TOOL(CMAKE_STRIP "strip")
+
+    # Sanity check that the build will produce debug info.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" _dsym_config)
+    if (NOT "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_dsym_config}}" MATCHES "(^| )-g($| )")
+        message(WARNING "GENERATE_DSYM is enabled but ${CMAKE_BUILD_TYPE} emits no debug info.")
+    endif ()
+
+    # dsymutil follows the N_OSO stabs back to the object files. Under LTO the
+    # linker synthesizes those objects in a temporary directory and deletes them
+    # when it exits, so they have to be kept somewhere durable.
+    if (LTO_MODE)
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/LTO")
+        add_link_options("LINKER-Wl,:-object_path_lto,${CMAKE_BINARY_DIR}/LTO")
+    endif ()
 endif ()
 
 if (ENABLE_SANITIZERS)
@@ -439,6 +459,11 @@ if (CMAKE_OSX_DEPLOYMENT_TARGET)
     unset(_arch_count)
 endif ()
 
+# Building x86_64 on an Apple Silicon host means the result only ever runs under Rosetta.
+if (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" AND WTF_HOST_SYSTEM_MACHINE STREQUAL "arm64")
+    add_compile_definitions(HAVE_CPU_TRANSLATION_CAPABILITY=0)
+endif ()
+
 # Fail loudly if an ASan build dir lost its CMakeCache.txt and reconfigured
 # without ENABLE_SANITIZERS — otherwise the tree silently rebuilds uninstrumented.
 get_filename_component(_bindir_name "${CMAKE_BINARY_DIR}" NAME)
@@ -459,6 +484,8 @@ set(WTF_LIBRARY_TYPE OBJECT)
 set(JavaScriptCore_LIBRARY_TYPE SHARED)
 set(WebCore_LIBRARY_TYPE SHARED)
 set(WebKit_LIBRARY_TYPE SHARED)
+set(WebGPU_LIBRARY_TYPE SHARED)
+set(WebCoreTestSupport_LIBRARY_TYPE SHARED)
 
 # Large unified-source bundles speed up the macOS build. The iOS family keeps
 # the script default (8) so @no-unify-when(bundle<=8) sources (e.g. those that
@@ -517,7 +544,8 @@ endif ()
 
 if (CMAKE_OSX_SYSROOT)
     add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-F${CMAKE_BINARY_DIR};-iframework${CMAKE_OSX_SYSROOT}/System/Library/PrivateFrameworks>")
-    add_compile_options("$<$<COMPILE_LANGUAGE:Swift>:-F${CMAKE_BINARY_DIR};-Fsystem;${CMAKE_OSX_SYSROOT}/System/Library/PrivateFrameworks>")
+    # -F rather than -Fsystem for SDK frameworks, cf. rdar://problem/30939744
+    add_compile_options("$<$<COMPILE_LANGUAGE:Swift>:-F${CMAKE_BINARY_DIR};-F${CMAKE_OSX_SYSROOT}/System/Library/PrivateFrameworks>")
 endif ()
 
 # Regenerate the Xcode debug wrapper on every (re)configure so its scheme paths

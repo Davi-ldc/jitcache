@@ -16,6 +16,10 @@
 #include <link.h>
 #endif
 
+#if CPU(X86_64)
+#include <cpuid.h>
+#endif
+
 // The process facts the header records, and the CRC-32C the container checksums with.
 
 namespace JSC::JITCache {
@@ -84,7 +88,7 @@ static std::optional<BuildID> firstBuildIDNote(std::span<const uint8_t> segment,
 }
 
 // The build ID of one loaded object: the first GNU build-ID note in its PT_NOTE segments, in program-header order, or
-// no ID. External linkage, because T-BUILDID reads crafted objects through it.
+// no ID. External linkage, because a test reads crafted objects through it.
 BuildID buildIDOfObject(const struct dl_phdr_info& object)
 {
     for (auto& header : unsafeMakeSpan(object.dlpi_phdr, object.dlpi_phnum)) {
@@ -218,6 +222,62 @@ static const ProcessFacts& computedProcessFacts()
 static std::atomic<bool> mainBuildIDRemovedForTesting { false };
 #endif
 
+// CRC-32C of RFC 3720: the Castagnoli polynomial 0x1EDC6F41, here reflected. Each path takes and returns the running
+// state, without the initial value or the final XOR, and all of them give the same state for the same bytes.
+static constexpr uint32_t crc32cReflectedPolynomial = 0x82F63B78;
+
+static constexpr std::array<uint32_t, 256> crc32cTable = [] {
+    std::array<uint32_t, 256> table { };
+    for (size_t index = 0; index < table.size(); ++index) {
+        uint32_t crc = static_cast<uint32_t>(index);
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = crc & 1 ? (crc >> 1) ^ crc32cReflectedPolynomial : crc >> 1;
+        table[index] = crc;
+    }
+    return table;
+}();
+
+static uint32_t crc32cExtendWithTable(uint32_t state, std::span<const uint8_t> bytes)
+{
+    for (uint8_t byte : bytes)
+        state = crc32cTable[(state ^ byte) & 0xff] ^ (state >> 8);
+    return state;
+}
+
+#if CPU(X86_64)
+// cpuid directly: __builtin_cpu_supports needs compiler-rt's __cpu_model, which not every link provides.
+static bool cpuHasSSE42()
+{
+    unsigned eax = 0;
+    unsigned ebx = 0;
+    unsigned ecx = 0;
+    unsigned edx = 0;
+    return __get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & bit_SSE4_2);
+}
+
+// SSE4.2's crc32 instruction computes CRC-32C, eight bytes at a time.
+__attribute__((target("sse4.2"))) static uint32_t crc32cExtendWithSSE42(uint32_t state, std::span<const uint8_t> bytes)
+{
+    uint64_t crc = state;
+    for (; bytes.size() >= sizeof(uint64_t); bytes = bytes.subspan(sizeof(uint64_t)))
+        crc = __builtin_ia32_crc32di(crc, WTF::unalignedLoad<uint64_t>(bytes.data()));
+    for (uint8_t byte : bytes)
+        crc = __builtin_ia32_crc32qi(static_cast<uint32_t>(crc), byte);
+    return static_cast<uint32_t>(crc);
+}
+#elif CPU(ARM64) && defined(__ARM_FEATURE_CRC32)
+// The CRC extension's crc32c instructions, eight bytes at a time. A build whose target defines __ARM_FEATURE_CRC32, as
+// Bun's -march=armv8-a+crc does, runs only on CPUs that have them.
+static uint32_t crc32cExtendWithARMv8(uint32_t state, std::span<const uint8_t> bytes)
+{
+    for (; bytes.size() >= sizeof(uint64_t); bytes = bytes.subspan(sizeof(uint64_t)))
+        state = __builtin_arm_crc32cd(state, WTF::unalignedLoad<uint64_t>(bytes.data()));
+    for (uint8_t byte : bytes)
+        state = __builtin_arm_crc32cb(state, byte);
+    return state;
+}
+#endif
+
 } // namespace PlatformInternal
 
 ProcessFacts processFacts()
@@ -232,13 +292,26 @@ ProcessFacts processFacts()
 
 uint32_t crc32cExtend(uint32_t state, std::span<const uint8_t> bytes)
 {
-    return JSC::crc32c(state, bytes);
+    using namespace PlatformInternal;
+#if CPU(X86_64)
+    static const bool hasSSE42 = cpuHasSSE42();
+    if (hasSSE42)
+        return crc32cExtendWithSSE42(state, bytes);
+#elif CPU(ARM64) && defined(__ARM_FEATURE_CRC32)
+    return crc32cExtendWithARMv8(state, bytes);
+#endif
+    return crc32cExtendWithTable(state, bytes);
 }
 
 #if ENABLE(JITCACHE_TWINS)
 void removeMainBuildIDForTesting(bool removed)
 {
     PlatformInternal::mainBuildIDRemovedForTesting.store(removed);
+}
+
+uint32_t crc32cExtendWithTableForTesting(uint32_t state, std::span<const uint8_t> bytes)
+{
+    return PlatformInternal::crc32cExtendWithTable(state, bytes);
 }
 #endif
 

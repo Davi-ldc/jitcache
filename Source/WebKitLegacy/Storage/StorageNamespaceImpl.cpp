@@ -73,7 +73,7 @@ StorageNamespaceImpl::StorageNamespaceImpl(StorageType storageType, const String
     , m_sessionID(sessionID)
 {
     if (isLocalStorage(m_storageType) && !m_path.isEmpty())
-        m_syncManager = StorageSyncManager::create(m_path);
+        lazyInitialize(m_syncManager, StorageSyncManager::create(m_path));
 }
 
 StorageNamespaceImpl::~StorageNamespaceImpl()
@@ -97,7 +97,7 @@ Ref<StorageNamespace> StorageNamespaceImpl::copy(Page&)
 
     auto newNamespace = adoptRef(*new StorageNamespaceImpl(m_storageType, m_path, m_quota, m_sessionID));
     for (auto& iter : m_storageAreaMap)
-        newNamespace->m_storageAreaMap.set(iter.key, iter.value->copy());
+        newNamespace->m_storageAreaMap.set(iter.key, protect(iter.value)->copy());
 
     return WTF::move(newNamespace);
 }
@@ -127,7 +127,7 @@ void StorageNamespaceImpl::close()
 
     StorageAreaMap::iterator end = m_storageAreaMap.end();
     for (StorageAreaMap::iterator it = m_storageAreaMap.begin(); it != end; ++it)
-        it->value->close();
+        protect(it->value)->close();
 
     if (m_syncManager)
         m_syncManager->close();
@@ -150,7 +150,7 @@ void StorageNamespaceImpl::clearAllOriginsForDeletion()
 
     StorageAreaMap::iterator end = m_storageAreaMap.end();
     for (StorageAreaMap::iterator it = m_storageAreaMap.begin(); it != end; ++it)
-        it->value->clearForOriginDeletion();
+        protect(it->value)->clearForOriginDeletion();
 }
     
 void StorageNamespaceImpl::sync()
@@ -158,7 +158,7 @@ void StorageNamespaceImpl::sync()
     ASSERT(isMainThread());
     StorageAreaMap::iterator end = m_storageAreaMap.end();
     for (StorageAreaMap::iterator it = m_storageAreaMap.begin(); it != end; ++it)
-        it->value->sync();
+        protect(it->value)->sync();
 }
 
 void StorageNamespaceImpl::closeIdleLocalStorageDatabases()
@@ -166,7 +166,7 @@ void StorageNamespaceImpl::closeIdleLocalStorageDatabases()
     ASSERT(isMainThread());
     StorageAreaMap::iterator end = m_storageAreaMap.end();
     for (StorageAreaMap::iterator it = m_storageAreaMap.begin(); it != end; ++it)
-        it->value->closeDatabaseIfIdle();
+        protect(it->value)->closeDatabaseIfIdle();
 }
 
 void StorageNamespaceImpl::setSessionIDForTesting(PAL::SessionID sessionID)

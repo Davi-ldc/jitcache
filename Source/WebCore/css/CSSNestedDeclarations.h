@@ -37,6 +37,7 @@ public:
     virtual ~CSSNestedDeclarations();
 
     WEBCORE_EXPORT CSSStyleProperties& style();
+    const StyleRuleNestedDeclarations& nestedDeclarationsRule() const { return m_styleRule.get(); }
 
 private:
     CSSNestedDeclarations(StyleRuleNestedDeclarations&, CSSStyleSheet*);
@@ -48,7 +49,7 @@ private:
     StyleRuleType styleRuleType() const final { return StyleRuleType::NestedDeclarations; }
 
     Ref<StyleRuleNestedDeclarations> m_styleRule;
-    RefPtr<StyleRuleCSSStyleProperties> m_propertiesCSSOMWrapper;
+    const RefPtr<StyleRuleCSSStyleProperties> m_propertiesCSSOMWrapper;
 };
 
 } // namespace WebCore

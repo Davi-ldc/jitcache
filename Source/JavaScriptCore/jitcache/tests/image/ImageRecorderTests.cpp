@@ -22,6 +22,7 @@
 #include "ImageTypes.h"
 #include "JIT.h"
 #include "JITCacheTest.h"
+#include "JITOperations.h"
 #include "JITThunks.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
@@ -1252,11 +1253,9 @@ JITCACHE_TEST(imageGetFromScopeKeysTheThunkTheNativeChainLinks, Yes)
     auto thunk = reinterpret_cast<uintptr_t>(vm.getCTIStub(JIT::baselineThunkGenerator(BaselineThunk::GetFromScopeGlobalVar)).code().untaggedPtr());
     auto thunkKey = makeTarget(TargetKind::BaselineThunk, static_cast<uint32_t>(BaselineThunk::GetFromScopeGlobalVar));
 
-    // The twin recorder seeds the assembler. The readers have no strict equality and no switch, so it answers no other
-    // question from its seeds and inputs.
+    // The twin recorder seeds the assembler. The readers have no switch, so it answers no other question from its seeds.
     TwinSeeds seeds { };
     seeds.assembler = assemblerSeed;
-    TwinCompileInputs compileInputs { };
     enum class Recorder : bool {
         None,
         Twin,
@@ -1265,7 +1264,7 @@ JITCACHE_TEST(imageGetFromScopeKeysTheThunkTheNativeChainLinks, Yes)
         Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(codeBlock));
         JIT jit(vm, plan.get(), codeBlock);
         if (recorder == Recorder::Twin)
-            jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, compileInputs);
+            jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds);
         return jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
     };
 
@@ -1357,6 +1356,60 @@ JITCACHE_TEST(imageGetFromScopeKeysTheThunkTheNativeChainLinks, Yes)
         if (calls != 1)
             JITCACHE_FAIL(makeString(reader.function, "'s recorded site holds "_s, calls, " Call fixups instead of one"_s));
     }
+}
+
+// The tail-call path of CallLinkInfo::emitFastPathImpl moves the address of operationEnsureCallLinkInfoForTailCall into a
+// register and calls it, the one operation call of baseline code that no far call carries. A strict function with two
+// tail calls compiles under a twin recorder, the one recorder a compilation outside production can have, to a record
+// with exactly one fixup per site naming that operation's CodeSymbol, each a Pointer whose footprint holds the
+// operation's address. Bun's builds load the engine at its link-time address, so no relocation comparison sees the move
+// if it loses its fixup, and the corpus names a target's kind, never which operation, so this test alone would fail.
+JITCACHE_TEST(imageTailCallOperationIsAPointerFixup, Yes)
+{
+    VM& vm = *context.vm();
+    auto* globalObject = createRealm(context, vm, "function tailCallee(x) { return x + 1; } function tailCaller(x) { 'use strict'; if (x) return tailCallee(x); return tailCallee(x + 1); } tailCaller(0); tailCaller(1);"_s, "the tail caller"_s);
+    if (!globalObject)
+        return;
+    auto* tailCaller = globalFunctionOrNull(*globalObject, "tailCaller"_s);
+    CodeBlock* codeBlock = tailCaller ? tailCaller->jsExecutable()->codeBlockForCall() : nullptr;
+    if (!codeBlock) {
+        JITCACHE_FAIL("tailCaller has no CodeBlock"_s);
+        return;
+    }
+    unsigned tailCalls = 0;
+    for (const auto& instruction : codeBlock->unlinkedCodeBlock()->instructions()) {
+        if (instruction->is<OpTailCall>())
+            ++tailCalls;
+    }
+    if (tailCalls != 2) {
+        JITCACHE_FAIL(makeString("tailCaller holds "_s, tailCalls, " tail calls instead of two"_s));
+        return;
+    }
+    auto symbol = CodeSymbol::of(operationEnsureCallLinkInfoForTailCall);
+    if (!symbol) {
+        JITCACHE_FAIL("operationEnsureCallLinkInfoForTailCall lies outside the engine's text segment"_s);
+        return;
+    }
+
+    auto code = compileUnderTwinRecorder(vm, *codeBlock);
+    auto* record = code ? code->m_jitCacheImageRecord.get() : nullptr;
+    if (!record || record->state() != RecordState::Complete) {
+        JITCACHE_FAIL(makeString("tailCaller's record is missing or not complete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ", reason "_s, record ? static_cast<unsigned>(record->unrecordableReason()) : 0u, ')'));
+        return;
+    }
+    auto bytes = unsafeMakeSpan(static_cast<const uint8_t*>(code->start()), record->codeSize());
+    ImageTarget operationTarget { .kind = TargetKind::Operation, .a = 0, .b = 0, .payload = symbol->offset };
+    unsigned fixups = 0;
+    for (auto& fixup : record->fixups()) {
+        if (fixup.target != operationTarget)
+            continue;
+        ++fixups;
+        auto decoded = decodeFixup(bytes, fixup);
+        if (fixup.form != FixupForm::Pointer || !decoded || *decoded != reinterpret_cast<uintptr_t>(symbol->address()))
+            JITCACHE_FAIL(makeString("the fixup at "_s, fixup.site, " naming the tail-call operation is no Pointer holding its address"_s));
+    }
+    if (fixups != 2)
+        JITCACHE_FAIL(makeString("tailCaller's record holds "_s, fixups, " fixups naming the tail-call operation instead of two"_s));
 }
 
 } // namespace JSC::JITCache::Tests

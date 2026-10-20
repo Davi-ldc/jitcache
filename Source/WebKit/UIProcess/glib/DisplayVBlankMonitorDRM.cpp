@@ -113,7 +113,7 @@ static std::optional<std::pair<uint32_t, uint32_t>> findCrtc(int fd)
     // Get the first active connector.
     drmModeConnector* connector = nullptr;
     for (uint32_t connectorId : unsafeMakeSpan(resources->connectors, resources->count_connectors)) {
-        auto* connector = drmModeGetConnector(fd, connectorId);
+        connector = drmModeGetConnector(fd, connectorId);
         if (!connector)
             continue;
 
@@ -235,7 +235,7 @@ std::unique_ptr<DisplayVBlankMonitor> DisplayVBlankMonitorDRM::create(PlatformDi
     vblank.request.signal = 0;
     auto ret = drmWaitVBlank(drmNodeWithCrtcInfo->drmNodeFd.value(), &vblank);
     if (ret) {
-        RELEASE_LOG_FAULT(DisplayLink, "Could not create a vblank monitor for display %u: drmWaitVBlank failed: %s", displayID, safeStrerror(-ret).data());
+        RELEASE_LOG_FAULT(DisplayLink, "Could not create a vblank monitor for display %u: drmWaitVBlank failed: %s", displayID, safeStrerror(-ret));
         return nullptr;
     }
 

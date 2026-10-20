@@ -28,12 +28,12 @@
 #import "BindableResource.h"
 #import <Metal/Metal.h>
 #import <WebGPU/WGPUTextureImpl.h>
+#import <WebGPU/WebGPUCpp.h>
 #import <wtf/FastMalloc.h>
 #import <wtf/HashMap.h>
 #import <wtf/HashSet.h>
 #import <wtf/Lock.h>
 #import <wtf/Ref.h>
-#import <wtf/RefCountedAndCanMakeWeakPtr.h>
 #import <wtf/Seconds.h>
 #import <wtf/SwiftBridging.h>
 #import <wtf/TZoneMalloc.h>
@@ -41,14 +41,14 @@
 #import <wtf/WeakHashSet.h>
 #import <wtf/WeakPtr.h>
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class CommandEncoder;
 class Device;
 class TextureView;
 
 // https://gpuweb.github.io/gpuweb/#gputexture
-class Texture : public RefCountedAndCanMakeWeakPtr<Texture>, public WGPUTextureImpl, public TrackedResource {
+class Texture final : public WebGPU::Texture, public WGPUTextureImpl, public TrackedResource {
     WTF_MAKE_TZONE_ALLOCATED(Texture);
 public:
     static Ref<Texture> create(id<MTLTexture> texture, const WGPUTextureDescriptor& descriptor, Vector<WGPUTextureFormat>&& viewFormats, Device& device)
@@ -64,9 +64,9 @@ public:
 
     Ref<TextureView> createView(const WGPUTextureViewDescriptor&);
     void destroy();
-    void setLabel(String&&);
+    void setLabel(String&&) final;
 
-    bool NODELETE isValid() const;
+    bool NODELETE isValid() const final;
 
     static uint32_t NODELETE texelBlockWidth(WGPUTextureFormat); // Texels
     static uint32_t NODELETE texelBlockHeight(WGPUTextureFormat); // Texels
@@ -80,13 +80,13 @@ public:
     static bool NODELETE containsStencilAspect(WGPUTextureFormat);
     static bool NODELETE isDepthOrStencilFormat(WGPUTextureFormat);
     static WGPUTextureFormat NODELETE aspectSpecificFormat(WGPUTextureFormat, WGPUTextureAspect);
-    static NSString* errorValidatingImageCopyTexture(const WGPUImageCopyTexture&, const WGPUExtent3D&);
-    static NSString* errorValidatingTextureCopyRange(const WGPUImageCopyTexture&, const WGPUExtent3D&);
+    static NSString* errorValidatingImageCopyTexture(const WGPUTexelCopyTextureInfo&, const WGPUExtent3D&);
+    static NSString* errorValidatingTextureCopyRange(const WGPUTexelCopyTextureInfo&, const WGPUExtent3D&);
     static bool NODELETE refersToSingleAspect(WGPUTextureFormat, WGPUTextureAspect);
     static bool NODELETE isValidDepthStencilCopySource(WGPUTextureFormat, WGPUTextureAspect);
     static bool NODELETE isValidDepthStencilCopyDestination(WGPUTextureFormat, WGPUTextureAspect);
-    static NSString* errorValidatingLinearTextureData(const WGPUTextureDataLayout&, uint64_t, WGPUTextureFormat, WGPUExtent3D);
-    static MTLTextureUsage NODELETE usage(WGPUTextureUsageFlags, WGPUTextureFormat);
+    static NSString* errorValidatingLinearTextureData(const WGPUTexelCopyBufferLayout&, uint64_t, WGPUTextureFormat, WGPUExtent3D);
+    static MTLTextureUsage NODELETE usage(WGPUTextureUsage, WGPUTextureFormat);
     static MTLPixelFormat NODELETE pixelFormat(WGPUTextureFormat);
     static WGPUTextureFormat NODELETE textureFormat(MTLPixelFormat);
     static std::optional<MTLPixelFormat> NODELETE depthOnlyAspectMetalFormat(WGPUTextureFormat);
@@ -118,7 +118,7 @@ public:
     uint32_t sampleCount() const { return m_sampleCount; }
     WGPUTextureDimension dimension() const { return m_dimension; }
     WGPUTextureFormat format() const { return m_format; }
-    WGPUTextureUsageFlags usage() const { return m_usage; }
+    WGPUTextureUsage usage() const { return m_usage; }
 
     Device& device() const { return m_device; }
 
@@ -132,7 +132,7 @@ public:
     static bool supportsMultisampling(WGPUTextureFormat, const Device&);
     static bool supportsResolve(WGPUTextureFormat, const Device&);
     static bool supportsBlending(WGPUTextureFormat, const Device&);
-    void NODELETE recreateIfNeeded();
+    void recreateIfNeeded();
     void NODELETE makeCanvasBacking();
     void setCommandEncoder(CommandEncoder&) const;
     static ASCIILiteral formatToString(WGPUTextureFormat);
@@ -174,7 +174,7 @@ private:
     const uint32_t m_sampleCount { 0 };
     const WGPUTextureDimension m_dimension { WGPUTextureDimension_2D };
     const WGPUTextureFormat m_format { WGPUTextureFormat_Undefined };
-    const WGPUTextureUsageFlags m_usage { WGPUTextureUsage_None };
+    const WGPUTextureUsage m_usage { WGPUTextureUsage_None };
 
     const Vector<WGPUTextureFormat> m_viewFormats;
 
@@ -182,7 +182,7 @@ private:
     using ClearedToZeroInnerContainer = HashSet<uint32_t, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>>;
     using ClearedToZeroContainer = HashMap<uint32_t, ClearedToZeroInnerContainer, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>>;
     ClearedToZeroContainer m_clearedToZero;
-    Vector<WeakPtr<TextureView>> m_textureViews;
+    Vector<ThreadSafeWeakPtr<TextureView>> m_textureViews;
     bool m_destroyed { false };
     bool m_canvasBacking { false };
     mutable Lock m_gpuFrameCostLock;
@@ -193,14 +193,14 @@ private:
     uint64_t m_sharedEventSignalValue { 0 };
 } SWIFT_SHARED_REFERENCE(refTexture, derefTexture) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
-inline void refTexture(WebGPU::Texture* obj)
+inline void refTexture(WebGPU::Metal::Texture* obj)
 {
     obj->ref();
 }
 
-inline void derefTexture(WebGPU::Texture* obj)
+inline void derefTexture(WebGPU::Metal::Texture* obj)
 {
     obj->deref();
 }

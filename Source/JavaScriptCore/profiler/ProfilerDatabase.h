@@ -61,14 +61,14 @@ public:
 
     // Saves the JSON representation (from toJSON()) to the given file. Returns false if the
     // save failed.
-    JS_EXPORT_PRIVATE bool save(const char* filename) const;
+    JS_EXPORT_PRIVATE bool save(const UTF8CString& filename) const;
 
-    void registerToSaveAtExit(const char* filename);
+    void registerToSaveAtExit(const UTF8CString& filename);
     
-    JS_EXPORT_PRIVATE void logEvent(CodeBlock* codeBlock, const char* summary, const CString& detail);
+    JS_EXPORT_PRIVATE void logEvent(CodeBlock*, const char* summary, const UTF8CString& detail);
     
 private:
-    Bytecodes* ensureBytecodesFor(const AbstractLocker&, CodeBlock*);
+    Bytecodes* ensureBytecodesFor(const AbstractLocker&, CodeBlock*) WTF_REQUIRES_LOCK(m_lock);
     
     void addDatabaseToAtExit();
     void removeDatabaseFromAtExit();
@@ -79,12 +79,12 @@ private:
     DatabaseID m_databaseID;
     VM& m_vm;
     SegmentedVector<Bytecodes> m_bytecodes;
-    UncheckedKeyHashMap<CodeBlock*, Bytecodes*> m_bytecodesMap;
+    UncheckedKeyHashMap<CodeBlock*, Bytecodes*> m_bytecodesMap WTF_GUARDED_BY_LOCK(m_lock);
     Vector<Ref<Compilation>> m_compilations;
-    UncheckedKeyHashMap<CodeBlock*, Ref<Compilation>> m_compilationMap;
+    UncheckedKeyHashMap<CodeBlock*, Ref<Compilation>> m_compilationMap WTF_GUARDED_BY_LOCK(m_lock);
     Vector<Event> m_events;
     bool m_shouldSaveAtExit;
-    CString m_atExitSaveFilename;
+    UTF8CString m_atExitSaveFilename;
     Database* m_nextRegisteredDatabase;
     Lock m_lock;
 };

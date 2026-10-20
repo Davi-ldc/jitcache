@@ -54,7 +54,8 @@ void cacheGlobalLexicalVar(CodeBlock* codeBlock, Metadata& metadata, JSGlobalLex
     }
     ConcurrentJSLocker locker(codeBlock->m_lock);
     metadata.m_getPutInfo = GetPutInfo(metadata.m_getPutInfo.resolveMode(), newResolveType, metadata.m_getPutInfo.initializationMode(), metadata.m_getPutInfo.ecmaMode());
-    metadata.m_watchpointSet = watchpointSet;
+    if constexpr (std::is_same_v<Metadata, OpPutToScope::Metadata>)
+        metadata.m_watchpointSet = watchpointSet;
     metadata.m_operand = reinterpret_cast<uintptr_t>(globalLexicalEnvironment->variableAt(offset).slot());
 }
 
@@ -233,7 +234,7 @@ inline void opEnumeratorPutByVal(JSGlobalObject* globalObject, JSValue baseValue
         if (baseValue.isCell()) [[likely]] {
             auto* baseCell = baseValue.asCell();
             auto* structure = baseCell->structure();
-            if (structure->id() == enumerator->cachedStructureID() && !structure->isWatchingReplacement() && !structure->hasReadOnlyOrGetterSetterPropertiesExcludingProto()) {
+            if (structure->id() == enumerator->cachedStructureID() && !structure->hasImmutableProperties() && !structure->isWatchingReplacement() && !structure->hasReadOnlyOrGetterSetterPropertiesExcludingProto()) {
                 // We'll only match the structure ID if the base is an object.
                 ASSERT(index < enumerator->endStructurePropertyIndex());
                 scope.release();

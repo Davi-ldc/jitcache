@@ -31,6 +31,7 @@
 #pragma once
 
 #include <span>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 #include <utility>
@@ -40,6 +41,7 @@
 #include <wtf/OptionSet.h>
 #include <wtf/Vector.h>
 #include <wtf/WallTime.h>
+#include <wtf/text/UTF8CStringView.h>
 #include <wtf/text/WTFString.h>
 
 #if OS(WINDOWS)
@@ -52,6 +54,10 @@
 
 #if USE(CF)
 typedef const struct __CFData* CFDataRef;
+#endif
+
+#if !OS(WINDOWS)
+struct stat;
 #endif
 
 OBJC_CLASS NSString;
@@ -133,10 +139,15 @@ WTF_EXPORT_PRIVATE bool markPurgeable(const String&);
 WTF_EXPORT_PRIVATE Vector<String> listDirectory(const String& path); // Returns file names, not full paths.
 WTF_EXPORT_PRIVATE void traverseDirectory(const String& path, NOESCAPE const Function<void(const String& fileName, FileType)>&);
 
-WTF_EXPORT_PRIVATE CString fileSystemRepresentation(const String&);
+WTF_EXPORT_PRIVATE UTF8CString fileSystemRepresentation(const String&);
 #if !PLATFORM(WIN)
-WTF_EXPORT_PRIVATE String stringFromFileSystemRepresentation(const char*);
+WTF_EXPORT_PRIVATE String stringFromFileSystemRepresentation(UTF8CStringView);
+inline String stringFromFileSystemRepresentation(const char* path) { return stringFromFileSystemRepresentation(UTF8CStringView::unsafeFromUTF8(path)); }
 #endif
+
+// stat() needs a null-terminated path, so these take the span including the terminator and check for it.
+WTF_EXPORT_PRIVATE int statFile(std::span<const char> pathIncludingNullTerminator, struct stat&);
+inline int statFile(std::span<const char8_t> pathIncludingNullTerminator, struct stat& result) { return statFile(byteCast<char>(pathIncludingNullTerminator), result); }
 
 using Salt = std::array<uint8_t, 8>;
 WTF_EXPORT_PRIVATE std::optional<Salt> readOrMakeSalt(const String& path);
@@ -147,7 +158,7 @@ WTF_EXPORT_PRIVATE std::optional<uint64_t> overwriteEntireFile(const String& pat
 WTF_EXPORT_PRIVATE std::pair<String, FileHandle> openTemporaryFile(StringView prefix, StringView suffix = { }, const String& temporaryDirectory = { });
 WTF_EXPORT_PRIVATE String createTemporaryFile(StringView prefix, StringView suffix = { });
 #if PLATFORM(COCOA)
-WTF_EXPORT_PRIVATE std::pair<FileHandle, CString> createTemporaryFileInDirectory(const String& directory, const String& suffix);
+WTF_EXPORT_PRIVATE std::pair<FileHandle, String> createTemporaryFileInDirectory(const String& directory, const String& suffix);
 #endif
 WTF_EXPORT_PRIVATE FileHandle openFile(const String& path, FileOpenMode, FileAccessPermission = FileAccessPermission::All, OptionSet<FileLockMode> = { }, bool failIfFileExists = false);
 
@@ -167,15 +178,19 @@ WTF_EXPORT_PRIVATE bool filesHaveSameVolume(const String&, const String&);
 WTF_EXPORT_PRIVATE RetainPtr<CFURLRef> pathAsURL(const String&);
 #endif
 
+// The name of the running executable, as reported by the platform.
+#if USE(GLIB) || PLATFORM(COCOA)
+WTF_EXPORT_PRIVATE UTF8CString currentExecutableName();
+#endif
+
 #if USE(GLIB)
 WTF_EXPORT_PRIVATE String filenameForDisplay(const String&);
-WTF_EXPORT_PRIVATE CString currentExecutablePath();
-WTF_EXPORT_PRIVATE CString currentExecutableName();
+WTF_EXPORT_PRIVATE UTF8CString currentExecutablePath();
 WTF_EXPORT_PRIVATE String userCacheDirectory();
 WTF_EXPORT_PRIVATE String userDataDirectory();
 WTF_EXPORT_PRIVATE String createTemporaryDirectory(const String& directoryPrefix = nullString());
 #if ENABLE(DEVELOPER_MODE)
-WTF_EXPORT_PRIVATE CString webkitTopLevelDirectory();
+WTF_EXPORT_PRIVATE UTF8CString webkitTopLevelDirectory();
 #endif
 #endif // USE(GLIB)
 

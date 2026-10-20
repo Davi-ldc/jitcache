@@ -59,6 +59,7 @@ WorkletGlobalScope::WorkletGlobalScope(WorkerOrWorkletThread& thread, Ref<JSC::V
     , m_jsRuntimeFlags(parameters.jsRuntimeFlags)
     , m_settingsValues(parameters.settingsValues)
     , m_agentClusterID(parameters.agentClusterID)
+    , m_networkLoadPolicy(parameters.networkLoadPolicy)
 {
     ++gNumberOfWorkletGlobalScopes;
 
@@ -76,6 +77,7 @@ WorkletGlobalScope::WorkletGlobalScope(Document& document, Ref<JSC::VM>&& vm, Sc
     , m_code(WTF::move(code))
     , m_settingsValues(document.settingsValues().isolatedCopy())
     , m_agentClusterID(document.agentClusterID())
+    , m_networkLoadPolicy(document.networkLoadPolicy().isolatedCopy())
 {
     ++gNumberOfWorkletGlobalScopes;
 
@@ -119,7 +121,7 @@ String WorkletGlobalScope::userAgent(const URL& url) const
 void WorkletGlobalScope::evaluate()
 {
     if (m_code)
-        script()->evaluate(*m_code);
+        protect(script())->evaluate(*m_code);
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#parse-a-url
@@ -174,7 +176,7 @@ void WorkletGlobalScope::addMessage(MessageSource source, MessageLevel level, co
 void WorkletGlobalScope::fetchAndInvokeScript(const URL& moduleURL, FetchRequestCredentials credentials, CompletionHandler<void(std::optional<Exception>&&)>&& completionHandler)
 {
     ASSERT(!isMainThread());
-    script()->loadAndEvaluateModule(moduleURL, credentials, WTF::move(completionHandler));
+    protect(script())->loadAndEvaluateModule(moduleURL, credentials, WTF::move(completionHandler));
 }
 
 MessagePortChannelProvider& WorkletGlobalScope::messagePortChannelProvider()

@@ -38,6 +38,7 @@
 #import "ModelProcessProxy.h"
 #import "PDFDisplayMode.h"
 #import "PageClientImplIOS.h"
+#import "PendingSnapshotDrawing.h"
 #import "PickerDismissalReason.h"
 #import "PrintInfo.h"
 #import "RemoteLayerTreeCommitBundle.h"
@@ -101,6 +102,8 @@
 
 #import "AppKitSoftLink.h"
 
+#if HAVE(UIKIT_PRINTING)
+
 @interface _WKPrintFormattingAttributes : NSObject
 @property (nonatomic, readonly) size_t pageCount;
 @property (nonatomic, readonly) Markable<WebCore::FrameIdentifier> frameID;
@@ -127,6 +130,8 @@ typedef NS_ENUM(NSInteger, _WKPrintRenderingCallbackType) {
     _WKPrintRenderingCallbackTypePreview,
     _WKPrintRenderingCallbackTypePrint,
 };
+
+#endif // HAVE(UIKIT_PRINTING)
 
 @interface WKInspectorIndicationView : UIView
 @end
@@ -239,10 +244,12 @@ typedef NS_ENUM(NSInteger, _WKPrintRenderingCallbackType) {
     RetainPtr<WKNSUndoManager> _undoManager;
     RetainPtr<WKNSKeyEventSimulatorUndoManager> _undoManagerForSimulatingKeyEvents;
 
+#if HAVE(UIKIT_PRINTING)
     Lock _pendingBackgroundPrintFormattersLock;
     RetainPtr<NSMutableSet> _pendingBackgroundPrintFormatters;
     Markable<IPC::Connection::AsyncReplyID> _printRenderingCallbackID;
     _WKPrintRenderingCallbackType _printRenderingCallbackType;
+#endif
 
     Vector<RetainPtr<NSURL>> _temporaryURLsToDeleteWhenDeallocated;
 }
@@ -263,7 +270,7 @@ typedef NS_ENUM(NSInteger, _WKPrintRenderingCallbackType) {
     page->setUseFixedLayout(true);
     page->setScreenIsBeingCaptured([self screenIsBeingCaptured]);
 
-    page->windowScreenDidChange(page->generateDisplayIDFromPageID());
+    page->windowScreenDidChange(WebCore::displayID(self.window.screen));
 
 #if ENABLE(FULLSCREEN_API)
     page->setFullscreenClient(makeUnique<WebKit::FullscreenClient>(self.webView));
@@ -674,10 +681,7 @@ typedef NS_ENUM(NSInteger, _WKPrintRenderingCallbackType) {
 
     bool wasStableState = page->inStableState();
 
-    page->updateVisibleContentRects(visibleContentRectUpdateInfo, sendEvenIfUnchanged);
-
-    auto layoutViewport = page->unconstrainedLayoutViewportRect();
-    page->adjustLayersForLayoutViewport(page->unobscuredContentRect().location(), layoutViewport, page->displayedContentScale());
+    auto layoutViewport = page->updateVisibleContentRectsAndAdjustLayers(visibleContentRectUpdateInfo, sendEvenIfUnchanged);
 
     _sizeChangedSinceLastVisibleContentRectUpdate = NO;
     self.webView->_needsScrollend = NO;
@@ -781,7 +785,7 @@ typedef NS_ENUM(NSInteger, _WKPrintRenderingCallbackType) {
     _screen = screen;
 
     if (RefPtr page = _page)
-        page->windowScreenDidChange(page->generateDisplayIDFromPageID());
+        page->windowScreenDidChange(WebCore::displayID(screen));
 
     [self _accessibilityRegisterUIProcessTokens];
 }
@@ -835,6 +839,7 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
     _webView = nil;
 }
 
+#if HAVE(UIKIT_PRINTING)
 - (void)_resetPrintingState
 {
     _printRenderingCallbackID = std::nullopt;
@@ -844,6 +849,7 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
         [printFormatter _invalidatePrintRenderingState];
     [_pendingBackgroundPrintFormatters removeAllObjects];
 }
+#endif
 
 #pragma mark PageClientImpl methods
 
@@ -864,7 +870,9 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
     [self _removeVisibilityPropagationViewForWebProcess];
 #endif
 
+#if HAVE(UIKIT_PRINTING)
     [self _resetPrintingState];
+#endif
 }
 
 #if ENABLE(GPU_PROCESS)
@@ -1168,6 +1176,8 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
 
 #pragma mark Printing
 
+#if HAVE(UIKIT_PRINTING)
+
 @interface WKContentView (_WKWebViewPrintFormatter) <_WKWebViewPrintProvider>
 @end
 
@@ -1359,7 +1369,7 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
         if (!callbackID)
             return;
 
-        protect(protect(_page)->legacyMainFrameProcess().connection())->waitForAsyncReplyAndDispatchImmediately<Messages::WebPage::DrawToPDFiOS>(*callbackID, Seconds::infinity());
+        WebKit::PendingSnapshotDrawing::wait(*callbackID);
         return;
     }
 
@@ -1403,7 +1413,7 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
         if (!callbackID)
             return;
 
-        protect(protect(_page)->legacyMainFrameProcess().connection())->waitForAsyncReplyAndDispatchImmediately<Messages::WebPage::DrawRectToImage>(*callbackID, Seconds::infinity());
+        WebKit::PendingSnapshotDrawing::wait(*callbackID);
         return;
     }
 
@@ -1438,5 +1448,7 @@ static void storeAccessibilityRemoteConnectionInformation(id element, pid_t pid,
 }
 
 @end
+
+#endif // HAVE(UIKIT_PRINTING)
 
 #endif // PLATFORM(IOS_FAMILY)

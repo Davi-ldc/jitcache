@@ -37,6 +37,7 @@ class CachedResource;
 class Document;
 class DocumentLoader;
 class DocumentThreadableLoader;
+class FragmentedSharedBuffer;
 class NetworkLoadMetrics;
 class ResourceError;
 class ResourceLoader;
@@ -58,9 +59,8 @@ namespace Inspector {
 // commands via IPC and doesn't share any state with InspectorNetworkAgent in the WebProcess.
 //
 // It inherits InspectorWebAgentBase so subclasses can register with AgentRegistry,
-// and AbstractCanMakeCheckedPtr so InstrumentingAgents can hold CheckedPtr to it.
 // Concrete subclasses must use CanMakeCheckedPtr and WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR.
-class NetworkAgentInstrumentation : public WebCore::InspectorAgentBase, public AbstractCanMakeCheckedPtr {
+class NetworkAgentInstrumentation : public WebCore::InspectorAgentBase {
 public:
     ~NetworkAgentInstrumentation() override = default;
 
@@ -79,6 +79,12 @@ public:
     virtual void didReceiveThreadableLoaderResponse(WebCore::ResourceLoaderIdentifier, WebCore::DocumentThreadableLoader&) = 0;
     virtual void willDestroyCachedResource(WebCore::CachedResource&) = 0;
     virtual void mainFrameNavigated(WebCore::DocumentLoader&) = 0;
+
+    virtual bool willIntercept(const WebCore::ResourceRequest&) = 0;
+    virtual bool shouldInterceptRequest(const WebCore::ResourceLoader&) = 0;
+    virtual bool shouldInterceptResponse(const WebCore::ResourceResponse&) = 0;
+    virtual void interceptRequest(WebCore::ResourceLoader&, Function<void(const WebCore::ResourceRequest&)>&&) = 0;
+    virtual void interceptResponse(const WebCore::ResourceResponse&, WebCore::ResourceLoaderIdentifier, CompletionHandler<void(const WebCore::ResourceResponse&, RefPtr<WebCore::FragmentedSharedBuffer>)>&&) = 0;
 
 protected:
     NetworkAgentInstrumentation(WebCore::WebAgentContext& context)

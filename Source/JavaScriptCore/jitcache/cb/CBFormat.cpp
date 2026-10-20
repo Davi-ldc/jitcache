@@ -3,6 +3,7 @@
 
 #if ENABLE(JIT)
 
+#include "CallLinkInfo.h"
 #include <stdint.h>
 #include <wtf/CheckedArithmetic.h>
 
@@ -14,7 +15,8 @@ namespace JSC::JITCache::CBFormat {
 
 namespace CBFormatInternal {
 
-// The type of each kind's metadata field, which the kind's cb.state record stores.
+// The type of each kind's metadata field, which the kind's cb.state record stores, and of iterator_close_check's, the one
+// iteration-mode field that is a byte.
 template<FamilyKind> struct ExpectedField;
 template<> struct ExpectedField<FamilyKind::ArrayProfile> {
     using Type = ArrayProfile;
@@ -36,11 +38,26 @@ template<> struct ExpectedField<FamilyKind::BranchBit> {
 };
 
 template<unsigned index>
+using ExpectedFieldOf = std::conditional_t<index == iteratorCloseCheckIterationModesFamily, uint8_t, typename ExpectedField<familyKind(index)>::Type>;
+
+// The three call opcodes whose this profile lives in the call site's own CallSiteData: the only families without a
+// field.
+template<typename Op>
+constexpr bool isCallWithThisProfileInCallSiteData = std::is_same_v<Op, OpCall> || std::is_same_v<Op, OpCallIgnoreResult> || std::is_same_v<Op, OpTailCall>;
+
+template<unsigned index>
 consteval bool familyIsWellFormed()
 {
     using FamilyType = Family<index>;
-    using Field = std::remove_reference_t<decltype(FamilyType::field(std::declval<typename FamilyType::Op::Metadata&>()))>;
-    static_assert(std::is_same_v<Field, typename ExpectedField<FamilyType::kind>::Type>, "a family's metadata field no longer has the type cb.state stores");
+    if constexpr (FamilyType::hasField) {
+        using Field = std::remove_reference_t<decltype(FamilyType::field(std::declval<typename FamilyType::Op::Metadata&>()))>;
+        static_assert(std::is_same_v<Field, ExpectedFieldOf<index>>, "a family's metadata field no longer has the type cb.state stores");
+        static_assert(!isCallWithThisProfileInCallSiteData<typename FamilyType::Op>, "a call opcode's metadata holds its this profile again");
+    } else {
+        static_assert(FamilyType::kind == FamilyKind::ArrayProfile, "a family without a field is not an array-profile family");
+        static_assert(isCallWithThisProfileInCallSiteData<typename FamilyType::Op>, "an opcode other than OpCall, OpCallIgnoreResult and OpTailCall lost its m_arrayProfile");
+        static_assert(std::is_same_v<decltype(std::declval<typename FamilyType::Op::Metadata&>().m_callLinkInfo), LazyCallLinkInfo>, "a call opcode without m_arrayProfile no longer holds a LazyCallLinkInfo");
+    }
     static_assert(FamilyType::kind == familyKind(index), "the family table and the kind ranges disagree");
     return true;
 }
@@ -51,16 +68,24 @@ consteval bool everyFamilyIsWellFormed(std::integer_sequence<unsigned, indices..
     return (familyIsWellFormed<indices>() && ...);
 }
 
+consteval unsigned numberOfFamiliesWithoutRecords()
+{
+    unsigned count = 0;
+    for (bool hasRecords : familiesWithRecords)
+        count += !hasRecords;
+    return count;
+}
+
 } // namespace CBFormatInternal
 
-// The family table. A reordered native macro moves the table with the native merge, and a new or renamed field fails the
-// build. A new field of one of these types under a new opcode does not, so each WebKit bump compares the profile fields
-// of BytecodeList.rb with the table by hand.
+// The family table. A reordered native macro moves the table with the native merge, and a new, moved or renamed field
+// fails the build. A new field of one of these types under a new opcode does not, so each WebKit bump compares the
+// profile fields of BytecodeList.rb, and every profile reached through another field, with the table by hand.
 static_assert(Internal::SimpleArrayProfileOps::size == 15, "FOR_EACH_OPCODE_WITH_SIMPLE_ARRAY_PROFILE no longer lists the 15 opcodes of A0..A14");
 static_assert(Internal::AllocationHintOps::size == 4, "FOR_EACH_OPCODE_WITH_ARRAY_ALLOCATION_PROFILE no longer lists the 4 opcodes of F16..F19");
 static_assert(Internal::SimpleArrayProfileOps::size + 1 == numberOfArrayProfileFamilies);
 static_assert(Internal::AllocationHintOps::size == numberOfAllocationHintFamilies);
-static_assert(Internal::IterationModesOps::size == numberOfIterationModesFamilies);
+static_assert(Internal::IterationModesOps::size + 1 == numberOfIterationModesFamilies);
 static_assert(Internal::EnumeratorModesOps::size == numberOfEnumeratorModesFamilies);
 static_assert(Internal::Fields::size == numberOfFamilies);
 static_assert(!firstArrayProfileFamily);
@@ -71,6 +96,8 @@ static_assert(toThisStatusFamily == firstEnumeratorModesFamily + numberOfEnumera
 static_assert(branchBitFamily == toThisStatusFamily + 1);
 static_assert(branchBitFamily + 1 == numberOfFamilies);
 static_assert(CBFormatInternal::everyFamilyIsWellFormed(std::make_integer_sequence<unsigned, numberOfFamilies>()));
+// Among the 15 opcodes of the macro, exactly OpCall, OpCallIgnoreResult and OpTailCall lack m_arrayProfile.
+static_assert(CBFormatInternal::numberOfFamiliesWithoutRecords() == 3, "the families without records are not exactly the three call opcodes");
 
 // The families this table places by hand, and A15 after the macro's opcodes, where
 // CodeBlock::updateAllArrayProfilePredictions merges it.
@@ -81,6 +108,7 @@ static_assert(std::is_same_v<Family<iteratorOpenIterationModesFamily>::Op, OpIte
 static_assert(std::is_same_v<Family<iteratorNextIterationModesFamily>::Op, OpIteratorNext>);
 static_assert(std::is_same_v<Family<asyncIteratorOpenIterationModesFamily>::Op, OpAsyncIteratorOpen>);
 static_assert(std::is_same_v<Family<asyncIteratorNextIterationModesFamily>::Op, OpAsyncIteratorNext>);
+static_assert(std::is_same_v<Family<iteratorCloseCheckIterationModesFamily>::Op, OpIteratorCloseCheck>);
 static_assert(std::is_same_v<Family<toThisStatusFamily>::Op, OpToThis>);
 static_assert(std::is_same_v<Family<branchBitFamily>::Op, OpJneqPtr>);
 
@@ -99,11 +127,13 @@ static_assert(ToThisOK <= UINT8_MAX && ToThisConflicted <= UINT8_MAX && ToThisCl
 static_assert(!(sizeof(StateHeader) % sectionAlignment) && !(sizeof(SummaryHeader) % sectionAlignment));
 static_assert(alignof(ArrayProfileRecord) <= sectionAlignment && alignof(LazyOperandRecord) <= sectionAlignment);
 
-// The iteration-mode masks in hexadecimal, and the enumerator flag set.
+// The iteration-mode masks in hexadecimal, and the enumerator flag set. iterator_close_check's byte holds its whole mask.
 static_assert(nativeIterationModes(iteratorOpenIterationModesFamily) == 0x1fff);
-static_assert(nativeIterationModes(iteratorNextIterationModesFamily) == 0x1ff1);
+static_assert(nativeIterationModes(iteratorNextIterationModesFamily) == 0x1ff3);
 static_assert(nativeIterationModes(asyncIteratorOpenIterationModesFamily) == 0x6001);
 static_assert(nativeIterationModes(asyncIteratorNextIterationModesFamily) == 0x2001);
+static_assert(nativeIterationModes(iteratorCloseCheckIterationModesFamily) == 0x12);
+static_assert(nativeIterationModes(iteratorCloseCheckIterationModesFamily) <= UINT8_MAX);
 static_assert(allEnumeratorModes == 0x0f);
 
 FamilyEntryCounts familyEntryCounts(CodeBlock& codeBlock)
@@ -122,12 +152,15 @@ FamilyEntryCounts familyEntryCounts(CodeBlock& codeBlock)
 
 namespace CBFormatInternal {
 
+// The records of a kind's array: the entries of its families that have records, which leaves out A11..A13.
 static CheckedSize familyTotal(const StateHeader& header, FamilyKind kind)
 {
     CheckedSize total;
     unsigned first = firstFamilyOf(kind);
-    for (unsigned family = first; family < first + numberOfFamiliesOf(kind); ++family)
-        total += header.familyEntryCount[family];
+    for (unsigned family = first; family < first + numberOfFamiliesOf(kind); ++family) {
+        if (familyHasRecords(family))
+            total += header.familyEntryCount[family];
+    }
     return total;
 }
 

@@ -29,13 +29,23 @@
 
 #if PLATFORM(COCOA)
 
+#import "InteractionInformationAtPosition.h"
+#import <WebCore/IntPoint.h>
+#import <WebCore/RemoteUserInputEventData.h>
+
+namespace WebCore {
+class HitTestResult;
+class LocalFrame;
+class LocalFrameView;
+}
+
 namespace WebKit {
 
 class WebPage;
-struct InteractionInformationAtPosition;
 struct InteractionInformationRequest;
 
-InteractionInformationAtPosition positionInformationForWebPage(WebPage&, const InteractionInformationRequest&);
+Variant<InteractionInformationAtPosition, WebCore::RemoteUserInputEventData> positionInformationForWebPage(WebPage&, WebCore::LocalFrame& localRoot, const InteractionInformationRequest&);
+std::optional<WebCore::RemoteUserInputEventData> remoteUserInputEventDataForHitTestResult(const WebCore::HitTestResult&, WebCore::LocalFrameView& localRootView, const WebCore::IntPoint& pointInRootView);
 
 };
 

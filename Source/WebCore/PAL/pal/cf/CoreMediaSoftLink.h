@@ -58,12 +58,26 @@ SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMFormatDescriptionGetExtension, C
 #define CMFormatDescriptionGetExtension softLink_CoreMedia_CMFormatDescriptionGetExtension
 SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMFormatDescriptionEqual, Boolean, (CMFormatDescriptionRef desc, CMFormatDescriptionRef other), (desc, other))
 #define CMFormatDescriptionEqual softLink_CoreMedia_CMFormatDescriptionEqual
+SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, OSStatus, (CMFormatDescriptionRef videoDesc, size_t parameterSetIndex, const uint8_t** parameterSetPointerOut, size_t* parameterSetSizeOut, size_t* parameterSetCountOut, int* nalUnitHeaderLengthOut), (videoDesc, parameterSetIndex, parameterSetPointerOut, parameterSetSizeOut, parameterSetCountOut, nalUnitHeaderLengthOut))
+#define CMVideoFormatDescriptionGetHEVCParameterSetAtIndex softLink_CoreMedia_CMVideoFormatDescriptionGetHEVCParameterSetAtIndex
+SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMVideoFormatDescriptionGetH264ParameterSetAtIndex, OSStatus, (CMFormatDescriptionRef videoDesc, size_t parameterSetIndex, const uint8_t** parameterSetPointerOut, size_t* parameterSetSizeOut, size_t* parameterSetCountOut, int* nalUnitHeaderLengthOut), (videoDesc, parameterSetIndex, parameterSetPointerOut, parameterSetSizeOut, parameterSetCountOut, nalUnitHeaderLengthOut))
+#define CMVideoFormatDescriptionGetH264ParameterSetAtIndex softLink_CoreMedia_CMVideoFormatDescriptionGetH264ParameterSetAtIndex
 SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMSampleBufferGetTypeID, CFTypeID, (void), ())
 #define CMSampleBufferGetTypeID softLink_CoreMedia_CMSampleBufferGetTypeID
 // Manual equivalent of WTF_DECLARE_CF_TYPE_TRAIT(CMSampleBuffer) because
 // the soft-linked function lives in the PAL namespace.
 template <> struct WTF::CFTypeTrait<CMSampleBufferRef> {
     static inline CFTypeID typeID() { return PAL::CMSampleBufferGetTypeID(); }
+};
+SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMFormatDescriptionGetTypeID, CFTypeID, (void), ())
+#define CMFormatDescriptionGetTypeID softLink_CoreMedia_CMFormatDescriptionGetTypeID
+template <> struct WTF::CFTypeTrait<CMFormatDescriptionRef> {
+    static inline CFTypeID typeID() { return PAL::CMFormatDescriptionGetTypeID(); }
+};
+SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMTimebaseGetTypeID, CFTypeID, (void), ())
+#define CMTimebaseGetTypeID softLink_CoreMedia_CMTimebaseGetTypeID
+template <> struct WTF::CFTypeTrait<CMTimebaseRef> {
+    static inline CFTypeID typeID() { return PAL::CMTimebaseGetTypeID(); }
 };
 SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMSampleBufferGetDataBuffer, CMBlockBufferRef, (CMSampleBufferRef sbuf), (sbuf))
 #define CMSampleBufferGetDataBuffer softLink_CoreMedia_CMSampleBufferGetDataBuffer
@@ -495,6 +509,8 @@ SOFT_LINK_CONSTANT_FOR_HEADER(PAL, CoreMedia, kCMFormatDescriptionCameraCalibrat
 
 SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMVideoFormatDescriptionCreateFromH264ParameterSets, OSStatus, (CFAllocatorRef allocator, size_t parameterSetCount, const uint8_t* const* parameterSetPointers, const size_t* parameterSetSizes, int NALUnitHeaderLength, CF_RETURNS_RETAINED CMFormatDescriptionRef* formatDescriptionOut), (allocator, parameterSetCount, parameterSetPointers, parameterSetSizes, NALUnitHeaderLength, formatDescriptionOut))
 #define CMVideoFormatDescriptionCreateFromH264ParameterSets softLink_CoreMedia_CMVideoFormatDescriptionCreateFromH264ParameterSets
+SOFT_LINK_FUNCTION_FOR_HEADER(PAL, CoreMedia, CMVideoFormatDescriptionCreateFromHEVCParameterSets, OSStatus, (CFAllocatorRef allocator, size_t parameterSetCount, const uint8_t* const* parameterSetPointers, const size_t* parameterSetSizes, int NALUnitHeaderLength, CFDictionaryRef extensions, CF_RETURNS_RETAINED CMFormatDescriptionRef* formatDescriptionOut), (allocator, parameterSetCount, parameterSetPointers, parameterSetSizes, NALUnitHeaderLength, extensions, formatDescriptionOut))
+#define CMVideoFormatDescriptionCreateFromHEVCParameterSets softLink_CoreMedia_CMVideoFormatDescriptionCreateFromHEVCParameterSets
 
 SOFT_LINK_CONSTANT_FOR_HEADER(PAL, CoreMedia, kCMTagInvalid, CMTag)
 #define kCMTagInvalid get_CoreMedia_kCMTagInvalidSingleton()

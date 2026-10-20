@@ -36,17 +36,17 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGComponentTransferFunctionElement);
 
 SVGComponentTransferFunctionElement::SVGComponentTransferFunctionElement(const QualifiedName& tagName, Document& document)
-    : SVGElement(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGElement(tagName, document, PropertyRegistry::singleton())
 {
     static bool didRegistration = false;
     if (!didRegistration) [[unlikely]] {
         didRegistration = true;
         PropertyRegistry::registerProperty<SVGNames::typeAttr, ComponentTransferType, &SVGComponentTransferFunctionElement::m_type>();
         PropertyRegistry::registerProperty<SVGNames::tableValuesAttr, &SVGComponentTransferFunctionElement::m_tableValues>();
-        PropertyRegistry::registerProperty<SVGNames::slopeAttr, &SVGComponentTransferFunctionElement::m_slope, initialSlopeValue>();
+        PropertyRegistry::registerProperty<SVGNames::slopeAttr, &SVGComponentTransferFunctionElement::m_slope>(initialSlopeValue);
         PropertyRegistry::registerProperty<SVGNames::interceptAttr, &SVGComponentTransferFunctionElement::m_intercept>();
-        PropertyRegistry::registerProperty<SVGNames::amplitudeAttr, &SVGComponentTransferFunctionElement::m_amplitude, initialAmplitudeValue>();
-        PropertyRegistry::registerProperty<SVGNames::exponentAttr, &SVGComponentTransferFunctionElement::m_exponent, initialExponentValue>();
+        PropertyRegistry::registerProperty<SVGNames::amplitudeAttr, &SVGComponentTransferFunctionElement::m_amplitude>(initialAmplitudeValue);
+        PropertyRegistry::registerProperty<SVGNames::exponentAttr, &SVGComponentTransferFunctionElement::m_exponent>(initialExponentValue);
         PropertyRegistry::registerProperty<SVGNames::offsetAttr, &SVGComponentTransferFunctionElement::m_offset>();
     };
 }
@@ -58,7 +58,7 @@ void SVGComponentTransferFunctionElement::attributeChanged(const QualifiedName& 
         protect(m_type)->parseBaseVal<ComponentTransferType>(*this, newValue);
         break;
     case AttributeNames::tableValuesAttr:
-        protect(m_tableValues)->baseVal()->parse(newValue);
+        protect(protect(m_tableValues)->baseVal())->parse(newValue);
         break;
     case AttributeNames::slopeAttr:
         m_slope->setBaseValInternal(parseNumber(newValue));

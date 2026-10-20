@@ -31,6 +31,7 @@
 #include "MessageReceiver.h"
 #include "MessageSender.h"
 #include "PolicyDecision.h"
+#include "PolicyListenerIdentifier.h"
 #include "TransactionID.h"
 #include "WKBase.h"
 #include "WebLocalFrameLoaderClient.h"
@@ -43,6 +44,7 @@
 #include <WebCore/LayerHostingContextIdentifier.h>
 #include <WebCore/LocalFrameLoaderClient.h>
 #include <WebCore/MarkupExclusionRule.h>
+#include <WebCore/PendingNavigateEventIdentifier.h>
 #include <WebCore/ProcessIdentifier.h>
 #include <WebCore/ScriptExecutionContextIdentifier.h>
 #include <WebCore/ShareableBitmap.h>
@@ -117,8 +119,6 @@ struct JSHandleInfo;
 struct ProvisionalFrameCreationParameters;
 struct WebsitePoliciesData;
 
-enum class WithCertificateInfo : bool { No, Yes };
-
 class WebFrame : public API::ObjectImpl<API::Object::Type::BundleFrame>, public IPC::MessageReceiver, public IPC::MessageSender {
 public:
     static Ref<WebFrame> create(WebPage& page, WebCore::FrameIdentifier frameID) { return adoptRef(*new WebFrame(page, frameID)); }
@@ -146,11 +146,12 @@ public:
     void createProvisionalFrame(ProvisionalFrameCreationParameters&&);
     void commitProvisionalFrame();
     void destroyProvisionalFrame();
+    void updateSandboxFlags(WebCore::SandboxFlags);
     void loadDidCommitInAnotherProcess(WebCore::ProcessIdentifier hostingProcessID, std::optional<WebCore::LayerHostingContextIdentifier>);
     WebCore::LocalFrame* provisionalFrame() { return m_provisionalFrame.get(); }
 
     Awaitable<std::optional<FrameInfoData>> getFrameInfo();
-    FrameInfoData info(WithCertificateInfo = WithCertificateInfo::No) const;
+    FrameInfoData info() const;
     FrameTreeNodeData frameTreeData() const;
 
     WebCore::FrameIdentifier frameID() const { return m_frameID; }
@@ -160,9 +161,10 @@ public:
     // document that made it: once the frame has a different document, the check can no longer be honored. A
     // download attribute check also carries the load it was made for, which a newer navigation can replace.
     enum class PolicyCheckKind : uint8_t { Navigation, DownloadAttribute, NewWindow };
-    uint64_t setUpPolicyListener(WebCore::FramePolicyFunction&&, ForNavigationAction, PolicyCheckKind, Markable<WebCore::ScriptExecutionContextIdentifier> initiatingDocument = { }, SingleThreadWeakPtr<WebCore::DocumentLoader>&& downloadAttributePolicyDocumentLoader = { });
+    PolicyListenerIdentifier setUpPolicyListener(WebCore::FramePolicyFunction&&, ForNavigationAction, PolicyCheckKind, Markable<WebCore::ScriptExecutionContextIdentifier> initiatingDocument = { }, SingleThreadWeakPtr<WebCore::DocumentLoader>&& downloadAttributePolicyDocumentLoader = { });
     void invalidatePolicyListeners();
-    void didReceivePolicyDecision(uint64_t listenerID, PolicyDecision&&);
+    void didReceivePolicyDecision(PolicyListenerIdentifier, PolicyDecision&&);
+    bool dispatchPendingNavigateEventAfterNavigationPolicy(WebCore::PendingNavigateEventIdentifier);
 
     void didFinishLoadInAnotherProcess();
     void removeFromTree();
@@ -249,7 +251,7 @@ public:
 
     RefPtr<WebImage> createSelectionSnapshot() const;
 
-#if ENABLE(TWO_PHASE_CLICKS)
+#if ENABLE(TWO_PHASE_CLICKS) || ENABLE(UI_SIDE_COMPOSITING)
     std::optional<TransactionID> firstLayerTreeTransactionIDAfterDidCommitLoad() const { return m_firstLayerTreeTransactionIDAfterDidCommitLoad; }
     void setFirstLayerTreeTransactionIDAfterDidCommitLoad(TransactionID transactionID) { m_firstLayerTreeTransactionIDAfterDidCommitLoad = transactionID; }
 #endif
@@ -309,6 +311,7 @@ public:
     void requestContainerJSHandleForExtractedText(WebCore::TextExtraction::ExtractedText&&, CompletionHandler<void(std::optional<JSHandleInfo>&&)>&&);
     void requestContainerJSHandleForSearchTexts(Vector<String>&&, std::optional<WebCore::NodeIdentifier>&&, CompletionHandler<void(std::optional<JSHandleInfo>&&)>&&);
     void requestContentFrameIdentifierForNode(WebCore::NodeIdentifier, CompletionHandler<void(std::optional<WebCore::FrameIdentifier>&&)>&&);
+    void findFirstConnectedNode(Vector<WebCore::NodeIdentifier>&&, CompletionHandler<void(std::optional<WebCore::NodeIdentifier>)>&&);
 
     void getSelectorPathsForNode(JSHandleInfo&&, CompletionHandler<void(Vector<HashSet<String>>&&)>&&);
     void getNodeForSelectorPaths(Vector<HashSet<String>>&&, CompletionHandler<void(std::optional<JSHandleInfo>&&)>&&);
@@ -346,7 +349,7 @@ private:
         SingleThreadWeakPtr<WebCore::DocumentLoader> downloadAttributePolicyDocumentLoader;
         WebCore::FramePolicyFunction policyFunction;
     };
-    HashMap<uint64_t, PolicyCheck> m_pendingPolicyChecks;
+    HashMap<PolicyListenerIdentifier, PolicyCheck> m_pendingPolicyChecks;
 
     bool initiatingDocumentIsStillCurrent(const PolicyCheck&) const;
     bool newerNavigationOwnsDownloadAttributePolicyCheckLoad(const PolicyCheck&) const;
@@ -357,7 +360,7 @@ private:
     bool m_wasRemovedInAnotherProcess { false };
     bool m_hasAppliedInitialRemoteFrameRect { false };
 
-#if ENABLE(TWO_PHASE_CLICKS)
+#if ENABLE(TWO_PHASE_CLICKS) || ENABLE(UI_SIDE_COMPOSITING)
     std::optional<TransactionID> m_firstLayerTreeTransactionIDAfterDidCommitLoad;
 #endif
     std::optional<NavigatingToAppBoundDomain> m_isNavigatingToAppBoundDomain;
@@ -365,7 +368,7 @@ private:
     Markable<WebCore::LayerHostingContextIdentifier> m_layerHostingContextIdentifier;
     Markable<WebCore::FrameIdentifier> m_frameIDBeforeProvisionalNavigation;
 
-    std::unique_ptr<FrameInspectorTarget> m_inspectorTarget;
+    const std::unique_ptr<FrameInspectorTarget> m_inspectorTarget;
 };
 
 RefPtr<WebCore::ShareableBitmap> shareableBitmapFromImageData(WebCore::ImageData&);

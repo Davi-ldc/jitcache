@@ -1,9 +1,9 @@
 // A module embedded beside supplied-digests-app.js in the standalone executable, which the app loads at run time, so the
-// executable records its source digest. Its source is CommonJS. A CommonJS build, with --bytecode or with --format=cjs,
-// keeps it CommonJS, so require evaluates it through JSCommonJSModule::evaluate. Where the app overrides the module wrapper
-// first, Bun evaluates the module's text inside the other wrapper, and the provider no longer vouches for the recorded
-// digest, which JSCommonJSModule::evaluate clears. A build without either flag turns it into
-// an ES module, which the module loader evaluates.
+// executable records its source digest. Its source is CommonJS. A CommonJS build, with --format=cjs, keeps it CommonJS,
+// so require evaluates it through JSCommonJSModule::evaluate. Where the app overrides the module wrapper first, Bun
+// evaluates the module's text inside the other wrapper, and the provider no longer vouches for the recorded digest,
+// which JSCommonJSModule::evaluate clears. A build without the flag turns it into an ES module, which the module loader
+// evaluates.
 function sdModuleHot(x)
 {
     let total = x;

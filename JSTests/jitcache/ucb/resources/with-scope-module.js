@@ -1,5 +1,5 @@
-// with-scope.js requires this CommonJS module with Node's compile cache on, so that later runs decode it from a payload
-// Bun generated without the with-scope bit while their request carries it.
+// with-scope.js requires this CommonJS module with Node's compile cache on, so that every run after the first decodes it
+// from the payload the first run persisted.
 function withScopeSquare(x)
 {
     return (x * x) | 0;

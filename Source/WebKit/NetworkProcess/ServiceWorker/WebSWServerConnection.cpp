@@ -328,11 +328,12 @@ RefPtr<ServiceWorkerFetchTask> WebSWServerConnection::createFetchTask(NetworkRes
 
 void WebSWServerConnection::startFetch(ServiceWorkerFetchTask& task, SWServerWorker& worker)
 {
-    auto runServerWorkerAndStartFetch = [weakThis = WeakPtr { *this }, task = WeakPtr { task }](bool success) mutable {
+    auto runServerWorkerAndStartFetch = [weakThis = WeakPtr { *this }, weakTask = WeakPtr { task }](bool success) mutable {
+        RefPtr task = weakTask;
         if (!task)
             return;
 
-        RefPtr protectedThis = weakThis.get();
+        RefPtr protectedThis = weakThis;
         if (!protectedThis) {
             task->cannotHandle();
             return;
@@ -369,7 +370,7 @@ void WebSWServerConnection::startFetch(ServiceWorkerFetchTask& task, SWServerWor
             }
 
             if (!contextConnection) {
-                SWSERVERCONNECTION_RELEASE_LOG_ERROR_WITH_THIS(protectedThis, "startFetch: fetchIdentifier=%s DidNotHandle because failed to run service worker", task->fetchIdentifier().loggingString().utf8().data());
+                SWSERVERCONNECTION_RELEASE_LOG_ERROR_WITH_THIS(protectedThis, "startFetch: fetchIdentifier=%s DidNotHandle because failed to run service worker", task->fetchIdentifier().loggingString().utf8());
                 task->cannotHandle();
                 return;
             }
@@ -381,7 +382,7 @@ void WebSWServerConnection::startFetch(ServiceWorkerFetchTask& task, SWServerWor
     worker.whenActivated(WTF::move(runServerWorkerAndStartFetch));
 }
 
-void WebSWServerConnection::postMessageToServiceWorker(ServiceWorkerIdentifier destinationIdentifier, MessageWithMessagePorts&& message, const ServiceWorkerOrClientIdentifier& sourceIdentifier)
+void WebSWServerConnection::postMessageToServiceWorker(ServiceWorkerIdentifier destinationIdentifier, MessageWithMessagePorts&& message, const ServiceWorkerOrClientIdentifier& sourceIdentifier, Vector<URL>&& blobURLs)
 {
     RefPtr server = this->server();
     if (!server)
@@ -403,8 +404,12 @@ void WebSWServerConnection::postMessageToServiceWorker(ServiceWorkerIdentifier d
     if (!sourceData)
         return;
 
+    CompletionHandlerCallingScope blobURLsInFlight;
+    if (RefPtr connection = m_networkConnectionToWebProcess.get())
+        blobURLsInFlight = connection->retainBlobURLsWhileMessageIsInFlight(blobURLs);
+
     // It's possible this specific worker cannot be re-run (e.g. its registration has been removed)
-    server->runServiceWorkerIfNecessary(destinationIdentifier, [protectedThis = Ref { *this }, destinationIdentifier, message = WTF::move(message), sourceData = WTF::move(*sourceData)](auto* contextConnection) mutable {
+    server->runServiceWorkerIfNecessary(destinationIdentifier, [protectedThis = Ref { *this }, destinationIdentifier, message = WTF::move(message), sourceData = WTF::move(*sourceData), blobURLsInFlight = WTF::move(blobURLsInFlight)](auto* contextConnection) mutable {
         if (!contextConnection)
             return;
 
@@ -416,7 +421,12 @@ void WebSWServerConnection::postMessageToServiceWorker(ServiceWorkerIdentifier d
         CheckedRef registry = networkProcess->messagePortChannelRegistry();
         for (auto& transferredPort : message.transferredPorts)
             registry->recordPendingTransferDestination(transferredPort.first, contextConnection->webProcessIdentifier());
-        sendToContextProcess(*contextConnection, Messages::WebSWContextManagerConnection::PostMessageToServiceWorker { destinationIdentifier, WTF::move(message), WTF::move(sourceData) });
+
+        if (!blobURLsInFlight) {
+            sendToContextProcess(*contextConnection, Messages::WebSWContextManagerConnection::PostMessageToServiceWorker { destinationIdentifier, WTF::move(message), WTF::move(sourceData) });
+            return;
+        }
+        Ref { downcast<WebSWServerToContextConnection>(*contextConnection) }->sendWithAsyncReply(Messages::WebSWContextManagerConnection::PostMessageToServiceWorkerAndNotifyWhenDispatched { destinationIdentifier, WTF::move(message), WTF::move(sourceData) }, [blobURLsInFlight = WTF::move(blobURLsInFlight)] { });
     });
 }
 
@@ -431,7 +441,7 @@ void WebSWServerConnection::scheduleJobInServer(ServiceWorkerJobData&& jobData)
         return;
     }
 
-    SWSERVERCONNECTION_RELEASE_LOG("Scheduling ServiceWorker job %s in server", jobData.identifier().loggingString().utf8().data());
+    SWSERVERCONNECTION_RELEASE_LOG("Scheduling ServiceWorker job %s in server", jobData.identifier().loggingString().utf8());
     ASSERT(identifier() == jobData.connectionIdentifier());
 
     if (RefPtr server = this->server())
@@ -484,13 +494,16 @@ void WebSWServerConnection::scheduleUnregisterJobInServer(ServiceWorkerJobIdenti
     server->scheduleUnregisterJob(ServiceWorkerJobDataIdentifier { identifier(), jobIdentifier }, *registration, contextIdentifier, WTF::move(clientURL));
 }
 
-void WebSWServerConnection::postMessageToServiceWorkerClient(ScriptExecutionContextIdentifier destinationContextIdentifier, const MessageWithMessagePorts& message, ServiceWorkerIdentifier sourceIdentifier, const SecurityOriginData& sourceOrigin)
+void WebSWServerConnection::postMessageToServiceWorkerClient(ScriptExecutionContextIdentifier destinationContextIdentifier, const MessageWithMessagePorts& message, ServiceWorkerIdentifier sourceIdentifier, const SecurityOriginData& sourceOrigin, CompletionHandlerCallingScope&& blobURLsInFlight)
 {
     RefPtr server = this->server();
     if (!server)
         return;
 
-    server->postMessageToServiceWorkerClient(destinationContextIdentifier, message, sourceIdentifier, sourceOrigin, [protectedThis = Ref { *this }] (auto destinationContextIdentifier, auto& message, auto sourceServiceWorkerData, auto& sourceOrigin) {
+    // FIXME: When the destination client is still being created, SWServer::postMessageToServiceWorkerClient queues the
+    // message in m_clientsToBeCreatedById without invoking this callback, so blobURLsInFlight is destroyed here rather
+    // than once releaseServiceWorkerClientPendingMessage has flushed the message to the client.
+    server->postMessageToServiceWorkerClient(destinationContextIdentifier, message, sourceIdentifier, sourceOrigin, [protectedThis = Ref { *this }, &blobURLsInFlight] (auto destinationContextIdentifier, auto& message, auto sourceServiceWorkerData, auto& sourceOrigin) {
         // PostMessageToServiceWorkerClient follows a different flow than normal MessagePort post message.
         // We pre-record the destination so impending message checks pass.
         RefPtr networkProcess = protectedThis->networkProcess();
@@ -499,7 +512,11 @@ void WebSWServerConnection::postMessageToServiceWorkerClient(ScriptExecutionCont
         CheckedRef registry = networkProcess->messagePortChannelRegistry();
         for (auto& transferredPort : message.transferredPorts)
             registry->recordPendingTransferDestination(transferredPort.first, destinationContextIdentifier.processIdentifier());
-        protectedThis->send(Messages::WebSWClientConnection::PostMessageToServiceWorkerClient { destinationContextIdentifier, message, sourceServiceWorkerData, sourceOrigin }, 0);
+        if (!blobURLsInFlight) {
+            protectedThis->send(Messages::WebSWClientConnection::PostMessageToServiceWorkerClient { destinationContextIdentifier, message, sourceServiceWorkerData, sourceOrigin }, 0);
+            return;
+        }
+        protectedThis->sendWithAsyncReply(Messages::WebSWClientConnection::PostMessageToServiceWorkerClientAndNotifyWhenDispatched { destinationContextIdentifier, message, sourceServiceWorkerData, sourceOrigin }, [blobURLsInFlight = WTF::move(blobURLsInFlight)] { }, 0);
     });
 }
 
@@ -690,10 +707,12 @@ void WebSWServerConnection::subscribeToPushService(WebCore::ServiceWorkerRegistr
     }
 
     session->notificationManager().subscribeToPushService(registration->scopeURLWithoutFragment(), WTF::move(applicationServerKey), [weakThis = WeakPtr { *this }, completionHandler = WTF::move(completionHandler), registrableDomain = RegistrableDomain(registration->data().scopeURL)] (std::expected<PushSubscriptionData, ExceptionData>&& result) mutable {
-        if (RefPtr resourceLoadStatistics = weakThis && weakThis->session() ? weakThis->session()->resourceLoadStatistics() : nullptr; result && resourceLoadStatistics) {
-            return resourceLoadStatistics->setMostRecentWebPushInteractionTime(WTF::move(registrableDomain), [result = WTF::move(result), completionHandler = WTF::move(completionHandler)] () mutable {
-                completionHandler(WTF::move(result));
-            });
+        if (RefPtr protectedThis = weakThis) {
+            if (RefPtr resourceLoadStatistics = protectedThis->session() ? protectedThis->session()->resourceLoadStatistics() : nullptr; result && resourceLoadStatistics) {
+                return resourceLoadStatistics->setMostRecentWebPushInteractionTime(WTF::move(registrableDomain), [result = WTF::move(result), completionHandler = WTF::move(completionHandler)] () mutable {
+                    completionHandler(WTF::move(result));
+                });
+            }
         }
         completionHandler(WTF::move(result));
     });

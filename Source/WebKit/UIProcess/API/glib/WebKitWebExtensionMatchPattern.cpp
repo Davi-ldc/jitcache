@@ -25,6 +25,7 @@
 #include "WebKitPrivate.h"
 
 #include <wtf/URLParser.h>
+#include <wtf/glib/GLibExtras.h>
 
 using namespace WebKit;
 
@@ -48,10 +49,10 @@ struct _WebKitWebExtensionMatchPattern {
     }
 
     RefPtr<WebExtensionMatchPattern> matchPattern;
-    CString string { matchPattern->string().utf8() };
-    CString scheme { matchPattern->scheme().utf8() };
-    CString host { matchPattern->host().utf8() };
-    CString path { matchPattern->path().utf8() };
+    UTF8CString string { matchPattern->string().utf8() };
+    UTF8CString scheme { matchPattern->scheme().utf8() };
+    UTF8CString host { matchPattern->host().utf8() };
+    UTF8CString path { matchPattern->path().utf8() };
     bool matchesAllURLs { matchPattern->matchesAllURLs() };
     bool matchesAllHosts { matchPattern->matchesAllHosts() };
     int referenceCount { 1 };
@@ -146,7 +147,7 @@ WebKitWebExtensionMatchPattern* webkit_web_extension_match_pattern_ref(WebKitWeb
  *
  * Atomically releases a reference on the given @matchPattern.
  *
- * If the reference was the last, the resources associated to the
+ * If the reference was the last, the resources associated with the
  * @matchPattern are freed. This function is MT-safe and may be called from
  * any thread.
  *
@@ -210,8 +211,8 @@ WebKitWebExtensionMatchPattern* webkit_web_extension_match_pattern_new_with_stri
     RefPtr matchPattern = WebKit::WebExtensionMatchPattern::create(String::fromUTF8(string), internalError);
 
     if (error && internalError) {
-        g_set_error(error, webkit_web_extension_match_pattern_error_quark(),
-            toWebKitWebExtensionMatchPatternError(internalError->errorCode()), internalError->localizedDescription().utf8().data(), nullptr);
+        SAFE_G_SET_ERROR(error, webkit_web_extension_match_pattern_error_quark(),
+            toWebKitWebExtensionMatchPatternError(internalError->errorCode()), "%s", internalError->localizedDescription().utf8());
     }
 
     return webkitWebExtensionMatchPatternCreate(matchPattern);
@@ -240,8 +241,8 @@ WebKitWebExtensionMatchPattern* webkit_web_extension_match_pattern_new_with_sche
     RefPtr matchPattern = WebKit::WebExtensionMatchPattern::create(String::fromUTF8(scheme), String::fromUTF8(host), String::fromUTF8(path), internalError);
 
     if (error && internalError) {
-        g_set_error(error, webkit_web_extension_match_pattern_error_quark(),
-            toWebKitWebExtensionMatchPatternError(internalError->errorCode()), internalError->localizedDescription().utf8().data(), nullptr);
+        SAFE_G_SET_ERROR(error, webkit_web_extension_match_pattern_error_quark(),
+            toWebKitWebExtensionMatchPatternError(internalError->errorCode()), "%s", internalError->localizedDescription().utf8());
     }
 
     return webkitWebExtensionMatchPatternCreate(matchPattern);
@@ -260,7 +261,7 @@ WebKitWebExtensionMatchPattern* webkit_web_extension_match_pattern_new_with_sche
 const gchar* webkit_web_extension_match_pattern_get_string(WebKitWebExtensionMatchPattern* matchPattern)
 {
     g_return_val_if_fail(matchPattern, nullptr);
-    return matchPattern->string.data();
+    return matchPattern->string.legacyCStringPointer();
 }
 
 /**
@@ -276,7 +277,7 @@ const gchar* webkit_web_extension_match_pattern_get_string(WebKitWebExtensionMat
 const gchar* webkit_web_extension_match_pattern_get_scheme(WebKitWebExtensionMatchPattern* matchPattern)
 {
     g_return_val_if_fail(matchPattern, nullptr);
-    return matchPattern->scheme.data();
+    return matchPattern->scheme.legacyCStringPointer();
 }
 
 /**
@@ -292,7 +293,7 @@ const gchar* webkit_web_extension_match_pattern_get_scheme(WebKitWebExtensionMat
 const gchar* webkit_web_extension_match_pattern_get_host(WebKitWebExtensionMatchPattern* matchPattern)
 {
     g_return_val_if_fail(matchPattern, nullptr);
-    return matchPattern->host.data();
+    return matchPattern->host.legacyCStringPointer();
 }
 
 /**
@@ -308,7 +309,7 @@ const gchar* webkit_web_extension_match_pattern_get_host(WebKitWebExtensionMatch
 const gchar* webkit_web_extension_match_pattern_get_path(WebKitWebExtensionMatchPattern* matchPattern)
 {
     g_return_val_if_fail(matchPattern, nullptr);
-    return matchPattern->path.data();
+    return matchPattern->path.legacyCStringPointer();
 }
 
 /**
@@ -332,7 +333,7 @@ gboolean webkit_web_extension_match_pattern_get_matches_all_urls(WebKitWebExtens
  * webkit_web_extension_match_pattern_get_matches_all_hosts:
  * @matchPattern: A #WebKitWebExtensionMatchPattern
  *
- * Gets whether the match pattern matches all host. This happens when
+ * Gets whether the match pattern matches all hosts. This happens when
  * the pattern is `<all_urls>`, or if `*` is set as the host string.
  * 
  * Returns: Whether this match pattern matches all hosts.
@@ -365,7 +366,7 @@ static OptionSet<WebExtensionMatchPattern::Options> toImpl(WebKitWebExtensionMat
  * webkit_web_extension_match_pattern_matches_url:
  * @matchPattern: A #WebKitWebExtensionMatchPattern
  * @url: The URL to match against the pattern.
- * @options: The #WebKitWebExtensionMatchPatternOptions use while matching.
+ * @options: The #WebKitWebExtensionMatchPatternOptions to use while matching.
  *
  * Matches the @matchPattern against the specified URL with options.
  * 
@@ -389,7 +390,7 @@ gboolean webkit_web_extension_match_pattern_matches_url(WebKitWebExtensionMatchP
  * webkit_web_extension_match_pattern_matches_pattern:
  * @matchPattern: A #WebKitWebExtensionMatchPattern to match against.
  * @pattern: The #WebKitWebExtensionMatchPattern to match with @matchPattern.
- * @options: The #WebKitWebExtensionMatchPatternOptions use while matching.
+ * @options: The #WebKitWebExtensionMatchPatternOptions to use while matching.
  *
  * Matches the @matchPattern against the specified @pattern with options.
  * 

@@ -66,6 +66,7 @@ enum class URLEnvironment : uint8_t {
     SmallScreen,
     TubularApp,
     LensApp,
+    SafariWebApp,
 };
 
 WEBCORE_EXPORT bool evaluateURLEnvironment(URLEnvironment);
@@ -123,6 +124,11 @@ public:
         return false;
     }
 
+    friend bool operator==(const URLPatternList& a, const URLPatternList& b)
+    {
+        return std::ranges::equal(a.span(), b.span());
+    }
+
 private:
     constexpr std::span<const ASCIILiteral> span() const LIFETIME_BOUND
     {
@@ -147,15 +153,27 @@ struct PathStartsWith {
     ASCIILiteral prefix;
 };
 
+struct PathStartsWithComponent {
+    ASCIILiteral prefix;
+};
+
 struct PathIs {
     ASCIILiteral path;
 };
 
-struct PathOrFragmentContains {
-    ASCIILiteral substring;
+struct LastPathComponentIs {
+    ASCIILiteral component;
+};
+
+struct LastPathComponentEndsWith {
+    ASCIILiteral suffix;
 };
 
 struct QueryContains {
+    ASCIILiteral substring;
+};
+
+struct FragmentContains {
     ASCIILiteral substring;
 };
 
@@ -177,17 +195,34 @@ constexpr PathStartsWith pathStartsWith(ASCIILiteral prefix)
     return { prefix };
 }
 
+// Matches leading path components, so "maps" covers "/maps" and "/maps/place" but
+// not "/mapsearch". The leading and trailing slashes are implied.
+constexpr PathStartsWithComponent pathStartsWithComponent(ASCIILiteral prefix)
+{
+    return { prefix };
+}
+
 constexpr PathIs pathIs(ASCIILiteral path)
 {
     return { path };
 }
 
-constexpr PathOrFragmentContains pathOrFragmentContains(ASCIILiteral substring)
+constexpr LastPathComponentIs lastPathComponentIs(ASCIILiteral component)
+{
+    return { component };
+}
+
+constexpr LastPathComponentEndsWith lastPathComponentEndsWith(ASCIILiteral suffix)
+{
+    return { suffix };
+}
+
+constexpr QueryContains queryContains(ASCIILiteral substring)
 {
     return { substring };
 }
 
-constexpr QueryContains queryContains(ASCIILiteral substring)
+constexpr FragmentContains fragmentContains(ASCIILiteral substring)
 {
     return { substring };
 }
@@ -210,6 +245,11 @@ constexpr EnvironmentIs tubularApp()
 constexpr EnvironmentIs lensApp()
 {
     return { URLEnvironment::LensApp };
+}
+
+constexpr EnvironmentIs safariWebApp()
+{
+    return { URLEnvironment::SafariWebApp };
 }
 
 } // namespace URLRefinement
@@ -262,6 +302,8 @@ public:
 
     WEBCORE_EXPORT bool matches(const URLMatchContext&) const;
 
+    friend bool operator==(const URLMatch&, const URLMatch&) = default;
+
 private:
     enum class Kind : uint8_t {
         Domain,
@@ -274,18 +316,23 @@ private:
     enum class PathComparison : uint8_t {
         PathContains,
         PathStartsWith,
+        PathStartsWithComponent,
         PathIs,
-        PathOrFragmentContains,
+        LastPathComponentIs,
+        LastPathComponentEndsWith,
     };
 
     struct RefinementSet {
         PathComparison pathComparison { PathComparison::PathContains };
         ASCIILiteral pathPattern;
         ASCIILiteral queryPattern;
+        ASCIILiteral fragmentPattern;
         std::optional<URLEnvironment> environment;
         URLPatternList hosts;
 
         bool matches(const URLMatchContext&) const;
+
+        friend bool operator==(const RefinementSet&, const RefinementSet&) = default;
 
     private:
         bool matchesPathPattern(const URL&) const;
@@ -308,20 +355,39 @@ private:
         setPathPattern(set, PathComparison::PathStartsWith, refinement.prefix);
     }
 
+    static constexpr void applyRefinement(RefinementSet& set, URLRefinement::PathStartsWithComponent refinement)
+    {
+        RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(refinement.prefix.length());
+        RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(refinement.prefix[0] != '/');
+        RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(refinement.prefix[refinement.prefix.length() - 1] != '/');
+        setPathPattern(set, PathComparison::PathStartsWithComponent, refinement.prefix);
+    }
+
     static constexpr void applyRefinement(RefinementSet& set, URLRefinement::PathIs refinement)
     {
         setPathPattern(set, PathComparison::PathIs, refinement.path);
     }
 
-    static constexpr void applyRefinement(RefinementSet& set, URLRefinement::PathOrFragmentContains refinement)
+    static constexpr void applyRefinement(RefinementSet& set, URLRefinement::LastPathComponentIs refinement)
     {
-        setPathPattern(set, PathComparison::PathOrFragmentContains, refinement.substring);
+        setPathPattern(set, PathComparison::LastPathComponentIs, refinement.component);
+    }
+
+    static constexpr void applyRefinement(RefinementSet& set, URLRefinement::LastPathComponentEndsWith refinement)
+    {
+        setPathPattern(set, PathComparison::LastPathComponentEndsWith, refinement.suffix);
     }
 
     static constexpr void applyRefinement(RefinementSet& set, URLRefinement::QueryContains refinement)
     {
         RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(set.queryPattern.isNull());
         set.queryPattern = refinement.substring;
+    }
+
+    static constexpr void applyRefinement(RefinementSet& set, URLRefinement::FragmentContains refinement)
+    {
+        RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(set.fragmentPattern.isNull());
+        set.fragmentPattern = refinement.substring;
     }
 
     static constexpr void applyRefinement(RefinementSet& set, URLRefinement::HostIs refinement)

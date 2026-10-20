@@ -32,6 +32,8 @@
 #include "config.h"
 #include "SourceBuffer.h"
 
+#include <wtf/text/TextStream.h>
+
 #if ENABLE(MEDIA_SOURCE)
 
 #include "AudioTrack.h"
@@ -731,7 +733,7 @@ VideoTrackList& SourceBuffer::videoTracks()
 {
     if (!m_videoTracks) {
         Ref videoTracks = VideoTrackList::create(protect(scriptExecutionContext()).get());
-        m_videoTracks = videoTracks.copyRef();
+        lazyInitialize(m_videoTracks, videoTracks.copyRef());
         videoTracks->setOpaqueRootObserver(m_opaqueRootProvider);
     }
     return *m_videoTracks;
@@ -741,7 +743,7 @@ AudioTrackList& SourceBuffer::audioTracks()
 {
     if (!m_audioTracks) {
         Ref audioTracks = AudioTrackList::create(protect(scriptExecutionContext()).get());
-        m_audioTracks = audioTracks.copyRef();
+        lazyInitialize(m_audioTracks, audioTracks.copyRef());
         audioTracks->setOpaqueRootObserver(m_opaqueRootProvider);
     }
     return *m_audioTracks;
@@ -751,7 +753,7 @@ TextTrackList& SourceBuffer::textTracks()
 {
     if (!m_textTracks) {
         Ref textTracks = TextTrackList::create(protect(scriptExecutionContext()).get());
-        m_textTracks = textTracks.copyRef();
+        lazyInitialize(m_textTracks, textTracks.copyRef());
         textTracks->setOpaqueRootObserver(m_opaqueRootProvider);
     }
     return *m_textTracks;
@@ -1208,7 +1210,7 @@ void SourceBuffer::audioTrackLanguageChanged(AudioTrack& track)
         audioTracks->scheduleChangeEvent();
 }
 
-void SourceBuffer::textTrackModeChanged(TextTrack& track)
+void SourceBuffer::textTrackModeChanged(TextTrack& track, TextTrack::ModeChangeType)
 {
     // 2.4.5 Changes to selected/enabled track state
     // If a text track mode becomes "disabled" and the SourceBuffer associated with this track is not
@@ -1405,7 +1407,7 @@ void SourceBuffer::updateBuffered()
     //    of this attribute to intersection ranges.
     if (oldRanges != intersectionRanges) {
         m_buffered = TimeRanges::create(intersectionRanges);
-        LOG(Media, "SourceBuffer::updateBuffered(%p) - buffered = %s", this, toString(intersectionRanges).utf8().data());
+        LOG_WITH_STREAM(Media, stream << "SourceBuffer::updateBuffered("_s << this << ") - buffered = "_s << toString(intersectionRanges));
     }
 }
 

@@ -60,7 +60,6 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderGrid);
 
 RenderGrid::RenderGrid(Element& element, Style::ComputedStyle&& style)
     : RenderBlock(Type::Grid, element, WTF::move(style), { })
-    , m_grid(*this)
     , m_trackSizingAlgorithm(this, currentGrid())
 {
     ASSERT(isRenderGrid());
@@ -318,7 +317,7 @@ enum class AlignmentContextTypes : uint8_t {
 };
 
 template<typename F>
-static void cacheBaselineAlignedGridItems(const RenderGrid& grid, GridTrackSizingAlgorithm& algorithm, OptionSet<AlignmentContextTypes> alignmentContextTypes, F& callback, bool cachingRowSubgridsForRootGrid)
+static void cacheBaselineAlignedGridItems(const RenderGrid& grid, GridTrackSizingAlgorithm& algorithm, OptionSet<AlignmentContextTypes> alignmentContextTypes, NOESCAPE const F& callback, bool cachingRowSubgridsForRootGrid)
 {
     ASSERT_IMPLIES(cachingRowSubgridsForRootGrid, !algorithm.renderGrid()->isSubgridRows() && (algorithm.renderGrid() == &grid || grid.isSubgridOf(GridLayoutFunctions::flowAwareDirectionForGridItem(*algorithm.renderGrid(), grid, Style::GridTrackSizingDirection::Rows), *algorithm.renderGrid())));
 
@@ -404,6 +403,8 @@ void RenderGrid::layoutBlock(RelayoutChildren relayoutChildren, LayoutUnit)
     if (relayoutChildren == RelayoutChildren::No && simplifiedLayout())
         return;
 
+    LayoutRepainter repainter(*this);
+
     // The layoutBlock was handling the layout of both the grid and grid lanes implementations.
     // This caused a huge amount of branching code to handle grid lanes specific cases. Splitting up the code
     // to layout will simplify both implementations.
@@ -411,6 +412,15 @@ void RenderGrid::layoutBlock(RelayoutChildren relayoutChildren, LayoutUnit)
         layoutGrid(relayoutChildren);
     else
         layoutGridLanes(relayoutChildren);
+
+    if (CheckedRef { layoutContext() }->isSkippedContentRootForLayout(*this)) {
+        for (CheckedRef child : childrenOfType<RenderElement>(*this))
+            child->clearNeedsLayoutForSkippedContent();
+    }
+
+    updateLayerTransform();
+
+    repainter.repaintAfterLayout();
 }
 
 static void clearGridItemOverridingSizesBeforeLayout(RenderGrid& renderGrid)
@@ -444,8 +454,6 @@ const std::optional<LayoutUnit> RenderGrid::availableLogicalHeightForContentBox(
 
 void RenderGrid::layoutGrid(RelayoutChildren relayoutChildren)
 {
-
-    LayoutRepainter repainter(*this);
     {
         LayoutStateMaintainer statePusher(*this, locationOffset(), isTransformed() || hasReflection() || writingMode().isBlockFlipped());
 
@@ -565,10 +573,6 @@ void RenderGrid::layoutGrid(RelayoutChildren relayoutChildren)
         m_trackSizingAlgorithm.reset();
     }
 
-    updateLayerTransform();
-
-    repainter.repaintAfterLayout();
-
     m_trackSizingAlgorithm.clearBaselineItemsCache();
 }
 
@@ -631,7 +635,6 @@ void RenderGrid::layoutGridLanes(RelayoutChildren relayoutChildren)
 {
     ASSERT(isGridLanes());
 
-    LayoutRepainter repainter(*this);
     {
         LayoutStateMaintainer statePusher(*this, locationOffset(), isTransformed() || hasReflection() || writingMode().isBlockFlipped());
         RenderGridLayoutState gridLayoutState;
@@ -755,10 +758,6 @@ void RenderGrid::layoutGridLanes(RelayoutChildren relayoutChildren)
         m_trackSizingAlgorithm.reset();
     }
 
-    updateLayerTransform();
-
-    repainter.repaintAfterLayout();
-
     m_trackSizingAlgorithm.clearBaselineItemsCache();
 }
 
@@ -873,7 +872,7 @@ std::pair<LayoutUnit, LayoutUnit> RenderGrid::computeIntrinsicLogicalWidths() co
     auto [legendMinWidth, legendMaxWidth] = computeIntrinsicLogicalWidthsForFieldsetLegend();
 
     RenderGridLayoutState gridLayoutState;
-    Grid grid(const_cast<RenderGrid&>(*this));
+    Grid grid;
     m_grid.m_currentGrid = std::ref(grid);
     GridTrackSizingAlgorithm algorithm(this, grid);
     // placeItemsOnGrid isn't const since it mutates our grid, but it's safe to do
@@ -988,6 +987,12 @@ unsigned RenderGrid::computeAutoRepeatTracksCount(Style::GridTrackSizingDirectio
                     ? adjustContentBoxLogicalWidthForBoxSizing(maxSizeValue)
                     : adjustContentBoxLogicalHeightForBoxSizing(maxSizeValue);
             },
+            [&](const Style::MaximumSize::CalcSize& calcSizeMaxSize) -> std::optional<LayoutUnit> {
+                auto maxSizeValue = Style::evaluate<LayoutUnit>(calcSizeMaxSize, containingBlockAvailableSize(), style().usedZoomForLength());
+                return isRowAxis
+                    ? adjustContentBoxLogicalWidthForBoxSizing(maxSizeValue)
+                    : adjustContentBoxLogicalHeightForBoxSizing(maxSizeValue);
+            },
             [&](const auto&) -> std::optional<LayoutUnit> {
                 return { };
             }
@@ -1016,6 +1021,12 @@ unsigned RenderGrid::computeAutoRepeatTracksCount(Style::GridTrackSizingDirectio
             },
             [&](const Style::MinimumSize::Calc& calcMinSize) -> std::optional<LayoutUnit> {
                 auto minSizeValue = Style::evaluate<LayoutUnit>(calcMinSize, containingBlockAvailableSize(), style().usedZoomForLength());
+                return isRowAxis
+                    ? adjustContentBoxLogicalWidthForBoxSizing(minSizeValue)
+                    : adjustContentBoxLogicalHeightForBoxSizing(minSizeValue);
+            },
+            [&](const Style::MinimumSize::CalcSize& calcSizeMinSize) -> std::optional<LayoutUnit> {
+                auto minSizeValue = Style::evaluate<LayoutUnit>(calcSizeMinSize, containingBlockAvailableSize(), style().usedZoomForLength());
                 return isRowAxis
                     ? adjustContentBoxLogicalWidthForBoxSizing(minSizeValue)
                     : adjustContentBoxLogicalHeightForBoxSizing(minSizeValue);
@@ -1236,10 +1247,7 @@ void RenderGrid::placeItemsOnGrid(std::optional<LayoutUnit> availableLogicalWidt
 
     Vector<RenderBox*> autoMajorAxisAutoGridItems;
     Vector<RenderBox*> specifiedMajorAxisAutoGridItems;
-    for (auto* gridItem = currentGrid().orderIterator().first(); gridItem; gridItem = currentGrid().orderIterator().next()) {
-        if (currentGrid().orderIterator().shouldSkipChild(*gridItem))
-            continue;
-
+    for (CheckedRef gridItem : currentGrid().orderIterator().gridItems()) {
         // Grid items should use the grid area sizes instead of the containing block (grid container)
         // sizes, we initialize the overrides here if needed to ensure it.
         if (!gridItem->gridAreaContentLogicalWidth())
@@ -1247,7 +1255,7 @@ void RenderGrid::placeItemsOnGrid(std::optional<LayoutUnit> availableLogicalWidt
         if (!gridItem->gridAreaContentLogicalHeight())
             gridItem->setGridAreaContentLogicalHeight(std::nullopt);
 
-        GridArea area = currentGrid().gridItemArea(*gridItem);
+        GridArea area = currentGrid().gridItemArea(gridItem);
         currentGrid().clampAreaToSubgridIfNeeded(area);
         if (!area.rows.isIndefinite())
             area.rows.translate(currentGrid().explicitGridStart(Style::GridTrackSizingDirection::Rows));
@@ -1255,16 +1263,16 @@ void RenderGrid::placeItemsOnGrid(std::optional<LayoutUnit> availableLogicalWidt
             area.columns.translate(currentGrid().explicitGridStart(Style::GridTrackSizingDirection::Columns));
 
         if (area.rows.isIndefinite() || area.columns.isIndefinite()) {
-            currentGrid().setGridItemArea(*gridItem, area);
+            currentGrid().setGridItemArea(gridItem, area);
             bool majorAxisDirectionIsForColumns = autoPlacementMajorAxisDirection() == Style::GridTrackSizingDirection::Columns;
             if ((majorAxisDirectionIsForColumns && area.columns.isIndefinite())
                 || (!majorAxisDirectionIsForColumns && area.rows.isIndefinite()))
-                autoMajorAxisAutoGridItems.append(gridItem);
+                autoMajorAxisAutoGridItems.append(gridItem.ptr());
             else
-                specifiedMajorAxisAutoGridItems.append(gridItem);
+                specifiedMajorAxisAutoGridItems.append(gridItem.ptr());
             continue;
         }
-        insertIntoGrid(currentGrid(), *gridItem, { area.rows, area.columns });
+        insertIntoGrid(currentGrid(), gridItem, { area.rows, area.columns });
     }
 
 #if ASSERT_ENABLED
@@ -1287,11 +1295,8 @@ void RenderGrid::placeItemsOnGrid(std::optional<LayoutUnit> availableLogicalWidt
     performAutoPlacement();
 
 #if ASSERT_ENABLED
-    for (auto* gridItem = currentGrid().orderIterator().first(); gridItem; gridItem = currentGrid().orderIterator().next()) {
-        if (currentGrid().orderIterator().shouldSkipChild(*gridItem))
-            continue;
-
-        GridArea area = currentGrid().gridItemArea(*gridItem);
+    for (CheckedRef gridItem : currentGrid().orderIterator().gridItems()) {
+        GridArea area = currentGrid().gridItemArea(gridItem);
         ASSERT(area.rows.isTranslatedDefinite() && area.columns.isTranslatedDefinite());
     }
 #endif
@@ -1871,6 +1876,40 @@ bool RenderGrid::aspectRatioPrefersInline(const RenderBox& gridItem, bool blockF
     return !selfAlignmentForGridItem(gridItem, containingAxis, StretchingMode::Explicit).isStretch();
 }
 
+void RenderGrid::stretchBlockSizeForGridItem(RenderBox& gridItem, LayoutUnit alignmentContainerSize, RenderGridLayoutState& gridLayoutState)
+{
+    auto stretchedLogicalHeight = GridLayoutFunctions::availableAlignmentSpaceForGridItemBeforeStretching(*this, alignmentContainerSize, gridItem, Style::GridTrackSizingDirection::Rows);
+    auto desiredLogicalHeight = gridItem.constrainLogicalHeightByMinMax(stretchedLogicalHeight, std::nullopt);
+    gridItem.setOverridingBorderBoxLogicalHeight(desiredLogicalHeight);
+
+    auto itemNeedsRelayoutForStretchAlignment = [&]() {
+        if (desiredLogicalHeight != gridItem.logicalHeight())
+            return true;
+
+        if (canSetColumnAxisStretchRequirementForItem(gridItem))
+            return gridLayoutState.containsLayoutRequirementForGridItem(gridItem, ItemLayoutRequirement::NeedsColumnAxisStretchAlignment);
+
+        return is<RenderBlock>(gridItem) && downcast<RenderBlock>(gridItem).hasPercentHeightDescendants();
+    }();
+    // Checking the logical-height of a grid item isn't enough. Setting an override logical-height
+    // changes the definiteness, resulting in percentages to resolve differently.
+    //
+    // FIXME: Can avoid laying out here in some cases. See https://webkit.org/b/87905.
+    if (itemNeedsRelayoutForStretchAlignment) {
+        gridItem.setLogicalHeight(0_lu);
+        gridItem.setNeedsLayout(MarkingBehavior::MarkOnlyThis);
+    }
+}
+
+void RenderGrid::stretchInlineSizeForGridItem(RenderBox& gridItem, LayoutUnit alignmentContainerSize)
+{
+    auto stretchedLogicalWidth = GridLayoutFunctions::availableAlignmentSpaceForGridItemBeforeStretching(*this, alignmentContainerSize, gridItem, Style::GridTrackSizingDirection::Columns);
+    auto desiredLogicalWidth = gridItem.constrainLogicalWidthByMinMax(stretchedLogicalWidth, contentBoxWidth(), *this);
+    gridItem.setOverridingBorderBoxLogicalWidth(desiredLogicalWidth);
+    if (desiredLogicalWidth != gridItem.logicalWidth())
+        gridItem.setNeedsLayout(MarkingBehavior::MarkOnlyThis);
+}
+
 // FIXME: This logic is shared by RenderFlexibleBox, so it should be moved to RenderBox.
 void RenderGrid::applyStretchAlignmentToGridItemIfNeeded(RenderBox& gridItem, RenderGridLayoutState& gridLayoutState)
 {
@@ -1886,38 +1925,14 @@ void RenderGrid::applyStretchAlignmentToGridItemIfNeeded(RenderBox& gridItem, Re
     bool willStretchBlockSize = blockFlowIsColumnAxis
         ? willStretchItem(gridItem, LogicalBoxAxis::Block) : willStretchItem(gridItem, LogicalBoxAxis::Inline);
     if (willStretchBlockSize && !aspectRatioPrefersInline(gridItem, blockFlowIsColumnAxis)) {
-        auto overridingContainingBlockContentSizeForGridItem = GridLayoutFunctions::overridingContainingBlockContentSizeForGridItem(gridItem, gridItemBlockDirection);
-        ASSERT(overridingContainingBlockContentSizeForGridItem && *overridingContainingBlockContentSizeForGridItem);
-        LayoutUnit stretchedLogicalHeight = GridLayoutFunctions::availableAlignmentSpaceForGridItemBeforeStretching(*this, overridingContainingBlockContentSizeForGridItem->value(), gridItem, Style::GridTrackSizingDirection::Rows);
-        LayoutUnit desiredLogicalHeight = gridItem.constrainLogicalHeightByMinMax(stretchedLogicalHeight, std::nullopt);
-        gridItem.setOverridingBorderBoxLogicalHeight(desiredLogicalHeight);
-
-        auto itemNeedsRelayoutForStretchAlignment = [&]() {
-            if (desiredLogicalHeight != gridItem.logicalHeight())
-                return true;
-
-            if (canSetColumnAxisStretchRequirementForItem(gridItem))
-                return gridLayoutState.containsLayoutRequirementForGridItem(gridItem, ItemLayoutRequirement::NeedsColumnAxisStretchAlignment);
-
-            return is<RenderBlock>(gridItem) && downcast<RenderBlock>(gridItem).hasPercentHeightDescendants();
-        }();
-        // Checking the logical-height of a grid item isn't enough. Setting an override logical-height
-        // changes the definiteness, resulting in percentages to resolve differently.
-        //
-        // FIXME: Can avoid laying out here in some cases. See https://webkit.org/b/87905.
-        if (itemNeedsRelayoutForStretchAlignment) {
-            gridItem.setLogicalHeight(0_lu);
-            gridItem.setNeedsLayout(MarkingBehavior::MarkOnlyThis);
-        }
+        auto gridAreaSize = GridLayoutFunctions::overridingContainingBlockContentSizeForGridItem(gridItem, gridItemBlockDirection);
+        ASSERT(gridAreaSize && *gridAreaSize);
+        stretchBlockSizeForGridItem(gridItem, gridAreaSize->value(), gridLayoutState);
     } else if (!willStretchBlockSize && willStretchItem(gridItem, LogicalBoxAxis::Inline)) {
         auto gridItemInlineDirection = Style::orthogonalDirection(gridItemBlockDirection);
-        auto overridingContainingBlockContentSizeForGridItem = GridLayoutFunctions::overridingContainingBlockContentSizeForGridItem(gridItem, gridItemInlineDirection);
-        ASSERT(overridingContainingBlockContentSizeForGridItem && *overridingContainingBlockContentSizeForGridItem);
-        LayoutUnit stretchedLogicalWidth = GridLayoutFunctions::availableAlignmentSpaceForGridItemBeforeStretching(*this, overridingContainingBlockContentSizeForGridItem->value(), gridItem, Style::GridTrackSizingDirection::Columns);
-        LayoutUnit desiredLogicalWidth = gridItem.constrainLogicalWidthByMinMax(stretchedLogicalWidth, contentBoxWidth(), *this);
-        gridItem.setOverridingBorderBoxLogicalWidth(desiredLogicalWidth);
-        if (desiredLogicalWidth != gridItem.logicalWidth())
-            gridItem.setNeedsLayout(MarkingBehavior::MarkOnlyThis);
+        auto gridAreaSize = GridLayoutFunctions::overridingContainingBlockContentSizeForGridItem(gridItem, gridItemInlineDirection);
+        ASSERT(gridAreaSize && *gridAreaSize);
+        stretchInlineSizeForGridItem(gridItem, gridAreaSize->value());
     }
 }
 
@@ -2026,8 +2041,7 @@ const RenderBox* RenderGrid::baselineGridItem(ItemPosition alignment) const
                 auto gridItemAlignment = selfAlignmentForGridItem(*gridItem, LogicalBoxAxis::Block).position();
                 if (rowIndexDeterminingBaseline == GridLayoutFunctions::alignmentContextForBaselineAlignment(gridSpanForGridItem(*gridItem, Style::GridTrackSizingDirection::Rows), gridItemAlignment)) {
                     // FIXME: self-baseline and content-baseline alignment not implemented yet.
-                    baselineGridItem = gridItem.get();
-                    break;
+                    return gridItem.get();
                 }
             }
             if (!baselineGridItem)
@@ -2583,36 +2597,36 @@ unsigned RenderGrid::numTracks(Style::GridTrackSizingDirection direction) const
 void RenderGrid::paintChildren(PaintInfo& paintInfo, const LayoutPoint& paintOffset, PaintInfo& forChild, bool usePrintRect)
 {
     ASSERT(!currentGrid().needsItemsPlacement());
-    for (RenderBox* gridItem = currentGrid().orderIterator().first(); gridItem; gridItem = currentGrid().orderIterator().next())
-        paintChild(*gridItem, paintInfo, paintOffset, forChild, usePrintRect, PaintAsInlineBlock);
+    for (CheckedRef gridItem : currentGrid().orderIterator().gridItems())
+        paintChild(gridItem, paintInfo, paintOffset, forChild, usePrintRect, PaintAsInlineBlock);
 }
 
 bool RenderGrid::hitTestChildren(const HitTestRequest& request, HitTestResult& result, const HitTestLocation& locationInContainer, const LayoutPoint& adjustedLocation, HitTestAction hitTestAction)
 {
-    if (hitTestAction != HitTestAction::Foreground)
-        return false;
+    ASSERT(!currentGrid().needsItemsPlacement());
 
-    LayoutPoint scrolledOffset = hasNonVisibleOverflow() ? adjustedLocation - toLayoutSize(scrollPosition()) : adjustedLocation;
+    if (hitTestAction == HitTestAction::Foreground) {
+        LayoutPoint scrolledOffset = hasNonVisibleOverflow() ? adjustedLocation - toLayoutSize(scrollPosition()) : adjustedLocation;
 
-    Vector<RenderBox*> reversedOrderIteratorForHitTesting;
-    for (auto* gridItem = currentGrid().orderIterator().first(); gridItem; gridItem = currentGrid().orderIterator().next()) {
-        if (gridItem->isOutOfFlowPositioned())
-            continue;
-        reversedOrderIteratorForHitTesting.append(gridItem);
-    }
-    reversedOrderIteratorForHitTesting.reverse();
-
-    for (auto* gridItem : reversedOrderIteratorForHitTesting) {
-        if (gridItem->hasSelfPaintingLayer())
-            continue;
-        auto location = flipForWritingModeForChild(*gridItem, scrolledOffset);
-        if (gridItem->hitTest(request, result, locationInContainer, location)) {
+        auto hitTestGridItem = [&](RenderBox& gridItem) {
+            if (gridItem.hasSelfPaintingLayer())
+                return false;
+            auto location = flipForWritingModeForChild(gridItem, scrolledOffset);
+            if (!gridItem.hitTest(request, result, locationInContainer, location))
+                return false;
             updateHitTestResult(result, flipForWritingMode(toLayoutPoint(locationInContainer.point() - adjustedLocation)));
             return true;
+        };
+
+        // Hit-testing visits grid items front-to-back, i.e. the reverse of paint order.
+        for (CheckedRef gridItem : currentGrid().orderIterator().gridItems() | std::views::reverse) {
+            if (hitTestGridItem(gridItem))
+                return true;
         }
     }
 
-    return false;
+    // A fieldset's legend is not a grid item and paints beneath them, so it is hit-tested in every phase, after the items.
+    return hitTestExcludedChildrenInBorder(request, result, locationInContainer, adjustedLocation, hitTestAction);
 }
 
 ASCIILiteral RenderGrid::renderName() const
@@ -2678,10 +2692,6 @@ GridSpan RenderGrid::gridSpanForGridItem(const RenderBox& gridItem, Style::GridT
     }
     return span;
 }
-
-RenderGrid::GridWrapper::GridWrapper(RenderGrid& renderGrid)
-    : m_layoutGrid(renderGrid)
-{ }
 
 void RenderGrid::GridWrapper::resetCurrentGrid() const
 {

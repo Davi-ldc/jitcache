@@ -29,8 +29,8 @@ using TwinReportSink = TwinReport; // as TwinReport.h names it
 // core and its string constants, the parse fields, the declaration order, the feedback, the children and the constant
 // cells.
 void verifyImport(const RequestState&, UnlinkedCodeBlock& imported, const ValidatedBody&, TwinReportSink&);
-// A seeded decoded UCB, or an attach; holder as for coreDigestOf.
-void verifyMatched(UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, bool seeded, const ValidatedBody&, TwinReportSink&);
+// An attach; holder as coreDigestOf takes it.
+void verifyMatched(UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, const ValidatedBody&, TwinReportSink&);
 // A root digest taken from builtin metadata or a provider equals the digest of its text.
 void verifySuppliedDigest(const SourceCode& rootSource, const RootSourceDigest&, TwinReportSink&);
 unsigned verifyRegistry(VM&, TwinReportSink*); // the number of violations; each is also reported when the sink is non-null

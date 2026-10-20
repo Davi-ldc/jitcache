@@ -63,12 +63,12 @@
 
 - (NSString *)protocol
 {
-    return reinterpret_cast<WebCore::SecurityOrigin*>(_private)->protocol().createNSString().autorelease();
+    return protect(reinterpret_cast<WebCore::SecurityOrigin*>(_private))->protocol().createNSString().autorelease();
 }
 
 - (NSString *)host
 {
-    return reinterpret_cast<WebCore::SecurityOrigin*>(_private)->host().createNSString().autorelease();
+    return protect(reinterpret_cast<WebCore::SecurityOrigin*>(_private))->host().createNSString().autorelease();
 }
 
 - (NSString *)databaseIdentifier
@@ -79,18 +79,18 @@
 #if PLATFORM(IOS_FAMILY)
 - (NSString *)toString
 {
-    return reinterpret_cast<WebCore::SecurityOrigin*>(_private)->toString().createNSString().autorelease();
+    return protect(reinterpret_cast<WebCore::SecurityOrigin*>(_private))->toString().createNSString().autorelease();
 }
 #endif
 
 - (NSString *)stringValue
 {
-    return reinterpret_cast<WebCore::SecurityOrigin*>(_private)->toString().createNSString().autorelease();
+    return protect(reinterpret_cast<WebCore::SecurityOrigin*>(_private))->toString().createNSString().autorelease();
 }
 
 - (unsigned short)port
 {
-    return reinterpret_cast<WebCore::SecurityOrigin*>(_private)->port().value_or(0);
+    return protect(reinterpret_cast<WebCore::SecurityOrigin*>(_private))->port().value_or(0);
 }
 
 // FIXME: Overriding isEqual: without overriding hash will cause trouble if this ever goes into an NSSet or is the key in an NSDictionary,
@@ -108,7 +108,8 @@
     if (_private)
         reinterpret_cast<WebCore::SecurityOrigin*>(_private)->deref();
     if (_databaseQuotaManager)
-        [(NSObject *)_databaseQuotaManager release];
+        // Retaining the member just to release it would be pointless.
+        SUPPRESS_UNRETAINED_ARG [(NSObject *)_databaseQuotaManager release];
     [super dealloc];
 }
 

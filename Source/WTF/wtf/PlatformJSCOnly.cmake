@@ -112,7 +112,10 @@ elseif (APPLE)
             -DMACH_EXC_SERVER_TASKIDTOKEN_STATE -isysroot ${CMAKE_OSX_SYSROOT}
             MachExceptions.defs
         VERBATIM)
-    if (NOT USE_GLIB)
+    # Bun: not with USE_BUN_JSC_ADDITIONS. TimeZone.cpp then compiles its no-op listenForTimeZoneChangeNotifications()
+    # on every platform (Bun bumps the time zone ID itself, through timeZoneDidChange()), and this file defines the same
+    # function: libWTF.a would hold two strong definitions of it and the link would take whichever came first.
+    if (NOT USE_GLIB AND NOT USE_BUN_JSC_ADDITIONS)
         list(APPEND WTF_SOURCES
             cocoa/TimeZoneCocoa.cpp
         )
@@ -169,6 +172,7 @@ if (LOWERCASE_EVENT_LOOP_TYPE STREQUAL "glib")
     )
     if (ENABLE_REMOTE_INSPECTOR)
         list(APPEND WTF_PUBLIC_HEADERS
+            glib/GLibExtras.h
             glib/GSocketMonitor.h
             glib/GUniquePtr.h
             glib/SocketConnection.h
@@ -181,6 +185,7 @@ if (LOWERCASE_EVENT_LOOP_TYPE STREQUAL "glib")
     endif ()
     if (ENABLE_JSC_GLIB_API)
         list(APPEND WTF_PUBLIC_HEADERS
+            glib/GLibExtras.h
             glib/GUniquePtr.h
             glib/GWeakPtr.h
             glib/WTFGType.h

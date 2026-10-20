@@ -56,15 +56,23 @@ RefPtr<NativeImage> NativeImage::createTransient(PlatformImagePtr&& platformImag
     return create(WTF::move(platformImage), grContext);
 }
 
-RefPtr<NativeImage> NativeImage::create(Ref<PixelBuffer>&& pixelBuffer, bool hasAlpha)
+RefPtr<NativeImage> NativeImage::create(Ref<PixelBuffer>&& pixelBuffer)
 {
     if (pixelBuffer->size().isEmpty())
         return nullptr;
     auto format = pixelBuffer->format();
     SkColorType colorType = kRGBA_8888_SkColorType;
     switch (format.pixelFormat) {
+    case PixelFormat::RGBX8:
+        colorType = kRGB_888x_SkColorType;
+        break;
     case PixelFormat::RGBA8:
         colorType = kRGBA_8888_SkColorType;
+        break;
+    case PixelFormat::BGRX8:
+        // Skia has no BGR color type with an ignored fourth component, so the contents are
+        // described as BGRA and the alpha component is required to be 255, see below.
+        colorType = kBGRA_8888_SkColorType;
         break;
     case PixelFormat::BGRA8:
         colorType = kBGRA_8888_SkColorType;
@@ -74,19 +82,27 @@ RefPtr<NativeImage> NativeImage::create(Ref<PixelBuffer>&& pixelBuffer, bool has
         colorType = kRGBA_F16_SkColorType;
         break;
 #endif
-    case PixelFormat::BGRX8:
+#if ENABLE(PIXEL_FORMAT_RGBA16)
+    case PixelFormat::RGBA16:
+        colorType = kR16G16B16A16_unorm_SkColorType;
+        break;
+#endif
 #if ENABLE(PIXEL_FORMAT_RGB10)
     case PixelFormat::RGB10:
+        ASSERT(!PixelBuffer::supportedPixelFormat(format.pixelFormat));
+        return nullptr;
 #endif
 #if ENABLE(PIXEL_FORMAT_RGB10A8)
     case PixelFormat::RGB10A8:
-#endif
         ASSERT(!PixelBuffer::supportedPixelFormat(format.pixelFormat));
         return nullptr;
+#endif
     }
     auto imageSize = pixelBuffer->size();
+    // kRGB_888x_SkColorType ignores the fourth component, but kBGRA_8888_SkColorType does not, so
+    // BGRX8 contents are required to have 255 in the component that holds no meaningful value.
     SkAlphaType alphaType = kUnpremul_SkAlphaType;
-    if (!hasAlpha)
+    if (pixelFormatIsOpaque(format.pixelFormat))
         alphaType = kOpaque_SkAlphaType;
     else if (format.alphaFormat == AlphaPremultiplication::Premultiplied)
         alphaType = kPremul_SkAlphaType;
@@ -140,6 +156,34 @@ ColorSpace NativeImage::colorSpace() const
         return ColorSpace(colorSpace);
     // No color space means the default - SRGB.
     return ColorSpace::SRGB();
+}
+
+NativeImage::UnpremultipliedPixels NativeImage::unpremultipliedPixels() const
+{
+    auto platformImage = this->platformImage();
+    if (!platformImage)
+        return { };
+
+    // Reading a premultiplied image back unpremultiplied would undo it, which is what this avoids.
+    // FIXME: The decoders only produce kUnpremul_SkAlphaType when constructed with
+    // AlphaOption::NotPremultiplied, which ImageBitmap does not ask for, so this returns empty today.
+    if (platformImage->imageInfo().alphaType() != kUnpremul_SkAlphaType)
+        return { };
+
+    auto imageInfo = SkImageInfo::Make(platformImage->width(), platformImage->height(), kRGBA_8888_SkColorType, kUnpremul_SkAlphaType, platformImage->refColorSpace());
+    auto sizeInBytes = imageInfo.computeMinByteSize();
+    if (!sizeInBytes || SkImageInfo::ByteSizeOverflowed(sizeInBytes))
+        return { };
+
+    if (platformImage->isTextureBacked() && !PlatformDisplay::sharedDisplay().skiaGLContext()->makeContextCurrent())
+        return { };
+
+    Vector<uint8_t> pixels(sizeInBytes);
+    SkPixmap pixmap(imageInfo, pixels.mutableSpan().data(), imageInfo.minRowBytes());
+    if (!platformImage->readPixels(m_grContext, pixmap, 0, 0))
+        return { };
+
+    return { WTF::move(pixels), PixelFormat::RGBA8 };
 }
 
 std::optional<Color> NativeImage::singlePixelSolidColor() const

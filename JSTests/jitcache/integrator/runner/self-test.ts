@@ -109,6 +109,13 @@ const fixtureCases: FixtureCase[] = [
   { fixture: "pin-output-declared.js", claim: "H7: it passes once it declares jitcache-pin: off", expect: "pass", args: againstItself("--useDollarVM=false") },
   { fixture: "pin-status.js", claim: "H7: a script whose pin run ends with another status fails the sequence", expect: [sequenceFail(0, "pin-status")], args: againstItself("--useDollarVM=false") },
   { fixture: "pin-status-declared.js", claim: "H7: it passes once it declares jitcache-pin: off", expect: "pass", args: againstItself("--useDollarVM=false") },
+  {
+    fixture: "pin-crash.js",
+    claim: "H7: a script whose two pin runs both end by a signal fails the sequence as a crash that names both",
+    expect: [sequenceFail(0, "pin-crash")],
+    args: context => [...againstItself()(context), "--extra-options=--useFTLJIT=false"],
+    detail: /this build's run ended by SIG\w+.*; the pin's run ended by SIG\w+/,
+  },
 ];
 
 interface Context {

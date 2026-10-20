@@ -26,6 +26,7 @@
 #pragma once
 
 #if USE(COORDINATED_GRAPHICS) && USE(SKIA) && !USE(TEXTURE_MAPPER)
+#include "AcceleratedAnimations.h"
 #include "BoxExtents.h"
 #include "Color.h"
 #include "CoordinatedBackingStoreProxy.h"
@@ -39,7 +40,6 @@
 #include "SkiaCompositingLayerImageSetBatch.h"
 #include "SkiaCompositingLayerOverlapRegions.h"
 #include "SkiaDamageRegion.h"
-#include "TextureMapperAnimation.h"
 #include "TransformationMatrix.h"
 WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
 #include <skia/core/SkCanvas.h>
@@ -61,6 +61,8 @@ class CoordinatedImageBackingStore;
 class CoordinatedPlatformLayerBuffer;
 class FilterOperations;
 class SkiaBackingStore;
+
+enum class FilterSurfaceAlignment : bool { LocalCoordinates, DevicePixels };
 
 class SkiaCompositingLayer final : public RefCountedAndCanMakeWeakPtr<SkiaCompositingLayer> {
     WTF_MAKE_TZONE_ALLOCATED(SkiaCompositingLayer);
@@ -88,7 +90,7 @@ public:
     void setOpacity(float);
     void setBlendMode(BlendMode);
     void setContentsRect(const FloatRect& rect) { m_contentsRect = rect; }
-    void setAnimations(const TextureMapperAnimations& animations) { m_animations = animations; }
+    void setAnimations(const AcceleratedAnimations& animations) { m_animations = animations; }
     void setContentsTiling(const FloatSize& size, const FloatSize& phase) { m_contentsTiling = { size, phase }; }
     void setClipPath(SkPath&& clipPath) { m_clipPath = WTF::move(clipPath); }
     void setMask(RefPtr<SkiaCompositingLayer>&&);
@@ -202,7 +204,6 @@ private:
         const SkiaDamageRegion* damageRegionOrNull() const { return compositingDamageRegion ? &*compositingDamageRegion : nullptr; }
         float opacity { 1 };
         std::optional<SkBlendMode> blendMode;
-        IntSize offset;
         sk_sp<SkColorFilter> colorFilter;
         TransformationMatrix accumulatedReplicaTransform;
         RefPtr<SkiaCompositingLayer> paintingBackdropForLayer;
@@ -233,16 +234,18 @@ private:
     void addGroupDamage(SkCanvas&, PaintContext&, const Vector<IntRect, 1>& overlapRects);
     static void resolveBackdropDamage(const Vector<FloatRect>& backdropRectsInFrame, Damage&);
 #endif
+    bool stopPaintingIntoBackdropIfNeeded(PaintContext&);
     void paintSelfAndChildren(SkCanvas&, PaintContext&);
-    void paintWithIntermediateSurface(SkCanvas&, PaintContext&, const IntRect&, SkPaint*, PaintFunction&&);
+    void paintWithIntermediateSurface(SkCanvas&, PaintContext&, const IntRect&, SkPaint*, NOESCAPE const PaintFunction&);
+    void paintWithFilter(SkCanvas&, PaintContext&, const TransformationMatrix& layerTransform, const TransformationMatrix& inverseLayerTransform, const FloatRect& localBounds, const SkPaint&, FilterSurfaceAlignment, NOESCAPE const PaintFunction&);
+    FloatSize filterSurfaceScale(const PaintContext&) const;
     void paintWith3DRenderingContext(SkCanvas&, PaintContext&);
     void paintBackdrop(SkCanvas&, PaintContext&);
     Vector<IntRect, 1> computeConsolidatedOverlapRegionRects(const SkCanvas&, const PaintContext&, ComputeOverlapRegionMode);
     TransformationMatrix replicaTransform() const;
     TransformationMatrix combinedTransform(const PaintContext&) const;
-    IntRect clipBounds(const SkCanvas&, const PaintContext&) const;
     sk_sp<SkImage> maskImage();
-    FloatPolygon3D geometryFor3DRenderingContext() const;
+    Polygon4D geometryFor3DRenderingContext() const;
     FloatRect transformedFlattenedBounds() const;
     void collect3DRenderingContextLayers(Vector<SkiaCompositingLayer3DRenderingContext::Layer>&);
     void recursiveCleanUpAfterPaint();
@@ -250,7 +253,8 @@ private:
     void clipRect(SkCanvas&, const FloatRoundedRect&, const TransformationMatrix& = { });
 
     enum class IncludesReplica : bool { No, Yes };
-    void computeOverlapRegions(ComputeOverlapRegionData&, const TransformationMatrix& accumulatedReplicaTransform, IncludesReplica = IncludesReplica::Yes);
+    enum class IncludesFilterOutsets : bool { No, Yes };
+    void computeOverlapRegions(ComputeOverlapRegionData&, const TransformationMatrix& accumulatedReplicaTransform, IncludesReplica = IncludesReplica::Yes, IncludesFilterOutsets = IncludesFilterOutsets::Yes);
 
     void damageWholeLayer()
     {
@@ -275,6 +279,8 @@ private:
 #if ENABLE(DAMAGE_TRACKING)
     bool damagePropagationEnabled() const { return m_damagePropagationEnabled; }
     bool hasLayerDamage() const { return m_layerDamage && !m_layerDamage->isEmpty(); }
+    bool hasGroupPropertyDamage() const;
+    bool hasDamageInSubtree() const;
     void trackLayerRect(PaintContext&, const FloatRect& layerRectInFrame);
 #endif
 
@@ -283,6 +289,7 @@ private:
         std::optional<TransformationMatrix> futureTransform;
         std::optional<float> opacity;
         std::optional<Filter> filter;
+        std::optional<FilterOperations> filterOperations;
         bool isRunning { false };
     };
     std::optional<AnimationsState> syncAnimations(MonotonicTime);
@@ -292,6 +299,8 @@ private:
     float opacity() const;
     float opacityForAnimationsState(const AnimationsState*) const;
     const std::optional<Filter> filter() const;
+    bool hasFilter() const;
+    IntOutsets unclippedFilterOutsets() const;
 
     struct DebugBorder {
         Color color;
@@ -343,7 +352,7 @@ private:
     // value string/geometry were computed for.
     struct {
         std::optional<unsigned> count;
-        CString string;
+        ASCIICString string;
         float backgroundWidth { 0 };
         float backgroundHeight { 0 };
         float baselineOffset { 0 };
@@ -352,12 +361,13 @@ private:
     std::optional<Filter> m_filter;
     struct {
         sk_sp<SkImageFilter> filter;
+        FilterOperations filterOperations;
         FloatRoundedRect clipRect;
         std::optional<SkPath> clipPath;
     } m_backdrop;
     bool m_isBackdropRoot { false };
     bool m_shouldBlend { false };
-    TextureMapperAnimations m_animations;
+    AcceleratedAnimations m_animations;
     std::optional<AnimationsState> m_animationsState;
     struct {
         TransformationMatrix combined;
@@ -366,7 +376,7 @@ private:
 #if ENABLE(DAMAGE_TRACKING)
     bool m_damagePropagationEnabled { false };
     std::optional<Damage> m_layerDamage;
-    std::unique_ptr<LayerRectTracker> m_layerRectTracker;
+    const std::unique_ptr<LayerRectTracker> m_layerRectTracker;
     uint64_t m_layerRectID { 0 };
     bool m_groupPropertyChanged { false };
 #endif

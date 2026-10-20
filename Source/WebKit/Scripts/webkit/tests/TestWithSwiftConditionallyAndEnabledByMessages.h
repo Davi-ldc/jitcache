@@ -57,7 +57,7 @@ private:
     TestWithSwiftConditionallyAndEnabledByMessageForwarder(WebKit::TestWithSwiftConditionallyAndEnabledByWeakRef* _Nonnull);
     std::unique_ptr<WebKit::TestWithSwiftConditionallyAndEnabledBy> getMessageTarget();
     std::unique_ptr<WebKit::TestWithSwiftConditionallyAndEnabledByWeakRef> m_handler;
-} SWIFT_SHARED_REFERENCE(.ref, .deref);
+} DERIVED_CLASS_SWIFT_SHARED_REFERENCE(.ref, .deref);
 
 }
 
@@ -163,6 +163,8 @@ namespace CompletionHandlers {
 namespace TestWithSwiftConditionallyAndEnabledBy {
 using TestAsyncMessageCompletionHandler = WTF::RefCountable<Messages::TestWithSwiftConditionallyAndEnabledBy::TestAsyncMessage::Reply>;
 using TestSyncMessageCompletionHandler = WTF::RefCountable<Messages::TestWithSwiftConditionallyAndEnabledBy::TestSyncMessage::Reply>;
+
+void completeWithDefaultReply(TestAsyncMessageCompletionHandler&);
 } // namespace TestWithSwiftConditionallyAndEnabledBy
 } // namespace CompletionHandlers
 

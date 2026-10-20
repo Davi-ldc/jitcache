@@ -17,20 +17,9 @@
 // - Bun internal modules created from their text, as a `bun` run creates them: loading node:querystring records its
 //   root once and takes its digest from its provider, the builtins section's table (statistics: a root, a supplied
 //   digest, no digest computed from text), and its functions import at their first call in the Consumer.
-// - Bun internal modules decoded by decodeBuiltinFunction, as a standalone executable decodes them: the app
-//   resources/builtin-roots-app.js, built with `bun build --compile --bytecode`, makes the same checks of
-//   node:querystring there. It runs twice (resources/ucb-bun.js, runApp). First it runs with this run's role over an
-//   artifact of its own, where its decoded functions are captured and then seeded or imported at their first call. Then
-//   it runs as a Consumer of this run's artifact, where its decoded functions must seed or import the bodies this
-//   script's VM captured from the module it created. That happens only if the decoded root and its children have the
-//   identities the created ones have.
-// Each window makes its first calls through a function that runs once, so that no body of this script or of the app,
-// which their Producers ran hot, imports or is seeded inside it: only the builtin's and the internal module's bodies
-// can. The output, this script's and the app's, equals the JITCache-off run.
-//
-// The runs use the lane's default sequence, so the test's own VM calls delta at exit in the Producer; the app calls none
-// (resources/ucb-bun.js).
-const path = require("node:path");
+// Each window makes its first calls through a function that runs once, so that no body of this script, which its
+// Producer ran hot, imports inside it: only the builtin's and the internal module's bodies can. The output equals the
+// JITCache-off run.
 const vm = require("node:vm");
 const { context } = require("./resources/ucb-bun.js");
 
@@ -74,9 +63,5 @@ setTimeout(() => {
             total = (total + calls[name](inputs[i % inputs.length]).length) | 0;
         console.log(`querystring.${name} ${first} ${total}`);
     }
-
-    const app = t.buildApp("builtin-roots-app", [path.join(__dirname, "resources", "builtin-roots-app.js")], { bytecode: true });
-    t.runApp(app);
-    t.runApp(app, { overRunArtifact: true });
     t.finish();
 }, 0);

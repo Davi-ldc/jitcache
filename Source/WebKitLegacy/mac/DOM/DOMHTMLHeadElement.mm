@@ -35,7 +35,7 @@
 #import <wtf/GetPtr.h>
 #import <wtf/URL.h>
 
-#define IMPL static_cast<WebCore::HTMLHeadElement*>(reinterpret_cast<WebCore::Node*>(_internal))
+#define IMPL downcast<WebCore::HTMLHeadElement>(reinterpret_cast<WebCore::Node*>(_internal))
 
 @implementation DOMHTMLHeadElement
 
@@ -53,7 +53,7 @@
 
 @end
 
-DOMHTMLHeadElement *kit(WebCore::HTMLHeadElement* value)
+SUPPRESS_NODELETE DOMHTMLHeadElement *kit(WebCore::HTMLHeadElement* value)
 {
     WebCoreThreadViolationCheckRoundOne();
     return static_cast<DOMHTMLHeadElement*>(kit(static_cast<WebCore::Node*>(value)));

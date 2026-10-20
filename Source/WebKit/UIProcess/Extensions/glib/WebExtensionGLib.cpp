@@ -29,6 +29,7 @@
 #include <WebCore/LocalizedStrings.h>
 #include <wtf/FileSystem.h>
 #include <wtf/Language.h>
+#include <wtf/glib/GMallocString.h>
 #include <wtf/glib/GRefPtr.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
@@ -45,8 +46,8 @@ WebExtension::WebExtension(GFile* resourcesFile, RefPtr<API::Error>& outError)
 
     outError = nullptr;
 
-    GUniquePtr<char> baseURL(g_file_get_uri(resourcesFile));
-    m_resourceBaseURL = URL { makeString(String::fromUTF8(baseURL.get()), "/"_s) };
+    auto baseURL = GMallocString::unsafeAdoptFromUTF8(g_file_get_uri(resourcesFile));
+    m_resourceBaseURL = URL { makeString(baseURL.span(), '/') };
 
     if (m_resourceBaseURL.isValid()) {
         auto isDirectory = g_file_query_file_type(resourcesFile, G_FILE_QUERY_INFO_NONE, nullptr) == G_FILE_TYPE_DIRECTORY;
@@ -95,14 +96,14 @@ std::expected<Ref<API::Data>, RefPtr<API::Error>> WebExtension::resourceDataForP
     auto resourceURL = resourceFileURLForPath(path);
     if (resourceURL.isEmpty()) {
         if (suppressErrors == SuppressNotFoundErrors::No)
-            return makeUnexpected(createError(Error::ResourceNotFound, WEB_UI_FORMAT_STRING("Unable to find “%s” in the extension’s resources. It is an invalid path.", "WKWebExtensionErrorResourceNotFound description with invalid file path", path.utf8().data())));
+            return makeUnexpected(createError(Error::ResourceNotFound, WEB_UI_FORMAT_STRING("Unable to find “%s” in the extension’s resources. It is an invalid path.", "WKWebExtensionErrorResourceNotFound description with invalid file path", path.utf8())));
         return makeUnexpected(nullptr);
     }
 
     auto rawData = FileSystem::readEntireFile(resourceURL.fileSystemPath());
     if (!rawData.has_value()) {
         if (suppressErrors == SuppressNotFoundErrors::No)
-            return makeUnexpected(createError(Error::ResourceNotFound, WEB_UI_FORMAT_STRING("Unable to find “%s” in the extension’s resources.", "WKWebExtensionErrorResourceNotFound description with file name", path.utf8().data())));
+            return makeUnexpected(createError(Error::ResourceNotFound, WEB_UI_FORMAT_STRING("Unable to find “%s” in the extension’s resources.", "WKWebExtensionErrorResourceNotFound description with file name", path.utf8())));
         return makeUnexpected(nullptr);
     }
 
@@ -115,7 +116,7 @@ std::expected<Ref<API::Data>, RefPtr<API::Error>> WebExtension::resourceDataForP
 
 void WebExtension::recordError(Ref<API::Error> error)
 {
-    RELEASE_LOG_ERROR(Extensions, "Error recorded: %s", error->localizedDescription().utf8().data());
+    RELEASE_LOG_ERROR(Extensions, "Error recorded: %s", error->localizedDescription().utf8());
 
     // Only the first occurrence of each error is recorded in the array. This prevents duplicate errors,
     // such as repeated "resource not found" errors, from being included multiple times.

@@ -395,6 +395,7 @@ void JIT::privateCompileMainPass()
         DEFINE_OP(op_new_async_generator_func_exp)
         DEFINE_OP(op_new_object)
         DEFINE_OP(op_new_reg_exp)
+        DEFINE_OP(op_new_reg_exp_shared)
         DEFINE_OP(op_not)
         DEFINE_OP(op_nstricteq)
         DEFINE_OP(op_create_lexical_environment)
@@ -423,6 +424,7 @@ void JIT::privateCompileMainPass()
 
         DEFINE_OP(op_iterator_open)
         DEFINE_OP(op_iterator_next)
+        DEFINE_OP(op_iterator_close_check)
         DEFINE_OP(op_async_iterator_next)
 
         DEFINE_OP(op_ret)
@@ -621,8 +623,8 @@ void JIT::privateCompileSlowCases()
         if (JITInternal::verbose)
             dataLog("At ", firstTo, " slow: ", iter - m_slowCases.begin(), "\n");
 
-        RELEASE_ASSERT_WITH_MESSAGE(iter == m_slowCases.end() || firstTo.offset() != iter->to.offset(), "Not enough jumps linked in slow case codegen while handling %s.", toCString(currentInstruction->opcodeID()).data());
-        RELEASE_ASSERT_WITH_MESSAGE(firstTo.offset() == (iter - 1)->to.offset(), "Too many jumps linked in slow case codegen while handling %s.", toCString(currentInstruction->opcodeID()).data());
+        RELEASE_ASSERT_WITH_MESSAGE(iter == m_slowCases.end() || firstTo.offset() != iter->to.offset(), "Not enough jumps linked in slow case codegen while handling %s.", toUTF8CString(currentInstruction->opcodeID()));
+        RELEASE_ASSERT_WITH_MESSAGE(firstTo.offset() == (iter - 1)->to.offset(), "Too many jumps linked in slow case codegen while handling %s.", toUTF8CString(currentInstruction->opcodeID()));
 
         jump().linkTo(fastPathResumePoint(), this);
         ++bytecodeCountHavingSlowCase;
@@ -717,17 +719,17 @@ void JIT::emitConsistencyCheck()
     m_consistencyCheckLabel = label();
     move(TrustedImm32(-stackPointerOffsetFor(m_unlinkedCodeBlock)), regT0);
     m_bytecodeIndex = BytecodeIndex(0);
-    JITCache::nearTailCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::ConsistencyCheck));
+    JITCache::nearTailCallSupport(*this, vm(), JITCache::SupportKey::baselineThunk(JITCache::BaselineThunk::ConsistencyCheck));
     m_bytecodeIndex = BytecodeIndex(); // Reset this, in order to guard its use with ASSERTs.
 }
 #endif
 
 #if ENABLE(JITCACHE_TWINS)
-void JIT::setJITCacheTwin(Ref<JITCache::ProducerBudget>&& budget, const JITCache::TwinSeeds& seeds, const JITCache::TwinCompileInputs& compileInputs)
+void JIT::setJITCacheTwin(Ref<JITCache::ProducerBudget>&& budget, const JITCache::TwinSeeds& seeds)
 {
     // Before the compilation, which then attaches this recorder instead of creating one, in any VM.
     ASSERT(!m_imageRecorder);
-    m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, WTF::move(budget), seeds, compileInputs);
+    m_imageRecorder = makeUnique<JITCache::ImageRecorder>(JITCache::RecordingScope::BaselineCompile, vm(), *m_unlinkedCodeBlock, WTF::move(budget), seeds);
 }
 #endif
 
@@ -872,7 +874,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
         tagPtr(NoPtrTag, linkRegister);
         move(linkRegister, GPRInfo::argumentGPR1);
 #endif
-        JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::processThunk(JITCache::ProcessThunk::ArityFixup));
+        JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::processThunk(JITCache::ProcessThunk::ArityFixup));
 #if CPU(X86_64)
         push(GPRInfo::argumentGPR1);
 #else
@@ -891,7 +893,7 @@ RefPtr<BaselineJITCode> JIT::compileAndLinkWithoutFinalizing(JITCompilationEffor
     emitFunctionPrologue();
     m_bytecodeIndex = BytecodeIndex(0);
     stackOverflow.link(this);
-    JITCache::jumpSupport(*this, vm(), JITCacheSupportKey::commonThunk(CommonJITThunkID::ThrowStackOverflowAtPrologue));
+    JITCache::jumpSupport(*this, vm(), JITCache::SupportKey::commonThunk(CommonJITThunkID::ThrowStackOverflowAtPrologue));
 
     // JITCache: on ARM64, one veneer per target of the conditional jumps that leave the image, after all other code.
     // Nothing on x86_64.
@@ -970,7 +972,7 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
 
     auto finalizeICs = [&] (auto& generators) {
         for (auto& gen : generators)
-            gen.m_unlinkedPropertyCache->doneLocation = patchBuffer.locationOf<JSInternalPtrTag>(gen.m_done);
+            gen.m_baselineUnlinkedPropertyCache->doneLocation = patchBuffer.locationOf<JSInternalPtrTag>(gen.m_done);
     };
 
     finalizeICs(m_getByIds);
@@ -1023,7 +1025,7 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
                 BytecodeIndex bytecodeIndex(bytecodeOffset);
                 if (bytecodeIndex.offset() >= m_profiledCodeBlock->instructionsSize())
                     continue;
-                LineColumn lineColumn = m_profiledCodeBlock->lineColumnForBytecodeIndex(bytecodeIndex);
+                LineColumn lineColumn = m_profiledCodeBlock->lineColumnForBytecodeIndexConcurrently(bytecodeIndex);
                 auto location = patchBuffer.locationOf<DisassemblyPtrTag>(m_labels[bytecodeOffset]);
                 uint32_t codeOffset = static_cast<uint32_t>(location.dataLocation<uintptr_t>() - reinterpret_cast<uintptr_t>(codeStart));
                 debugInfo->codeEntries.append({ codeOffset, lineColumn, Ref { *provider } });
@@ -1035,7 +1037,7 @@ RefPtr<BaselineJITCode> JIT::link(LinkBuffer& patchBuffer)
     // FIXME: Make a version of CodeBlockWithJITType that knows about UnlinkedCodeBlock.
     CodeRef<JSEntryPtrTag> result = FINALIZE_BASELINE_CODE(
         patchBuffer, JSEntryPtrTag,
-        "Baseline JIT code for %s", toCString(CodeBlockWithJITType(m_profiledCodeBlock, JITType::BaselineJIT)).data());
+        "Baseline JIT code for %s", toUTF8CString(CodeBlockWithJITType(m_profiledCodeBlock, JITType::BaselineJIT)));
     
     CodePtr<JSEntryPtrTag> withArityCheck = patchBuffer.locationOf<JSEntryPtrTag>(m_arityCheck);
     auto jitCode = adoptRef(*new BaselineJITCode(result, withArityCheck));
@@ -1132,9 +1134,9 @@ int JIT::stackPointerOffsetFor(CodeBlock* codeBlock)
     return stackPointerOffsetFor(codeBlock->unlinkedCodeBlock());
 }
 
-UncheckedKeyHashMap<CString, Seconds> JIT::compileTimeStats()
+UncheckedKeyHashMap<ASCIICString, Seconds> JIT::compileTimeStats()
 {
-    UncheckedKeyHashMap<CString, Seconds> result;
+    UncheckedKeyHashMap<ASCIICString, Seconds> result;
     if (Options::reportTotalCompileTimes()) {
         result.add("Total Compile Time"_s, totalCompileTime());
         result.add("Baseline Compile Time"_s, totalBaselineCompileTime);
@@ -1157,7 +1159,7 @@ Seconds JIT::totalCompileTime()
 
 void JIT::exceptionCheck(Jump jumpToHandler)
 {
-    JITCache::linkJumpToSupport(*this, vm(), jumpToHandler, JITCacheSupportKey::commonThunk(CommonJITThunkID::HandleException));
+    JITCache::linkJumpToSupport(*this, vm(), jumpToHandler, JITCache::SupportKey::commonThunk(CommonJITThunkID::HandleException));
 }
 
 void JIT::exceptionCheck()

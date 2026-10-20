@@ -273,7 +273,7 @@ void ViewTransition::callUpdateCallback()
             return WTF::move(promiseAndWrapper.first);
         }
 
-        auto result = protect(m_updateCallback)->invoke();
+        auto result = m_updateCallback->invoke();
         if (result.type() != CallbackResultType::Success || result.returnValue()->isSuspended()) {
             auto promiseAndWrapper = createPromiseAndWrapper(document);
             // FIXME: First case should reject with `ExceptionCode::ExistingExceptionError`.
@@ -444,7 +444,7 @@ LayoutRect ViewTransition::captureOverflowRect(RenderLayerModelObject& renderer)
 static LayoutPoint layerToLayoutOffset(const RenderLayerModelObject& renderer)
 {
     if (const auto* renderInline = dynamicDowncast<RenderInline>(renderer)) {
-        auto boundingBox = renderInline->linesBoundingBox();
+        auto boundingBox = renderInline->borderBoxRectInContainer();
         return LayoutPoint { boundingBox.x(), boundingBox.y() };
     }
     return { };

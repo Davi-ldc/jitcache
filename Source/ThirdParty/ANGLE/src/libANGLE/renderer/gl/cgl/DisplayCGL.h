@@ -33,7 +33,7 @@ struct EnsureCGLContextIsCurrent : angle::NonCopyable
     bool mResetContext;
 };
 
-class DisplayCGL : public DisplayGL
+class DisplayCGL : public DisplayGL, public ThreadSafeDisplayGL
 {
   public:
     DisplayCGL(const egl::DisplayState &state);
@@ -41,7 +41,6 @@ class DisplayCGL : public DisplayGL
 
     egl::Error initialize(egl::Display *display) override;
     void terminate() override;
-    egl::Error prepareForCall() override;
     egl::Error releaseThread() override;
 
     egl::Error makeCurrent(egl::Display *display,
@@ -69,9 +68,6 @@ class DisplayCGL : public DisplayGL
                                const egl::AttributeMap &attribs) override;
 
     egl::ConfigSet generateConfigs() override;
-
-    bool testDeviceLost() override;
-    egl::Error restoreLostDevice(const egl::Display *display) override;
 
     bool isValidNativeWindow(EGLNativeWindowType window) const override;
     egl::Error validateClientBuffer(const egl::Config *configuration,
@@ -103,6 +99,8 @@ class DisplayCGL : public DisplayGL
     egl::Error handleGPUSwitch() override;
     egl::Error forceGPUSwitch(EGLint gpuIDHigh, EGLint gpuIDLow) override;
 
+    ThreadSafeDisplayImpl *getThreadSafeDisplayImpl() override { return this; }
+
   private:
     egl::Error makeCurrentSurfaceless(gl::Context *context) override;
 
@@ -126,7 +124,6 @@ class DisplayCGL : public DisplayGL
     // is unref'd for the last time, this is set to the time of that last unref. If it isn't
     // activated again in 10 seconds, the discrete GPU pixel format is deleted.
     double mLastDiscreteGPUUnrefTime;
-    bool mDeviceContextIsVolatile = false;
 };
 
 }  // namespace rx

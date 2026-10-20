@@ -23,6 +23,7 @@
 #include "config.h"
 #include <wtf/FileSystem.h>
 
+#include <wtf/glib/GLibExtras.h>
 #include <wtf/glib/GUniquePtr.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
@@ -37,10 +38,9 @@ namespace WTF {
 
 namespace FileSystemImpl {
 
-bool validRepresentation(const CString& representation)
+bool validRepresentation(const UTF8CString& representation)
 {
-    auto* data = representation.data();
-    return !!data && data[0] != '\0';
+    return !representation.isEmpty();
 }
 
 // Converts a string to something suitable to be displayed to the user.
@@ -53,7 +53,7 @@ String filenameForDisplay(const String& string)
     if (!validRepresentation(filename))
         return string;
 
-    GUniquePtr<gchar> display(g_filename_display_name(filename.data()));
+    GUniquePtr<gchar> display(g_filename_display_name(filename.legacyCStringPointer()));
     if (!display)
         return string;
     return String::fromUTF8(display.get());
@@ -61,23 +61,23 @@ String filenameForDisplay(const String& string)
 }
 
 #if OS(LINUX)
-CString currentExecutablePath()
+UTF8CString currentExecutablePath()
 {
     static std::array<char, PATH_MAX> readLinkBuffer;
     ssize_t result = readlink("/proc/self/exe", readLinkBuffer.data(), readLinkBuffer.size());
     if (result <= 0)
         return { };
-    return CString(unsafeMakeSpan(readLinkBuffer.data(), static_cast<size_t>(result)));
+    return UTF8CString::fromUTF8(unsafeMakeSpan(readLinkBuffer.data(), static_cast<size_t>(result)));
 }
 #elif OS(HURD)
-CString currentExecutablePath()
+UTF8CString currentExecutablePath()
 {
     return { };
 }
 #elif OS(QNX)
 #include <fcntl.h>
 
-CString currentExecutablePath()
+UTF8CString currentExecutablePath()
 {
     static char readBuffer[PATH_MAX];
     int selfFd = open("/proc/self/exefile", O_RDONLY);
@@ -85,7 +85,7 @@ CString currentExecutablePath()
     close(selfFd);
     if (result <= 0)
         return { };
-    return CString(unsafeMakeSpan(readBuffer, static_cast<size_t>(result)));
+    return UTF8CString::fromUTF8(unsafeMakeSpan(readBuffer, static_cast<size_t>(result)));
 }
 #elif OS(UNIX)
 #if OS(NETBSD)
@@ -93,16 +93,16 @@ CString currentExecutablePath()
 #else
 #define _PROC_CURPROC_PATH "/proc/curproc/file"
 #endif
-CString currentExecutablePath()
+UTF8CString currentExecutablePath()
 {
     static char readLinkBuffer[PATH_MAX];
     ssize_t result = readlink(_PROC_CURPROC_PATH, readLinkBuffer, PATH_MAX);
     if (result <= 0)
         return { };
-    return CString(unsafeMakeSpan(readLinkBuffer, static_cast<size_t>(result)));
+    return UTF8CString::fromUTF8(unsafeMakeSpan(readLinkBuffer, static_cast<size_t>(result)));
 }
 #elif OS(WINDOWS)
-CString currentExecutablePath()
+UTF8CString currentExecutablePath()
 {
     static WCHAR buffer[MAX_PATH];
     DWORD length = GetModuleFileNameW(0, buffer, MAX_PATH);
@@ -114,15 +114,15 @@ CString currentExecutablePath()
 }
 #endif
 
-CString currentExecutableName()
+UTF8CString currentExecutableName()
 {
     auto executablePath = currentExecutablePath();
     if (!executablePath.isNull()) {
-        GUniquePtr<char> basename(g_path_get_basename(executablePath.data()));
-        return basename.get();
+        GUniquePtr<char> basename(g_path_get_basename(executablePath.legacyCStringPointer()));
+        return UTF8CString::unsafeFromUTF8(basename.get());
     }
 
-    return g_get_prgname();
+    return UTF8CString::unsafeFromUTF8(g_get_prgname());
 }
 
 String userCacheDirectory()
@@ -139,9 +139,9 @@ String createTemporaryDirectory(const String& directoryPrefix)
 {
     String newTempDir = makeString(directoryPrefix, "XXXXXX"_s);
     GUniqueOutPtr<GError> error;
-    GUniquePtr<char> tempDir(g_dir_make_tmp(newTempDir.utf8().data(), &error.outPtr()));
+    GUniquePtr<char> tempDir(g_dir_make_tmp(newTempDir.utf8().legacyCStringPointer(), &error.outPtr()));
     if (!tempDir) {
-        g_warning("Creating temporary directory at %s failed: %s", directoryPrefix.utf8().data(), error->message);
+        SAFE_G_WARNING("Creating temporary directory at %s failed: %s", directoryPrefix.utf8(), error->message);
         return { };
     }
 
@@ -149,18 +149,18 @@ String createTemporaryDirectory(const String& directoryPrefix)
 }
 
 #if ENABLE(DEVELOPER_MODE)
-CString webkitTopLevelDirectory()
+UTF8CString webkitTopLevelDirectory()
 {
     if (const char* topLevelDirectory = g_getenv("WEBKIT_TOP_LEVEL")) {
         if (g_file_test(topLevelDirectory, G_FILE_TEST_IS_DIR))
-            return topLevelDirectory;
+            return UTF8CString::unsafeFromUTF8(topLevelDirectory);
     }
     // The tooling to run tests should provide the above environment variable with
     // the right value, but if that was not the case, then do an attempt to guess
     // it assuming that we were built in the standard WebKitBuild subdirectory.
-    GUniquePtr<char*> parentPath(g_strsplit(currentExecutablePath().data(), "/WebKitBuild", -1));
+    GUniquePtr<char*> parentPath(g_strsplit(currentExecutablePath().legacyCStringPointer(), "/WebKitBuild", -1));
     GUniquePtr<char> absoluteTopLevelPath(realpath(parentPath.get()[0], nullptr));
-    return absoluteTopLevelPath.get();
+    return UTF8CString::unsafeFromUTF8(absoluteTopLevelPath.get());
 }
 #endif
 

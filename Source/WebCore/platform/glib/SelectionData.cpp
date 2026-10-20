@@ -20,6 +20,7 @@
 #include "SelectionData.h"
 
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/glib/GMallocString.h>
 #include <wtf/glib/GUniquePtr.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/MakeString.h>
@@ -89,7 +90,7 @@ void SelectionData::setURIList(const String& uriListString)
             }
 
             GUniqueOutPtr<GError> error;
-            GUniquePtr<gchar> filename(g_filename_from_uri(line.utf8().data(), 0, &error.outPtr()));
+            GUniquePtr<gchar> filename(g_filename_from_uri(line.utf8().legacyCStringPointer(), 0, &error.outPtr()));
             if (!error && filename)
                 m_filenames.append(String::fromUTF8(filename.get()));
         }
@@ -109,10 +110,8 @@ void SelectionData::setURL(const URL& url, const String& label)
         return;
 
     String actualLabel = label.isEmpty() ? url.string() : label;
-    GUniquePtr<gchar> escaped(g_markup_escape_text(actualLabel.utf8().data(), -1));
-
-    setMarkup(makeString("<a href=\""_s, url.string(), "\">"_s,
-        String::fromUTF8(escaped.get()), "</a>"_s));
+    auto escaped = GMallocString::unsafeAdoptFromUTF8(g_markup_escape_text(actualLabel.utf8().legacyCStringPointer(), -1));
+    setMarkup(makeString("<a href=\""_s, url.string(), "\">"_s, escaped.span(), "</a>"_s));
 }
 
 const String& SelectionData::urlLabel() const

@@ -34,9 +34,8 @@
 
 namespace JSC {
 
-ALWAYS_INLINE bool RegExpObject::isSymbolMatchFastAndNonObservable()
+ALWAYS_INLINE bool RegExpObject::isSymbolMatchFastAndNonObservable(JSGlobalObject* globalObject)
 {
-    JSGlobalObject* globalObject = this->realm();
     if (!globalObject->regExpPrimordialPropertiesWatchpointSet().isStillValid())
         return false;
 
@@ -62,9 +61,8 @@ ALWAYS_INLINE bool RegExpObject::isSymbolMatchFastAndNonObservable()
     return true;
 }
 
-ALWAYS_INLINE bool RegExpObject::isSymbolSearchFastAndNonObservable()
+ALWAYS_INLINE bool RegExpObject::isSymbolSearchFastAndNonObservable(JSGlobalObject* globalObject)
 {
-    JSGlobalObject* globalObject = this->realm();
     if (!globalObject->regExpPrimordialPropertiesWatchpointSet().isStillValid())
         return false;
 
@@ -73,8 +71,9 @@ ALWAYS_INLINE bool RegExpObject::isSymbolSearchFastAndNonObservable()
 
     // RegExp.prototype[@@search] sets lastIndex to 0 and restores it afterwards. The fast
     // path skips both writes, which is only unobservable when lastIndex is a plain writable
-    // number; a non-writable lastIndex must throw in the generic path.
-    if (!lastIndexIsWritable())
+    // number, or, for a RegExp with immutable properties, when neither write would happen;
+    // otherwise a non-writable lastIndex must throw in the generic path.
+    if (!lastIndexIsWritable() && !canSearchWithoutWritingLastIndex())
         return false;
 
     if (!getLastIndex().isNumber())
@@ -96,9 +95,8 @@ ALWAYS_INLINE bool RegExpObject::isSymbolSearchFastAndNonObservable()
     return true;
 }
 
-ALWAYS_INLINE bool RegExpObject::isSymbolMatchAllFastAndNonObservable()
+ALWAYS_INLINE bool RegExpObject::isSymbolMatchAllFastAndNonObservable(JSGlobalObject* globalObject)
 {
-    JSGlobalObject* globalObject = this->realm();
     if (!globalObject->regExpPrimordialPropertiesWatchpointSet().isStillValid())
         return false;
 
@@ -127,9 +125,33 @@ ALWAYS_INLINE bool RegExpObject::isSymbolMatchAllFastAndNonObservable()
     return true;
 }
 
-ALWAYS_INLINE bool RegExpObject::isSymbolReplaceFastAndNonObservable()
+ALWAYS_INLINE bool RegExpObject::canShareLiteralAsReceiver(JSGlobalObject* globalObject, bool forTest)
 {
-    JSGlobalObject* globalObject = this->realm();
+    // "exec" (and with it everything the builtin test looks at) is the original, and so is "test" where the call goes through it.
+    if (globalObject->regExpPrimordialPropertiesWatchpointSet().state() != IsWatched)
+        return false;
+    return !forTest || globalObject->regExpPrototypeTestWatchpointSet().state() == IsWatched;
+}
+
+ALWAYS_INLINE JSObject* RegExpObject::literalAsReceiver(JSGlobalObject* globalObject, CodeBlock* codeBlock, RegExp* regExp, bool forTest, WriteBarrier<JSCell>& cachedObject)
+{
+    // The slot is only ever filled while the option is on.
+    if (JSCell* cached = cachedObject.get()) [[likely]] {
+        auto* object = uncheckedDowncast<RegExpObject>(cached);
+        if (canShareLiteralAsReceiver(globalObject, forTest) && object->isSharedLiteralInInitialState(globalObject->regExpStructure(), regExp)) [[likely]]
+            return object;
+    }
+    return literalAsReceiverSlow(globalObject, codeBlock, regExp, forTest, cachedObject);
+}
+
+inline RegExpObject* RegExpObject::copyOfSharedLiteral(VM& vm)
+{
+    ASSERT(isSharedLiteral());
+    return create(vm, realm()->regExpStructure(), regExp());
+}
+
+ALWAYS_INLINE bool RegExpObject::isSymbolReplaceFastAndNonObservable(JSGlobalObject* globalObject)
+{
     if (!globalObject->regExpPrimordialPropertiesWatchpointSet().isStillValid())
         return false;
 
@@ -155,9 +177,8 @@ ALWAYS_INLINE bool RegExpObject::isSymbolReplaceFastAndNonObservable()
     return true;
 }
 
-ALWAYS_INLINE bool RegExpObject::isSymbolSplitFastAndNonObservable()
+ALWAYS_INLINE bool RegExpObject::isSymbolSplitFastAndNonObservable(JSGlobalObject* globalObject)
 {
-    JSGlobalObject* globalObject = this->realm();
     if (!globalObject->regExpPrimordialPropertiesWatchpointSet().isStillValid())
         return false;
 
@@ -309,7 +330,7 @@ inline uint64_t NODELETE advanceStringIndex(StringView str, unsigned strSize, ui
 }
 
 template<typename FixEndFunc>
-JSValue collectMatches(VM& vm, JSGlobalObject* globalObject, JSString* string, StringView s, RegExp* regExp, const FixEndFunc& fixEnd)
+JSValue collectMatches(VM& vm, JSGlobalObject* globalObject, JSString* string, StringView s, RegExp* regExp, NOESCAPE const FixEndFunc& fixEnd)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
 

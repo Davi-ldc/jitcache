@@ -31,13 +31,17 @@ messages -> WebPageTesting {
     SetPermissionLevel(String origin, bool allowed)
     IsEditingCommandEnabled(String commandName) -> (bool result) Synchronous
 
+#if PLATFORM(IOS_FAMILY)
+    ScreenIsBeingCaptured() -> (bool captured)
+#endif
+
 #if ENABLE(NOTIFICATIONS)
     ClearNotificationPermissionState()
 #endif
 
     ClearWheelEventTestMonitor()
     StartMonitoringWheelEventsForTesting() -> ()
-    WaitForWheelEventsToCompleteForTesting() -> ()
+    WaitForWheelEventsToCompleteForTesting(bool expectMomentumEnd) -> ()
     ResetStateBetweenTests()
     SetObscuredContentInsets(float top, float right, float bottom, float left) -> ()
     ClearCachedBackForwardListCounts() -> ()

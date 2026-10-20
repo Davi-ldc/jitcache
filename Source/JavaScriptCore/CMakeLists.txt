@@ -309,8 +309,8 @@ add_custom_target(Bytecodes DEPENDS "${JavaScriptCore_DERIVED_SOURCES_DIR}/Bytec
 add_custom_command(
     OUTPUT ${JavaScriptCore_DERIVED_SOURCES_DIR}/JSCWebPreferenceOptions.h
     MAIN_DEPENDENCY ${JAVASCRIPTCORE_DIR}/Scripts/PreferencesTemplates/JSCWebPreferenceOptions.h.erb
-    DEPENDS ${WTF_SCRIPTS_DIR}/GeneratePreferences.rb ${WTF_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml WTF_CopyPreferences
-    COMMAND ${Ruby_EXECUTABLE} ${WTF_SCRIPTS_DIR}/GeneratePreferences.rb --frontend JavaScriptCore --outputDir "${JavaScriptCore_DERIVED_SOURCES_DIR}" --template ${JAVASCRIPTCORE_DIR}/Scripts/PreferencesTemplates/JSCWebPreferenceOptions.h.erb ${WTF_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml
+    DEPENDS ${WTF_SCRIPTS_DIR}/GeneratePreferences.rb ${WTF_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml WTF_CopyPreferences ${WEB_PREFERENCES_ADDITIONS} ${WEBKITADDITIONS_HEADERS_DEPENDENCIES}
+    COMMAND ${Ruby_EXECUTABLE} ${WTF_SCRIPTS_DIR}/GeneratePreferences.rb --frontend JavaScriptCore --outputDir "${JavaScriptCore_DERIVED_SOURCES_DIR}" --template ${JAVASCRIPTCORE_DIR}/Scripts/PreferencesTemplates/JSCWebPreferenceOptions.h.erb ${WTF_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml ${WEB_PREFERENCES_ADDITIONS}
     VERBATIM)
 add_custom_target(JSCWebPreferenceOptions DEPENDS "${JavaScriptCore_DERIVED_SOURCES_DIR}/JSCWebPreferenceOptions.h")
 
@@ -447,7 +447,9 @@ set(LLIntSettingsExtractor_DEPENDENCIES
     WTF_CopyHeaders
     bmalloc_CopyHeaders
 )
+# Only used for local analysis; skip the normal post-link steps.
 set_property(TARGET LLIntSettingsExtractor PROPERTY SKIP_CODESIGN YES)
+set_property(TARGET LLIntSettingsExtractor PROPERTY SKIP_DSYM YES)
 WEBKIT_EXECUTABLE(LLIntSettingsExtractor)
 set_target_properties(LLIntSettingsExtractor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -476,7 +478,9 @@ set(LLIntOffsetsExtractor_DEPENDENCIES
     WTF_CopyHeaders
     bmalloc_CopyHeaders
 )
+# Only used for local analysis; skip the normal post-link steps.
 set_property(TARGET LLIntOffsetsExtractor PROPERTY SKIP_CODESIGN YES)
+set_property(TARGET LLIntOffsetsExtractor PROPERTY SKIP_DSYM YES)
 WEBKIT_EXECUTABLE(LLIntOffsetsExtractor)
 set_target_properties(LLIntOffsetsExtractor PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -601,7 +605,9 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     API/JSRemoteInspector.h
     API/JSRetainPtr.h
     API/JSScriptRefPrivate.h
+    API/JSStringRefCPP.h
     API/JSStringRefPrivate.h
+    API/JSStringRefPtr.h
     API/JSValueInternal.h
     API/JSValuePrivate.h
     API/JSVirtualMachineInternal.h
@@ -696,6 +702,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     bytecode/ComplexGetStatus.h
     bytecode/DFGExitProfile.h
     bytecode/DataFormat.h
+    bytecode/DeclaredNamesLink.h
     bytecode/DeferredCompilationCallback.h
     bytecode/DeferredSourceDump.h
     bytecode/DeleteByStatus.h
@@ -851,6 +858,8 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     heap/CodeBlockSetInlines.h
     heap/CollectingScope.h
     heap/CollectionScope.h
+    heap/Collector.h
+    heap/CollectorInlines.h
     heap/CollectorPhase.h
     heap/CompleteSubspace.h
     heap/CompleteSubspaceInlines.h
@@ -1093,6 +1102,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     jitcache/harness/JITCacheTwinsHost.h
     jitcache/maintenance/JITCacheMaintenance.h
     jitcache/session/JITCacheAPI.h
+    jitcache/session/JITCacheBun.h
 
     llint/LLIntOpcode.h
     llint/LLIntThunks.h
@@ -1114,6 +1124,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     parser/ParserModes.h
     parser/ParserTokens.h
     parser/ResultType.h
+    parser/SourceCharacters.h
     parser/SourceCode.h
     parser/SourceCodeKey.h
     parser/SourceProvider.h
@@ -1523,8 +1534,8 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     runtime/JSModuleRecord.h
     runtime/JSNativeStdFunction.h
     runtime/JSNativeStdFunctionInlines.h
-    runtime/JSONAtomStringCache.h
-    runtime/JSONAtomStringCacheInlines.h
+    runtime/JSONCache.h
+    runtime/JSONCacheInlines.h
     runtime/JSONObject.h
     runtime/JSONObjectInlines.h
     runtime/JSObject.h
@@ -1560,6 +1571,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     runtime/JSStringIteratorInlines.h
     runtime/JSStringJoiner.h
     runtime/JSSymbolTableObject.h
+    runtime/JSSymbolTableObjectInlines.h
     runtime/JSTemplateObjectDescriptor.h
     runtime/JSTemplateObjectDescriptorInlines.h
     runtime/JSType.h
@@ -1652,7 +1664,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     runtime/PageCount.h
     runtime/ParseInt.h
     runtime/PinballCompletion.h
-    runtime/PlainGregorianDateTime.h
+    runtime/PrelinkedModuleGraph.h
     runtime/PrivateFieldPutKind.h
     runtime/PrivateName.h
     runtime/ProfilerSupport.h
@@ -2112,6 +2124,9 @@ if (APPLE)
         corpse/CorpseClient.h
         corpse/CorpseError.h
         corpse/CorpseExportsTrie.h
+        corpse/CorpseMemory.h
+        corpse/CorpseMemoryPtr.h
+        corpse/CorpseMemorySpan.h
         corpse/CorpseProcess.h
         corpse/CorpseRegion.h
         corpse/CorpseSnapshot.h
@@ -2228,11 +2243,16 @@ set(JavaScriptCore_INSPECTOR_DOMAINS
     ${JAVASCRIPTCORE_DIR}/inspector/protocol/Process.json
 )
 
+set(_platform_defines_file_arg)
+if (WEBKIT_PLATFORM_FEATURE_DEFINES_FILE)
+    set(_platform_defines_file_arg --defines-file ${WEBKIT_PLATFORM_FEATURE_DEFINES_FILE})
+endif ()
+
 add_custom_command(
     OUTPUT ${JavaScriptCore_DERIVED_SOURCES_DIR}/CombinedDomains.json
     MAIN_DEPENDENCY ${JavaScriptCore_SCRIPTS_DIR}/generate-combined-inspector-json.py
-    DEPENDS ${JavaScriptCore_INSPECTOR_DOMAINS}
-    COMMAND ${PYTHON_EXECUTABLE} ${JavaScriptCore_SCRIPTS_DIR}/generate-combined-inspector-json.py ${JavaScriptCore_INSPECTOR_DOMAINS} "${FEATURE_DEFINES_WITH_SPACE_SEPARATOR}" ${JavaScriptCore_DERIVED_SOURCES_DIR}/CombinedDomains.json
+    DEPENDS ${JavaScriptCore_INSPECTOR_DOMAINS} ${WEBKIT_PLATFORM_FEATURE_DEFINES_FILE}
+    COMMAND ${PYTHON_EXECUTABLE} ${JavaScriptCore_SCRIPTS_DIR}/generate-combined-inspector-json.py ${_platform_defines_file_arg} ${JavaScriptCore_INSPECTOR_DOMAINS} "${FEATURE_DEFINES_WITH_SPACE_SEPARATOR}" ${JavaScriptCore_DERIVED_SOURCES_DIR}/CombinedDomains.json
     VERBATIM)
 
 # Inspector Backend Dispatchers, Frontend Dispatchers, Type Builders

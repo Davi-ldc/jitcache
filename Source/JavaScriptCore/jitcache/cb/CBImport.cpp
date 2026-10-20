@@ -35,7 +35,7 @@
 // writes neither; with strict on it first runs validateState, checks that the CB is newborn and at its link state, and
 // checks the captured counter. seedLinkedState then writes every profile and the tier-up history field by field into the
 // linked CB and runs the realm step, and finishCounter, after native setup, puts the captured counter back and lets the
-// engine's own check re-slice a finite threshold against this process's pool.
+// engine's own check re-slice a finite threshold against this process's pool and the VM's startup deferral scale.
 
 namespace JSC::JITCache {
 
@@ -67,14 +67,10 @@ template<> struct FamilyRecord<FamilyKind::BranchBit> {
 
 using ArrayOffsets = std::array<uint32_t, CBFormat::numberOfStateArrays>;
 
-// The records of a family kind: the sum of its families' entry counts.
+// The records of a family kind: the entry counts of its families that have records.
 static size_t familyRecordCount(const CBFormat::StateHeader& header, FamilyKind kind)
 {
-    size_t count = 0;
-    unsigned first = CBFormat::firstFamilyOf(kind);
-    for (unsigned family = first; family < first + CBFormat::numberOfFamiliesOf(kind); ++family)
-        count += header.familyEntryCount[family];
-    return count;
+    return CBFormat::recordCountOfKind(header.familyEntryCount, kind);
 }
 
 // One array of a prepared section as a typed span. The section starts 8-byte aligned and the layout aligns every element,
@@ -139,10 +135,11 @@ static bool isNewborn(CodeBlock& codeBlock)
     return codeBlock.jitType() == JITType::None && !codeBlock.baselineJITData();
 }
 
+// An argument profile or a ValueProfileRef, whose prediction reads SpecNone while its table has no predictions.
 template<typename Profile>
 static bool valueProfileIsAtLinkState(const Profile& profile)
 {
-    return profile.m_prediction == SpecNone && !profile.numberOfSamples();
+    return profile.prediction() == SpecNone && !profile.numberOfSamples();
 }
 
 // An ArrayProfile is its two StructureID samples, its flags and its modes, with no padding, so comparing its bytes with
@@ -160,7 +157,7 @@ static bool familyFieldIsAtLinkState(Field& field)
     else if constexpr (kind == FamilyKind::AllocationHint)
         return !field.vectorLengthHintConcurrently();
     else if constexpr (kind == FamilyKind::IterationModes)
-        return !field.seenModes;
+        return !CBFormat::iterationModesOf(field);
     else if constexpr (kind == FamilyKind::EnumeratorModes)
         return !field;
     else if constexpr (kind == FamilyKind::ToThisStatus)
@@ -182,20 +179,23 @@ static bool isAtLinkState(CodeBlock& codeBlock)
     }
 
     bool atLinkState = true;
-    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned, ValueProfile& profile) {
+    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned, const ValueProfileRef& profile) {
         atLinkState &= valueProfileIsAtLinkState(profile);
     });
 
+    // A family without a field holds call sites, whose call data the ICs lane checks.
     unsigned newArrayBufferEntries = 0;
     CBFormat::forEachFamily([&](auto family) {
         using FamilyType = decltype(family);
-        CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
-            atLinkState &= familyFieldIsAtLinkState<FamilyType::kind>(field);
-            if constexpr (FamilyType::index == CBFormat::newArrayBufferFamily)
-                ++newArrayBufferEntries;
-            else if constexpr (FamilyType::kind == FamilyKind::AllocationHint)
-                atLinkState &= field.selectIndexingTypeConcurrently() == ArrayWithUndecided;
-        });
+        if constexpr (FamilyType::hasField) {
+            CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
+                atLinkState &= familyFieldIsAtLinkState<FamilyType::kind>(field);
+                if constexpr (FamilyType::index == CBFormat::newArrayBufferFamily)
+                    ++newArrayBufferEntries;
+                else if constexpr (FamilyType::kind == FamilyKind::AllocationHint)
+                    atLinkState &= field.selectIndexingTypeConcurrently() == ArrayWithUndecided;
+            });
+        }
     });
 
     // Linking gives each F19 entry its instruction's type. The check reaches the entry through the instruction, as
@@ -234,7 +234,8 @@ static std::optional<CBCheck> strictFailure(std::span<const uint8_t> stateSectio
 }
 
 // One family field from its record: the array profile and allocation hint through restoreAccumulatedState and
-// restoreHint, which assert that the samples they leave are empty, and every other field assigned.
+// restoreHint, which assert that the samples they leave are empty, iterator_close_check's byte narrowed, and every other
+// field assigned.
 template<FamilyKind kind, typename Field, typename Record>
 static void seedFamilyField(Field& field, const Record& record)
 {
@@ -243,7 +244,7 @@ static void seedFamilyField(Field& field, const Record& record)
     else if constexpr (kind == FamilyKind::AllocationHint)
         field.restoreHint(CBFormat::allocationHintIndexingType(record), CBFormat::allocationHintVectorLength(record));
     else if constexpr (kind == FamilyKind::IterationModes)
-        field.seenModes = record;
+        CBFormat::setIterationModes(field, record);
     else if constexpr (kind == FamilyKind::EnumeratorModes)
         field = record;
     else if constexpr (kind == FamilyKind::ToThisStatus)
@@ -298,9 +299,13 @@ void CBStateImport::seedLinkedState(CodeBlock& codeBlock) const
     const CBFormat::StateHeader& header = *m_header;
     StateArrays arrays(m_bytes, header, m_arrayOffsets);
 
-    // Value profiles: offset k from element k - 1.
-    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, ValueProfile& profile) {
-        profile.m_prediction = static_cast<SpeculatedType>(arrays.valuePredictions[offset - 1]);
+    // Value profiles: offset k from element k - 1, through the native writer, for each record that is not SpecNone. On a
+    // link-state profile a merge is an assignment, and the first one allocates the table's predictions, so a CB whose
+    // records are all SpecNone gets none, as natively.
+    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, const ValueProfileRef& profile) {
+        auto prediction = static_cast<SpeculatedType>(arrays.valuePredictions[offset - 1]);
+        if (prediction != SpecNone)
+            profile.mergePrediction(prediction);
     });
 
     // Argument profiles.
@@ -321,15 +326,18 @@ void CBStateImport::seedLinkedState(CodeBlock& codeBlock) const
     ASSERT(arrays.lazyOperandProfiles.empty());
 #endif
 
-    // The families: each family's entries in metadata-ID order, in step with its records.
+    // The families: each family's entries in metadata-ID order, in step with its records. A family without a field holds
+    // call sites, whose this profile the ICs lane restores; it has no records.
     CBFormat::forEachFamily([&](auto family) {
         using FamilyType = decltype(family);
-        auto records = arrays.records<FamilyType::kind>();
-        size_t index = CBFormat::firstRecordOfFamily(header.familyEntryCount, FamilyType::index);
-        CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
-            seedFamilyField<FamilyType::kind>(field, records[index++]);
-        });
-        ASSERT(index == CBFormat::firstRecordOfFamily(header.familyEntryCount, FamilyType::index) + header.familyEntryCount[FamilyType::index]);
+        if constexpr (FamilyType::hasField) {
+            auto records = arrays.records<FamilyType::kind>();
+            size_t index = CBFormat::firstRecordOfFamily(header.familyEntryCount, FamilyType::index);
+            CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
+                seedFamilyField<FamilyType::kind>(field, records[index++]);
+            });
+            ASSERT(index == CBFormat::firstRecordOfFamily(header.familyEntryCount, FamilyType::index) + header.familyEntryCount[FamilyType::index]);
+        }
     });
 
     // The tier-up history, before setup, whose optimizeAfterWarmUp reads the reoptimization count.
@@ -376,13 +384,17 @@ CBCounterRestore CBStateImport::finishCounter(CodeBlock& codeBlock) const
     counter.m_totalCount = header.counterTotalCount;
     counter.m_counter = header.counterValue;
 
-    CBCounterRestore restore { .carried = true };
+    // The scale CodeBlock::checkIfOptimizationThresholdReached passes, which withholds it only from a CB that already has
+    // an optimized replacement; a newborn CB is not yet its executable's code, so it has none. That function is not
+    // called, since it would take the JIT worklist's lock to look for a DFG plan this CB cannot have.
+    double startupDeferralScale = codeBlock.vm().startupJITDeferralScale();
+    CBCounterRestore restore { .carried = true, .startupDeferralScale = startupDeferralScale };
     if (threshold == std::numeric_limits<int32_t>::max()) {
         // setThreshold would defer indefinitely and drop the progress, so the captured slice stays, which no pool
         // statistic shaped.
         restore.nativeSlice = header.counterValue < 0 ? -static_cast<int64_t>(header.counterValue) : 0;
-    } else if (counter.checkIfThresholdCrossedAndSet(&codeBlock)) {
-        // This process's pool and this CB's size say the threshold is reached.
+    } else if (counter.checkIfThresholdCrossedAndSet(&codeBlock, startupDeferralScale)) {
+        // This process's pool, this CB's size and the VM's scale say the threshold is reached.
         restore.crossed = true;
         restore.nativeSlice = 0;
     } else

@@ -56,10 +56,10 @@
     if (capturing) {
         const sections = load("./resources/image-sections.js", "caller relative");
         sections.expectTargets(role, { call: { fromProducer } }, [
-            { site: "E1", kind: "CommonThunk", a: "ReturnFromBaseline", form: "Jump" },
-            { site: "C27, A6", kind: "StructureIDBase", form: "Pointer" },
-            { site: "B1", kind: "VMAddress", a: "SoftStackLimit", form: "Pointer" },
-            { site: "B9", kind: "Operation", form: "Pointer" },
+            { site: "ret's jump to the return thunk", kind: "CommonThunk", a: "ReturnFromBaseline", form: "Jump" },
+            { site: "emitLoadStructure's structure ID decode", kind: "StructureIDBase", form: "Pointer" },
+            { site: "the prologue's stack limit check", kind: "VMAddress", a: "SoftStackLimit", form: "Pointer" },
+            { site: "a far call to an operation", kind: "Operation", form: "Pointer" },
         ]);
         keys = {
             fromProducer: jitcacheBodyKey(fromProducer, "call"),

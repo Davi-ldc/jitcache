@@ -41,6 +41,7 @@ BaselineJITPlan::BaselineJITPlan(CodeBlock* codeBlock)
 {
     VM& vm = codeBlock->vm();
     JIT::doMainThreadPreparationBeforeCompile(vm);
+    codeBlock->unlinkedCodeBlock()->ensureValueAndArrayProfiles();
 
     // JITCache: whether the compilation records its image. Both callers, jitCompileAndSetHeuristics and JIT::compileSync,
     // construct the plan on the VM thread, where the glue's test runs.
@@ -53,8 +54,7 @@ BaselineJITPlan::BaselineJITPlan(CodeBlock* codeBlock)
 
 auto BaselineJITPlan::compileInThreadImpl(JITCompilationEffort effort) -> CompilationPath
 {
-    m_codeBlock->updateAllNonLazyValueProfilePredictions();
-    m_codeBlock->updateAllLazyValueProfilePredictions();
+    m_codeBlock->updatePredictionsConcurrently();
 
     // JITCache: the native cost counts the compilation after its profile drain.
     JITCache::BaselineSpanTimer jitCacheTimer(*m_vm, JITCache::BaselineSpan::Compile, m_jitCacheMeasure);
@@ -127,8 +127,8 @@ CompilationResult BaselineJITPlan::finalize()
     CompilationResult result = JIT::finalizeOnMainThread(m_codeBlock, *this, m_jitCode);
     switch (result) {
     case CompilationResult::CompilationFailed:
-        // JITCache: a baseline plan fails only for lack of executable memory (JIT::link returns null only when its
-        // LinkBuffer failed to allocate), so the executable-allocation fault comes before the effects below.
+        // JITCache: a baseline plan fails only when it found no executable memory, so report that before the lines
+        // below write the failure's effects.
         JITCache::didFailExecutableAllocation(*m_vm, JITCache::ExecutableAllocationSite::BaselinePlan);
         CODEBLOCK_LOG_EVENT(m_codeBlock, "delayJITCompile", ("compilation failed"));
         dataLogLnIf(Options::verboseOSR(), "    JIT compilation failed.");

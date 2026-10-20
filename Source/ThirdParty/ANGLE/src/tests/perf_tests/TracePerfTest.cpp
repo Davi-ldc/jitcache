@@ -1033,11 +1033,6 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
     }
 
-    if (traceNameIs("saint_seiya_awakening"))
-    {
-        addExtensionPrerequisite("GL_EXT_shadow_samplers");
-    }
-
     if (traceNameIs("magic_tiles_3"))
     {
         // Linux+NVIDIA doesn't support GL_KHR_texture_compression_astc_ldr (possibly others also)
@@ -1121,20 +1116,9 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
     }
 
-    if (traceNameIs("pokemon_go"))
-    {
-        addExtensionPrerequisite("GL_EXT_texture_cube_map_array");
-        addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
-    }
-
     if (traceNameIs("cookie_run_kingdom"))
     {
         addExtensionPrerequisite("GL_OES_EGL_image_external");
-    }
-
-    if (traceNameIs("pubg_mobile_skydive") || traceNameIs("pubg_mobile_battle_royale"))
-    {
-        addExtensionPrerequisite("GL_EXT_texture_buffer");
     }
 
     if (traceNameIs("scrabble_go"))
@@ -1172,20 +1156,10 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         addExtensionPrerequisite("GL_EXT_shader_framebuffer_fetch");
     }
 
-    if (traceNameIs("war_planet_online"))
-    {
-        addExtensionPrerequisite("GL_KHR_texture_compression_astc_ldr");
-    }
-
     if (traceNameIs("lords_mobile"))
     {
         // http://anglebug.com/42265475 - glTexStorage2DEXT is not exposed on Pixel 4 native
         addExtensionPrerequisite("GL_EXT_texture_storage");
-    }
-
-    if (traceNameIs("real_racing3"))
-    {
-        addExtensionPrerequisite("GL_EXT_shader_framebuffer_fetch");
     }
 
     if (traceNameIs("blade_and_soul_revolution"))
@@ -1345,6 +1319,11 @@ TracePerfTest::TracePerfTest(std::unique_ptr<const TracePerfParams> params)
         traceNameIs("my_talking_tom2") || traceNameIs("tower_of_fantasy"))
     {
         addExtensionPrerequisite("GL_EXT_sRGB_write_control");
+    }
+
+    if (traceNameIs("tiles_hop"))
+    {
+        addIntegerPrerequisite(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, 1024);
     }
 
     // GL_KHR_debug does not work on Android for GLES1

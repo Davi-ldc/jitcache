@@ -6,24 +6,28 @@ description: Serialize JavaScriptCore baseline code so a cold worker installs it
 This is a hard problem and your instinct will be to route around it. But you are the world's strongest, largest language model — believe in yourself. We are after a timeless solution, one that somebody looking at it in a thousand years would still call optimal.
 
 Pins:
-- `bun-v1.4.2`, `744846f844374847c902b5e7fd59b4342a51ef99`
+- `bun-v1.4.3`, `c6da4a4d3010e5553438c60f6bd76d981976867c`
 
-- **Webkitbun:** `oven-sh/WebKit` `2e2aa2290fac856d6f451ceacb58f7f5b44dd057`, declared by `WEBKIT_VERSION` in `scripts/build/deps/webkit.ts`
+- **Webkitbun:** `oven-sh/WebKit` `0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f`, declared by `WEBKIT_VERSION` in `scripts/build/deps/webkit.ts`
 
-- **Upstream pin:** `WebKit/WebKit` at [`0d58b764f34b86ecf520ac7954b7aa1ded15cc5e`] through merge [`d4e7e206dc9b1c58eb8aca8f06eed7a6f4abb98a`]
+- **Upstream pin:** `WebKit/WebKit` at [`dbdca7545da84620b857f7d32749a1ee364370f0`] through merge [`661e26ef1300c45debd5f73dd65ecd4cba1daad8`]
 
 PS: ARM = ARM64; we do not support arm32 or Windows ARM.
 
-For cpp work, check [reference/cpp/cpp-coding-standards.md](reference/cpp/cpp-coding-standards.md). Run `clang-format` and `Tools/Scripts/check-webkit-style`, run from inside the checkout because its paths only resolve from there — it carries far more rules than the doc does, and its categories are spelled out in `Tools/Scripts/webkitpy/style/checkers/cpp.py`. It fires on the engine's own sources too, so read a hit as a question to answer, not a verdict to obey. JITCache's own files carry no header at all, no license and no copyright, only comments that explain code, so its `legal/copyright` hit does not apply to them.
+For cpp work, check [reference/cpp/cpp-coding-standards.md](reference/cpp/cpp-coding-standards.md). Run `clang-format` and `Tools/Scripts/check-webkit-style`, run from inside the checkout because its paths only resolve from there — it carries far more rules than the doc does, and its categories are spelled out in `Tools/Scripts/webkitpy/style/checkers/cpp.py`. Format JITCache's own files whole and an engine file only on the lines you changed (`clang-format --lines`), since formatting a whole engine file rewrites upstream code. It fires on the engine's own sources too, so read a hit as a question to answer, not a verdict to obey. JITCache's own files carry no header at all, no license and no copyright, only comments that explain code, so its `legal/copyright` hit does not apply to them.
 ---
 
 ## Scope
 
 [THREAD](../docs/JitCache/THREAD.md) decides what JITCache does now and what later versions add. DFG and FTL capture belong to later versions, so reviews do not report that a body which tiered up keeps its last baseline capture. Native JSC and Bun behavior is out of scope too, bugs included: whatever also happens with JITCache off, whether a deliberate choice or a defect, JITCache does not fix it, report it upstream or track it in todo.md, as long as it leaves the run no worse than native. Native behavior becomes a blocker only when it makes a consumer run differ from the JITCache-off run or makes a guarantee THREAD states false, and then the fix goes only as far as that guarantee needs.
 
+## Decisions
+
+Product is what JITCache promises or exposes: THREAD's guarantees, the public surface (the C++ API, Bun's flags and their defaults, what `status`, `delta` and maintenance report), the artifact's compatibility and trust model, the supported platforms, v1's scope and anything a Bun user or embedder can observe. How the code meets those is not product: layouts, internal interfaces, the task split and order, codec internals, tests, benches, builds and the workflow. A product question waits for Davi, with your recommendation, and a question you cannot place is product. Decide everything else yourself, for THREAD's goals, and write each decision where its rule lives: in the SPEC, with its reason in the SPEC's history when a reader would otherwise go back to the obvious choice; in CLAUDE.md or this skill when it is a working rule; in todo.md when it leaves work open; and in the plan of the work under way, such as a bump plan, until that work lands.
+
 ## Writing SPECs
 
-A SPEC is for the implementer, who builds from it alone. It states every decision, and gives a one-sentence reason only where the implementer would otherwise get the decision wrong. A SPEC's history is for whoever later revisits a decision: for each one that isn't obvious, it records what first seemed right, the evidence that changed it and the intent that came out, so the next agent doesn't go back to the obvious version. The SPEC links its history in its header and beside each decision the history explains, for whoever revisits that decision, but implementing never needs a link: a SPEC passage that only makes sense with its history is a defect. Logs and routine fixes belong in neither; git keeps them. Write so the reasoning reads in order: each rule lives in one place and is cited everywhere else, and each sentence states one fact plainly. Leave out provenance, status lines and anything a table column already says. [options.md](../docs/JitCache/options.md)'s opening is the model.
+A SPEC is for the implementer, who builds from it alone. It states every decision, and gives a one-sentence reason only where the implementer would otherwise get the decision wrong. A SPEC's history is for whoever later revisits a decision: for each one that isn't obvious, it records what first seemed right, the evidence that changed it and the intent that came out, so the next agent doesn't go back to the obvious version. The SPEC links its history in its header and beside each decision the history explains, for whoever revisits that decision, but implementing never needs a link: a SPEC passage that only makes sense with its history is a defect. Logs and routine fixes belong in neither; git keeps them. Write so the reasoning reads in order: each rule lives in one place and is cited everywhere else, and each sentence states one fact plainly. Leave out provenance, status lines and anything a table column already says. [options.md](../docs/JitCache/options.md)'s opening is the model. The comments in a SPEC's code blocks are the comments the implementer writes, so they explain the code in their own words and never cite THREAD, a SPEC, a section, a rule ID, a task, a step or a phase; a citation belongs in the prose around the block.
 
 ## Glossary
 

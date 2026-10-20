@@ -106,8 +106,8 @@ JSC_DEFINE_JIT_OPERATION(operationJSToWasmEntryWrapperBuildFrame, JSToWasmCallee
     }
 
     auto access = [sp, callFrame]<typename V>(auto* arr, int i) -> V* {
-        dataLogLnIf(WasmOperationsInternal::verbose, "fp[", (&reinterpret_cast<uint8_t*>(arr)[i / sizeof(uint8_t)] - reinterpret_cast<uint8_t*>(callFrame)), "] sp[", (&reinterpret_cast<uint8_t*>(arr)[i / sizeof(uint8_t)] - reinterpret_cast<uint8_t*>(sp)), "](", RawHex(reinterpret_cast<V*>(arr)[i / sizeof(V)]), ")");
-        return &reinterpret_cast<V*>(arr)[i / sizeof(V)];
+        dataLogLnIf(WasmOperationsInternal::verbose, "fp[", (&reinterpret_cast<uint8_t*>(arr)[i / static_cast<int>(sizeof(uint8_t))] - reinterpret_cast<uint8_t*>(callFrame)), "] sp[", (&reinterpret_cast<uint8_t*>(arr)[i / static_cast<int>(sizeof(uint8_t))] - reinterpret_cast<uint8_t*>(sp)), "](", RawHex(reinterpret_cast<V*>(arr)[i / static_cast<int>(sizeof(V))]), ")");
+        return &reinterpret_cast<V*>(arr)[i / static_cast<int>(sizeof(V))];
     };
 
     CallInformation wasmFrameConvention = wasmCallingConvention().callInformationFor(signature, CallRole::Caller);
@@ -166,8 +166,8 @@ JSC_DEFINE_JIT_OPERATION(operationJSToWasmEntryWrapperBuildReturnFrame, EncodedJ
     const RTT& signature = callee->rtt();
 
     auto access = [sp, callFrame]<typename V>(auto* arr, int i) -> V* {
-        dataLogLnIf(WasmOperationsInternal::verbose, "fp[", (&reinterpret_cast<uint8_t*>(arr)[i / sizeof(uint8_t)] - reinterpret_cast<uint8_t*>(callFrame)), "] sp[", (&reinterpret_cast<uint8_t*>(arr)[i / sizeof(uint8_t)] - reinterpret_cast<uint8_t*>(sp)), "](", reinterpret_cast<V*>(arr)[i / sizeof(V)], ")");
-        return &reinterpret_cast<V*>(arr)[i / sizeof(V)];
+        dataLogLnIf(WasmOperationsInternal::verbose, "fp[", (&reinterpret_cast<uint8_t*>(arr)[i / static_cast<int>(sizeof(uint8_t))] - reinterpret_cast<uint8_t*>(callFrame)), "] sp[", (&reinterpret_cast<uint8_t*>(arr)[i / static_cast<int>(sizeof(uint8_t))] - reinterpret_cast<uint8_t*>(sp)), "](", reinterpret_cast<V*>(arr)[i / static_cast<int>(sizeof(V))], ")");
+        return &reinterpret_cast<V*>(arr)[i / static_cast<int>(sizeof(V))];
     };
 
     if (signature.returnsVoid())
@@ -300,7 +300,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationGetWasmCalleeStackSize, UCPUStrictInt
 JSC_DEFINE_JIT_OPERATION(operationWasmToJSExitMarshalArguments, void, (void* sp, CallFrame* callFrame, void* argumentRegisters, JSWebAssemblyInstance* instance))
 {
     auto access = []<typename V>(auto* arr, int i) -> V* {
-        return &reinterpret_cast<V*>(arr)[i / sizeof(V)];
+        return &reinterpret_cast<V*>(arr)[i / static_cast<int>(sizeof(V))];
     };
 
     // We need to set up them immediately before potentially throwing anything.
@@ -443,7 +443,7 @@ ALWAYS_INLINE void assertCalleeIsReferenced(CallFrame* frame, JSWebAssemblyInsta
 JSC_DEFINE_JIT_OPERATION(operationWasmToJSExitMarshalReturnValues, void, (void* sp, CallFrame* callFrame, JSWebAssemblyInstance* instance))
 {
     auto access = []<typename V>(auto* arr, int i) -> V* {
-        return &reinterpret_cast<V*>(arr)[i / sizeof(V)];
+        return &reinterpret_cast<V*>(arr)[i / static_cast<int>(sizeof(V))];
     };
 
     void* registerSpace = sp;
@@ -832,7 +832,7 @@ static void doOSREntry(JSWebAssemblyInstance* instance, Probe::Context& context,
     context.fp() = std::bit_cast<UCPURegister*>(*framePointer);
     context.sp() = framePointer + 1;
     static_assert(prologueStackPointerDelta() == sizeof(void*) * 1);
-#elif CPU(ARM64E) || CPU(ARM64)
+#elif CPU(ARM64)
     // move(framePointerRegister, stackPointerRegister);
     // popPair(framePointerRegister, linkRegister);
     context.fp() = std::bit_cast<UCPURegister*>(*framePointer);
@@ -1799,10 +1799,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationWasmArrayFill16B, void, (void* payloa
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationWasmArrayFillRefs, void, (uint64_t* payload, uint64_t value, size_t elementCount))
 {
-    // A reference is stored whole so the concurrent collector cannot observe a torn JSValue.
-    volatile uint64_t* cursor = payload;
-    for (size_t i = 0; i < elementCount; ++i)
-        cursor[i] = value;
+    gcSafeMemfill(payload, value, elementCount * sizeof(uint64_t));
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationWasmArrayCopyRefs, void, (uint64_t* dst, const uint64_t* src, size_t byteCount))

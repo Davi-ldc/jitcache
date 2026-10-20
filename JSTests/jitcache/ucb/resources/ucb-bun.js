@@ -67,17 +67,6 @@ function matches(actual, expected)
     throw new Error(`unknown comparison ${operator}`);
 }
 
-// Whether this Bun is instrumented with AddressSanitizer, as Bun's own test harness tells (test/harness.ts).
-function isASAN()
-{
-    try {
-        const { isASANEnabled } = require("bun:internal-for-testing");
-        if (typeof isASANEnabled === "function")
-            return isASANEnabled();
-    } catch { }
-    return /asan|debug/.test(path.basename(process.execPath)) || Bun.version.includes("debug");
-}
-
 class Context {
     constructor(role, scratch, artifact, sequence)
     {
@@ -243,7 +232,7 @@ class Context {
 
     // Runs the app and prints its standard output. By default the app runs this run's role over an artifact of its own.
     // With `overRunArtifact`, a run that configures JITCache starts it as a Consumer of this run's artifact, which
-    // consumers open without a lock, so the app imports or seeds the bodies the test's own VM captured; an Off run starts
+    // consumers open without a lock, so the app imports the bodies the test's own VM captured; an Off run starts
     // it without JITCache either way. The app reads its role and scratch path from the environment, since a standalone
     // executable's argv is its user's.
     runApp(executable, { artifactName = "app-artifact", overRunArtifact = false, flags = [], environment = { } } = { })
@@ -278,4 +267,4 @@ function appContext()
     return new Context(process.env.JITCACHE_UCB_ROLE, process.env.JITCACHE_UCB_SCRATCH, "", process.env.JITCACHE_UCB_SEQUENCE ?? "0");
 }
 
-module.exports = { context, appContext, isASAN, Context };
+module.exports = { context, appContext, Context };

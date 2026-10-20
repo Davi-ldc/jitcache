@@ -65,8 +65,11 @@ public:
     friend WTF::TextStream& operator<<(WTF::TextStream&, const GridLayout&);
 
 private:
-    void updateGridItemRenderers();
-    void updateFormattingContextRootRenderer(const Layout::GridLayoutConstraints&, const Layout::UsedTrackSizes&, const Layout::GridItemRects&);
+    using GridItemBorderBoxRects = Vector<LayoutRect, 4>;
+    GridItemBorderBoxRects gridItemBorderBoxRects() const;
+
+    void updateGridItemRenderers(const GridItemBorderBoxRects& previousGridItemRects);
+    void updateFormattingContextRootRenderer(LayoutUnit blockContentSize, const Layout::GridItemRects&);
     void layoutOutOfFlowBoxes(const Layout::UsedTrackSizes&);
     void updateOverflow(RenderGrid&);
     void populateGridPositionsForOutOfFlowLayout(const Layout::UsedTrackSizes&);

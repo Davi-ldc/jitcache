@@ -193,6 +193,12 @@ selectors = [
 ]
 requires = ["ENABLE_SCRIPT_TRACKING_PRIVACY_PROTECTIONS"]
 
+[[not-web-essential]]
+request = "rdar://157886589"
+selectors = [
+    { name = "loadDefaultContentRuleListForStore:completionHandler:", class = "?" },
+]
+
 [[temporary-usage]]
 request = "rdar://157888734"
 cleanup = "rdar://157888769"
@@ -304,16 +310,6 @@ selectors = [
 ]
 requires = ["PLATFORM_VISION"]
 
-[[temporary-usage]]
-request = "rdar://165789536"
-cleanup = "rdar://173046822"
-selectors = [
-    { name = "cancelAllAnimations", class = "?" },
-    { name = "cancelAnimationForSuggestionWithUUID:", class = "?" },
-    { name = "startAnimationForSuggestionWithUUID:writingDirection:effectType:completion:", class = "?" },
-]
-requires = ["ENABLE_WRITING_TOOLS_TEXT_EFFECTS"]
-
 [[staging]]
 request = "rdar://171222829"
 selectors = [
@@ -338,7 +334,7 @@ selectors = [
 [[staging]]
 request = "rdar://166719636"
 symbols = [
-    "SecQWACTLSBindingVerify"
+    "SecTrustCreateAndVerifyQWACTLSBinding"
 ]
 
 [[not-web-essential]]
@@ -349,3 +345,13 @@ selectors = [
     { name = "invalidateWithReason:", class = "BERenderingProcess" },
 ]
 requires = ["USE_EXTENSIONKIT"]
+
+[[not-web-essential]]
+request = "rdar://188757685"
+classes = ["_UIVolumetricWindowSceneActivationRequestOptions"]
+selectors = [
+    { name = "_internalConfigurationWithRole:sceneClass:delegateClass:storyboard:", class = "UISceneConfiguration" },
+    { name = "_requestWithConfiguration:", class = "UISceneSessionActivationRequest" },
+    { name = "_setInternal:", class = "_UIVolumetricWindowSceneActivationRequestOptions" },
+]
+requires = ["PLATFORM_VISION", "ENABLE_CONNECTED_VOLUMETRIC_SCENE"]

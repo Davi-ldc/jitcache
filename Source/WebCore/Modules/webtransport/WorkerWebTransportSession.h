@@ -68,7 +68,7 @@ private:
     void cancelReceiveStream(WebTransportStreamIdentifier, std::optional<WebTransportStreamErrorCode>) final;
     void cancelSendStream(WebTransportStreamIdentifier, std::optional<WebTransportStreamErrorCode>) final;
     void destroyStream(WebTransportStreamIdentifier, std::optional<WebTransportStreamErrorCode>) final;
-    void terminate(WebTransportSessionErrorCode, CString&&) final;
+    void terminate(WebTransportSessionErrorCode, UTF8CString&&) final;
     void datagramIncomingMaxAgeUpdated(std::optional<double>) final;
     void datagramOutgoingMaxAgeUpdated(std::optional<double>) final;
     void incomingMaxBufferedDatagramsUpdated(uint32_t) final;
@@ -76,7 +76,7 @@ private:
 
     const ScriptExecutionContextIdentifier m_contextID;
     ThreadSafeWeakPtr<WebTransportSessionClient> m_client;
-    RefPtr<WebTransportSession> m_session;
+    const RefPtr<WebTransportSession> m_session;
 };
 
 }

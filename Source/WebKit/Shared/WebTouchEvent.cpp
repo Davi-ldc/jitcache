@@ -72,7 +72,7 @@ void WebTouchEvent::transformToRemoteFrameCoordinates(const WebCore::RemoteFrame
 {
     ASSERT(!std::exchange(m_hasTransformedToRemoteFrameCoordinates, true));
 
-    m_data.position = transformer.transformRootViewPointToRemoteFrameCoordinates(m_data.position);
+    m_data.position = transformer.transformToRemoteFrameCoordinates(m_data.position);
     for (auto& touchPoint : m_data.touchPoints)
         touchPoint.transformToRemoteFrameCoordinates(transformer);
     for (Ref event : m_data.coalescedEvents)
@@ -83,8 +83,8 @@ void WebTouchEvent::transformToRemoteFrameCoordinates(const WebCore::RemoteFrame
 
 void WebPlatformTouchPoint::transformToRemoteFrameCoordinates(const WebCore::RemoteFrameGeometryTransformer& transformer)
 {
-    m_locationInRootView = transformer.transformRootViewPointToRemoteFrameCoordinates(m_locationInRootView);
-    m_previousLocationInRootView = transformer.transformRootViewPointToRemoteFrameCoordinates(m_previousLocationInRootView);
+    m_locationInRootView = transformer.transformToRemoteFrameCoordinates(m_locationInRootView);
+    m_previousLocationInRootView = transformer.transformToRemoteFrameCoordinates(m_previousLocationInRootView);
 
     // When translating to the coordinate space of a site isolated iframe,
     // viewport coordinates become the same as root view coordinates because
@@ -93,6 +93,25 @@ void WebPlatformTouchPoint::transformToRemoteFrameCoordinates(const WebCore::Rem
     // obscured, we get bogus values here. Iframe processes don't handle
     // any difference between root view coordinates and viewport coordinates.
     m_locationInViewport = m_locationInRootView;
+}
+#endif
+
+#if ENABLE(COORDINATED_TOUCH_EVENTS)
+void WebTouchEvent::mergeMovedTouchPointsFrom(const WebTouchEvent& supersededEvent)
+{
+    ASSERT(type() == WebEventType::TouchMove);
+    ASSERT(supersededEvent.type() == WebEventType::TouchMove);
+
+    for (auto& touchPoint : m_data.touchPoints) {
+        if (touchPoint.state() != WebPlatformTouchPoint::State::Stationary)
+            continue;
+
+        auto index = supersededEvent.touchPoints().findIf([&](const auto& supersededTouchPoint) {
+            return supersededTouchPoint.id() == touchPoint.id();
+        });
+        if (index != notFound && supersededEvent.touchPoints()[index].state() == WebPlatformTouchPoint::State::Moved)
+            touchPoint.setState(WebPlatformTouchPoint::State::Moved);
+    }
 }
 #endif
 

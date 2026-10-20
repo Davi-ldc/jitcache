@@ -32,6 +32,7 @@
 #include "CSSColor.h"
 #include "CSSColorConversion+Normalize.h"
 #include "CSSColorDescriptors.h"
+#include "CSSColorInterpolationMethod.h"
 #include "CSSColorLayers.h"
 #include "CSSColorMix.h"
 #include "CSSContrastColor.h"
@@ -74,11 +75,6 @@ namespace CSSPropertyParserHelpers {
 template<typename T> static CSS::Color makeCSSColor(T&& unresolvedColorKind)
 {
     return CSS::Color { std::forward<T>(unresolvedColorKind) };
-}
-
-template<typename T> static std::optional<CSS::Color> makeCSSColor(std::optional<T>&& unresolvedColorKind)
-{
-    return unresolvedColorKind ? std::make_optional(makeCSSColor(std::forward<T>(*unresolvedColorKind))) : std::nullopt;
 }
 
 // State passed to internal color consumer functions. Used to pass information
@@ -447,7 +443,7 @@ static std::optional<CSS::Color> consumeHSLFunction(CSSParserTokenRange& range, 
 // MARK: - color()
 
 template<typename Functor>
-static auto callWithColorFunction(CSSValueID id, Functor&& functor) -> decltype(functor.template operator()<ColorRGBFunction<ExtendedSRGBA<float>>>())
+static auto callWithColorFunction(CSSValueID id, NOESCAPE const Functor& functor) -> decltype(functor.template operator()<ColorRGBFunction<ExtendedSRGBA<float>>>())
 {
     switch (id) {
     case CSSValueA98Rgb:
@@ -478,7 +474,7 @@ static auto callWithColorFunction(CSSValueID id, Functor&& functor) -> decltype(
 }
 
 template<typename Functor>
-static auto consumeColorSpace(CSSParserTokenRange& args, Functor&& functor) -> decltype(functor.template operator()<ColorRGBFunction<ExtendedSRGBA<float>>>())
+static auto consumeColorSpace(CSSParserTokenRange& args, NOESCAPE const Functor& functor) -> decltype(functor.template operator()<ColorRGBFunction<ExtendedSRGBA<float>>>())
 {
     return callWithColorFunction(args.peek().id(), [&]<typename Descriptor>() {
         consumeIdentRaw(args);
@@ -576,7 +572,7 @@ static std::optional<CSS::Color> consumeColorMixFunction(CSSParserTokenRange& ra
 
     auto args = consumeFunction(range);
 
-    std::optional<ColorInterpolationMethod> colorInterpolationMethod = CSS::defaultInterpolationMethodForColorMix;
+    std::optional<CSS::ColorInterpolationMethod> colorInterpolationMethod = CSS::defaultInterpolationMethodForColorMix;
     if (args.peek().id() == CSSValueIn) {
         colorInterpolationMethod = consumeColorInterpolationMethod(args, state.propertyParserState);
         if (!colorInterpolationMethod)
@@ -667,7 +663,7 @@ static std::optional<CSS::Color> consumeLightDarkFunction(CSSParserTokenRange& r
 
 static std::optional<CSS::Color> consumeRelativeAlphaColorFunction(CSSParserTokenRange& range, ColorParserState& state)
 {
-    // alpha() = alpha([from <color>] [ / [<alpha-value> | none] ]? )
+    // alpha() = alpha([from <color>] / [<alpha-value> | none] )
     // https://drafts.csswg.org/css-color-5/#relative-alpha
 
     ASSERT(range.peek().functionId() == CSSValueAlpha);
@@ -682,15 +678,6 @@ static std::optional<CSS::Color> consumeRelativeAlphaColorFunction(CSSParserToke
     auto originColor = consumeColor(args, state);
     if (!originColor)
         return { };
-
-    if (args.atEnd()) {
-        return CSS::Color {
-            CSS::RelativeAlphaColor {
-                .origin = WTF::move(*originColor),
-                .alpha = std::nullopt,
-            }
-        };
-    }
 
     if (!consumeSlashIncludingWhitespace(args))
         return std::nullopt;

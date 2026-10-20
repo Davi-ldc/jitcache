@@ -29,6 +29,7 @@
 
 #include <WebCore/AsyncNodeDeletionQueue.h>
 #include <WebCore/Color.h>
+#include <WebCore/ColorHash.h>
 #include <WebCore/ContainerNode.h>
 #include <WebCore/ContextDestructionObserver.h>
 #include <WebCore/DocumentClasses.h>
@@ -99,6 +100,9 @@ class TextEncoding;
 namespace WebCore {
 
 class AXObjectCache;
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+class AXCustomColorModeController;
+#endif
 class AppHighlightStorage;
 class Attr;
 class CanvasBase;
@@ -189,7 +193,7 @@ class JSViewTransitionUpdateCallback;
 class LargestContentfulPaintData;
 class LayoutPoint;
 class LayoutRect;
-class LazyLoadImageObserver;
+class LazyLoadElementObserver;
 class LiveNodeList;
 class LocalFrame;
 class LocalFrameView;
@@ -316,10 +320,6 @@ struct EventTrackingRegions;
 struct SystemPreviewInfo;
 #endif
 
-#if ENABLE(VIDEO)
-class LazyLoadVideoObserver;
-#endif
-
 #if ENABLE(WEB_RTC)
 class RTCPeerConnection;
 #endif
@@ -362,10 +362,6 @@ enum class EventTrackingRegionsEventType : uint8_t;
 
 #if ENABLE(MEDIA_SESSION)
 enum class MediaSessionAction : uint8_t;
-#endif
-
-#if ENABLE(MODEL_ELEMENT)
-class LazyLoadModelObserver;
 #endif
 
 using IntDegrees = int32_t;
@@ -414,7 +410,7 @@ enum class HttpEquivPolicy : uint8_t {
     DisabledByContentDispositionAttachmentSandbox
 };
 
-enum class CustomElementNameValidationStatus {
+enum class CustomElementNameValidationStatus : uint8_t {
     Valid,
     FirstCharacterIsNotLowercaseASCIILetter,
     ContainsNoHyphen,
@@ -757,6 +753,7 @@ public:
     inline const Quirks& quirks() const; // Defined in DocumentQuirks.h
 
     WEBCORE_EXPORT float NODELETE deviceScaleFactor() const;
+    float NODELETE pixelSnappingScaleFactor() const;
 
     WEBCORE_EXPORT bool NODELETE useElevatedUserInterfaceLevel() const;
     WEBCORE_EXPORT bool useDarkAppearance(const Style::ComputedStyle*) const;
@@ -768,6 +765,8 @@ public:
     OptionSet<StyleColorOptions> styleColorOptions(const Style::ComputedStyle*) const;
 
     CompositeOperator compositeOperatorForBackgroundColor(const Color&, const RenderElement&) const;
+
+    bool backgroundColorIsPunchedOut(const Color&, const RenderElement&) const;
 
     WEBCORE_EXPORT Ref<Range> createRange();
 
@@ -826,7 +825,9 @@ public:
     bool isEventLoopGroupStoppedPermanently() const final;
     GraphicsClient* graphicsClient() final;
 
-    inline const SettingsValues& settingsValues() const final; // Defined in DocumentSettingsValues.h.
+    inline const SettingsValues& NODELETE settingsValues() const final; // Defined in DocumentSettingsValues.h.
+
+    const NetworkLoadPolicy& networkLoadPolicy() const final;
 
     void NODELETE suspendDeviceMotionAndOrientationUpdates();
     void NODELETE resumeDeviceMotionAndOrientationUpdates();
@@ -1421,6 +1422,9 @@ public:
 
     void updateAccessibilityObjectRegions();
     void updateEventRegions();
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    void updateAXCustomColorModeTextBackdrops();
+#endif
 
     void NODELETE invalidateRenderingDependentRegions();
     void invalidateEventRegionsForFrame(HTMLFrameOwnerElement&);
@@ -1445,8 +1449,9 @@ public:
     bool loadEventFinished() const { return m_loadEventFinished; }
 
     bool isContextThread() const final;
-    bool isSecureContext() const final;
-    bool NODELETE crossOriginIsolated() const final;
+    WEBCORE_EXPORT bool isSecureContext() const final;
+    bool crossOriginIsolated() const final;
+    bool NODELETE isInCrossOriginIsolatedAgentCluster() const;
     bool NODELETE originAgentCluster() const;
     String agentClusterID() const final;
     bool isJSExecutionForbidden() const final { return false; }
@@ -1509,6 +1514,7 @@ public:
     void decrementLoadEventDelayCount();
     bool isDelayingLoadEvent() const { return m_loadEventDelayCount; }
     WEBCORE_EXPORT void checkCompleted();
+    WEBCORE_EXPORT void checkLoadComplete();
 
 #if ENABLE(IOS_TOUCH_EVENTS)
 // FIXME: Properly support using WKA in modules.
@@ -1561,6 +1567,8 @@ public:
 
     bool hasRecentUserInteractionForNavigationFromJS() const;
     void userActivatedMediaFinishedPlaying() { m_userActivatedMediaFinishedPlayingTimestamp = MonotonicTime::now(); }
+    void updateMostRecentAudiblePlaybackEndedTime() { m_mostRecentAudiblePlaybackEndedTime = MonotonicTime::now(); }
+    Markable<MonotonicTime> mostRecentAudiblePlaybackEndedTime() const { return m_mostRecentAudiblePlaybackEndedTime; }
 
     // Used for testing. Count handlers in the main document, and one per frame which contains handlers.
     WEBCORE_EXPORT unsigned NODELETE wheelEventHandlerCount() const;
@@ -1656,8 +1664,11 @@ public:
     void didAssociateFormControl(Element&);
 
 #if ENABLE(AX_CUSTOM_COLOR_MODE)
-    bool addAXCustomColorModeAdjustedElement(Element&);
-    bool isAXCustomColorModeAdjustedElement(const Element&) const;
+    AXCustomColorModeController* axCustomColorModeControllerIfExists() { return m_axCustomColorModeController.get(); }
+    const AXCustomColorModeController* axCustomColorModeControllerIfExists() const { return m_axCustomColorModeController.get(); }
+    AXCustomColorModeController& axCustomColorModeController();
+
+    bool isAXCustomColorModeActive() const;
 #endif
 
     void adjustStyleColorOptionsIfNeeded(OptionSet<StyleColorOptions>&) const;
@@ -1684,6 +1695,8 @@ public:
 
     SecurityOrigin& securityOrigin() const { return *SecurityContext::securityOrigin(); }
     WEBCORE_EXPORT SecurityOrigin& topOrigin() const final;
+    bool hasUnpartitionedStorageAccess() const { return m_hasUnpartitionedStorageAccess; }
+    void updateHasUnpartitionedStorageAccess(const DocumentLoader*);
     URL topURL() const;
     inline ClientOrigin clientOrigin() const;
 
@@ -1855,7 +1868,7 @@ public:
     void attachToCachedFrame(CachedFrameBase&);
     void detachFromCachedFrame(CachedFrameBase&);
 
-    void orientationChanged(IntDegrees orientation);
+    WEBCORE_EXPORT void orientationChanged(IntDegrees orientation);
     OrientationNotifier& orientationNotifier();
 
     WEBCORE_EXPORT const AtomString& NODELETE bgColor() const;
@@ -1876,9 +1889,7 @@ public:
     // Per https://html.spec.whatwg.org/multipage/obsolete.html#dom-document-releaseevents, this method does nothing.
     void releaseEvents() { }
 
-#if ENABLE(TEXT_AUTOSIZING)
     TextAutoSizing& textAutoSizing();
-#endif
 
     Logger& logger();
     const Logger& logger() const { return const_cast<Document&>(*this).logger(); }
@@ -1982,7 +1993,7 @@ public:
     void setPaintWorkletGlobalScopeForName(const String& name, Ref<PaintWorkletGlobalScope>&&);
 
     WEBCORE_EXPORT bool hitTest(const HitTestRequest&, HitTestResult&);
-    bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
+    WEBCORE_EXPORT bool hitTest(const HitTestRequest&, const HitTestLocation&, HitTestResult&);
 #if ASSERT_ENABLED
     bool inHitTesting() const { return m_inHitTesting; }
 #endif
@@ -2024,13 +2035,7 @@ public:
 
     bool allowsContentJavaScript() const;
 
-    LazyLoadImageObserver& lazyLoadImageObserver();
-#if ENABLE(MODEL_ELEMENT)
-    LazyLoadModelObserver& lazyLoadModelObserver();
-#endif
-#if ENABLE(VIDEO)
-    LazyLoadVideoObserver& lazyLoadVideoObserver() LIFETIME_BOUND;
-#endif
+    LazyLoadElementObserver& lazyLoadElementObserver() LIFETIME_BOUND;
 
     ContentVisibilityDocumentState& contentVisibilityDocumentState();
 
@@ -2053,6 +2058,10 @@ public:
     void prepareCanvasesForDisplayOrFlushIfNeeded();
     void addCanvasNeedingPreparationForDisplayOrFlush(CanvasRenderingContext&);
     void removeCanvasNeedingPreparationForDisplayOrFlush(CanvasRenderingContext&);
+
+    void serviceCanvasPaintEvents();
+    void requestCanvasPaintEvent(HTMLCanvasElement&);
+    void cancelCanvasPaintEvent(HTMLCanvasElement&);
 
     bool contains(const Node& node) const { return this == &node.treeScope() && node.isConnected(); }
     bool contains(const Node* node) const { return node && contains(*node); }
@@ -2095,7 +2104,7 @@ public:
 
     String mediaKeysStorageDirectory();
 
-    void invalidateDOMCookieCache();
+    WEBCORE_EXPORT void invalidateDOMCookieCache();
 
     void detachFromFrame();
     void NODELETE willBeDisconnectedFromFrame(Document&);
@@ -2221,7 +2230,7 @@ private:
     WeakPtr<HTMLMetaElement, WeakPtrImplWithEventTargetData> determineActiveThemeColorMetaElement();
     void themeColorChanged();
 
-    void NODELETE invalidateAccessKeyCacheSlowCase();
+    void invalidateAccessKeyCacheSlowCase();
     void buildAccessKeyCache();
 
     void intersectionObserversInitialUpdateTimerFired();
@@ -2237,7 +2246,7 @@ private:
 
     void setVisualUpdatesAllowed(ReadyState);
 
-    enum class VisualUpdatesPreventedReason {
+    enum class VisualUpdatesPreventedReason : uint8_t {
         ReadyState     = 1 << 0,
         Suspension     = 1 << 1,
         RenderBlocking = 1 << 2,
@@ -2307,6 +2316,7 @@ private:
     MediaProducerMediaStateFlags computeCaptureState() const;
 #endif
     void securityOriginDidChange() final;
+    bool computeHasUnpartitionedStorageAccess(const DocumentLoader*) const;
 
     inline Ref<DocumentSyncData> syncData();
     void NODELETE populateDocumentSyncDataForNewlyConstructedDocument(DocumentSyncDataType);
@@ -2327,7 +2337,7 @@ private:
     OptionSet<ParserContentPolicy> m_parserContentPolicy;
     AsyncNodeDeletionQueue m_asyncNodeDeletionQueue;
 
-    RefPtr<CachedResourceLoader> m_cachedResourceLoader;
+    const RefPtr<CachedResourceLoader> m_cachedResourceLoader;
     RefPtr<DocumentParser> m_parser;
 
     // Document URLs.
@@ -2377,7 +2387,7 @@ private:
 
     const UniqueRef<Style::DocumentScope> m_styleScope;
     const std::unique_ptr<ExtensionStyleSheets> m_extensionStyleSheets;
-    RefPtr<StyleSheetList> m_styleSheetList;
+    const RefPtr<StyleSheetList> m_styleSheetList;
 
     std::unique_ptr<FormController> m_formController;
 
@@ -2405,15 +2415,9 @@ private:
 
     WeakPtr<Element, WeakPtrImplWithEventTargetData> m_cssTarget;
 
-    std::unique_ptr<LazyLoadImageObserver> m_lazyLoadImageObserver;
-#if ENABLE(MODEL_ELEMENT)
-    std::unique_ptr<LazyLoadModelObserver> m_lazyLoadModelObserver;
-#endif
-#if ENABLE(VIDEO)
-    std::unique_ptr<LazyLoadVideoObserver> m_lazyLoadVideoObserver;
-#endif
+    std::unique_ptr<LazyLoadElementObserver> m_lazyLoadElementObserver;
 
-    std::unique_ptr<ContentVisibilityDocumentState> m_contentVisibilityDocumentState;
+    const std::unique_ptr<ContentVisibilityDocumentState> m_contentVisibilityDocumentState;
 
 #if !LOG_DISABLED
     MonotonicTime m_documentCreationTime;
@@ -2445,14 +2449,16 @@ private:
     HashSet<HTMLCollection*> m_collectionsInvalidatedAtDocument;
     std::array<unsigned, numNodeListInvalidationTypes> m_nodeListAndCollectionCounts = { };
 
-    RefPtr<XPathEvaluator> m_xpathEvaluator;
+    const RefPtr<XPathEvaluator> m_xpathEvaluator;
 
-    std::unique_ptr<SVGDocumentExtensions> m_svgExtensions;
+    const std::unique_ptr<SVGDocumentExtensions> m_svgExtensions;
 
     // Collection of canvas contexts that need periodic work in "PrepareCanvasesForDisplayOrFlush" phase of
     // render update. Hold canvases via rendering context, since there is no common base class that
     // would be managed.
     WeakHashSet<CanvasRenderingContext> m_canvasContextsToPrepare;
+
+    WeakHashSet<HTMLCanvasElement, WeakPtrImplWithEventTargetData> m_canvasesNeedingPaintEvent;
 
     HashMap<String, Ref<HTMLCanvasElement>> m_cssCanvasElements;
 
@@ -2530,7 +2536,7 @@ private:
     DocumentEventTiming m_eventTiming;
     mutable std::unique_ptr<LargestContentfulPaintData> m_largestContentfulPaintData;
 
-    RefPtr<MediaQueryMatcher> m_mediaQueryMatcher;
+    const RefPtr<MediaQueryMatcher> m_mediaQueryMatcher;
 
 #if ENABLE(TOUCH_EVENTS) || ENABLE(TOUCH_EVENT_REGIONS)
     EventTargetSet m_touchEventTargets;
@@ -2540,32 +2546,31 @@ private:
 
     MonotonicTime m_lastHandledUserGestureTimestamp;
     MonotonicTime m_userActivatedMediaFinishedPlayingTimestamp;
+    Markable<MonotonicTime> m_mostRecentAudiblePlaybackEndedTime;
 
     void clearScriptedAnimationController();
     RefPtr<ScriptedAnimationController> m_scriptedAnimationController;
 
-    std::unique_ptr<IdleCallbackController> m_idleCallbackController;
+    const std::unique_ptr<IdleCallbackController> m_idleCallbackController;
 
 #if ENABLE(DEVICE_ORIENTATION) && PLATFORM(IOS_FAMILY)
-    std::unique_ptr<DeviceMotionClient> m_deviceMotionClient;
-    std::unique_ptr<DeviceMotionController> m_deviceMotionController;
-    std::unique_ptr<DeviceOrientationClient> m_deviceOrientationClient;
-    std::unique_ptr<DeviceOrientationController> m_deviceOrientationController;
+    const std::unique_ptr<DeviceMotionClient> m_deviceMotionClient;
+    const std::unique_ptr<DeviceMotionController> m_deviceMotionController;
+    const std::unique_ptr<DeviceOrientationClient> m_deviceOrientationClient;
+    const std::unique_ptr<DeviceOrientationController> m_deviceOrientationController;
 #endif
 
     Timer m_pendingTasksTimer;
     Vector<Task> m_pendingTasks;
 
-#if ENABLE(TEXT_AUTOSIZING)
     std::unique_ptr<TextAutoSizing> m_textAutoSizing;
-#endif
 
     const RefPtr<HighlightRegistry> m_highlightRegistry;
     const RefPtr<HighlightRegistry> m_fragmentHighlightRegistry;
     const RefPtr<HighlightRegistry> m_textExtractionHighlightRegistry;
 #if ENABLE(APP_HIGHLIGHTS)
     const RefPtr<HighlightRegistry> m_appHighlightRegistry;
-    std::unique_ptr<AppHighlightStorage> m_appHighlightStorage;
+    const std::unique_ptr<AppHighlightStorage> m_appHighlightStorage;
 #endif
 
     Timer m_visualUpdatesSuppressionTimer;
@@ -2609,7 +2614,7 @@ private:
     Timer m_didAssociateFormControlsTimer;
     Timer m_cookieCacheExpiryTimer;
 
-    RefPtr<SocketProvider> m_socketProvider;
+    const RefPtr<SocketProvider> m_socketProvider;
 
     String m_cachedDOMCookies;
 
@@ -2619,7 +2624,7 @@ private:
 
     WeakHashSet<Element, WeakPtrImplWithEventTargetData> m_associatedFormControls;
 #if ENABLE(AX_CUSTOM_COLOR_MODE)
-    WeakHashSet<Element, WeakPtrImplWithEventTargetData> m_axCustomColorModeAdjustedElements;
+    std::unique_ptr<AXCustomColorModeController> m_axCustomColorModeController;
 #endif
 
     const std::unique_ptr<OrientationNotifier> m_orientationNotifier;
@@ -2630,7 +2635,7 @@ private:
     const std::unique_ptr<StyleOriginatedTimelinesController> m_styleOriginatedTimelinesController;
 
     RefPtr<WindowEventLoop> m_eventLoop;
-    std::unique_ptr<EventLoopTaskGroup> m_documentTaskGroup;
+    const std::unique_ptr<EventLoopTaskGroup> m_documentTaskGroup;
 
     RefPtr<SWClientConnection> m_serviceWorkerConnection;
 
@@ -2644,7 +2649,7 @@ private:
 
 #if ENABLE(CONTENT_CHANGE_OBSERVER)
     const std::unique_ptr<ContentChangeObserver> m_contentChangeObserver;
-    std::unique_ptr<DOMTimerHoldingTank> m_domTimerHoldingTank;
+    const std::unique_ptr<DOMTimerHoldingTank> m_domTimerHoldingTank;
 #endif
 
 #if ENABLE(PICTURE_IN_PICTURE_API)
@@ -2700,8 +2705,6 @@ private:
 
     MediaProducerMediaStateFlags m_mediaState;
 
-    bool m_shouldNotFireMutationEvents = false;
-
     unsigned m_writeRecursionDepth { 0 };
     unsigned m_numberOfRejectedSyncXHRs { 0 };
     unsigned m_parserYieldTokenCount { 0 };
@@ -2753,134 +2756,114 @@ private:
     OptionSet<ContentRelevancy> m_contentRelevancyUpdate;
 
     StandaloneStatus m_xmlStandalone { StandaloneStatus::Unspecified };
-    bool m_hasXMLDeclaration { false };
-
-    bool m_constructionDidFinish { false };
 
 #if ENABLE(DARK_MODE_CSS)
     OptionSet<ColorScheme> m_colorScheme;
 #endif
 
-    bool m_activeParserWasAborted { false };
-    bool m_writeRecursionIsTooDeep { false };
-    bool m_wellFormed { false };
-    bool m_createRenderers { true };
+    DocumentCompatibilityMode m_compatibilityMode { DocumentCompatibilityMode::NoQuirksMode };
 
-    bool m_hasNodesWithMissingStyle { false };
+    Vector<Function<void()>> m_pendingCompressionDictionaryLoads;
+
+    RenderTreeState m_renderTreeState { RenderTreeState::NotBuilt };
+
+    OriginKeyed m_isOriginKeyed { OriginKeyed::No };
+
+    // These flags are kept as full bool members rather than joining the bitfield block below
+    // because they are bound by reference (via SetForScope or std::exchange), which a bitfield
+    // cannot be.
     // But sometimes you need to ignore pending stylesheet count to
     // force an immediate layout when requested by JS.
     bool m_ignorePendingStylesheets { false };
+    bool m_inRenderTreeUpdate { false };
+    bool m_isInStyleInterleavedLayout { false };
+    bool m_renderingIsSuppressedForViewTransition { false };
+    bool m_enableRenderingIsSuppressedForViewTransitionAfterUpdateRendering { false };
+#if ASSERT_ENABLED
+    bool m_inHitTesting { false };
+#endif
 
-    bool m_hasElementUsingStyleBasedEditability { false };
-    bool m_focusNavigationStartingNodeIsRemoved { false };
-
-    bool m_printing { false };
-    bool m_paginatedForScreen { false };
-
-    DocumentCompatibilityMode m_compatibilityMode { DocumentCompatibilityMode::NoQuirksMode };
-    bool m_compatibilityModeLocked { false }; // This is cheaper than making setCompatibilityMode virtual.
+    // Consolidated boolean flags. Keep these together so the compiler packs them into a few
+    // bytes instead of one byte-plus-padding each.
+    bool m_hasXMLDeclaration : 1 { false };
+    bool m_constructionDidFinish : 1 { false };
+    bool m_activeParserWasAborted : 1 { false };
+    bool m_writeRecursionIsTooDeep : 1 { false };
+    bool m_wellFormed : 1 { false };
+    bool m_createRenderers : 1 { true };
+    bool m_hasNodesWithMissingStyle : 1 { false };
+    bool m_hasElementUsingStyleBasedEditability : 1 { false };
+    bool m_focusNavigationStartingNodeIsRemoved : 1 { false };
+    bool m_printing : 1 { false };
+    bool m_paginatedForScreen : 1 { false };
+    bool m_compatibilityModeLocked : 1 { false }; // This is cheaper than making setCompatibilityMode virtual.
 
     // FIXME: Merge these 2 variables into an enum. Also, FrameLoader::m_didCallImplicitClose
     // is almost a duplication of this data, so that should probably get merged in too.
     // FIXME: Document::m_processingLoadEvent and DocumentLoader::m_wasOnloadDispatched are roughly the same
     // and should be merged.
-    bool m_processingLoadEvent { false };
-    bool m_loadEventFinished { false };
-
-    Vector<Function<void()>> m_pendingCompressionDictionaryLoads;
-
-    bool m_visuallyOrdered { false };
-    bool m_bParsing { false }; // FIXME: rename
-
-    bool m_needsFullStyleRebuild { false };
-    bool m_inStyleRecalc { false };
-    bool m_inRenderTreeUpdate { false };
-    bool m_isResolvingTreeStyle { false };
-    bool m_isInStyleInterleavedLayout { false };
-
-    bool m_gotoAnchorNeededAfterStylesheetsLoad { false };
-
-    bool m_isSynthesized { false };
-    bool m_isNonRenderedPlaceholder { false };
-
-    bool m_sawElementsInKnownNamespaces { false };
-    bool m_isSrcdocDocument { false };
-
-    RenderTreeState m_renderTreeState { RenderTreeState::NotBuilt };
-    bool m_hasPreparedForDestruction { false };
-
-    bool m_hasStyleWithViewportUnits { false };
-    bool m_needsDOMWindowResizeEvent { false };
-    bool m_needsVisualViewportResizeEvent { false };
-    bool m_needsVisualViewportScrollEvent { false };
-    bool m_isTimerThrottlingEnabled { false };
-    bool m_isSuspended { false };
-
-    bool m_scheduledTasksAreSuspended { false };
-
-    bool m_areDeviceMotionAndOrientationUpdatesSuspended { false };
-
-    bool m_didEnqueueFirstContentfulPaint { false };
-
-    OriginKeyed m_isOriginKeyed { OriginKeyed::No };
-
-    bool m_mayHaveRenderedSVGForeignObjects { false };
-    bool m_mayHaveRenderedSVGRootElements { false };
-
-    bool m_userHasInteractedWithMediaElement { false };
-
-    bool m_hasEverHadSelectionInsideTextFormControl { false };
-
-    bool m_updateTitleTaskScheduled { false };
-
-    bool m_shouldPreventEnteringBackForwardCacheForTesting { false };
-    bool m_hasLoadedThirdPartyScript { false };
-    bool m_hasLoadedThirdPartyFrame { false };
-    bool m_hasVisuallyNonEmptyCustomContent { false };
-
-    bool m_visibilityHiddenDueToDismissal { false };
-
+    bool m_processingLoadEvent : 1 { false };
+    bool m_loadEventFinished : 1 { false };
+    bool m_visuallyOrdered : 1 { false };
+    bool m_bParsing : 1 { false }; // FIXME: rename
+    bool m_needsFullStyleRebuild : 1 { false };
+    bool m_inStyleRecalc : 1 { false };
+    bool m_isResolvingTreeStyle : 1 { false };
+    bool m_gotoAnchorNeededAfterStylesheetsLoad : 1 { false };
+    bool m_isSynthesized : 1 { false };
+    bool m_isNonRenderedPlaceholder : 1 { false };
+    bool m_sawElementsInKnownNamespaces : 1 { false };
+    bool m_isSrcdocDocument : 1 { false };
+    bool m_hasUnpartitionedStorageAccess : 1 { false };
+    bool m_hasPreparedForDestruction : 1 { false };
+    bool m_hasStyleWithViewportUnits : 1 { false };
+    bool m_needsDOMWindowResizeEvent : 1 { false };
+    bool m_needsVisualViewportResizeEvent : 1 { false };
+    bool m_needsVisualViewportScrollEvent : 1 { false };
+    bool m_isTimerThrottlingEnabled : 1 { false };
+    bool m_isSuspended : 1 { false };
+    bool m_scheduledTasksAreSuspended : 1 { false };
+    bool m_areDeviceMotionAndOrientationUpdatesSuspended : 1 { false };
+    bool m_didEnqueueFirstContentfulPaint : 1 { false };
+    bool m_mayHaveRenderedSVGForeignObjects : 1 { false };
+    bool m_mayHaveRenderedSVGRootElements : 1 { false };
+    bool m_userHasInteractedWithMediaElement : 1 { false };
+    bool m_hasEverHadSelectionInsideTextFormControl : 1 { false };
+    bool m_updateTitleTaskScheduled : 1 { false };
+    bool m_shouldPreventEnteringBackForwardCacheForTesting : 1 { false };
+    bool m_hasLoadedThirdPartyScript : 1 { false };
+    bool m_hasLoadedThirdPartyFrame : 1 { false };
+    bool m_hasVisuallyNonEmptyCustomContent : 1 { false };
+    bool m_visibilityHiddenDueToDismissal : 1 { false };
+    bool m_shouldNotFireMutationEvents : 1 { false };
+    bool m_hasViewTransitionPseudoElementTree : 1 { false };
+    bool m_isDirAttributeDirty : 1 { false };
+    bool m_usesHeadingOffsetAttribute : 1 { false };
+    bool m_scheduledDeferredAXObjectCacheUpdate : 1 { false };
+    bool m_wasRemovedLastRefCalled : 1 { false };
+    bool m_hasBeenRevealed : 1 { false };
+    bool m_visualUpdatesAllowedChangeRequiresLayoutMilestones : 1 { false };
+    bool m_visualUpdatesAllowedChangeCompletesPageTransition : 1 { false };
+    bool m_requiresTrustedTypes : 1 { false };
 #if ENABLE(XSLT)
-    bool m_hasPendingXSLTransforms { false };
-    bool m_hasLoggedXSLTDeprecationWarning { false };
+    bool m_hasPendingXSLTransforms : 1 { false };
+    bool m_hasLoggedXSLTDeprecationWarning : 1 { false };
 #endif
-
 #if ENABLE(MEDIA_STREAM)
-    bool m_hasHadCaptureMediaStreamTrack { false };
+    bool m_hasHadCaptureMediaStreamTrack : 1 { false };
 #endif
-
 #if HAVE(SUPPORT_HDR_DISPLAY)
-    bool m_hasHDRContent { false };
+    bool m_hasHDRContent : 1 { false };
 #endif
-
-    bool m_hasViewTransitionPseudoElementTree { false };
-    bool m_renderingIsSuppressedForViewTransition { false };
-    bool m_enableRenderingIsSuppressedForViewTransitionAfterUpdateRendering { false };
-
 #if ENABLE(TOUCH_ACTION_REGIONS)
-    bool m_mayHaveElementsWithNonAutoTouchAction { false };
+    bool m_mayHaveElementsWithNonAutoTouchAction : 1 { false };
 #endif
 #if ENABLE(EDITABLE_REGION)
-    bool m_mayHaveEditableElements { false };
+    bool m_mayHaveEditableElements : 1 { false };
 #endif
 #if ENABLE(TELEPHONE_NUMBER_DETECTION)
-    bool m_isTelephoneNumberParsingAllowed { true };
+    bool m_isTelephoneNumberParsingAllowed : 1 { true };
 #endif
-
-#if ASSERT_ENABLED
-    bool m_inHitTesting { false };
-#endif
-    bool m_isDirAttributeDirty { false };
-    bool m_usesHeadingOffsetAttribute { false };
-
-    bool m_scheduledDeferredAXObjectCacheUpdate { false };
-    bool m_wasRemovedLastRefCalled { false };
-
-    bool m_hasBeenRevealed { false };
-    bool m_visualUpdatesAllowedChangeRequiresLayoutMilestones { false };
-    bool m_visualUpdatesAllowedChangeCompletesPageTransition { false };
-
-    bool m_requiresTrustedTypes { false };
 
     static bool hasEverCreatedAnAXObjectCache;
 
@@ -2899,7 +2882,7 @@ private:
     RefPtr<FrameMemoryMonitor> m_frameMemoryMonitor;
 
 #if ENABLE(CONTENT_EXTENSIONS)
-    RefPtr<ResourceMonitor> m_resourceMonitor;
+    const RefPtr<ResourceMonitor> m_resourceMonitor;
 #endif
 
     mutable RefPtr<CSSCalc::RandomCachingKeyMap> m_randomCachingKeyMap;

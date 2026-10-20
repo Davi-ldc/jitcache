@@ -1,6 +1,6 @@
 // Readers of the Image lane's sections for the scripts that compare captures, the check a script makes that its imports
-// happened (HARNESS.md, Tests), and the check that its images carry the targets its header claims, which together cover
-// every target kind and every site that records one. A script loads this file inside its main
+// happened, and the check that its images carry the targets its header claims, which together cover every target kind
+// and every site that records one. A script loads this file inside its main
 // function, const sections = load("./resources/image-sections.js", "caller relative"), which returns the object at the end
 // of this file and defines no global, so concurrency.js can load several corpus scripts that each load it. Every field is
 // little-endian and every region starts 8-byte aligned. The image.baseline reader walks the regions in the order
@@ -45,7 +45,7 @@
         VM: 1, SoftStackLimit: 2, TrapBits: 3, Exception: 4, TopEntryFrame: 5, TargetMachinePCForThrow: 6, TopCallFrame: 7,
         MightBeExecutingTaintedCode: 8, BarrierThreshold: 9, MutatorShouldBeFenced: 10, SyncResumeCallCache: 11,
     });
-    const vmCell = Object.freeze({ EmptyString: 1, SmallStringsSentinel: 2 });
+    const vmCell = Object.freeze({ EmptyString: 1, SmallStringsSentinel: 2, FastArraySentinel: 3, FastStringSentinel: 4 });
     const targetFieldA = Object.freeze({
         CommonThunk: commonJITThunkID, BaselineThunk: baselineThunk, VirtualCallThunk: callMode, ProcessThunk: processThunk,
         VMAddress: vmAddress, VMCell: vmCell,
@@ -53,15 +53,14 @@
 
     const imageMathICFlags = Object.freeze({ generateFastPathOnRepatch: 1, hasSnippet: 2, noInlineCode: 4 });
 
-    // MathICKind, the kind byte of region 9.
+    // MathICKind, the kind byte of each MathIC entry.
     const imageMathICKind = Object.freeze({ Add: 1, Sub: 2, Mul: 3, Negate: 4 });
 
-    // CompileInputKind and StrictEqualityAtomOperand, the kind and value bytes of the twins section's compile inputs.
+    // CompileInputKind, the kind byte of the twins section's compile inputs.
     const twinCompileInputKind = Object.freeze({
         ResolveScopeType: 1, GetFromScopeType: 2, PutToScopeType: 3, GetByIdMode: 4, IteratorOpenMode: 5,
-        AsyncIteratorOpenMode: 6, EnumeratorMetadata: 7, StrictEqualityAtomOperand: 8,
+        AsyncIteratorOpenMode: 6, EnumeratorMetadata: 7,
     });
-    const strictEqualityAtomOperand = Object.freeze({ None: 0, Lhs: 1, Rhs: 2 });
 
     // The sections of a key's current body, each an ArrayBuffer or null.
     function readBodySections(key) {
@@ -236,10 +235,18 @@
         };
         let offset = imageSectionAlign(48 + 4 * header.binarySwitchSeedCount);
 
-        // Each input: u32 bytecode offset, u8 kind, u8 value, u16 reserved, u32 local scope depth.
+        // Each input: u32 bytecode offset, u8 kind, u8 value, u16 reserved, u32 local scope depth, u32 module import
+        // slot.
         const inputs = [];
-        for (let i = 0; i < header.inputCount; ++i, offset += 12)
-            inputs.push({ bytecodeOffset: read.u32(offset), kind: read.u8(offset + 4), value: read.u8(offset + 5), localScopeDepth: read.u32(offset + 8) });
+        for (let i = 0; i < header.inputCount; ++i, offset += 16) {
+            inputs.push({
+                bytecodeOffset: read.u32(offset),
+                kind: read.u8(offset + 4),
+                value: read.u8(offset + 5),
+                localScopeDepth: read.u32(offset + 8),
+                moduleImportSlot: read.u32(offset + 12),
+            });
+        }
         offset = imageSectionAlign(offset);
         offset = imageSectionAlign(offset + 2 * header.binaryArithProfileCount);
         offset = imageSectionAlign(offset + 2 * header.unaryArithProfileCount);
@@ -355,8 +362,8 @@
     }
 
     // What fn's body of kind carries in the artifact the run reads: the fixups of its image and of every snippet, those
-    // of its MathICs' slow calls (mathICSlowCallFixups), the access types its molds list (region 4, the first byte of
-    // each 16-byte entry) and its architecture.
+    // of its MathICs' slow calls (mathICSlowCallFixups), the access types its molds list (the first byte of each 16-byte
+    // mold) and its architecture.
     function bodyTargets(fn, kind, label) {
         const key = jitcacheBodyKey(fn, kind);
         const bytes = key ? jitcacheReadSection(key, "image.baseline") : null;
@@ -432,7 +439,7 @@
     }
 
     return Object.freeze({
-        imageFixupForm, imageTargetKind, imageMathICFlags, imageMathICKind, twinCompileInputKind, strictEqualityAtomOperand,
+        imageFixupForm, imageTargetKind, imageMathICFlags, imageMathICKind, twinCompileInputKind,
         commonJITThunkID, callMode, baselineThunk, processThunk, vmAddress, vmCell,
         readBodySections, sameImageBytes, sameImageFixup, describeImageFixup, parseImageSection, imageFootprint,
         parseTwinsSection, sameTwinsExceptCapturingProcess, checksImports, expectImported, expectImports, isArm64Image,

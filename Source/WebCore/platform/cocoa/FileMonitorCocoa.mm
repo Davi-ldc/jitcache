@@ -46,12 +46,12 @@ FileMonitor::FileMonitor(const String& path, Ref<WorkQueue>&& handlerQueue, WTF:
 
     auto handle = FileSystem::openFile(path, FileSystem::FileOpenMode::EventsOnly);
     if (!handle) {
-        RELEASE_LOG_ERROR(ResourceLoadStatistics, "Failed to open statistics file for monitoring: %s", path.utf8().data());
+        RELEASE_LOG_ERROR(ResourceLoadStatistics, "Failed to open statistics file for monitoring: %s", path.utf8());
         return;
     }
 
     // The source (platformMonitor) retains the dispatch queue.
-    m_platformMonitor = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE, handle.platformHandle(), monitorMask, handlerQueue->dispatchQueue()));
+    m_platformMonitor = adoptOSObject(dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE, handle.platformHandle(), monitorMask, protect(handlerQueue->dispatchQueue())));
 
     LOG(ResourceLoadStatistics, "Creating monitor %p", m_platformMonitor.get());
 

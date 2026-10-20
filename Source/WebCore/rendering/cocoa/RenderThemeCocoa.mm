@@ -1324,7 +1324,7 @@ String RenderThemeCocoa::mediaControlsFormattedStringForDuration(const double du
 
     BEGIN_BLOCK_OBJC_EXCEPTIONS
     if (!m_durationFormatter) {
-        m_durationFormatter = adoptNS([NSDateComponentsFormatter new]);
+        lazyInitialize(m_durationFormatter, adoptNS([NSDateComponentsFormatter new]));
         m_durationFormatter.get().unitsStyle = NSDateComponentsFormatterUnitsStyleFull;
         m_durationFormatter.get().allowedUnits = NSCalendarUnitHour | NSCalendarUnitMinute | NSCalendarUnitSecond;
         m_durationFormatter.get().formattingContext = NSFormattingContextStandalone;
@@ -3213,7 +3213,9 @@ static void adjustSelectListButtonStyleForVectorBasedControls(Style::ComputedSty
 #if PLATFORM(IOS_FAMILY)
     applyCommonButtonPaddingToStyleForVectorBasedControls(style);
 #endif
-    style.setLineHeight(CSS::Keyword::Normal { });
+
+    style.setLineHeight(Style::ComputedStyle::initialLineHeight());
+    style.setTextAutosizingAdjustedLineHeight(Style::ComputedStyle::initialLineHeight());
 }
 
 bool RenderThemeCocoa::adjustMenuListStyleForVectorBasedControls(Style::ComputedStyle& style, const Element* element) const
@@ -3233,8 +3235,10 @@ bool RenderThemeCocoa::adjustMenuListStyleForVectorBasedControls(Style::Computed
     style.setBoxShadow(CSS::Keyword::None  { });
 
     // Enforce "line-height: normal" as long as this element isn't a non-select element using `-webkit-appearance: menulist`.
-    if (element && is<HTMLSelectElement>(*element))
+    if (element && is<HTMLSelectElement>(*element)) {
         style.setLineHeight(CSS::Keyword::Normal { });
+        style.setTextAutosizingAdjustedLineHeight(CSS::Keyword::Normal { });
+    }
 
     return true;
 }
@@ -4077,7 +4081,7 @@ bool RenderThemeCocoa::paintSliderTrackForVectorBasedControls(const RenderElemen
         float height = trackClip.height();
         float newHeight = height * valueRatio;
         if (needsAdditionalLength)
-            newHeight += tickLength * additionalLength;
+            newHeight += additionalLength;
 
         if (box.writingMode().isHorizontal() || box.writingMode().isInlineFlipped())
             trackClip.setY(trackClip.y() + height - newHeight);

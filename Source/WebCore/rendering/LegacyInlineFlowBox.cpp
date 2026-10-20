@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003, 2004, 2005, 2006, 2007, 2008, 2009 Apple Inc. All rights reserved.
+ * Copyright (C) 2003-2026 Apple Inc. All rights reserved.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -35,6 +35,7 @@
 #include "RenderInline.h"
 #include "RenderLayer.h"
 #include "RenderObjectInlines.h"
+#include "RenderSVGInline.h"
 #include "RenderTableCell.h"
 #include "RenderTheme.h"
 #include "RenderView.h"
@@ -50,7 +51,6 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(LegacyInlineFlowBox);
 
 struct SameSizeAsLegacyInlineFlowBox : public LegacyInlineBox {
-    uint32_t bitfields : 23;
     void* pointers[5];
 };
 
@@ -66,11 +66,11 @@ LegacyInlineFlowBox::~LegacyInlineFlowBox()
 void LegacyInlineFlowBox::setHasBadChildList()
 {
     assertNotDeleted();
-    if (m_hasBadChildList)
+    if (m_bitfields.hasBadChildList())
         return;
     for (auto* child = firstChild(); child; child = child->nextOnLine())
         child->setHasBadParent();
-    m_hasBadChildList = true;
+    m_bitfields.setHasBadChildList(true);
 }
 
 #endif
@@ -103,7 +103,7 @@ void LegacyInlineFlowBox::addToLine(LegacyInlineBox* child)
     child->setIsHorizontal(isHorizontal());
     if (child->isInlineTextBox()) {
         if (child->renderer().parent() == &renderer())
-            m_hasTextChildren = true;
+            m_bitfields.setHasTextChildren(true);
         setHasTextDescendantsOnAncestors(this);
     } else if (auto* blockFlow = dynamicDowncast<LegacyInlineFlowBox>(*child)) {
         if (blockFlow->hasTextDescendants())
@@ -132,7 +132,7 @@ void LegacyInlineFlowBox::addToLine(LegacyInlineBox* child)
     }
 
     if (auto* renderInline = dynamicDowncast<RenderInline>(child->renderer()); renderInline && renderInline->hasSelfPaintingLayer())
-        m_hasSelfPaintInlineBox = true;
+        m_bitfields.setHasSelfPaintInlineBox(true);
 
     checkConsistency();
 }
@@ -182,7 +182,7 @@ void LegacyInlineFlowBox::deleteLine()
 
 void LegacyInlineFlowBox::removeLineBoxFromRenderObject()
 {
-    downcast<RenderInline>(renderer()).legacyLineBoxes().removeLineBox(this);
+    downcast<RenderSVGInline>(renderer()).legacyLineBoxes().removeLineBox(this);
 }
 
 void LegacyInlineFlowBox::adjustPosition(float dx, float dy)
@@ -260,7 +260,7 @@ void LegacyInlineFlowBox::computeOverflow(LayoutUnit lineTop, LayoutUnit lineBot
             LayoutRect textBoxOverflow(enclosingLayoutRect(textBox.logicalFrameRect()));
             addTextBoxVisualOverflow(textBox, textBoxDataMap, textBoxOverflow);
             logicalVisualOverflow.unite(textBoxOverflow);
-        } else if (is<RenderInline>(child->renderer())) {
+        } else if (child->renderer().isInlineBox()) {
             auto& flow = downcast<LegacyInlineFlowBox>(*child);
             flow.computeOverflow(lineTop, lineBottom, textBoxDataMap);
             if (!flow.renderer().hasSelfPaintingLayer())
@@ -330,7 +330,9 @@ void LegacyInlineFlowBox::outputLineTreeAndMark(WTF::TextStream& stream, const L
 void LegacyInlineFlowBox::checkConsistency() const
 {
     assertNotDeleted();
-    ASSERT_WITH_SECURITY_IMPLICATION(!m_hasBadChildList);
+#if !ASSERT_WITH_SECURITY_IMPLICATION_DISABLED
+    RELEASE_ASSERT_WITH_SECURITY_IMPLICATION(!m_bitfields.hasBadChildList());
+#endif
 #ifdef CHECK_CONSISTENCY
     const LegacyInlineBox* previousChild = nullptr;
     for (const LegacyInlineBox* child = firstChild(); child; child = child->nextOnLine()) {

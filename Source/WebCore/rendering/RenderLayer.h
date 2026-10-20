@@ -59,6 +59,7 @@
 #include <WebCore/RenderView.h>
 #include <WebCore/ScrollAlignment.h>
 #include <WebCore/ScrollBehavior.h>
+#include <WebCore/ScrollIntoViewContainer.h>
 #include <WebCore/TransformationMatrix.h>
 #include <wtf/InlineWeakPtr.h>
 #include <wtf/Markable.h>
@@ -163,6 +164,7 @@ struct ScrollRectToVisibleOptions {
     AllowScrollingOverflowHidden allowScrollingOverflowHidden { AllowScrollingOverflowHidden::Yes };
     std::optional<LayoutRect> visibilityCheckRect { std::nullopt };
     SkipScrollingTargetElement skipScrollingTargetElement { SkipScrollingTargetElement::No };
+    ScrollIntoViewContainer container { ScrollIntoViewContainer::All };
 };
 
 enum class UpdateBackingSharingFlags {
@@ -270,7 +272,7 @@ public:
     void setSelfAndDescendantsNeedPositionUpdate();
 
 private:
-    enum class LayerPositionUpdates {
+    enum class LayerPositionUpdates : uint8_t {
         NeedsPositionUpdate  = 1 << 0,
         DescendantNeedsPositionUpdate = 1 << 1,
         AllChildrenNeedPositionUpdate = 1 << 2,
@@ -299,7 +301,7 @@ private:
     bool hasVisibleContentForPaintingForSVG() const;
 
     // These flags propagate in paint order (z-order tree).
-    enum class Compositing {
+    enum class Compositing : uint16_t {
         HasDescendantNeedingRequirementsTraversal           = 1 << 0, // Need to do the overlap-testing tree walk because hierarchy or geometry changed.
         HasDescendantNeedingBackingOrHierarchyTraversal     = 1 << 1, // Need to update geometry, configuration and update the GraphicsLayer tree.
 
@@ -537,7 +539,7 @@ public:
 
     bool hasOverlayScrollbars() const;
 
-    bool isPointInResizeControl(IntPoint localPoint) const;
+    WEBCORE_EXPORT bool isPointInResizeControl(IntPoint localPoint) const;
     IntSize offsetFromResizeCorner(const IntPoint& localPoint) const;
 
     std::optional<ScrollbarUpdateScope> updateScrollInfoAfterLayout();
@@ -1271,6 +1273,8 @@ private:
     void paintList(LayerList, GraphicsContext&, const LayerPaintingInfo&, OptionSet<PaintLayerFlag>);
 
     void updatePaintingInfoForFragments(LayerFragments&, const LayerPaintingInfo&, OptionSet<PaintLayerFlag>, bool shouldPaintContent, const LayoutSize& offsetFromRoot);
+    void paintContentForRenderer(PaintInfo&, const LayoutPoint& paintOffset);
+    bool hitTestContentForRenderer(const HitTestRequest&, HitTestResult&, const HitTestLocation&, const LayoutPoint& accumulatedOffset, HitTestFilter) const;
     void paintBackgroundForFragments(const LayerFragments&, GraphicsContext&, GraphicsContext& transparencyLayerContext,
         const LayoutRect& transparencyPaintDirtyRect, bool haveTransparency, const LayerPaintingInfo&, OptionSet<PaintBehavior>, RenderObject* paintingRootForRenderer);
     void paintForegroundForFragments(const LayerFragments&, GraphicsContext&, GraphicsContext& transparencyLayerContext,
@@ -1283,6 +1287,9 @@ private:
     void paintTransformedLayerIntoFragments(GraphicsContext&, const LayerPaintingInfo&, OptionSet<PaintLayerFlag>);
     void collectEventRegionForFragments(const LayerFragments&, GraphicsContext&, const LayerPaintingInfo&, OptionSet<PaintBehavior>);
     void collectAccessibilityRegionsForFragments(const LayerFragments&, GraphicsContext&, const LayerPaintingInfo&, OptionSet<PaintBehavior>);
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    void collectAXCustomColorBackdropsForFragments(PaintPhase, const LayerFragments&, GraphicsContext&, const LayerPaintingInfo&, OptionSet<PaintBehavior>);
+#endif
 
     RenderLayer* transparentPaintingAncestor(const LayerPaintingInfo&);
     void beginTransparencyLayers(GraphicsContext&, const LayerPaintingInfo&, const LayoutRect& dirtyRect);
@@ -1512,7 +1519,7 @@ private:
     std::unique_ptr<Vector<RenderLayer*>> m_negZOrderList;
 
     // This list contains child layers that cannot create stacking contexts and appear in normal flow order.
-    std::unique_ptr<Vector<RenderLayer*>> m_normalFlowList;
+    const std::unique_ptr<Vector<RenderLayer*>> m_normalFlowList;
 
     // Only valid if m_repaintRectsValid is set (std::optional<> not used to avoid padding).
     RenderObject::RepaintRects m_repaintRects;
@@ -1526,17 +1533,17 @@ private:
     // The layer's width/height
     IntSize m_layerSize;
 
+    // If the RenderLayer contains an anchor-positioned box, this is the "default scroll shift"
+    // for scroll compensation purpose. This offset aligns the anchor-positioned box with the anchor
+    // after scroll, and is applied as a transform.
+    std::optional<LayoutSize> m_anchorScrollAdjustment;
+
     std::unique_ptr<ClipRectsCache> m_clipRectsCache;
 
     Markable<ScrollingScope, IntegralMarkableTraits<ScrollingScope, 0>> m_boxScrollingScope;
     Markable<ScrollingScope, IntegralMarkableTraits<ScrollingScope, 0>> m_contentsScrollingScope;
 
     std::unique_ptr<TransformationMatrix> m_transform;
-
-    // If the RenderLayer contains an anchor-positioned box, this is the "default scroll shift"
-    // for scroll compensation purpose. This offset aligns the anchor-positioned box with the anchor
-    // after scroll, and is applied as a transform.
-    std::optional<LayoutSize> m_anchorScrollAdjustment;
 
     // May ultimately be extended to many replicas (with their own paint order).
     RenderPtr<RenderReplica> m_reflection;
@@ -1557,7 +1564,7 @@ private:
         SingleThreadWeakPtr<RenderSVGHiddenContainer> enclosingHiddenOrResourceContainer;
         Vector<SVGPaintOrderLayerItem> childrenInDOMOrder;
     };
-    std::unique_ptr<SVGData> m_svgData;
+    const std::unique_ptr<SVGData> m_svgData;
 
     PaintFrequencyTracker m_paintFrequencyTracker;
 };

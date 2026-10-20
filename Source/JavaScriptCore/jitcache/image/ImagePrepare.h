@@ -31,13 +31,13 @@ namespace JITCache {
 class ProducerBudget;
 
 enum class PrepareOutcome : uint8_t {
-    InvalidMaterial, // ImageCheck::S5 failed: the patched code does not reach the consumer's resolution of its targets
+    InvalidMaterial, // ImageCheck::PatchReadBack failed: the patched code does not reach the consumer's resolution of its targets
     ExecutableMemoryExhausted, // the image or a snippet got no executable memory
 };
 
 struct PrepareFailure {
     PrepareOutcome outcome;
-    ImageCheck check; // ImageCheck::S5 for InvalidMaterial, else None
+    ImageCheck check; // ImageCheck::PatchReadBack for InvalidMaterial, else None
 };
 
 // The wall time of four stages of prepareImage, read from CLOCK_MONOTONIC for the install event when a bench report is
@@ -79,11 +79,11 @@ private:
 // with no JSC lock held. It allocates no cell and writes nothing to the CB, the UCB or the VM's statistics, so a failure
 // leaves no trace. The UCB is the import's, with the producer's index spaces; it is not const because the MathICs and
 // the UCB targets take its arithmetic profiles through accessors with no const overload. Under strict the glue has
-// already validated the sections; with strict off, debug builds ASSERT ImageCheck::U1 to U7 here. A non-null budget,
+// already validated the sections; with strict off, debug builds ASSERT the checks against the UCB here. A non-null budget,
 // given exactly in a ConsumerProducer VM whose production is active, rebuilds the image's record, in twins builds with
 // the twin data of the twins section; a refused charge leaves the image without one, and the budget raises the recording
 // fault. The borrowed payload need live only until the call returns: the prepared image keeps copies of everything it
-// reads. In twins builds the SkipPatch test hook makes it skip its first patch, so ImageCheck::S5 fails. A non-null
+// reads. In twins builds the SkipPatch test hook makes it skip its first patch, so ImageCheck::PatchReadBack fails. A non-null
 // timings receives the stages' times; null costs nothing.
 std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict, PrepareTimings* = nullptr);
 

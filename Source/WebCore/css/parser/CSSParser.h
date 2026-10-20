@@ -66,6 +66,9 @@ class StyleRulePositionTry;
 class StyleRuleSupports;
 class StyleRuleViewport;
 class StyleRuleViewTransition;
+#if ENABLE(SPATIAL_PORTAL)
+class StyleRuleEnvironmentMap;
+#endif
 class StyleSheetContents;
 class ImmutableStyleProperties;
 class Element;
@@ -176,6 +179,9 @@ private:
     RefPtr<StyleRuleViewTransition> consumeViewTransitionRule(CSSParserTokenRange prelude, CSSParserTokenRange block);
     RefPtr<StyleRulePositionTry> consumePositionTryRule(CSSParserTokenRange prelude, CSSParserTokenRange block);
     RefPtr<StyleRuleFunction> consumeFunctionRule(CSSParserTokenRange prelude, CSSParserTokenRange block);
+#if ENABLE(SPATIAL_PORTAL)
+    RefPtr<StyleRuleEnvironmentMap> consumeEnvironmentMapRule(CSSParserTokenRange prelude, CSSParserTokenRange block);
+#endif
 
     RefPtr<StyleRuleKeyframe> consumeKeyframeStyleRule(CSSParserTokenRange prelude, CSSParserTokenRange block);
     RefPtr<StyleRuleBase> consumeStyleRule(CSSParserTokenRange prelude, CSSParserTokenRange block);
@@ -198,7 +204,7 @@ private:
     StyleSheetContents* styleSheet() const { return m_styleSheet.get(); }
 
     Ref<StyleRuleBase> createNestedDeclarationsRule();
-    void runInNewNestingContext(auto&& run);
+    void runInNewNestingContext(NOESCAPE const auto&);
     NestingContext& topContext()
     {
         ASSERT(!m_nestingContextStack.isEmpty());
@@ -224,7 +230,7 @@ private:
     // https://bugs.webkit.org/show_bug.cgi?id=265566
     unsigned m_ruleListNestingLevel { 0 };
     Vector<CSSParserEnum::NestedContextType, 16> m_ancestorRuleTypeStack;
-    Vector<NestingContext, 16> m_nestingContextStack { NestingContext { } };
+    Vector<NestingContext, 16> m_nestingContextStack { 1 };
 
     std::optional<CSSParserEnum::NestedContextType> lastAncestorRuleType() const
     {
@@ -235,8 +241,8 @@ private:
 
     const CSSParserContext& m_context;
 
-    RefPtr<StyleSheetContents> m_styleSheet;
-    std::unique_ptr<CSSTokenizer> m_tokenizer;
+    const RefPtr<StyleSheetContents> m_styleSheet;
+    const std::unique_ptr<CSSTokenizer> m_tokenizer;
 
     // For the inspector
     WeakPtr<CSSParserObserverWrapper> m_observerWrapper;

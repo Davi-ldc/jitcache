@@ -100,7 +100,7 @@ void AtomicsObject::finishCreation(VM& vm, JSGlobalObject* globalObject)
 namespace {
 
 template<typename Adaptor, typename Func>
-EncodedJSValue atomicReadModifyWriteCase(JSGlobalObject* globalObject, VM& vm, const JSValue* args, JSArrayBufferView* typedArrayView, uint64_t accessIndex, const Func& func)
+EncodedJSValue atomicReadModifyWriteCase(JSGlobalObject* globalObject, VM& vm, const JSValue* args, JSArrayBufferView* typedArrayView, uint64_t accessIndex, NOESCAPE const Func& func)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
 
@@ -179,7 +179,7 @@ inline JSArrayBufferView* validateIntegerTypedArray(JSGlobalObject* globalObject
 }
 
 template<typename Func>
-EncodedJSValue atomicReadModifyWrite(JSGlobalObject* globalObject, VM& vm, const JSValue* args, const Func& func)
+EncodedJSValue atomicReadModifyWrite(JSGlobalObject* globalObject, VM& vm, const JSValue* args, NOESCAPE const Func& func)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
 
@@ -214,7 +214,7 @@ EncodedJSValue atomicReadModifyWrite(JSGlobalObject* globalObject, VM& vm, const
 }
 
 template<typename Func>
-EncodedJSValue atomicReadModifyWrite(JSGlobalObject* globalObject, CallFrame* callFrame, const Func& func)
+EncodedJSValue atomicReadModifyWrite(JSGlobalObject* globalObject, CallFrame* callFrame, NOESCAPE const Func& func)
 {
     JSValue args[2 + Func::numExtraArgs];
     for (unsigned i = 2 + Func::numExtraArgs; i--;)
@@ -309,21 +309,16 @@ EncodedJSValue isLockFree(JSGlobalObject* globalObject, JSValue arg)
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    int32_t size = arg.toInt32(globalObject);
-    RETURN_IF_EXCEPTION(scope, JSValue::encode(jsUndefined()));
-    
-    bool result;
-    switch (size) {
-    case 1:
-    case 2:
-    case 4:
-    case 8:
-        result = true;
-        break;
-    default:
-        result = false;
-        break;
+    if (arg.isInt32()) [[likely]] {
+        int32_t size = arg.asInt32();
+        bool result = size == 1 || size == 2 || size == 4 || size == 8;
+        return JSValue::encode(jsBoolean(result));
     }
+
+    double size = arg.toIntegerOrInfinity(globalObject);
+    RETURN_IF_EXCEPTION(scope, JSValue::encode(jsUndefined()));
+
+    bool result = size == 1 || size == 2 || size == 4 || size == 8;
     return JSValue::encode(jsBoolean(result));
 }
 

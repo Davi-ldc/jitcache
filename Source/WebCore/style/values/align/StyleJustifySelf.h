@@ -32,13 +32,13 @@
 namespace WebCore {
 namespace Style {
 
-// <'justify-self'> = auto | normal | stretch | <baseline-position> | <overflow-position>? [ <self-position> | left | right ]
+// <'justify-self'> = auto | <overflow-position>? normal | stretch | <baseline-position> | <overflow-position>? [ <self-position> | left | right ]
 // https://drafts.csswg.org/css-align/#propdef-justify-self
 // Additional values, `anchor-center` added to <self-position> by CSS Anchor Positioning.
 // https://drafts.csswg.org/css-anchor-position-1/#anchor-center
 struct JustifySelf {
     constexpr JustifySelf(CSS::Keyword::Auto);
-    constexpr JustifySelf(CSS::Keyword::Normal);
+    constexpr JustifySelf(CSS::Keyword::Normal, std::optional<OverflowPosition> = std::nullopt);
     constexpr JustifySelf(CSS::Keyword::Stretch);
     constexpr JustifySelf(CSS::Keyword::Baseline, std::optional<BaselineAlignmentPreference> = std::nullopt);
     constexpr JustifySelf(CSS::Keyword::Center, std::optional<OverflowPosition> = std::nullopt);
@@ -70,7 +70,7 @@ struct JustifySelf {
     constexpr bool isFirstBaseline() const { return primary() == PrimaryKind::Baseline && baselineAlignmentPreference() == BaselineAlignmentPreferenceKind::First; }
     constexpr bool isLastBaseline() const { return primary() == PrimaryKind::Baseline && baselineAlignmentPreference() == BaselineAlignmentPreferenceKind::Last; }
 
-    template<typename... F> constexpr decltype(auto) switchOn(F&&...) const;
+    template<typename... F> constexpr decltype(auto) switchOn(NOESCAPE F&&...) const;
 
     constexpr bool operator==(const JustifySelf&) const = default;
 
@@ -115,8 +115,8 @@ constexpr JustifySelf::JustifySelf(CSS::Keyword::Auto)
 {
 }
 
-constexpr JustifySelf::JustifySelf(CSS::Keyword::Normal)
-    : JustifySelf { PrimaryKind::Normal }
+constexpr JustifySelf::JustifySelf(CSS::Keyword::Normal, std::optional<OverflowPosition> overflow)
+    : JustifySelf { PrimaryKind::Normal, overflow }
 {
 }
 
@@ -228,10 +228,10 @@ constexpr bool JustifySelf::canHaveOverflowPosition(PrimaryKind primary)
 {
     switch (primary) {
     case PrimaryKind::Auto:
-    case PrimaryKind::Normal:
     case PrimaryKind::Stretch:
     case PrimaryKind::Baseline:
         return false;
+    case PrimaryKind::Normal:
     case PrimaryKind::Center:
     case PrimaryKind::Start:
     case PrimaryKind::End:
@@ -247,7 +247,7 @@ constexpr bool JustifySelf::canHaveOverflowPosition(PrimaryKind primary)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-template<typename... F> constexpr decltype(auto) JustifySelf::switchOn(F&&... f) const
+template<typename... F> constexpr decltype(auto) JustifySelf::switchOn(NOESCAPE F&&... f) const
 {
     auto visitor = WTF::makeVisitor(std::forward<F>(f)...);
 
@@ -255,7 +255,7 @@ template<typename... F> constexpr decltype(auto) JustifySelf::switchOn(F&&... f)
     case PrimaryKind::Auto:
         return visitor(CSS::Keyword::Auto { });
     case PrimaryKind::Normal:
-        return visitor(CSS::Keyword::Normal { });
+        return visitOverflowPosition(CSS::Keyword::Normal { }, overflowPosition(), visitor);
     case PrimaryKind::Stretch:
         return visitor(CSS::Keyword::Stretch { });
     case PrimaryKind::Baseline:

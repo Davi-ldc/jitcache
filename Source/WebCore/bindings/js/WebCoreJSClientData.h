@@ -25,6 +25,7 @@
 #include "WebCoreBuiltinNames.h"
 #include "WebCoreJSBuiltins.h"
 #include "WorkerThreadType.h"
+#include <JavaScriptCore/WeakGCMap.h>
 #include <wtf/AbstractRefCountedAndCanMakeWeakPtr.h>
 #include <wtf/Function.h>
 #include <wtf/HashSet.h>
@@ -51,8 +52,6 @@ class JSHeapData {
 public:
     JSHeapData(JSC::Heap&);
 
-    static JSHeapData* ensureHeapData(JSC::Heap&);
-
     Lock& lock() LIFETIME_BOUND { return m_lock; }
     ExtendedDOMIsoSubspaces& subspaces() LIFETIME_BOUND { return m_subspaces; }
 
@@ -66,7 +65,7 @@ public:
     void reconcileWeakReferencesAtGCEnd(JSC::VM&, JSC::CollectionScope);
 
     template<typename Func>
-    void forEachOutputConstraintSpace(const Func& func)
+    void forEachOutputConstraintSpace(NOESCAPE const Func& func)
     {
         for (auto* space : m_outputConstraintSpaces)
             func(*space);
@@ -99,6 +98,7 @@ public:
     // DOM exception wrappers (IDL [Exception] interfaces) are JSC::ErrorInstance subclasses, so
     // they need custom heap cell types.
     JSC::IsoHeapCellType m_heapCellTypeForJSDOMException;
+    JSC::IsoHeapCellType m_heapCellTypeForJSQuotaExceededError;
 #if ENABLE(WEB_RTC)
     JSC::IsoHeapCellType m_heapCellTypeForJSRTCError;
 #endif
@@ -166,7 +166,7 @@ public:
 
     virtual String overrideSourceURL(const JSC::StackFrame&, const String& originalSourceURL) const;
 
-    JSHeapData& heapData() { return *m_heapData; }
+    JSHeapData& heapData() { return m_heapData.get(); }
 
     WebCoreBuiltinNames& builtinNames() LIFETIME_BOUND { return m_builtinNames; }
     JSBuiltinFunctions& builtinFunctions() LIFETIME_BOUND { return m_builtinFunctions; }
@@ -187,6 +187,8 @@ public:
 
     ExtendedDOMClientIsoSubspaces& clientSubspaces() LIFETIME_BOUND { return m_clientSubspaces; }
 
+    JSC::WeakGCMap<JSHandleIdentifier, JSDOMGlobalObject>& jsHandleGlobalObjects() LIFETIME_BOUND { return m_jsHandleGlobalObjects; }
+
     void addClient(JSVMClientDataClient& client) { m_clients.add(client); }
 
 private:
@@ -203,7 +205,8 @@ private:
     JSBuiltinFunctions m_builtinFunctions;
     WebCoreBuiltinNames m_builtinNames;
 
-    JSHeapData* m_heapData;
+    // Declared before the client subspaces, which point into its subspaces, so that it outlives them.
+    const UniqueRef<JSHeapData> m_heapData;
     JSC::GCClient::IsoSubspace m_domBuiltinConstructorSpace;
     JSC::GCClient::IsoSubspace m_domConstructorSpace;
     JSC::GCClient::IsoSubspace m_domNamespaceObjectSpace;
@@ -219,6 +222,8 @@ private:
     JSC::GCClient::IsoSubspace m_idbSerializationSpace;
 
     const UniqueRef<ExtendedDOMClientIsoSubspaces> m_clientSubspaces;
+
+    JSC::WeakGCMap<JSHandleIdentifier, JSDOMGlobalObject> m_jsHandleGlobalObjects;
 
     WeakHashSet<JSVMClientDataClient> m_clients;
 };

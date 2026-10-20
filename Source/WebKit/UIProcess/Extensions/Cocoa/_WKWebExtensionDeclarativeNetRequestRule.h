@@ -33,7 +33,7 @@ WK_EXTERN NSString * const dynamicRulesetID;
 WK_EXTERN
 @interface _WKWebExtensionDeclarativeNetRequestRule : NSObject
 
-- (instancetype)initWithDictionary:(NSDictionary *)ruleDictionary rulesetID:(NSString *)rulesetID errorString:(NSString * _Nullable * _Nullable)outErrorString NS_DESIGNATED_INITIALIZER;
+- (nullable instancetype)initWithDictionary:(NSDictionary *)ruleDictionary rulesetID:(NSString *)rulesetID errorString:(NSString * _Nullable * _Nullable)outErrorString NS_DESIGNATED_INITIALIZER;
 
 - (instancetype)init NS_UNAVAILABLE;
 
@@ -41,6 +41,7 @@ WK_EXTERN
 
 @property (nonatomic, readonly) NSInteger ruleID;
 @property (nonatomic, readonly) NSInteger priority;
+@property (nonatomic) NSUInteger declarationOrder;
 @property (nonatomic, readonly, copy) NSString *rulesetID;
 @property (nonatomic, readonly, copy) NSDictionary *action;
 @property (nonatomic, readonly, copy) NSDictionary *condition;

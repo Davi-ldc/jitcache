@@ -130,7 +130,7 @@ struct FocusedElementInformation {
     bool isMultiSelect { false };
     bool isReadOnly {false };
     bool allowsUserScaling { false };
-    bool usesBaseAppearancePicker { false };
+    bool optionsAreRenderedWithBaseAppearance { false };
     bool allowsUserScalingIgnoringAlwaysScalable { false };
     bool insideFixedPosition { false };
     bool hasPlainText { false };
@@ -167,6 +167,7 @@ struct FocusedElementInformation {
     bool shouldHideSoftTopScrollEdgeEffect { false };
     bool isFocusingWithValidationMessage { false };
     bool preventScroll { false };
+    bool preventInputViewPresentation { false };
 
     FocusedElementInformationIdentifier identifier;
     Markable<WebCore::ScrollingNodeID> containerScrollingNodeID;

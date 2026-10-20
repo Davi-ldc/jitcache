@@ -46,7 +46,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onBeforeRequest()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onBeforeRequest
 
     if (!m_onBeforeRequestEvent)
-        m_onBeforeRequestEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnBeforeRequest);
+        lazyInitialize(m_onBeforeRequestEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnBeforeRequest));
 
     return *m_onBeforeRequestEvent;
 }
@@ -56,7 +56,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onBeforeSendHeaders()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onBeforeSendHeaders
 
     if (!m_onBeforeSendHeadersEvent)
-        m_onBeforeSendHeadersEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnBeforeSendHeaders);
+        lazyInitialize(m_onBeforeSendHeadersEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnBeforeSendHeaders));
 
     return *m_onBeforeSendHeadersEvent;
 }
@@ -66,7 +66,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onSendHeaders()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onSendHeaders
 
     if (!m_onSendHeadersEvent)
-        m_onSendHeadersEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnSendHeaders);
+        lazyInitialize(m_onSendHeadersEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnSendHeaders));
 
     return *m_onSendHeadersEvent;
 }
@@ -76,7 +76,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onHeadersReceived()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onHeadersReceived
 
     if (!m_onHeadersReceivedEvent)
-        m_onHeadersReceivedEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnHeadersReceived);
+        lazyInitialize(m_onHeadersReceivedEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnHeadersReceived));
 
     return *m_onHeadersReceivedEvent;
 }
@@ -86,7 +86,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onAuthRequired()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onAuthRequired
 
     if (!m_onAuthRequiredEvent)
-        m_onAuthRequiredEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnAuthRequired);
+        lazyInitialize(m_onAuthRequiredEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnAuthRequired));
 
     return *m_onAuthRequiredEvent;
 }
@@ -96,7 +96,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onBeforeRedirect()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onBeforeRedirect
 
     if (!m_onBeforeRedirectEvent)
-        m_onBeforeRedirectEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnBeforeRedirect);
+        lazyInitialize(m_onBeforeRedirectEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnBeforeRedirect));
 
     return *m_onBeforeRedirectEvent;
 }
@@ -106,7 +106,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onResponseStarted()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onResponseStarted
 
     if (!m_onResponseStartedEvent)
-        m_onResponseStartedEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnResponseStarted);
+        lazyInitialize(m_onResponseStartedEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnResponseStarted));
 
     return *m_onResponseStartedEvent;
 }
@@ -116,7 +116,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onCompleted()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onCompleted
 
     if (!m_onCompletedEvent)
-        m_onCompletedEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnCompleted);
+        lazyInitialize(m_onCompletedEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnCompleted));
 
     return *m_onCompletedEvent;
 }
@@ -126,7 +126,7 @@ WebExtensionAPIWebRequestEvent& WebExtensionAPIWebRequest::onErrorOccurred()
     // Documentation: https://developer.mozilla.org/docs/Mozilla/Add-ons/WebExtensions/API/webRequest/onErrorOccurred
 
     if (!m_onErrorOccurredEvent)
-        m_onErrorOccurredEvent = WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnErrorOccurred);
+        lazyInitialize(m_onErrorOccurredEvent, WebExtensionAPIWebRequestEvent::create(*this, WebExtensionEventListenerType::WebRequestOnErrorOccurred));
 
     return *m_onErrorOccurredEvent;
 }
@@ -230,14 +230,18 @@ static NSString *toWebAPI(ResourceLoadInfo::Type type)
 
 static NSMutableDictionary *webRequestDetailsForResourceLoad(const ResourceLoadInfo& resourceLoad, WebExtensionTabIdentifier tabIdentifier)
 {
+    auto parentFrameIdentifier = WebExtensionFrameConstants::NoneIdentifier;
+    if (resourceLoad.parentFrameID)
+        parentFrameIdentifier = resourceLoad.parentFrameIsMainFrame ? WebExtensionFrameConstants::MainFrameIdentifier : toWebExtensionFrameIdentifier(resourceLoad.parentFrameID);
+
     NSMutableDictionary *result = [@{
         @"frameId": resourceLoad.parentFrameID ? @(toWebAPI(toWebExtensionFrameIdentifier(resourceLoad.frameID))) : @(toWebAPI(WebExtensionFrameConstants::MainFrameIdentifier)),
-        parentFrameIdKey: resourceLoad.parentFrameID ? @(toWebAPI(toWebExtensionFrameIdentifier(resourceLoad.parentFrameID))) : @(toWebAPI(WebExtensionFrameConstants::NoneIdentifier)),
+        parentFrameIdKey: @(toWebAPI(parentFrameIdentifier)),
         requestIdKey: adoptNS([[NSString alloc] initWithFormat:@"%llu", resourceLoad.resourceLoadID.toUInt64()]).get(),
         timeStampKey: @(floor(resourceLoad.eventTimestamp.approximate<WallTime>().secondsSinceEpoch().milliseconds())),
         @"url": resourceLoad.originalURL.string().createNSString().get(),
         @"tabId": @(toWebAPI(tabIdentifier)),
-        typeKey: toWebAPI(resourceLoad.type),
+        typeKey: resourceLoad.type == ResourceLoadInfo::Type::Document && resourceLoad.parentFrameID ? @"sub_frame" : toWebAPI(resourceLoad.type),
         methodKey: resourceLoad.originalHTTPMethod.createNSString().get(),
     } mutableCopy];
 

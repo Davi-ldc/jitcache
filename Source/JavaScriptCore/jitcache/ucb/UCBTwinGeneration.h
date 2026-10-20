@@ -29,8 +29,6 @@ struct TwinParseResults {
     CodeFeatures features { 0 };
     LexicallyScopedFeatures lexicallyScopedFeatures { NoLexicallyScopedFeatures };
     bool hasCapturedVariables { false };
-    int lastLine { 0 }; // globals and direct eval: what recordParse would give the executable
-    unsigned endColumn { 0 }; // likewise
 };
 
 // Each generates what the request's native generation would, but writes its parse results only into `results`: no

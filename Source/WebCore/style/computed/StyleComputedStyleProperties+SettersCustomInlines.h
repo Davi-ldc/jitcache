@@ -86,7 +86,7 @@ inline void ComputedStyleProperties::setAppearance(StyleAppearance appearance)
 
 inline void ComputedStyleProperties::setBlendMode(BlendMode mode)
 {
-    SET_NESTED(m_nonInheritedData, rareData, effectiveBlendMode, static_cast<unsigned>(mode));
+    SET_NESTED(m_nonInheritedData, rareData, blendMode, static_cast<unsigned>(mode));
     SET(m_inheritedRareData, isInSubtreeWithBlendMode, mode != BlendMode::Normal);
 }
 
@@ -302,7 +302,7 @@ inline void ComputedStyleProperties::setFontVariantPosition(FontVariantPosition 
 inline void ComputedStyleProperties::setLocale(WebkitLocale value)
 {
     auto description = fontDescription();
-    description.setSpecifiedLocale(value.takePlatform());
+    description.setComputedLocale(value.takePlatform());
     setFontDescription(WTF::move(description));
 }
 

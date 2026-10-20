@@ -84,12 +84,12 @@ private:
     template<typename T>
     [[nodiscard]] IPC::Error send(T&& message)
     {
-        return protect(root().streamClientConnection())->send(WTF::move(message), backing());
+        return protect(root().streamClientConnection())->send(std::forward<T>(message), backing());
     }
     template<typename T>
     [[nodiscard]] IPC::Connection::SendSyncResult<T> sendSync(T&& message)
     {
-        return protect(root().streamClientConnection())->sendSync(WTF::move(message), backing());
+        return protect(root().streamClientConnection())->sendSync(std::forward<T>(message), backing());
     }
 
 #if PLATFORM(COCOA)
@@ -100,12 +100,14 @@ private:
     void updateContentsHeadroom(float) override;
 
     Seconds lastFrameGPUCost() const final { return m_lastFrameGPUCost; }
+    Seconds lastFramePresentStall() const final { return m_lastFramePresentStall; }
 
     WebGPUIdentifier m_backing;
     const Ref<ConvertToBackingContext> m_convertToBackingContext;
     const Ref<RemoteGPUProxy> m_parent;
     RefPtr<RemotePresentationContextProxy> m_presentationContext;
     Seconds m_lastFrameGPUCost { 0_s };
+    Seconds m_lastFramePresentStall { 0_s };
 };
 
 } // namespace WebKit::WebGPU

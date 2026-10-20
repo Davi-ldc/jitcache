@@ -56,7 +56,7 @@ local copy without needing to vendor it in the project source tree.
 if (NOT ENABLE_DOCUMENTATION)
     function(GI_DOCGEN)
     endfunction()
-    return()
+    return ()
 endif ()
 
 find_package(GI REQUIRED)
@@ -114,7 +114,7 @@ find_package_handle_standard_args(GIDocgen
 )
 
 if (NOT GIDocgen_FOUND)
-    return()
+    return ()
 endif ()
 
 #[=======================================================================[.rst:
@@ -220,6 +220,10 @@ function(GI_DOCGEN namespace toml)
         --config "${toml_path}"
         --add-include-path "${CMAKE_BINARY_DIR}"
     )
+
+    if (CMAKE_COMPILE_WARNING_AS_ERROR)
+        list(APPEND common_flags --fatal-warnings)
+    endif ()
 
     set(content_dir_flags
         --content-dir "${contentdir}"

@@ -65,6 +65,7 @@ from webkitpy.style.checkers.api_test_allowlist import APITestAllowlistChecker
 from webkitpy.style.checkers.api_test_expectations import APITestExpectationsChecker
 from webkitpy.style.checkers.swift import SwiftChecker
 from webkitpy.style.checkers.swift_association import SwiftAssociationChecker
+from webkitpy.style.checkers.swift_build_registration import SwiftBuildRegistrationChecker
 from webkitpy.style.checkers.test_expectations import TestExpectationsChecker
 from webkitpy.style.checkers.text import TextChecker
 from webkitpy.style.checkers.watchlist import WatchListChecker
@@ -163,6 +164,10 @@ _PATH_RULES_SPECIFIER = [
     ([  # Ignore use of RetainPtr<NSObject *> for tests that ensure its compatibility with ReteainPtr<NSObject>.
       os.path.join('Tools', 'TestWebKitAPI', 'Tests', 'WTF', 'ns', 'RetainPtr.mm')],
      ["-runtime/retainptr"]),
+    ([  # Ignore append() of a default-constructed temporary in tests that compare it with constructAndAppend().
+        os.path.join('Tools', 'TestWebKitAPI', 'Tests', 'WTF', 'Deque.cpp'),
+        os.path.join('Tools', 'TestWebKitAPI', 'Tests', 'WTF', 'Vector.cpp')],
+     ["-runtime/construct_and_append"]),
     ([  # There is no clean way to avoid "yy_*" names used by flex.
       os.path.join('Source', 'WebCore', 'css', 'CSSParser.cpp'),
       # TestWebKitAPI uses funny macros like EXPECT_WK_STREQ.
@@ -449,6 +454,7 @@ _PATH_RULES_SPECIFIER = [
      ["-non-inclusive-term"]),
 
     ([  # The GTK/WPE MiniBrowser uses public API and GLib-style conventions and indentation.
+     os.path.join('Tools', 'MiniBrowser', 'glib'),
      os.path.join('Tools', 'MiniBrowser', 'gtk'),
      os.path.join('Tools', 'MiniBrowser', 'wpe')],
      ["-readability/enum_casing",
@@ -699,6 +705,7 @@ def _all_categories():
     categories = categories.union(XcodeSchemeChecker.categories)
     categories = categories.union(SwiftChecker.categories)
     categories = categories.union(SwiftAssociationChecker.categories)
+    categories = categories.union(SwiftBuildRegistrationChecker.categories)
 
     # FIXME: Consider adding all of the pep8 categories.  Since they
     #        are not too meaningful for documentation purposes, for
@@ -1364,6 +1371,8 @@ class StyleProcessor(ProcessorBase):
         APITestExpectationsChecker.lint_test_expectations(files, self._configuration, cwd, self._increment_error_count, host=host)
 
         SwiftAssociationChecker.check_associations(files, self._configuration, cwd, self._increment_error_count, host=host)
+
+        SwiftBuildRegistrationChecker.check_registrations(files, self._configuration, cwd, self._increment_error_count, host=host)
 
         wpt_dir = os.path.join('LayoutTests', *IMPORTED_WPT_DIR.split('/'))
         wpt_paths = []

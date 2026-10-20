@@ -67,7 +67,6 @@
 #include "LocalFrame.h"
 #include "LocalFrameLoaderClient.h"
 #include "ModalContainerTypes.h"
-#include "NetworkStorageSession.h"
 #include "Page.h"
 #include "PageConfiguration.h"
 #include "PaymentCoordinatorClient.h"
@@ -312,7 +311,7 @@ private:
     void NODELETE didWriteSelectionToPasteboard() final { }
     void NODELETE getClientPasteboardData(const std::optional<SimpleRange>&, Vector<std::pair<String, RefPtr<SharedBuffer>>>&) final { }
     void NODELETE requestCandidatesForSelection(const VisibleSelection&) final { }
-    void NODELETE handleAcceptedCandidateWithSoftSpaces(TextCheckingResult) final { }
+    void NODELETE handleAcceptedCandidateWithSoftSpaces(const TextCheckingResult&) final { }
 
     void registerUndoStep(UndoStep&) final;
     void registerRedoStep(UndoStep&) final;
@@ -409,7 +408,7 @@ private:
         void NODELETE checkGrammarOfString(StringView, Vector<GrammarDetail>&, int*, int*) final { }
 
 #if USE(UNIFIED_TEXT_CHECKING)
-        Vector<TextCheckingResult> NODELETE checkTextOfParagraph(StringView, OptionSet<TextCheckingType>, const VisibleSelection&) final { return Vector<TextCheckingResult>(); }
+        Vector<TextCheckingResult> NODELETE checkTextOfParagraph(StringView, OptionSet<TextCheckingType>, const VisibleSelection&) final { return { }; }
 #endif
 
         void NODELETE getGuessesForWord(const String&, const String&, const VisibleSelection&, Vector<String>&) final { }
@@ -430,7 +429,7 @@ private:
     EmptyFrameNetworkingContext();
 
     bool NODELETE shouldClearReferrerOnHTTPSToHTTPRedirect() const { return true; }
-    NetworkStorageSession* NODELETE storageSession() const final { return nullptr; }
+    CookieStorageSession* NODELETE storageSession() const final { return nullptr; }
 
 #if PLATFORM(COCOA)
     bool NODELETE localFileContentSniffingEnabled() const { return false; }
@@ -869,7 +868,7 @@ void EmptyFrameLoaderClient::dispatchDidReceiveTitle(const StringWithDirection&)
 {
 }
 
-void EmptyFrameLoaderClient::dispatchDidCommitLoad(std::optional<HasInsecureContent>, std::optional<UsedLegacyTLS>, std::optional<WasPrivateRelayed>)
+void EmptyFrameLoaderClient::dispatchDidCommitLoad(const std::optional<BackForwardCacheCommitData>&)
 {
 }
 
@@ -1221,7 +1220,7 @@ Ref<StorageNamespace> EmptyStorageNamespaceProvider::createTransientLocalStorage
 }
 
 class EmptyStorageSessionProvider final : public StorageSessionProvider {
-    NetworkStorageSession* NODELETE storageSession() const final { return nullptr; }
+    CookieStorageSession* NODELETE storageSession() const final { return nullptr; }
 };
 
 class EmptyBroadcastChannelRegistry final : public BroadcastChannelRegistry {
@@ -1256,7 +1255,7 @@ public:
     void cancelReceiveStream(WebTransportStreamIdentifier, std::optional<WebTransportStreamErrorCode>) final { }
     void cancelSendStream(WebTransportStreamIdentifier, std::optional<WebTransportStreamErrorCode>) final { }
     void destroyStream(WebTransportStreamIdentifier, std::optional<WebTransportStreamErrorCode>) final { }
-    void terminate(WebTransportSessionErrorCode, CString&&) final { }
+    void terminate(WebTransportSessionErrorCode, UTF8CString&&) final { }
     void datagramIncomingMaxAgeUpdated(std::optional<double>) final { }
     void datagramOutgoingMaxAgeUpdated(std::optional<double>) final { }
     void incomingMaxBufferedDatagramsUpdated(uint32_t) final { }

@@ -57,7 +57,6 @@ public:
         ShouldSmoothFonts           = 1 << 12,
         ShouldSubpixelQuantizeFonts = 1 << 13,
         ShadowsIgnoreTransforms     = 1 << 14,
-        DrawLuminanceMask           = 1 << 15,
     };
     using ChangeFlags = OptionSet<Change>;
 
@@ -72,11 +71,27 @@ public:
 
     WEBCORE_EXPORT GraphicsContextState(const ChangeFlags& = { }, InterpolationQuality = InterpolationQuality::Default);
 
+    // The initial state for a context that knows nothing about the state of the context its output
+    // will be applied to. Every property is indeterminate, so every setter is observed.
+    static GraphicsContextState initialIndeterminate()
+    {
+        GraphicsContextState state;
+        state.m_indeterminateProperties = ChangeFlags::all();
+        return state;
+    }
+
     void repurpose(Purpose);
     GraphicsContextState clone(Purpose) const;
 
     ChangeFlags changes() const { return m_changeFlags; }
     void didApplyChanges() { m_changeFlags = { }; }
+
+    void markChanged(ChangeFlags properties) { m_changeFlags.add(properties); }
+
+    // The mask travels with save() and restore(), matching what the other context does to its own
+    // state: a property established inside a save block is unknown again after the restore.
+    ChangeFlags indeterminateProperties() const { return m_indeterminateProperties; }
+    void markDeterminate(ChangeFlags properties) { m_indeterminateProperties.remove(properties); }
 
     SourceBrush& fillBrush() LIFETIME_BOUND { return m_fillBrush; }
     const SourceBrush& fillBrush() const LIFETIME_BOUND { return m_fillBrush; }
@@ -131,9 +146,6 @@ public:
     bool shadowsIgnoreTransforms() const { return m_shadowsIgnoreTransforms; }
     void setShadowsIgnoreTransforms(bool shadowsIgnoreTransforms) { setProperty(Change::ShadowsIgnoreTransforms, &GraphicsContextState::m_shadowsIgnoreTransforms, shadowsIgnoreTransforms); }
 
-    bool drawLuminanceMask() const { return m_drawLuminanceMask; }
-    void setDrawLuminanceMask(bool drawLuminanceMask) { setProperty(Change::DrawLuminanceMask, &GraphicsContextState::m_drawLuminanceMask, drawLuminanceMask); }
-
     void mergeLastChanges(const GraphicsContextState&);
     void mergeAllChanges(const GraphicsContextState&);
 
@@ -145,7 +157,7 @@ public:
     WEBCORE_EXPORT void copyPropertiesFrom(const GraphicsContextState&, ChangeFlags);
 
     // Whether every property holds the same value, ignoring changes() and purpose(). For assertions.
-    WEBCORE_EXPORT bool propertiesEqual(const GraphicsContextState&) const;
+    WEBCORE_EXPORT bool propertiesEqualIgnoring(const GraphicsContextState&, ChangeFlags ignoredProperties) const;
 
     Purpose purpose() const { return m_purpose; }
 
@@ -160,7 +172,7 @@ private:
     void setProperty(Change change, T GraphicsContextState::*property, const T& value)
     {
 #if !USE(CAIRO)
-        if (this->*property == value)
+        if (this->*property == value && !m_indeterminateProperties.contains(change))
             return;
 #endif
         this->*property = value;
@@ -171,7 +183,7 @@ private:
     void setProperty(Change change, T GraphicsContextState::*property, T&& value)
     {
 #if !USE(CAIRO)
-        if (this->*property == value)
+        if (this->*property == value && !m_indeterminateProperties.contains(change))
             return;
 #endif
         this->*property = std::forward<T>(value);
@@ -180,7 +192,11 @@ private:
 
     SourceBrush m_fillBrush { Color::black };
     SourceBrush m_strokeBrush { Color::black };
+    // Changes not appiled to the underlying platform context.
     ChangeFlags m_changeFlags;
+    // Properties whose value in the context this state is being applied to is unknown. A setter for
+    // such a property is never elided. Used for display list recording.
+    ChangeFlags m_indeterminateProperties;
     float m_strokeThickness { 0 };
     WindRule m_fillRule { WindRule::NonZero };
     StrokeStyle m_strokeStyle { StrokeStyle::SolidStroke };
@@ -197,7 +213,6 @@ private:
     bool m_shouldSmoothFonts { true };
     bool m_shouldSubpixelQuantizeFonts { true };
     bool m_shadowsIgnoreTransforms { false };
-    bool m_drawLuminanceMask { false };
 
     Purpose m_purpose { Purpose::Initial };
 };

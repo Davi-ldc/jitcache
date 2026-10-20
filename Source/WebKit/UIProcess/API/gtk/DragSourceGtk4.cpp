@@ -34,6 +34,7 @@
 #include <WebCore/NativeImage.h>
 #include <WebCore/PasteboardCustomData.h>
 #include <gtk/gtk.h>
+#include <wtf/text/MakeString.h>
 
 namespace WebKit {
 using namespace WebCore;
@@ -77,23 +78,21 @@ void DragSource::begin(SelectionData&& selectionData, OptionSet<DragOperation> o
 
     Vector<GdkContentProvider*> providers;
     if (m_selectionData->hasMarkup()) {
-        CString markup = m_selectionData->markup().utf8();
-        GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(markup.data(), markup.length()));
+        auto markup = m_selectionData->markup().utf8();
+        GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(markup.legacyCStringPointer(), markup.length()));
         providers.append(gdk_content_provider_new_for_bytes("text/html", bytes.get()));
     }
 
     if (m_selectionData->hasURIList()) {
-        CString uriList = m_selectionData->uriList().utf8();
-        GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(uriList.data(), uriList.length()));
+        auto uriList = m_selectionData->uriList().utf8();
+        GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(uriList.legacyCStringPointer(), uriList.length()));
         providers.append(gdk_content_provider_new_for_bytes("text/uri-list", bytes.get()));
     }
 
     if (m_selectionData->hasURL()) {
-        CString urlString = m_selectionData->url().string().utf8();
-        gchar* url = g_strdup_printf("%s\n%s", urlString.data(), m_selectionData->hasText() ? m_selectionData->text().utf8().data() : urlString.data());
-        IGNORE_CLANG_WARNINGS_BEGIN("unsafe-buffer-usage-in-libc-call")
-        GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new_take(url, strlen(url)));
-        IGNORE_CLANG_WARNINGS_END
+        const auto& urlString = m_selectionData->url().string();
+        auto url = makeString(urlString, '\n', m_selectionData->hasText() ? m_selectionData->text() : urlString).utf8();
+        GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(url.span().data(), url.length()));
         providers.append(gdk_content_provider_new_for_bytes("_NETSCAPE_URL", bytes.get()));
     }
 
@@ -103,7 +102,7 @@ void DragSource::begin(SelectionData&& selectionData, OptionSet<DragOperation> o
     }
 
     if (m_selectionData->hasText())
-        providers.append(gdk_content_provider_new_typed(G_TYPE_STRING, m_selectionData->text().utf8().data()));
+        providers.append(gdk_content_provider_new_typed(G_TYPE_STRING, m_selectionData->text().utf8().legacyCStringPointer()));
 
     if (m_selectionData->canSmartReplace()) {
         GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new(nullptr, 0));

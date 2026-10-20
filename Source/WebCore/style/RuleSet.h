@@ -40,6 +40,9 @@ class StyleSheetContents;
 class StyleRuleFunction;
 class StyleRulePositionTry;
 class StyleRuleViewTransition;
+#if ENABLE(SPATIAL_PORTAL)
+class StyleRuleEnvironmentMap;
+#endif
 
 namespace MQ {
 class MediaQueryEvaluator;
@@ -111,6 +114,7 @@ public:
     const RuleDataVector& cuePseudoRules() const LIFETIME_BOUND { return m_cuePseudoRules; }
 #endif
     const RuleDataVector& hostPseudoClassRules() const LIFETIME_BOUND { return m_hostPseudoClassRules; }
+    const RuleDataVector& shadowHostRulesInUniversalBucket() const LIFETIME_BOUND { return m_shadowHostRulesInUniversalBucket; }
     const RuleDataVector& slottedPseudoElementRules() const LIFETIME_BOUND { return m_slottedPseudoElementRules; }
     const RuleDataVector& partPseudoElementRules() const LIFETIME_BOUND { return m_partPseudoElementRules; }
     const RuleDataVector& focusPseudoClassRules() const LIFETIME_BOUND { return m_focusPseudoClassRules; }
@@ -124,6 +128,9 @@ public:
     EnumSet<PseudoElementType> universalHTMLPseudoElementTypes() const { return m_universalHTMLPseudoElementTypes; }
     // Pseudo element types applying to all elements.
     EnumSet<PseudoElementType> universalPseudoElementTypes() const { return m_universalPseudoElementTypes; }
+    // Whether any universal ::before/::after rule may generate a box.
+    PseudoElementBoxGeneration universalHTMLPseudoElementBoxGeneration() const { return m_universalHTMLPseudoElementBoxGeneration; }
+    PseudoElementBoxGeneration universalPseudoElementBoxGeneration() const { return m_universalPseudoElementBoxGeneration; }
 
     const Vector<StyleRulePage*>& pageRules() const LIFETIME_BOUND { return m_pageRules; }
 
@@ -132,7 +139,7 @@ public:
     bool hasAttributeRules() const { return !m_attributeLocalNameRules.isEmpty(); }
     bool hasUserAgentPartRules() const { return !m_userAgentPartRules.isEmpty(); }
     bool hasHostPseudoClassRulesMatchingInShadowTree() const { return m_hasHostPseudoClassRulesMatchingInShadowTree; }
-    bool hasHostOrScopePseudoClassRulesInUniversalBucket() const { return m_hasHostOrScopePseudoClassRulesInUniversalBucket; }
+    bool hasRulesMatchingShadowHost() const { return !m_hostPseudoClassRules.isEmpty() || !m_shadowHostRulesInUniversalBucket.isEmpty(); }
 
     static constexpr auto cascadeLayerPriorityForPresentationalHints = std::numeric_limits<CascadeLayerPriority>::min();
     static constexpr auto cascadeLayerPriorityForUnlayered = std::numeric_limits<CascadeLayerPriority>::max();
@@ -147,6 +154,10 @@ public:
     Vector<Ref<const StyleRuleScope>> scopeRulesFor(const RuleData&) const;
 
     const RefPtr<const StyleRulePositionTry> NODELETE positionTryRuleForName(const AtomString&) const;
+
+#if ENABLE(SPATIAL_PORTAL)
+    RefPtr<const StyleRuleEnvironmentMap> NODELETE environmentMapRuleForName(const AtomString&) const;
+#endif
 
     WTF::String selectorsForDebugging() const;
 
@@ -174,8 +185,8 @@ private:
     };
     CollectedMediaQueryChanges evaluateDynamicMediaQueryRules(const MQ::MediaQueryEvaluator&, size_t startIndex);
 
-    template<typename Function> void traverseRuleDatas(Function&&);
-    template<typename Function> void traverseRuleDatas(Function&&) const;
+    template<typename Function> void traverseRuleDatas(NOESCAPE const Function&);
+    template<typename Function> void traverseRuleDatas(NOESCAPE const Function&) const;
 
     struct CascadeLayer {
         CascadeLayerName resolvedName;
@@ -226,6 +237,7 @@ private:
     RuleDataVector m_cuePseudoRules;
 #endif
     RuleDataVector m_hostPseudoClassRules;
+    RuleDataVector m_shadowHostRulesInUniversalBucket;
     RuleDataVector m_slottedPseudoElementRules;
     RuleDataVector m_partPseudoElementRules;
     RuleDataVector m_focusPseudoClassRules;
@@ -236,6 +248,8 @@ private:
     RuleDataVector m_universalPseudoElementRules;
     EnumSet<PseudoElementType> m_universalHTMLPseudoElementTypes;
     EnumSet<PseudoElementType> m_universalPseudoElementTypes;
+    PseudoElementBoxGeneration m_universalHTMLPseudoElementBoxGeneration { PseudoElementBoxGeneration::NotForBeforeOrAfter };
+    PseudoElementBoxGeneration m_universalPseudoElementBoxGeneration { PseudoElementBoxGeneration::NotForBeforeOrAfter };
     Vector<StyleRulePage*> m_pageRules;
     RefPtr<StyleRuleViewTransition> m_viewTransitionRule;
     RuleFeatureSet m_features;
@@ -259,9 +273,12 @@ private:
     // @position-try
     HashMap<AtomString, Ref<const StyleRulePositionTry>> m_positionTryRules;
 
+#if ENABLE(SPATIAL_PORTAL)
+    HashMap<AtomString, Ref<const StyleRuleEnvironmentMap>> m_environmentMapRules;
+#endif
+
     bool m_hasHostPseudoClassRulesMatchingInShadowTree { false };
     bool m_hasViewportDependentMediaQueries { false };
-    bool m_hasHostOrScopePseudoClassRulesInUniversalBucket { false };
 
     // For checking against re-entrancy.
     bool m_isBuilding { false };

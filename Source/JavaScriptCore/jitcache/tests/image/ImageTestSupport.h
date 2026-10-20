@@ -224,10 +224,9 @@ inline RefPtr<BaselineJITCode> compileUnderTwinRecorder(VM& vm, CodeBlock& codeB
 {
     TwinSeeds seeds { };
     seeds.assembler = assemblerSeed;
-    TwinCompileInputs compileInputs { };
     Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(&codeBlock));
     JIT jit(vm, plan.get(), &codeBlock);
-    jit.setJITCacheTwin(WTF::move(budget), seeds, compileInputs);
+    jit.setJITCacheTwin(WTF::move(budget), seeds);
     return jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
 }
 

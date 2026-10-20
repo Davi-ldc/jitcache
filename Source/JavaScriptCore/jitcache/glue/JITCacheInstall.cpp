@@ -175,8 +175,8 @@ static void recordInstallEvent(const InstallMeasurement& measurement, const Inst
         { "prepareImage.flush"_s, installed.prepareTimings.flushNanoseconds },
         { "steps.cbPrepare"_s, step(InstallStep::CBPrepare) },
         { "steps.prepareBaselineICs"_s, step(InstallStep::PrepareBaselineICs) },
-        { "steps.seedLinkedState"_s, step(InstallStep::SeedLinkedState) },
         { "steps.seedCallLinkHistory"_s, step(InstallStep::SeedCallLinkHistory) },
+        { "steps.seedLinkedState"_s, step(InstallStep::SeedLinkedState) },
         { "steps.commit"_s, step(InstallStep::Commit) },
         { "steps.setup"_s, step(InstallStep::Setup) },
         { "steps.attachPropertyICState"_s, step(InstallStep::AttachPropertyICState) },
@@ -187,6 +187,7 @@ static void recordInstallEvent(const InstallMeasurement& measurement, const Inst
         { "restore.crossed"_s, installed.restore.crossed },
         { "restore.nativeSlice"_s, installed.restore.nativeSlice },
         { "restore.slice"_s, installed.restore.slice },
+        { "restore.startupDeferralScale"_s, installed.restore.startupDeferralScale },
         { "codeSize"_s, installed.codeSize },
         { "image.codeSize"_s, static_cast<uint64_t>(installed.imageCodeSize) },
         { "image.fixupCount"_s, static_cast<uint64_t>(installed.imageFixupCount) },
@@ -198,35 +199,6 @@ static void recordInstallEvent(const InstallMeasurement& measurement, const Inst
 static String importedBodyDetail(const BodyKey& key)
 {
     return makeString("body "_s, bodyKeyHex(key));
-}
-
-// The enumerator names the ICs lane's checks are raised at, as fault reports name them.
-static ASCIILiteral icsRestoreCheckName(ICs::Check check)
-{
-    switch (check) {
-    case ICs::Check::SectionSize:
-        return "SectionSize"_s;
-    case ICs::Check::SummaryBound:
-        return "SummaryBound"_s;
-    case ICs::Check::CallLinkGroups:
-        return "CallLinkGroups"_s;
-    case ICs::Check::ReservedBits:
-        return "ReservedBits"_s;
-    case ICs::Check::EnumRange:
-        return "EnumRange"_s;
-    case ICs::Check::SummaryCount:
-        return "SummaryCount"_s;
-    case ICs::Check::MoldPairing:
-        return "MoldPairing"_s;
-    case ICs::Check::MetadataLayout:
-        return "MetadataLayout"_s;
-    case ICs::Check::MoldMegamorphicBit:
-        return "MoldMegamorphicBit"_s;
-    case ICs::Check::NewbornCallLinks:
-        return "NewbornCallLinks"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return { };
 }
 
 #if ENABLE(JITCACHE_TWINS)
@@ -401,7 +373,7 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     measurement.endStep(InstallStep::CBPrepare);
     if (!cbImport) {
         ASSERT(cbImport.error().kind == CBFaultKind::InvalidMaterial);
-        state->raiseInvalidMaterial("cb"_s, description(cbImport.error().check), importedBodyDetail(key));
+        state->raiseInvalidMaterial("cb"_s, description(cbImport.error().check), makeString(faultDetail(cbImport.error().check), "; "_s, importedBodyDetail(key)));
         return InstallOutcome::Abandoned;
     }
 
@@ -409,7 +381,7 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     auto icsPrepared = ICs::prepareBaselineICs(body->section(SectionKind::ICsBaseline), prepared->code(), newborn, strict ? ICs::StrictChecks::Yes : ICs::StrictChecks::No);
     measurement.endStep(InstallStep::PrepareBaselineICs);
     if (!icsPrepared) {
-        state->raiseInvalidMaterial("ics"_s, icsRestoreCheckName(icsPrepared.error().check), makeString("site "_s, icsPrepared.error().siteIndex, "; "_s, importedBodyDetail(key)));
+        state->raiseInvalidMaterial("ics"_s, ICs::description(icsPrepared.error().check), makeString("site "_s, icsPrepared.error().siteIndex, "; "_s, importedBodyDetail(key)));
         return InstallOutcome::Abandoned;
     }
 
@@ -417,19 +389,21 @@ InstallOutcome installAtNewbornCodeBlock(VM& vm, CodeBlock& newborn, InstallPoin
     // image goes on without a record. The recording fault ends production and leaves activity on, so the install
     // continues.
     if (budget && budget->hasRefused())
-        state->raiseRecordingFault({ }, "budget.limit"_s, makeString("the rebuilt image record; "_s, importedBodyDetail(key)));
+        state->raiseRecordingFault({ }, "budget.limit"_s, makeString("rebuilt image record; "_s, importedBodyDetail(key)));
 
-    // Nothing from here on can fail. The only cell allocations, the CB lane's realm step and lazy-operand holder, run
-    // under this function's deferral and prepareForExecutionImpl's. The CB stays unpublished until installCode, so no
-    // marker or compiler thread reads what the steps before it write.
+    // Nothing from here on can fail. The cell allocations, the CB lane's realm step and the FunctionExecutables native
+    // setup materializes, and the other allocations, the CB lane's predictions and lazy-operand holder and the ICs lane's
+    // CallSiteData, run under this function's deferral, which only records a collection one of them requests. The CB
+    // stays unpublished until installCode, so no marker or compiler thread reads what the steps before it write.
 
-    // The linked state. The two lanes write disjoint fields of shared metadata entries, after linking and before the CB
-    // has a JIT type.
+    // The linked state, after linking and before the CB has a JIT type. The ICs lane gives each restored call site its
+    // own CallSiteData where the site needs one; the CB lane writes no CallSiteData, and the two write disjoint fields of
+    // shared metadata entries.
     measurement.mark();
-    cbImport->seedLinkedState(newborn);
-    measurement.endStep(InstallStep::SeedLinkedState);
     ICs::seedCallLinkHistory(*icsPrepared, newborn);
     measurement.endStep(InstallStep::SeedCallLinkHistory);
+    cbImport->seedLinkedState(newborn);
+    measurement.endStep(InstallStep::SeedLinkedState);
 
     // The image's commit: the code-size sample, the cross-modifying fence and the profiler reports.
     uint32_t imageCodeSize = view.header().codeSize;

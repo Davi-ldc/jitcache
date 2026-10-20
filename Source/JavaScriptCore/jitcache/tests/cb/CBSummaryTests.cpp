@@ -6,6 +6,7 @@
 #include "CBFormat.h"
 #include "CBState.h"
 #include "CBTestSupport.h"
+#include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "CollectionScope.h"
 #include "EnsureStillAliveHere.h"
@@ -15,6 +16,7 @@
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
+#include "MetadataTable.h"
 #include "ProducerBudget.h"
 #include "SpeculatedType.h"
 #include "TestVM.h"
@@ -33,13 +35,15 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringView.h>
 
-// Tests of the CB lane's score (cb/CBCapture.cpp, decodeSummary in cb/CBSummary.cpp): the score of a capture is a
+// Tests of the CB lane's score (cb/CBCapture.cpp, decodeSummary in cb/CBCapture.cpp): the score of a capture is a
 // function of the cb.summary it wrote, so capture, scoreLive and decodeSummary agree; after the native merges, each
 // slot capture wrote equals the UCB copy it pairs with (argument i with UCB value profile i, value offset k with UCB
-// value profile numArguments + k - 1, array position p with UCB array profile p), and the summary slot is the two ORed;
-// and decodeSummary with strict on accepts or rejects each field of cb.summary exactly at its check's bound. Live tests
-// build their CBs as the capture tests do: one call installs an LLInt CB, which JIT::compileSync compiles to baseline.
-// Each test keeps its global object on its stack, and its source keeps every value the test passes in globals.
+// value profile numArguments + k - 1, array position p with UCB array profile p), and the summary slot is the two ORed,
+// a call site's slot holding its own this profile's flags; a builtin, whose UCB keeps no copies, has its summary slots
+// from its own profiles alone; and decodeSummary with strict on accepts or rejects each field of cb.summary exactly at
+// its check's bound. Live tests build their CBs as the capture tests do: one call installs an LLInt CB, which
+// JIT::compileSync compiles to baseline. Each test keeps its global object on its stack, and its source keeps every
+// value the test passes in globals.
 
 namespace JSC::JITCache::Tests {
 
@@ -303,13 +307,20 @@ static void checkAcceptedBytes(TestContext& context, StringView what, const Sect
         checkDecodes(context, what, bytes.span(), strict, expectedScore(*model));
 }
 
+// The call-site families of the format's table, A11..A13 (op_call, op_call_ignore_result and op_tail_call), whose
+// entries count as array positions and hold no cb.state record.
+static bool isCallSiteFamily(unsigned family)
+{
+    return family >= 11 && family <= 13;
+}
+
 // The slots of cb.state that pair with UCB copies, which are its first four arrays (argument and value predictions,
 // array profiles and lazy-operand predictions), at offsets computed here.
 struct ScoredState {
     CBFormat::StateHeader header { };
     Vector<uint64_t> argumentPredictions;
     Vector<uint64_t> valuePredictions;
-    Vector<CBFormat::ArrayProfileRecord> arrayProfiles;
+    Vector<CBFormat::ArrayProfileRecord> arrayProfiles; // the records of A0..A10, A14 and A15
     Vector<uint64_t> lazyOperandPredictions;
 };
 
@@ -322,8 +333,10 @@ static std::optional<ScoredState> parseState(TestContext& context, std::span<con
     ScoredState state;
     state.header = readAt<CBFormat::StateHeader>(bytes, 0);
     size_t numArrayProfiles = 0;
-    for (unsigned family = 0; family < CBFormat::numberOfArrayProfileFamilies; ++family)
-        numArrayProfiles += state.header.familyEntryCount[family];
+    for (unsigned family = 0; family < CBFormat::numberOfArrayProfileFamilies; ++family) {
+        if (!isCallSiteFamily(family))
+            numArrayProfiles += state.header.familyEntryCount[family];
+    }
     size_t argumentOffset = sizeof(CBFormat::StateHeader);
     size_t valueOffset = argumentOffset + static_cast<size_t>(state.header.numArguments) * sizeof(uint64_t);
     size_t arrayOffset = valueOffset + static_cast<size_t>(state.header.numValueProfiles) * sizeof(uint64_t);
@@ -335,8 +348,8 @@ static std::optional<ScoredState> parseState(TestContext& context, std::span<con
     }
     state.argumentPredictions = readSlots(bytes, argumentOffset, state.header.numArguments);
     state.valuePredictions = readSlots(bytes, valueOffset, state.header.numValueProfiles);
-    for (size_t position = 0; position < numArrayProfiles; ++position)
-        state.arrayProfiles.append(readAt<CBFormat::ArrayProfileRecord>(bytes, arrayOffset + position * sizeof(CBFormat::ArrayProfileRecord)));
+    for (size_t record = 0; record < numArrayProfiles; ++record)
+        state.arrayProfiles.append(readAt<CBFormat::ArrayProfileRecord>(bytes, arrayOffset + record * sizeof(CBFormat::ArrayProfileRecord)));
     for (size_t index = 0; index < state.header.numLazyOperandProfiles; ++index)
         state.lazyOperandPredictions.append(readAt<CBFormat::LazyOperandRecord>(bytes, lazyOperandOffset + index * sizeof(CBFormat::LazyOperandRecord)).prediction);
     return state;
@@ -358,33 +371,96 @@ static uint32_t expectedProgress(const CBFormat::StateHeader& header)
 // value that differs from the UCB copy it is compared with.
 static void checkNeighboursDiffer(TestContext& context, UnlinkedCodeBlock& unlinkedCodeBlock)
 {
-    auto& valueProfiles = unlinkedCodeBlock.unlinkedValueProfiles();
+    auto* profiles = unlinkedCodeBlock.valueAndArrayProfiles();
+    if (!profiles) {
+        JITCACHE_FAIL("the subject's UCB has no value and array profile copies"_s);
+        return;
+    }
+    std::span<UnlinkedValueProfile> valueProfiles = profiles->valueProfiles();
     for (size_t index = 1; index < valueProfiles.size(); ++index) {
         if (valueProfiles[index - 1].prediction() == valueProfiles[index].prediction())
             JITCACHE_FAIL(makeString("the subject's UCB value profiles "_s, index - 1, " and "_s, index, " both hold "_s, valueProfiles[index].prediction(), ", so a walk out of step there would pass"_s));
     }
-    auto& arrayProfiles = unlinkedCodeBlock.unlinkedArrayProfiles();
+    std::span<UnlinkedArrayProfile> arrayProfiles = profiles->arrayProfiles();
     for (size_t position = 1; position < arrayProfiles.size(); ++position) {
         if (arrayProfiles[position - 1].observedArrayModes() == arrayProfiles[position].observedArrayModes())
             JITCACHE_FAIL(makeString("the subject's UCB array profiles "_s, position - 1, " and "_s, position, " both hold modes "_s, arrayProfiles[position].observedArrayModes(), ", so a walk out of step there would pass"_s));
     }
 }
 
+// The flags of each call site's own this profile, in the format's order: A11 (op_call), A12 (op_call_ignore_result) and
+// A13 (op_tail_call), each in metadata-ID order. Nothing for a site that has no data of its own.
+static Vector<std::optional<uint32_t>> callSiteThisFlags(CodeBlock& codeBlock)
+{
+    Vector<std::optional<uint32_t>> flags;
+    MetadataTable* metadataTable = codeBlock.metadataTable();
+    if (!metadataTable)
+        return flags;
+    auto append = [&](auto& metadata) {
+        ArrayProfile* profile = metadata.m_callLinkInfo.arrayProfile();
+        flags.append(profile ? std::optional<uint32_t> { profile->arrayProfileFlags().toRaw() } : std::nullopt);
+    };
+    metadataTable->forEach<OpCall>(append);
+    metadataTable->forEach<OpCallIgnoreResult>(append);
+    metadataTable->forEach<OpTailCall>(append);
+    return flags;
+}
+
+// The summary slot of every call site: the flags of its own this profile ORed with its UCB copy's, which a UCB without
+// copies, a builtin's among them, leaves out; a site with no data of its own adds no flag. Walks the array positions of
+// A0..A15 in the format's order and returns, per call site, its position.
+static Vector<size_t> checkCallSiteSlots(TestContext& context, StringView what, const ScoredState& state, const Summary& summary, const Vector<std::optional<uint32_t>>& callSiteFlags, std::span<const UnlinkedArrayProfile> unlinkedArrayProfiles)
+{
+    Vector<size_t> positions;
+    size_t position = 0;
+    for (unsigned family = 0; family < CBFormat::numberOfArrayProfileFamilies; ++family) {
+        for (uint32_t entry = 0; entry < state.header.familyEntryCount[family]; ++entry, ++position) {
+            if (isCallSiteFamily(family))
+                positions.append(position);
+        }
+    }
+    if (positions.size() != callSiteFlags.size() || summary.arrayFlags.size() != position) {
+        JITCACHE_FAIL(makeString(what, ": cb.state counts "_s, positions.size(), " call sites and "_s, position, " array positions, the CB "_s, callSiteFlags.size(), " call sites and cb.summary "_s, summary.arrayFlags.size(), " array flags"_s));
+        return { };
+    }
+    for (size_t site = 0; site < positions.size(); ++site) {
+        size_t sitePosition = positions[site];
+        uint32_t unlinkedFlags = unlinkedArrayProfiles.empty() ? 0 : unlinkedArrayProfiles[sitePosition].arrayProfileFlags().toRaw();
+        auto expected = static_cast<uint8_t>(callSiteFlags[site].value_or(0) | unlinkedFlags);
+        if (summary.arrayFlags[sitePosition] != expected)
+            JITCACHE_FAIL(makeString(what, ": the call site at array position "_s, sitePosition, " holds flags "_s, static_cast<unsigned>(summary.arrayFlags[sitePosition]), " in cb.summary, not its own this profile's ORed with its UCB copy's, "_s, static_cast<unsigned>(expected)));
+    }
+    return positions;
+}
+
 // After the native merges, each cb.state slot equals the UCB copy it pairs with: the prediction for an argument or
 // value slot; the modes, and the flags without the pruning mark, which the merge keeps out of the UCB copy, for an array
 // profile, whose families follow the native merge order. Each summary slot is its cb.state slot ORed with that copy,
-// and a lazy-operand slot, which has no copy, is its cb.state prediction.
-static void checkPairing(TestContext& context, StringView what, const ScoredState& state, const Summary& summary, UnlinkedCodeBlock& unlinkedCodeBlock)
+// a call site's is its own this profile's flags ORed with that copy, and a lazy-operand slot, which has no copy, is its
+// cb.state prediction. A call site has no cb.state record but keeps its array position, so the records of A14 and A15
+// pair with the copies past the call sites.
+static void checkPairing(TestContext& context, StringView what, const ScoredState& state, const Summary& summary, UnlinkedCodeBlock& unlinkedCodeBlock, const Vector<std::optional<uint32_t>>& callSiteFlags)
 {
-    auto& unlinkedValueProfiles = unlinkedCodeBlock.unlinkedValueProfiles();
-    auto& unlinkedArrayProfiles = unlinkedCodeBlock.unlinkedArrayProfiles();
+    auto* profiles = unlinkedCodeBlock.valueAndArrayProfiles();
+    if (!profiles) {
+        JITCACHE_FAIL(makeString(what, ": the UCB has no value and array profile copies"_s));
+        return;
+    }
+    std::span<UnlinkedValueProfile> unlinkedValueProfiles = profiles->valueProfiles();
+    std::span<UnlinkedArrayProfile> unlinkedArrayProfiles = profiles->arrayProfiles();
     size_t numArguments = state.argumentPredictions.size();
-    if (unlinkedValueProfiles.size() != numArguments + state.valuePredictions.size() || unlinkedArrayProfiles.size() != state.arrayProfiles.size()) {
-        JITCACHE_FAIL(makeString(what, ": the UCB copies are not as many as the cb.state slots they pair with"_s));
+    size_t numCallSites = 0;
+    for (unsigned family = 0; family < CBFormat::numberOfArrayProfileFamilies; ++family) {
+        if (isCallSiteFamily(family))
+            numCallSites += state.header.familyEntryCount[family];
+    }
+    size_t numArrayPositions = state.arrayProfiles.size() + numCallSites;
+    if (unlinkedValueProfiles.size() != numArguments + state.valuePredictions.size() || unlinkedArrayProfiles.size() != numArrayPositions) {
+        JITCACHE_FAIL(makeString(what, ": the UCB copies are not as many as the slots they pair with"_s));
         return;
     }
     if (summary.argumentCategories.size() != numArguments || summary.valueCategories.size() != state.valuePredictions.size()
-        || summary.lazyOperandCategories.size() != state.lazyOperandPredictions.size() || summary.arrayFlags.size() != state.arrayProfiles.size()) {
+        || summary.lazyOperandCategories.size() != state.lazyOperandPredictions.size() || summary.arrayFlags.size() != numArrayPositions) {
         JITCACHE_FAIL(makeString(what, ": cb.summary and cb.state count different slots"_s));
         return;
     }
@@ -403,17 +479,24 @@ static void checkPairing(TestContext& context, StringView what, const ScoredStat
         if (summary.lazyOperandCategories[index] != state.lazyOperandPredictions[index])
             JITCACHE_FAIL(makeString(what, ": lazy-operand profile "_s, index, " holds "_s, summary.lazyOperandCategories[index], " in cb.summary and "_s, state.lazyOperandPredictions[index], " in cb.state"_s));
     }
-    for (size_t position = 0; position < state.arrayProfiles.size(); ++position) {
-        const auto& record = state.arrayProfiles[position];
-        const auto& unlinked = unlinkedArrayProfiles[position];
-        uint32_t unlinkedFlags = unlinked.arrayProfileFlags().toRaw();
-        if (record.observedArrayModes != unlinked.observedArrayModes())
-            JITCACHE_FAIL(makeString(what, ": array position "_s, position, " holds modes "_s, record.observedArrayModes, " in cb.state where its UCB copy holds "_s, unlinked.observedArrayModes()));
-        if ((record.flags & ~static_cast<uint32_t>(pruningMark)) != unlinkedFlags)
-            JITCACHE_FAIL(makeString(what, ": array position "_s, position, " holds flags "_s, record.flags, " in cb.state where its UCB copy holds "_s, unlinkedFlags));
-        if (summary.arrayFlags[position] != static_cast<uint8_t>(record.flags | unlinkedFlags))
-            JITCACHE_FAIL(makeString(what, ": array position "_s, position, " holds flags "_s, static_cast<unsigned>(summary.arrayFlags[position]), " in cb.summary, not its cb.state flags ORed with its UCB copy's"_s));
+    size_t recordIndex = 0;
+    size_t position = 0;
+    for (unsigned family = 0; family < CBFormat::numberOfArrayProfileFamilies; ++family) {
+        for (uint32_t entry = 0; entry < state.header.familyEntryCount[family]; ++entry, ++position) {
+            if (isCallSiteFamily(family))
+                continue;
+            const auto& record = state.arrayProfiles[recordIndex++];
+            const auto& unlinked = unlinkedArrayProfiles[position];
+            uint32_t unlinkedFlags = unlinked.arrayProfileFlags().toRaw();
+            if (record.observedArrayModes != unlinked.observedArrayModes())
+                JITCACHE_FAIL(makeString(what, ": array position "_s, position, " holds modes "_s, record.observedArrayModes, " in cb.state where its UCB copy holds "_s, unlinked.observedArrayModes()));
+            if ((record.flags & ~static_cast<uint32_t>(pruningMark)) != unlinkedFlags)
+                JITCACHE_FAIL(makeString(what, ": array position "_s, position, " holds flags "_s, record.flags, " in cb.state where its UCB copy holds "_s, unlinkedFlags));
+            if (summary.arrayFlags[position] != static_cast<uint8_t>(record.flags | unlinkedFlags))
+                JITCACHE_FAIL(makeString(what, ": array position "_s, position, " holds flags "_s, static_cast<unsigned>(summary.arrayFlags[position]), " in cb.summary, not its cb.state flags ORed with its UCB copy's"_s));
+        }
     }
+    checkCallSiteSlots(context, what, state, summary, callSiteFlags, unlinkedArrayProfiles);
 }
 
 // The live score test's body. `subject` has an A15 entry, the iterable profile of the iterator_next that
@@ -426,8 +509,9 @@ static void checkPairing(TestContext& context, StringView what, const ScoredStat
 //   iterator or an array (the iterator), a function (next), a plain object (next's result), a boolean (done), an int or
 //   a double (value), undefined or a function (the return get), a plain object (return's result), an int (ints[0]),
 //   a double (doubles[1]);
-//   array profiles: Int32 (ints[0]), Double (doubles[1]), Contiguous (the return call's this), NonArray (the
-//   iterable of a generic iterator_open), Int32 then Double (A15, after iterateDoubles).
+//   array profiles: Int32 (ints[0]), Double (doubles[1]), Contiguous (the return call's this, an A11 call site whose
+//   profile its own CallSiteData holds once the call ran twice), NonArray (the iterable of a generic iterator_open),
+//   Int32 then Double (A15, after iterateDoubles).
 static constexpr auto subjectSource = "function subject(ints, iterable, doubles, tag) {"
     "    var [first] = iterable;"
     "    return [first, ints[0], doubles[1], tag];"
@@ -458,6 +542,16 @@ static constexpr auto elementSource = "function element(array, index) { return a
     "var array = [1, 2, 3];"
     "function run(rounds) { for (var round = 0; round < rounds; ++round) element(array, round % 3); }"_s;
 
+// The builtin test's source. One call of run makes Array.prototype.forEach call its callback four times with an object
+// as this: the callback's call site gets data of its own at its second call, and its own this profile sees the
+// receiver at the later ones. forEach's call of @toLength runs once, so that site never gets data of its own.
+static constexpr auto builtinSource = "var forEach = Array.prototype.forEach;"
+    "var elements = [1, 2, 3, 4];"
+    "var receiver = { weight: 2 };"
+    "var total = 0;"
+    "function add(element) { total += element * this.weight; }"
+    "function run() { elements.forEach(add, receiver); }"_s;
+
 } // namespace CBSummaryTestsInternal
 
 using namespace CBSummaryTestsInternal;
@@ -465,7 +559,9 @@ using namespace CBSummaryTestsInternal;
 // Right after a synchronous full collection, in a VM with useConcurrentJIT off and with no JS run in between, capture
 // and scoreLive give one score, which decodeSummary and a recount give again from the written summary, in both modes
 // and with the polymorphic bit set and clear. The recount leaves the pruning mark out, and the collection's merges make
-// every cb.state slot equal the UCB copy it pairs with.
+// every cb.state slot equal the UCB copy it pairs with, by array positions that count the call sites, whose summary
+// slots hold their own this profiles' flags ORed with their copies'. The subject stays below
+// maximumOptimizationCandidateBytecodeCost, so the collection's drain folds its value samples into predictions.
 JITCACHE_TEST_WITH_OPTIONS(cbSummaryScoreAgreesAcrossCaptureScoreLiveAndDecode, Yes, "--useConcurrentJIT=false")
 {
     VM& vm = *context.vm();
@@ -501,8 +597,20 @@ JITCACHE_TEST_WITH_OPTIONS(cbSummaryScoreAgreesAcrossCaptureScoreLiveAndDecode, 
         JITCACHE_FAIL("the collections replaced the subject's baseline CB"_s);
         return;
     }
+    if (codeBlock->valueProfilePredictionsAreNeverRead()) {
+        JITCACHE_FAIL("the subject's drains keep its value samples in their buckets"_s);
+        return;
+    }
     UnlinkedCodeBlock& unlinkedCodeBlock = *codeBlock->unlinkedCodeBlock();
     checkNeighboursDiffer(context, unlinkedCodeBlock);
+
+    // The call site whose own this profile the summary reads: the return call ran five times, so it has data of its
+    // own.
+    Vector<std::optional<uint32_t>> callSiteFlags = callSiteThisFlags(*codeBlock);
+    if (!std::ranges::any_of(callSiteFlags, [](const std::optional<uint32_t>& flags) { return flags.has_value(); })) {
+        JITCACHE_FAIL("no call site of the subject has data of its own"_s);
+        return;
+    }
 
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
     std::array<std::optional<CBScore>, 2> strictScoreByBit;
@@ -550,7 +658,7 @@ JITCACHE_TEST_WITH_OPTIONS(cbSummaryScoreAgreesAcrossCaptureScoreLiveAndDecode, 
 
             // The body's A15 entry, and the pairing of every slot with its UCB copy.
             JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", A15 entries"_s), state->header.familyEntryCount[CBFormat::numberOfArrayProfileFamilies - 1], 1);
-            checkPairing(context, what, *state, *summary, unlinkedCodeBlock);
+            checkPairing(context, what, *state, *summary, unlinkedCodeBlock, callSiteFlags);
 
             // Strict mode only adds checks, so a normal capture with the same bit gives the strict capture's score.
             auto& strictScore = strictScoreByBit[hasPolymorphicSite];
@@ -560,6 +668,97 @@ JITCACHE_TEST_WITH_OPTIONS(cbSummaryScoreAgreesAcrossCaptureScoreLiveAndDecode, 
                 JITCACHE_CB_SUMMARY_CHECK_SCORE(makeString(what, " against the strict capture"_s), score, *strictScore);
         }
     }
+
+    ensureStillAliveHere(globalObject);
+}
+
+// A baseline CB of a builtin, whose UCB keeps no copies, has its summary slots from its own profiles alone. Right after a
+// synchronous full collection, whose finalization drains forEach's baseline CB, in a VM with useConcurrentJIT off and
+// with no JS run in between, the slot of the callback's call site holds the flags of that site's own this profile,
+// UsesNonOriginalArrayStructures among them, and richnessUnits counts them; the slot of the call site that never got
+// data of its own is 0.
+JITCACHE_TEST_WITH_OPTIONS(cbSummaryBuiltinCallSitesScoreTheirOwnThisProfiles, Yes, "--useConcurrentJIT=false")
+{
+    VM& vm = *context.vm();
+    JSGlobalObject* globalObject = createRealm(context, vm, builtinSource);
+    if (!globalObject)
+        return;
+    JSFunction* forEach = globalFunction(context, globalObject, "forEach"_s);
+    JSFunction* run = globalFunction(context, globalObject, "run"_s);
+    if (!forEach || !run)
+        return;
+    if (!callFunction(context, globalObject, run, { }))
+        return;
+    CodeBlock* codeBlock = compileToBaseline(context, forEach);
+    if (!codeBlock)
+        return;
+    UnlinkedCodeBlock& unlinkedCodeBlock = *codeBlock->unlinkedCodeBlock();
+    if (!unlinkedCodeBlock.isBuiltinFunction() || unlinkedCodeBlock.valueAndArrayProfiles()) {
+        JITCACHE_FAIL("forEach's UCB is no builtin's, or keeps profile copies"_s);
+        return;
+    }
+
+    // The collection's drain gives the callback site's own this profile the receiver's structure, which is no original
+    // array structure.
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+    if (forEach->jsExecutable()->codeBlockForCall() != codeBlock || codeBlock->jitType() != JITType::BaselineJIT) {
+        JITCACHE_FAIL("the collection replaced forEach's baseline CB"_s);
+        return;
+    }
+    constexpr uint32_t nonOriginal = static_cast<uint32_t>(ArrayProfileFlag::UsesNonOriginalArrayStructures);
+    Vector<std::optional<uint32_t>> callSiteFlags = callSiteThisFlags(*codeBlock);
+    bool hasOwnNonOriginalProfile = std::ranges::any_of(callSiteFlags, [&](const std::optional<uint32_t>& flags) {
+        return flags && (*flags & nonOriginal);
+    });
+    bool hasSiteWithoutData = std::ranges::any_of(callSiteFlags, [](const std::optional<uint32_t>& flags) {
+        return !flags;
+    });
+    if (!hasOwnNonOriginalProfile || !hasSiteWithoutData) {
+        JITCACHE_FAIL(makeString("forEach's "_s, callSiteFlags.size(), " call sites hold no own this profile with UsesNonOriginalArrayStructures, or none lacks data of its own"_s));
+        return;
+    }
+
+    Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
+    auto liveScore = CBStateCapture::scoreLive(*codeBlock, true, false);
+    if (!liveScore) {
+        failWith(context, "scoreLive"_s, liveScore.error());
+        return;
+    }
+    auto captured = CBStateCapture::capture(*codeBlock, budget.get(), true, false);
+    if (!captured) {
+        failWith(context, "capture"_s, captured.error());
+        return;
+    }
+    const CBScore& score = captured->score();
+    JITCACHE_CB_SUMMARY_CHECK_SCORE("forEach's scoreLive against score()"_s, *liveScore, score);
+    auto state = parseState(context, captured->stateSection());
+    auto summary = parseSummary(context, captured->summarySection());
+    if (!state || !summary)
+        return;
+    JITCACHE_CB_SUMMARY_CHECK_SCORE("the recount of forEach's summary"_s, expectedScore(*summary), score);
+
+    // Every call site's slot is its own this profile's flags alone, since a builtin has no copies to OR in.
+    Vector<size_t> positions = checkCallSiteSlots(context, "forEach"_s, *state, *summary, callSiteFlags, { });
+    if (positions.size() != callSiteFlags.size())
+        return;
+    bool countedOwnFlags = false;
+    for (size_t site = 0; site < positions.size(); ++site) {
+        uint8_t slot = summary->arrayFlags[positions[site]];
+        if (!callSiteFlags[site]) {
+            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString("the slot of forEach's call site "_s, site, ", which has no data of its own"_s), slot, 0);
+            continue;
+        }
+        if (!(slot & nonOriginal))
+            continue;
+        // A summary without the slot's flags scores exactly their units fewer.
+        Summary withoutSlot = *summary;
+        withoutSlot.arrayFlags[positions[site]] = 0;
+        auto slotUnits = static_cast<uint64_t>(std::popcount(static_cast<unsigned>(slot & ~pruningMark)));
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString("forEach's richness without the flags of call site "_s, site), expectedScore(withoutSlot).richnessUnits + slotUnits, score.richnessUnits);
+        countedOwnFlags = true;
+    }
+    if (!countedOwnFlags)
+        JITCACHE_FAIL("no summary slot of forEach holds UsesNonOriginalArrayStructures"_s);
 
     ensureStillAliveHere(globalObject);
 }

@@ -34,13 +34,14 @@ enum class CaptureOutcome : uint8_t {
     NotEligible,
     // The budget refused a charge and has raised the recording fault itself; the capture stopped.
     ChargeRefused,
-    // A strict check, ImageCheck::S1 to S4, rejected what the capture read from the producer's own state.
+    // A strict check of the capture (ImageCheck::CodeFixupTargets to SideTablePointers) rejected what it read from the
+    // producer's own state.
     RecordingFault,
 };
 
 struct CaptureFailure {
     CaptureOutcome outcome;
-    ImageCheck check; // ImageCheck::S1 to S4 for RecordingFault, else None
+    ImageCheck check; // the failed capture check for RecordingFault, else None
 };
 
 // Whether the code carries a record in state Complete, which a record reaches only for shareable code. The glue checks
@@ -85,8 +86,8 @@ private:
 #endif
 
     // The offset of a code pointer of the side tables or a MathIC location in the image, which lies inside
-    // [start, start + codeSize]: ImageCheck::S4 checked it under strict, and JIT::link placed it there otherwise (debug
-    // builds ASSERT).
+    // [start, start + codeSize]: ImageCheck::SideTablePointers checked it under strict, and JIT::link placed it there
+    // otherwise (debug builds ASSERT).
     uint32_t imageOffsetOf(const void* location) const;
     // A MathIC's entry in the MathICs region, from its live IC when it has inline code and from the record alone otherwise.
     ImageMathICEntry mathICEntryOf(const MathICRecord&) const;
@@ -106,11 +107,12 @@ private:
 
 // Captures the image, on the VM thread with the API lock and heap access, JS paused and no collector phase, on a
 // BaselineJITCode the caller holds a reference to. It allocates no cell, drains nothing and takes no JSC lock other than
-// JITThunks::m_lock, which the native support lookups of strict's ImageCheck::S1 and S2 take; every target they resolve
-// already exists. Every byte it allocates is charged to the budget first. When it meets what makes a record
-// Unrecordable (an unknown mold identifier, a MathIC snippet without matching provenance), it marks the record and
-// returns NotEligible; otherwise, under strict, it runs ImageCheck::S1 to S4. In twins builds it first resolves every
-// fixup for the producer values, and the ChangeRecordedTarget test hook changes the record's first fixup before S1 runs.
+// JITThunks::m_lock, which the native support lookups of strict's ImageCheck::CodeFixupTargets and SnippetFixupTargets
+// take; every target they resolve already exists. Every byte it allocates is charged to the budget first. When it meets
+// what makes a record Unrecordable (an unknown mold identifier, a MathIC snippet without matching provenance), it marks
+// the record and returns NotEligible; otherwise, under strict, it runs the capture checks, CodeFixupTargets to
+// SideTablePointers. In twins builds it first resolves every fixup for the producer values, and the ChangeRecordedTarget
+// test hook changes the record's first fixup before those checks run.
 std::expected<ImageCapture, CaptureFailure> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&, bool strict);
 
 } // namespace JITCache

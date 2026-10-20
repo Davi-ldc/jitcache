@@ -100,6 +100,7 @@ CSSParserContext::CSSParserContext(const Settings& settings)
 #endif
     , gridLanesEnabled { settings.gridLanesEnabled() }
     , cssAppearanceBaseEnabled { settings.cssAppearanceBaseEnabled() }
+    , cssClassPrefixSelectorEnabled { settings.cssClassPrefixSelectorEnabled() }
     , cssPaintingAPIEnabled { settings.cssPaintingAPIEnabled() }
     , cssTextDecorationLineErrorValues { settings.cssTextDecorationLineErrorValues() }
     , cssFlexWrapBalanceEnabled { settings.cssFlexWrapBalanceEnabled() }
@@ -117,8 +118,10 @@ CSSParserContext::CSSParserContext(const Settings& settings)
     , cssRandomItemFunctionEnabled { settings.cssRandomItemFunctionEnabled() }
     , cssRubyDisplayTypesEnabled { settings.cssRubyDisplayTypesInAuthorStylesEnabled() }
     , cssTreeCountingFunctionsEnabled { settings.cssTreeCountingFunctionsEnabled() }
+    , cssCalcSizeFunctionEnabled { settings.cssCalcSizeFunctionEnabled() }
     , cssURLModifiersEnabled { settings.cssURLModifiersEnabled() }
     , cssURLIntegrityModifierEnabled { settings.cssURLIntegrityModifierEnabled() }
+    , cssLinkParametersEnabled { settings.cssLinkParametersEnabled() }
     , cssAxisRelativePositionKeywordsEnabled { settings.cssAxisRelativePositionKeywordsEnabled() }
     , cssDynamicRangeLimitMixEnabled { settings.cssDynamicRangeLimitMixEnabled() }
     , cssConstrainedDynamicRangeLimitEnabled { settings.cssConstrainedDynamicRangeLimitEnabled() }
@@ -133,8 +136,11 @@ CSSParserContext::CSSParserContext(const Settings& settings)
     , cssIdentFunctionEnabled { settings.cssIdentFunctionEnabled() }
     , cssIfFunctionEnabled { settings.cssIfFunctionEnabled() }
     , cssInheritFunctionEnabled { settings.cssInheritFunctionEnabled() }
+    , cssFontPaletteMixFunctionEnabled { settings.cssFontPaletteMixFunctionEnabled() }
+    , cssSymbolsFunctionEnabled { settings.cssSymbolsFunctionEnabled() }
     , propertySettings { CSSPropertySettings { settings } }
 {
+    StaticCSSValuePool::init();
 }
 
 void add(Hasher& hasher, const CSSParserContext& context)
@@ -152,6 +158,7 @@ void add(Hasher& hasher, const CSSParserContext& context)
 #endif
         context.gridLanesEnabled,
         context.cssAppearanceBaseEnabled,
+        context.cssClassPrefixSelectorEnabled,
         context.cssPaintingAPIEnabled,
         context.cssWordBreakAutoPhraseEnabled,
         context.popoverAttributeEnabled,
@@ -167,8 +174,10 @@ void add(Hasher& hasher, const CSSParserContext& context)
         context.cssRandomItemFunctionEnabled,
         context.cssRubyDisplayTypesEnabled,
         context.cssTreeCountingFunctionsEnabled,
+        context.cssCalcSizeFunctionEnabled,
         context.cssURLModifiersEnabled,
         context.cssURLIntegrityModifierEnabled,
+        context.cssLinkParametersEnabled,
         context.cssAxisRelativePositionKeywordsEnabled,
         context.cssDynamicRangeLimitMixEnabled,
         context.cssConstrainedDynamicRangeLimitEnabled,
@@ -186,6 +195,8 @@ void add(Hasher& hasher, const CSSParserContext& context)
         context.cssIdentFunctionEnabled,
         context.cssIfFunctionEnabled,
         context.cssInheritFunctionEnabled,
+        context.cssFontPaletteMixFunctionEnabled,
+        context.cssSymbolsFunctionEnabled,
         context.legacyFontFaceAttributeMode
     );
     add(hasher, context.baseURL, context.charset, context.propertySettings, context.mode, context.enclosingRuleType, bits);

@@ -117,7 +117,7 @@ private:
     void dispatchWillClose() final;
     void dispatchDidStartProvisionalLoad() final;
     void dispatchDidReceiveTitle(const WebCore::StringWithDirection&) final;
-    void dispatchDidCommitLoad(std::optional<WebCore::HasInsecureContent>, std::optional<WebCore::UsedLegacyTLS>, std::optional<WebCore::WasPrivateRelayed>) final;
+    void dispatchDidCommitLoad(const std::optional<WebCore::BackForwardCacheCommitData>&) final;
     void dispatchDidFailProvisionalLoad(const WebCore::ResourceError&, WebCore::WillContinueLoading, WebCore::WillInternallyHandleFailure) final;
     void dispatchDidFailLoad(const WebCore::ResourceError&) final;
     void dispatchDidFinishDocumentLoad() final;
@@ -256,6 +256,10 @@ private:
 
     WeakObjCPtr<WebFramePolicyListener> m_policyListener;
 };
+
+SPECIALIZE_TYPE_TRAITS_BEGIN(WebFrameLoaderClient)
+    static bool isType(const WebCore::LocalFrameLoaderClient& client) { return !client.isEmptyFrameLoaderClient(); }
+SPECIALIZE_TYPE_TRAITS_END()
 
 WebDataSource *NODELETE dataSource(WebCore::DocumentLoader*);
 void addTypesFromClass(NSMutableDictionary *, Class, NSArray *);

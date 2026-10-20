@@ -35,6 +35,7 @@
 #include <wtf/EnumTraits.h>
 
 namespace WTF {
+class String;
 class TextStream;
 }
 
@@ -48,6 +49,12 @@ enum class DumpStyleValues {
 enum class PrintColorAdjust : bool {
     Economy,
     Exact
+};
+
+// https://drafts.csswg.org/css-values-5/#interpolate-size
+enum class InterpolateSize : bool {
+    NumericOnly,
+    AllowKeywords
 };
 
 enum class PseudoElementType : uint8_t {
@@ -130,6 +137,8 @@ constexpr auto allInternalPseudoElementTypes = EnumSet {
 };
 
 constexpr auto allPseudoElementTypes = allPublicPseudoElementTypes | allInternalPseudoElementTypes;
+
+enum class PseudoElementBoxGeneration : bool { Normal, NotForBeforeOrAfter };
 
 inline std::optional<PseudoElementType> parentPseudoElement(PseudoElementType pseudoElementType)
 {
@@ -295,6 +304,11 @@ enum class SpatialType : bool {
 enum class PortalActionType : bool {
     None,
     Orbit
+};
+
+enum class PositionContextType : bool {
+    Container,
+    Anchor
 };
 
 enum class TextCombine : bool {
@@ -554,6 +568,13 @@ enum class QuoteType : uint8_t {
     NoOpenQuote,
     NoCloseQuote
 };
+
+enum class SynthesizedGlyph : uint8_t {
+    PickerUp,
+    PickerDown
+};
+
+WTF::String fallbackText(SynthesizedGlyph);
 
 enum class AnimationFillMode : uint8_t {
     None,
@@ -1194,6 +1215,7 @@ WTF::TextStream& operator<<(WTF::TextStream&, UsedFloat);
 WTF::TextStream& operator<<(WTF::TextStream&, Hyphens);
 WTF::TextStream& operator<<(WTF::TextStream&, ImageRendering);
 WTF::TextStream& operator<<(WTF::TextStream&, InsideLink);
+WTF::TextStream& operator<<(WTF::TextStream&, InterpolateSize);
 WTF::TextStream& operator<<(WTF::TextStream&, Isolation);
 WTF::TextStream& operator<<(WTF::TextStream&, ItemPosition);
 WTF::TextStream& operator<<(WTF::TextStream&, ItemPositionType);
@@ -1213,10 +1235,12 @@ WTF::TextStream& operator<<(WTF::TextStream&, OverflowAlignment);
 WTF::TextStream& operator<<(WTF::TextStream&, OverflowWrap);
 WTF::TextStream& operator<<(WTF::TextStream&, PointerEvents);
 WTF::TextStream& operator<<(WTF::TextStream&, PortalActionType);
+WTF::TextStream& operator<<(WTF::TextStream&, PositionContextType);
 WTF::TextStream& operator<<(WTF::TextStream&, PositionType);
 WTF::TextStream& operator<<(WTF::TextStream&, PrintColorAdjust);
 WTF::TextStream& operator<<(WTF::TextStream&, PseudoElementType);
 WTF::TextStream& operator<<(WTF::TextStream&, QuoteType);
+WTF::TextStream& operator<<(WTF::TextStream&, SynthesizedGlyph);
 WTF::TextStream& operator<<(WTF::TextStream&, ReflectionDirection);
 WTF::TextStream& operator<<(WTF::TextStream&, RubyPosition);
 WTF::TextStream& operator<<(WTF::TextStream&, RubyAlign);

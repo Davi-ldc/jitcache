@@ -198,19 +198,19 @@ void ApplyStyleCommand::doApply()
     switch (m_propertyLevel) {
     case ApplyStylePropertyLevel::Default: {
         // Apply the block-centric properties of the style.
-        auto blockStyle = protect(m_style)->extractAndRemoveBlockProperties();
+        auto blockStyle = m_style->extractAndRemoveBlockProperties();
         if (!blockStyle->isEmpty())
             applyBlockStyle(blockStyle);
         // Apply any remaining styles to the inline elements.
         if (!m_style->isEmpty() || m_styledInlineElement || m_isInlineElementToRemoveFunction) {
             applyRelativeFontStyleChange(m_style.get());
-            applyInlineStyle(protect(*m_style));
+            applyInlineStyle(*m_style);
         }
         break;
     }
     case ApplyStylePropertyLevel::ForceBlock:
         // Force all properties to be applied as block styles.
-        applyBlockStyle(protect(*m_style));
+        applyBlockStyle(*m_style);
         break;
     }
 }
@@ -219,7 +219,7 @@ void ApplyStyleCommand::applyBlockStyle(EditingStyle& style)
 {
     // Update document layout once before removing styles so that we avoid the expense of
     // updating before each and every call to check a computed style.
-    document().updateLayoutIgnorePendingStylesheets();
+    protect(document())->updateLayoutIgnorePendingStylesheets();
 
     auto start = startPosition();
     auto end = endPosition();
@@ -569,7 +569,7 @@ void ApplyStyleCommand::applyInlineStyle(EditingStyle& style)
     // update document layout once before removing styles
     // so that we avoid the expense of updating before each and every call
     // to check a computed style
-    document().updateLayoutIgnorePendingStylesheets();
+    protect(document())->updateLayoutIgnorePendingStylesheets();
 
     // adjust to the positions we want to use for applying style
     auto start = startPosition();
@@ -668,7 +668,7 @@ void ApplyStyleCommand::applyInlineStyle(EditingStyle& style)
     // update document layout once before running the rest of the function
     // so that we avoid the expense of updating before each and every call
     // to check a computed style
-    document().updateLayoutIgnorePendingStylesheets();
+    protect(document())->updateLayoutIgnorePendingStylesheets();
 
     RefPtr styleToApply = style;
     if (textDirection) {
@@ -775,7 +775,7 @@ void ApplyStyleCommand::applyInlineStyleToNodeRange(EditingStyle& style, Node& s
     if (m_removeOnly)
         return;
 
-    document().updateLayoutIgnorePendingStylesheets();
+    protect(document())->updateLayoutIgnorePendingStylesheets();
 
     Vector<InlineRunToApplyStyle> runs;
     RefPtr node = startNode;
@@ -833,10 +833,10 @@ void ApplyStyleCommand::applyInlineStyleToNodeRange(EditingStyle& style, Node& s
     for (auto& run : runs) {
         removeConflictingInlineStyleFromRun(style, run.start, run.end, run.pastEndNode.get());
         if (run.startAndEndAreStillInDocument())
-            run.positionForStyleComputation = positionToComputeInlineStyleChange(*run.start, run.dummyElement);
+            run.positionForStyleComputation = positionToComputeInlineStyleChange(protect(*run.start), run.dummyElement);
     }
 
-    document().updateLayoutIgnorePendingStylesheets();
+    protect(document())->updateLayoutIgnorePendingStylesheets();
 
     for (auto& run : runs)
         run.change = StyleChange(&style, run.positionForStyleComputation);
@@ -1508,7 +1508,7 @@ void ApplyStyleCommand::applyInlineStyleChange(Node& passedStart, Node& passedEn
         surroundNodeRangeWithElement(*startNode, *endNode, createHTMLElement(document(), supTag));
 
     if (m_styledInlineElement && addStyledElement == AddStyledElement::Yes)
-        surroundNodeRangeWithElement(*startNode, *endNode, protect(m_styledInlineElement)->cloneElementWithoutChildren(document(), nullptr));
+        surroundNodeRangeWithElement(*startNode, *endNode, m_styledInlineElement->cloneElementWithoutChildren(document(), nullptr));
 }
 
 float ApplyStyleCommand::computedFontSize(Node* node)

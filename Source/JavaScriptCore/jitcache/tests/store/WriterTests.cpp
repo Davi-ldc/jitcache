@@ -224,7 +224,7 @@ JITCACHE_TEST(writerCompactionFaultsKeepTheOldPack, No)
         Vector<String> temporaries;
         listDirectory(pack->cacheFd(), [&](std::span<const char> name, uint64_t) {
             if (temporaryKindOfFileName(name))
-                temporaries.append(String { name });
+                temporaries.append(String::fromLatin1(name));
         });
         JITCACHE_CHECK(temporaries.isEmpty());
     }
@@ -393,6 +393,92 @@ JITCACHE_TEST(writerRewriteSectionResealsTheBody, No)
     JITCACHE_CHECK(core.size() > 4 && core[3] == 0xAB && core[4] == 0xCD);
     auto missing = pack->writer().rewriteSection(testKey(9), SectionKind::UCBCore, 0, bytes);
     JITCACHE_CHECK(!missing && missing.error().check == WriterChecks::rewrite);
+}
+
+// The rewrite copies every section the body holds: a module's body of either tier keeps its ucb.analysis through a rewrite
+// of another section, and a rewrite reaches ucb.analysis itself. A kind the body does not hold, ucb.analysis in a body
+// without one or a section of a tier above the body's, fails at writer.rewrite and writes nothing.
+JITCACHE_TEST(writerRewriteSectionCopiesEverySectionTheBodyHolds, No)
+{
+    HookScope hooks;
+    auto pack = PackArtifact::create(context);
+    if (!pack)
+        return;
+    constexpr size_t analysisBytes = 11;
+    const std::array<uint8_t, 2> bytes { 0xAB, 0xCD };
+
+    // The rewrite fails at writer.rewrite, and the pack and the key's token stay as they were.
+    auto checkRefused = [&](ASCIILiteral label, const BodyKey& key, SectionKind kind) {
+        auto validEnd = pack->validEnd();
+        uint64_t token = pack->artifact().token(key);
+        auto refused = pack->writer().rewriteSection(key, kind, 0, bytes);
+        if (refused || refused.error().check != WriterChecks::rewrite)
+            JITCACHE_FAIL(makeString(label, ": the rewrite of "_s, sectionKindDescription(kind).name, " did not fail at writer.rewrite"_s));
+        JITCACHE_CHECK(validEnd && pack->validEnd() == validEnd && pack->artifact().token(key) == token);
+    };
+
+    for (uint8_t tier : { uint8_t { 0 }, uint8_t { 1 } }) {
+        BodyKey moduleKey = testKey(static_cast<uint16_t>(1 + tier), IdentityKind::Module);
+        uint8_t seed = static_cast<uint8_t>(20 + tier);
+        uint32_t progress = tier ? 9 : 0;
+        // The sections of the tier and ucb.analysis, as the body holds them.
+        auto body = bodySections(seed, 1, analysisBytes);
+        std::array<Vector<uint8_t>, numberOfSectionKinds> expected;
+        Vector<SectionSource> sources;
+        for (auto& source : body->sources) {
+            if (!isSectionRequired(source.kind, tier) && source.kind != SectionKind::UCBAnalysis)
+                continue;
+            sources.append(source);
+            expected[static_cast<size_t>(source.kind)] = body->bytes[static_cast<size_t>(source.kind)];
+        }
+        auto committed = pack->writer().commit({ moduleKey, 500, progress, tier }, CommitSections { sources.span() });
+        if (!committed) {
+            JITCACHE_FAIL(makeString("tier "_s, static_cast<unsigned>(tier), ": the module's body did not commit, at "_s, committed.error().check));
+            return;
+        }
+
+        // Overwrites the bytes at offset in the kind's section and reopens the body: every section it held, the rewritten
+        // one changed, under a fresh commit identifier and the body's own tier, L and P.
+        uint64_t version = committed->version;
+        auto rewriteAndCheck = [&](SectionKind kind, size_t offset) {
+            ASCIILiteral sectionName = sectionKindDescription(kind).name;
+            auto rewritten = pack->writer().rewriteSection(moduleKey, kind, offset, bytes);
+            if (!rewritten) {
+                JITCACHE_FAIL(makeString("tier "_s, static_cast<unsigned>(tier), ": the rewrite of "_s, sectionName, " failed at "_s, rewritten.error().check, ": "_s, rewritten.error().detail));
+                return false;
+            }
+            JITCACHE_CHECK(rewritten->version != version);
+            version = rewritten->version;
+            memcpySpan(expected[static_cast<size_t>(kind)].mutableSpan().subspan(offset, bytes.size()), std::span { bytes });
+            BodyOpen opened = pack->artifact().open(moduleKey, ValidationMode::Full);
+            if (!opened.body) {
+                JITCACHE_FAIL(makeString("tier "_s, static_cast<unsigned>(tier), ": the body does not open after the rewrite of "_s, sectionName));
+                return false;
+            }
+            for (size_t index = 0; index < numberOfSectionKinds; ++index) {
+                auto sectionKind = static_cast<SectionKind>(index);
+                if (!equalSpans(opened.body->section(sectionKind), expected[index].span()))
+                    JITCACHE_FAIL(makeString("tier "_s, static_cast<unsigned>(tier), ": after the rewrite of "_s, sectionName, ", "_s, sectionKindDescription(sectionKind).name, " is not the section expected"_s));
+            }
+            JITCACHE_CHECK(opened.body->version() == version && opened.body->highestTier() == tier);
+            JITCACHE_CHECK(opened.body->llintThreshold() == 500 && opened.body->counterProgress() == progress);
+            return true;
+        };
+        if (!rewriteAndCheck(SectionKind::UCBCore, 3) || !rewriteAndCheck(SectionKind::UCBAnalysis, analysisBytes - bytes.size()))
+            return;
+        if (!tier)
+            checkRefused("a module's body of tier 0"_s, moduleKey, SectionKind::CBStateBaseline);
+    }
+
+    // ucb.analysis in a program's body, and in a module's body whose capture built none.
+    for (auto identityKind : { IdentityKind::Program, IdentityKind::Module }) {
+        BodyKey key = testKey(10, identityKind);
+        if (!commitBody(pack->writer(), key, 30)) {
+            JITCACHE_FAIL("a body without ucb.analysis did not commit"_s);
+            return;
+        }
+        checkRefused(identityKind == IdentityKind::Module ? "a module's body without ucb.analysis"_s : "a program's body"_s, key, SectionKind::UCBAnalysis);
+    }
 }
 
 JITCACHE_TEST(writerHookNames, No)

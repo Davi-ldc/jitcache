@@ -271,7 +271,7 @@ Ref<BaselineJITCode> PreparedImage::commit(VM& vm, CodeBlock& installing) &&
         StringPrintStream out;
         out.print("JSC-Baseline: ");
         installing.dumpSimpleName(out);
-        auto name = out.toCString();
+        auto name = out.toUTF8CString();
         MacroAssemblerCodeRef<LinkBufferPtrTag> codeRef(WTF::move(imageMemory));
         if (Options::useGdbJITInfo())
             GdbJIT::log(name, codeRef);
@@ -397,8 +397,8 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
     patchFixups(imageStart, view.fixups(), context, skipsNextPatch);
     endStage(&PrepareTimings::patchNanoseconds);
 
-    // ImageCheck::S5, the read-back after patching: each patched footprint decodes, islands followed, to the consumer's
-    // resolution of its target. It guards an installation, so a failure is invalid material.
+    // ImageCheck::PatchReadBack: each patched footprint decodes, islands followed, to the consumer's resolution of its
+    // target. It guards an installation, so a failure is invalid material.
     if (strict) {
         bool readsBack = true;
         view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
@@ -406,7 +406,7 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         });
         readsBack = readsBack && fixupsReachTargets(imageStart, header.codeSize, view.fixups(), context);
         if (!readsBack)
-            return std::unexpected(PrepareFailure { PrepareOutcome::InvalidMaterial, ImageCheck::S5 });
+            return std::unexpected(PrepareFailure { PrepareOutcome::InvalidMaterial, ImageCheck::PatchReadBack });
     }
 
     // The instruction-cache flush, over the linked bytes, as LinkBuffer::performFinalization flushes.

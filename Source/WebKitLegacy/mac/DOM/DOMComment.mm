@@ -33,13 +33,13 @@
 #import <WebCore/WebScriptObjectPrivate.h>
 #import <wtf/GetPtr.h>
 
-#define IMPL static_cast<WebCore::Comment*>(reinterpret_cast<WebCore::Node*>(_internal))
+#define IMPL downcast<WebCore::Comment>(reinterpret_cast<WebCore::Node*>(_internal))
 
 @implementation DOMComment
 
 @end
 
-DOMComment *kit(WebCore::Comment* value)
+SUPPRESS_NODELETE DOMComment *kit(WebCore::Comment* value)
 {
     WebCoreThreadViolationCheckRoundOne();
     return static_cast<DOMComment*>(kit(static_cast<WebCore::Node*>(value)));

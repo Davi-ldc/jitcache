@@ -761,8 +761,8 @@ TEST(ProcessSwap, PSONRedirectionToExternal)
 {
     TestWebKitAPI::HTTPServer server(std::initializer_list<std::pair<String, TestWebKitAPI::HTTPResponse>> { }, TestWebKitAPI::HTTPServer::Protocol::Https);
 
-    HashMap<String, String> redirectHeaders;
-    redirectHeaders.add("location"_s, "other://test"_s);
+    Vector<WTF::KeyValuePair<String, String>> redirectHeaders;
+    redirectHeaders.append({ "location"_s, "other://test"_s });
     TestWebKitAPI::HTTPResponse redirectResponse(301, WTF::move(redirectHeaders));
 
     server.addResponse("/popup.html"_s, WTF::move(redirectResponse));
@@ -2146,6 +2146,8 @@ static void runClientSideRedirectTest(ShouldEnablePSON shouldEnablePSON)
     RetainPtr delegate = adoptNS([[PSONNavigationDelegate alloc] init]);
     [webView setNavigationDelegate:delegate.get()];
 
+    bool expectProcessSwap = shouldEnablePSON == ShouldEnablePSON::Yes || isSiteIsolationEnabled(webView.get());
+
     NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:@"pson://www.webkit.org/main.html"]];
     [webView loadRequest:request];
 
@@ -2162,7 +2164,7 @@ static void runClientSideRedirectTest(ShouldEnablePSON shouldEnablePSON)
 
     EXPECT_WK_STREQ(@"pson://www.google.com/clientSideRedirect.html", [[webView URL] absoluteString]);
     auto googlePID = [webView _webProcessIdentifier];
-    if (shouldEnablePSON == ShouldEnablePSON::Yes)
+    if (expectProcessSwap)
         EXPECT_NE(webkitPID, googlePID);
     else
         EXPECT_EQ(webkitPID, googlePID);
@@ -2173,7 +2175,7 @@ static void runClientSideRedirectTest(ShouldEnablePSON shouldEnablePSON)
     EXPECT_WK_STREQ(@"pson://www.apple.com/main.html", [[webView URL] absoluteString]);
 
     auto applePID = [webView _webProcessIdentifier];
-    if (shouldEnablePSON == ShouldEnablePSON::Yes) {
+    if (expectProcessSwap) {
         EXPECT_NE(webkitPID, applePID);
         EXPECT_NE(webkitPID, googlePID);
     } else {
@@ -2295,7 +2297,10 @@ TEST(ProcessSwap, CrossSiteClientSideRedirectFromFileURL)
     auto pid2 = [webView _webProcessIdentifier];
     EXPECT_NE(pid1, pid2);
 
-    EXPECT_EQ(1U, [processPool _webProcessCountIgnoringPrewarmedAndCached]);
+    // The previous page's process is kept alive until the page has run its unload handlers.
+    EXPECT_TRUE(TestWebKitAPI::Util::waitFor([&] {
+        return [processPool _webProcessCountIgnoringPrewarmedAndCached] == 1U;
+    }));
     EXPECT_TRUE(willPerformClientRedirect);
     EXPECT_TRUE(didPerformClientRedirect);
 }
@@ -2410,6 +2415,8 @@ static void runNavigationWithLockedHistoryTest(ShouldEnablePSON shouldEnablePSON
         return;
     }
 
+    bool expectProcessSwap = shouldEnablePSON == ShouldEnablePSON::Yes || isSiteIsolationEnabled(webView.get());
+
     NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:@"pson://www.webkit.org/main.html"]];
     [webView loadRequest:request];
 
@@ -2424,7 +2431,7 @@ static void runNavigationWithLockedHistoryTest(ShouldEnablePSON shouldEnablePSON
     done = false;
 
     auto applePID = [webView _webProcessIdentifier];
-    if (shouldEnablePSON == ShouldEnablePSON::Yes)
+    if (expectProcessSwap)
         EXPECT_NE(webkitPID, applePID);
     else
         EXPECT_EQ(webkitPID, applePID);
@@ -2489,6 +2496,8 @@ static void runQuickBackForwardNavigationTest(ShouldEnablePSON shouldEnablePSON)
 
     [webView configuration].preferences.fraudulentWebsiteWarningEnabled = NO;
 
+    bool expectProcessSwap = shouldEnablePSON == ShouldEnablePSON::Yes || isSiteIsolationEnabled(webView.get());
+
     NSURLRequest *request = [NSURLRequest requestWithURL:[NSURL URLWithString:@"pson://www.webkit.org/main1.html"]];
     [webView loadRequest:request];
 
@@ -2512,7 +2521,7 @@ static void runQuickBackForwardNavigationTest(ShouldEnablePSON shouldEnablePSON)
     done = false;
 
     auto applePID = [webView _webProcessIdentifier];
-    if (shouldEnablePSON == ShouldEnablePSON::Yes)
+    if (expectProcessSwap)
         EXPECT_NE(webkitPID, applePID);
     else
         EXPECT_EQ(webkitPID, applePID);
@@ -3209,6 +3218,19 @@ TEST(ProcessSwap, PageZoomLevelAfterSwap)
 
     clientWidth = waitUntilClientWidthIs(webView.get(), 400);
     EXPECT_EQ(400U, clientWidth);
+
+    [webView _setPageZoomFactor:4.0];
+
+    clientWidth = waitUntilClientWidthIs(webView.get(), 200);
+    EXPECT_EQ(200U, clientWidth);
+
+    [webView goBack];
+
+    TestWebKitAPI::Util::run(&done);
+    done = false;
+
+    clientWidth = waitUntilClientWidthIs(webView.get(), 200);
+    EXPECT_EQ(200U, clientWidth);
 }
 
 #endif // PLATFORM(MAC)
@@ -4482,6 +4504,62 @@ TEST(ProcessSwap, LoadUnload)
         EXPECT_WK_STREQ(@"pson://www.apple.com/main.html - load", receivedMessages.get()[5]);
         EXPECT_WK_STREQ(@"pson://www.webkit.org/main.html - unload", receivedMessages.get()[6]);
     }
+}
+
+static constexpr auto unloadOnClientRedirectBytes = R"PSONRESOURCE(
+<script>
+for (const type of ['pagehide', 'visibilitychange', 'unload']) {
+    window.addEventListener(type, function(event) {
+        window.webkit.messageHandlers.pson.postMessage(window.location.href + " - " + type);
+    });
+}
+window.addEventListener('load', function(event) {
+    setTimeout(() => window.location.replace("pson://www.apple.com/main.html"), 0);
+});
+</script>
+)PSONRESOURCE"_s;
+
+// A client-side redirect never suspends the previous page, so its process is shut down as soon as
+// the new one commits. The unload events of the previous page still need to be delivered.
+TEST(ProcessSwap, UnloadEventsOnCrossSiteClientRedirect)
+{
+    auto processPoolConfiguration = psonProcessPoolConfiguration();
+    // A cached process outlives the swap, which would hide an early shutdown.
+    processPoolConfiguration.get().usesWebProcessCache = NO;
+    RetainPtr processPool = adoptNS([[WKProcessPool alloc] _initWithConfiguration:processPoolConfiguration.get()]);
+
+    RetainPtr webViewConfiguration = adoptNS([[WKWebViewConfiguration alloc] init]);
+    [webViewConfiguration setProcessPool:processPool.get()];
+    RetainPtr handler = adoptNS([[PSONScheme alloc] init]);
+    [handler addMappingFromURLString:@"pson://www.webkit.org/main.html" toData:unloadOnClientRedirectBytes];
+    [handler addMappingFromURLString:@"pson://www.apple.com/main.html" toData:"<body>apple</body>"_s];
+    [webViewConfiguration setURLSchemeHandler:handler.get() forURLScheme:@"PSON"];
+
+    RetainPtr messageHandler = adoptNS([[PSONMessageHandler alloc] init]);
+    [[webViewConfiguration userContentController] addScriptMessageHandler:messageHandler.get() name:@"pson"];
+
+    RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+    RetainPtr delegate = adoptNS([[PSONNavigationDelegate alloc] init]);
+    [webView setNavigationDelegate:delegate.get()];
+
+    [webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"pson://www.webkit.org/main.html"]]];
+    TestWebKitAPI::Util::run(&done);
+    done = false;
+    auto webkitPID = [webView _webProcessIdentifier];
+
+    while (![[[webView URL] absoluteString] isEqualToString:@"pson://www.apple.com/main.html"])
+        TestWebKitAPI::Util::runFor(0.05_s);
+    TestWebKitAPI::Util::run(&done);
+    done = false;
+    EXPECT_NE(webkitPID, [webView _webProcessIdentifier]);
+
+    EXPECT_TRUE(TestWebKitAPI::Util::waitFor([] {
+        return [receivedMessages count] >= 3;
+    }));
+    EXPECT_EQ(3u, [receivedMessages count]);
+    EXPECT_TRUE([receivedMessages containsObject:@"pson://www.webkit.org/main.html - pagehide"]);
+    EXPECT_TRUE([receivedMessages containsObject:@"pson://www.webkit.org/main.html - visibilitychange"]);
+    EXPECT_TRUE([receivedMessages containsObject:@"pson://www.webkit.org/main.html - unload"]);
 }
 
 TEST(ProcessSwap, WebInspector)
@@ -8293,6 +8371,248 @@ TEST(ProcessSwap, MultitabCOOPSwapSameOriginProcessPool)
     EXPECT_NE(pid3, pid6);
 }
 
+#if PLATFORM(MAC)
+enum class UseSiteIsolation : bool { No, Yes };
+static RetainPtr<WKWebViewConfiguration> webViewConfigurationWithCOOPEnabled(WKProcessPool *processPool, UseSiteIsolation useSiteIsolation)
+{
+    RetainPtr webViewConfiguration = adoptNS([[WKWebViewConfiguration alloc] init]);
+    [webViewConfiguration setProcessPool:processPool];
+    [webViewConfiguration preferences].javaScriptCanOpenWindowsAutomatically = YES;
+    for (_WKFeature *feature in [WKPreferences _features]) {
+        if ([feature.key isEqualToString:@"CrossOriginOpenerPolicyEnabled"])
+            [[webViewConfiguration preferences] _setEnabled:YES forFeature:feature];
+        else if ([feature.key isEqualToString:@"CrossOriginEmbedderPolicyEnabled"])
+            [[webViewConfiguration preferences] _setEnabled:YES forFeature:feature];
+    }
+    if (useSiteIsolation == UseSiteIsolation::Yes)
+        enableSiteIsolationForPSONTest(webViewConfiguration.get());
+    return webViewConfiguration;
+}
+
+static void waitForAllProcessesToEnterProcessCache(WKProcessPool *processPool)
+{
+    while ([processPool _webProcessCountIgnoringPrewarmedAndCached] || [processPool _processCacheSize] != [processPool _webProcessCountIgnoringPrewarmed])
+        TestWebKitAPI::Util::runFor(0.1_s);
+}
+
+static void runUseWebProcessCacheForCOOPSwapToSameOriginTest(UseSiteIsolation useSiteIsolation)
+{
+    using namespace TestWebKitAPI;
+
+    HTTPServer server({
+        { "/source.html"_s, { "source"_s } },
+        { "/coop.html"_s, { { { "Content-Type"_s, "text/html"_s }, { "Cross-Origin-Opener-Policy"_s, "same-origin"_s } }, "coop"_s } },
+    }, HTTPServer::Protocol::Https);
+
+    HTTPServer otherOriginServer({
+        { "/coop.html"_s, { { { "Content-Type"_s, "text/html"_s }, { "Cross-Origin-Opener-Policy"_s, "same-origin"_s } }, "coop"_s } },
+    }, HTTPServer::Protocol::Https);
+
+    auto processPoolConfiguration = psonProcessPoolConfiguration();
+    RetainPtr processPool = adoptNS([[WKProcessPool alloc] _initWithConfiguration:processPoolConfiguration.get()]);
+    auto webViewConfiguration = webViewConfigurationWithCOOPEnabled(processPool.get(), useSiteIsolation);
+    RetainPtr navigationDelegate = adoptNS([[PSONNavigationDelegate alloc] init]);
+
+    pid_t sourcePID = 0;
+    pid_t coopPID = 0;
+    @autoreleasepool {
+        RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+        [webView setNavigationDelegate:navigationDelegate.get()];
+
+        done = false;
+        [webView loadRequest:server.request("/source.html"_s)];
+        Util::run(&done);
+        sourcePID = [webView _webProcessIdentifier];
+
+        done = false;
+        [webView loadRequest:server.request("/coop.html"_s)];
+        Util::run(&done);
+        coopPID = [webView _webProcessIdentifier];
+        EXPECT_NE(sourcePID, coopPID);
+    }
+
+    waitForAllProcessesToEnterProcessCache(processPool.get());
+    EXPECT_EQ(2U, [processPool _processCacheSize]);
+
+    RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+    [webView setNavigationDelegate:navigationDelegate.get()];
+
+    done = false;
+    [webView loadRequest:server.request("/source.html"_s)];
+    Util::run(&done);
+    EXPECT_EQ(sourcePID, [webView _webProcessIdentifier]);
+
+    done = false;
+    [webView loadRequest:otherOriginServer.request("/coop.html"_s)];
+    Util::run(&done);
+    auto otherOriginCOOPPID = [webView _webProcessIdentifier];
+    EXPECT_NE(sourcePID, otherOriginCOOPPID);
+    EXPECT_NE(coopPID, otherOriginCOOPPID);
+
+    done = false;
+    [webView loadRequest:server.request("/coop.html"_s)];
+    Util::run(&done);
+    EXPECT_EQ(coopPID, [webView _webProcessIdentifier]);
+    EXPECT_WK_STREQ([webView _committedURL].absoluteString, server.request("/coop.html"_s).URL.absoluteString);
+}
+
+TEST(ProcessSwap, UseWebProcessCacheForCOOPSwapToSameOrigin)
+{
+    runUseWebProcessCacheForCOOPSwapToSameOriginTest(UseSiteIsolation::No);
+}
+
+TEST(ProcessSwap, UseWebProcessCacheForCOOPSwapToSameOriginWithSiteIsolation)
+{
+    runUseWebProcessCacheForCOOPSwapToSameOriginTest(UseSiteIsolation::Yes);
+}
+
+static void runUseWebProcessCacheForCOOPSwapFromCrossSitePageTest(UseSiteIsolation useSiteIsolation)
+{
+    using namespace TestWebKitAPI;
+
+    HTTPServer server({
+        { "/source.html"_s, { "source"_s } },
+        { "/coop.html"_s, { { { "Content-Type"_s, "text/html"_s }, { "Cross-Origin-Opener-Policy"_s, "same-origin"_s } }, "coop"_s } },
+    }, HTTPServer::Protocol::Https);
+
+    auto processPoolConfiguration = psonProcessPoolConfiguration();
+    RetainPtr processPool = adoptNS([[WKProcessPool alloc] _initWithConfiguration:processPoolConfiguration.get()]);
+    auto webViewConfiguration = webViewConfigurationWithCOOPEnabled(processPool.get(), useSiteIsolation);
+    RetainPtr navigationDelegate = adoptNS([[PSONNavigationDelegate alloc] init]);
+
+    pid_t coopPID = 0;
+    @autoreleasepool {
+        RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+        [webView setNavigationDelegate:navigationDelegate.get()];
+
+        done = false;
+        [webView loadRequest:server.requestWithLocalhost("/source.html"_s)];
+        Util::run(&done);
+        auto sourcePID = [webView _webProcessIdentifier];
+
+        __block pid_t provisionalPID = 0;
+        navigationDelegate->didStartProvisionalNavigationHandler = ^{
+            provisionalPID = [webView _provisionalWebProcessIdentifier];
+        };
+
+        done = false;
+        [webView loadRequest:server.request("/coop.html"_s)];
+        Util::run(&done);
+        navigationDelegate->didStartProvisionalNavigationHandler = nil;
+        coopPID = [webView _webProcessIdentifier];
+        EXPECT_NE(sourcePID, coopPID);
+        EXPECT_EQ(provisionalPID, coopPID);
+    }
+
+    waitForAllProcessesToEnterProcessCache(processPool.get());
+
+    RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+    [webView setNavigationDelegate:navigationDelegate.get()];
+
+    done = false;
+    [webView loadRequest:server.requestWithLocalhost("/source.html"_s)];
+    Util::run(&done);
+
+    __block pid_t provisionalPID = 0;
+    navigationDelegate->didStartProvisionalNavigationHandler = ^{
+        provisionalPID = [webView _provisionalWebProcessIdentifier];
+    };
+
+    done = false;
+    [webView loadRequest:server.request("/coop.html"_s)];
+    Util::run(&done);
+    navigationDelegate->didStartProvisionalNavigationHandler = nil;
+    EXPECT_NE(0, provisionalPID);
+    EXPECT_NE(coopPID, provisionalPID);
+    EXPECT_EQ(coopPID, [webView _webProcessIdentifier]);
+    EXPECT_WK_STREQ([webView _committedURL].absoluteString, server.request("/coop.html"_s).URL.absoluteString);
+}
+
+TEST(ProcessSwap, UseWebProcessCacheForCOOPSwapFromCrossSitePage)
+{
+    runUseWebProcessCacheForCOOPSwapFromCrossSitePageTest(UseSiteIsolation::No);
+}
+
+TEST(ProcessSwap, UseWebProcessCacheForCOOPSwapFromCrossSitePageWithSiteIsolation)
+{
+    runUseWebProcessCacheForCOOPSwapFromCrossSitePageTest(UseSiteIsolation::Yes);
+}
+
+static void runDoNotUseWebProcessCacheForCOOPSwapAfterCommittingOtherOriginTest(UseSiteIsolation useSiteIsolation)
+{
+    using namespace TestWebKitAPI;
+
+    HTTPServer popupServer({
+        { "/popup.html"_s, { "popup"_s } },
+    }, HTTPServer::Protocol::Https);
+
+    HTTPServer server({
+        { "/source.html"_s, { "source"_s } },
+        { "/coop.html"_s, { { { "Content-Type"_s, "text/html"_s }, { "Cross-Origin-Opener-Policy"_s, "same-origin-allow-popups"_s } }, "coop"_s } },
+    }, HTTPServer::Protocol::Https);
+
+    auto processPoolConfiguration = psonProcessPoolConfiguration();
+    RetainPtr processPool = adoptNS([[WKProcessPool alloc] _initWithConfiguration:processPoolConfiguration.get()]);
+    auto webViewConfiguration = webViewConfigurationWithCOOPEnabled(processPool.get(), useSiteIsolation);
+    RetainPtr navigationDelegate = adoptNS([[PSONNavigationDelegate alloc] init]);
+    RetainPtr uiDelegate = adoptNS([[PSONUIDelegate alloc] initWithNavigationDelegate:navigationDelegate.get()]);
+
+    pid_t coopPID = 0;
+    @autoreleasepool {
+        RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+        [webView setNavigationDelegate:navigationDelegate.get()];
+        [webView setUIDelegate:uiDelegate.get()];
+
+        done = false;
+        [webView loadRequest:server.request("/source.html"_s)];
+        Util::run(&done);
+        auto sourcePID = [webView _webProcessIdentifier];
+
+        done = false;
+        [webView loadRequest:server.request("/coop.html"_s)];
+        Util::run(&done);
+        coopPID = [webView _webProcessIdentifier];
+        EXPECT_NE(sourcePID, coopPID);
+
+        done = false;
+        didCreateWebView = false;
+        [webView _evaluateJavaScriptWithoutUserGesture:[NSString stringWithFormat:@"w = window.open('%@'); true", popupServer.request("/popup.html"_s).URL.absoluteString] completionHandler:nil];
+        Util::run(&didCreateWebView);
+        didCreateWebView = false;
+        Util::run(&done);
+        done = false;
+        EXPECT_EQ(coopPID, [createdWebView _webProcessIdentifier]);
+        EXPECT_WK_STREQ([createdWebView _committedURL].absoluteString, popupServer.request("/popup.html"_s).URL.absoluteString);
+
+        createdWebView = nullptr;
+    }
+
+    waitForAllProcessesToEnterProcessCache(processPool.get());
+
+    RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+    [webView setNavigationDelegate:navigationDelegate.get()];
+
+    done = false;
+    [webView loadRequest:server.request("/source.html"_s)];
+    Util::run(&done);
+
+    done = false;
+    [webView loadRequest:server.request("/coop.html"_s)];
+    Util::run(&done);
+    EXPECT_NE(coopPID, [webView _webProcessIdentifier]);
+}
+
+TEST(ProcessSwap, DoNotUseWebProcessCacheForCOOPSwapAfterCommittingOtherOrigin)
+{
+    runDoNotUseWebProcessCacheForCOOPSwapAfterCommittingOtherOriginTest(UseSiteIsolation::No);
+}
+
+TEST(ProcessSwap, DoNotUseWebProcessCacheForCOOPSwapAfterCommittingOtherOriginWithSiteIsolation)
+{
+    runDoNotUseWebProcessCacheForCOOPSwapAfterCommittingOtherOriginTest(UseSiteIsolation::Yes);
+}
+#endif // PLATFORM(MAC)
+
 // FIXME when webkit.org/b/314594 is resolved.
 TEST(ProcessSwap, DISABLED_NavigateBackAfterNavigatingAwayFromCrossOriginOpenerPolicyUsingBackForwardCache2)
 {
@@ -8417,25 +8737,66 @@ TEST(ProcessSwap, CommittedURLAfterNavigatingBackToCOOP)
     EXPECT_WK_STREQ([webView _committedURL].absoluteString, server.request("/destination1.html"_s).URL.absoluteString);
 }
 
+TEST(ProcessSwap, CrossSiteNavigationToCOOPReusesProvisionalProcess)
+{
+    using namespace TestWebKitAPI;
+
+    HTTPServer server({
+        { "/source.html"_s, { "foo"_s } },
+        { "/destination.html"_s, { { { "Content-Type"_s, "text/html"_s }, { "Cross-Origin-Opener-Policy"_s, "same-origin"_s } }, "bar"_s } },
+    }, HTTPServer::Protocol::Https);
+
+    auto processPoolConfiguration = psonProcessPoolConfiguration();
+    RetainPtr processPool = adoptNS([[WKProcessPool alloc] _initWithConfiguration:processPoolConfiguration.get()]);
+
+    RetainPtr webViewConfiguration = adoptNS([[WKWebViewConfiguration alloc] init]);
+    [webViewConfiguration setProcessPool:processPool.get()];
+
+    RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:webViewConfiguration.get()]);
+    RetainPtr navigationDelegate = adoptNS([[PSONNavigationDelegate alloc] init]);
+    [webView setNavigationDelegate:navigationDelegate.get()];
+
+    done = false;
+    [webView loadRequest:server.request("/source.html"_s)];
+    Util::run(&done);
+    done = false;
+
+    auto pid1 = [webView _webProcessIdentifier];
+
+    __block pid_t provisionalPID = 0;
+    navigationDelegate->didStartProvisionalNavigationHandler = ^{
+        provisionalPID = [webView _provisionalWebProcessIdentifier];
+    };
+
+    [webView loadRequest:server.requestWithLocalhost("/destination.html"_s)];
+    Util::run(&done);
+    done = false;
+
+    auto pid2 = [webView _webProcessIdentifier];
+    EXPECT_NE(provisionalPID, 0);
+    EXPECT_NE(pid1, pid2);
+    EXPECT_EQ(provisionalPID, pid2);
+}
+
 enum class IsSameOrigin : bool { No, Yes };
 enum class DoServerSideRedirect : bool { No, Yes };
 static void runCOOPProcessSwapTest(ASCIILiteral sourceCOOP, ASCIILiteral sourceCOEP, ASCIILiteral destinationCOOP, ASCIILiteral destinationCOEP, IsSameOrigin isSameOrigin, DoServerSideRedirect doServerSideRedirect, ExpectSwap expectSwapBrowsingContextGroup)
 {
     using namespace TestWebKitAPI;
 
-    HashMap<String, String> sourceHeaders;
-    sourceHeaders.add("Content-Type"_s, "text/html"_s);
+    Vector<WTF::KeyValuePair<String, String>> sourceHeaders;
+    sourceHeaders.append({ "Content-Type"_s, "text/html"_s });
     if (sourceCOOP)
-        sourceHeaders.add("Cross-Origin-Opener-Policy"_s, sourceCOOP);
+        sourceHeaders.append({ "Cross-Origin-Opener-Policy"_s, sourceCOOP });
     if (sourceCOEP)
-        sourceHeaders.add("Cross-Origin-Embedder-Policy"_s, sourceCOEP);
+        sourceHeaders.append({ "Cross-Origin-Embedder-Policy"_s, sourceCOEP });
 
-    HashMap<String, String> destinationHeaders;
-    destinationHeaders.add("Content-Type"_s, "text/html"_s);
+    Vector<WTF::KeyValuePair<String, String>> destinationHeaders;
+    destinationHeaders.append({ "Content-Type"_s, "text/html"_s });
     if (destinationCOOP)
-        destinationHeaders.add("Cross-Origin-Opener-Policy"_s, destinationCOOP);
+        destinationHeaders.append({ "Cross-Origin-Opener-Policy"_s, destinationCOOP });
     if (destinationCOEP)
-        destinationHeaders.add("Cross-Origin-Embedder-Policy"_s, destinationCOEP);
+        destinationHeaders.append({ "Cross-Origin-Embedder-Policy"_s, destinationCOEP });
     HTTPResponse destinationResponse(WTF::move(destinationHeaders), "popup"_s);
 
     HTTPServer server(std::initializer_list<std::pair<String, HTTPResponse>> { }, HTTPServer::Protocol::Https);
@@ -8445,9 +8806,9 @@ static void runCOOPProcessSwapTest(ASCIILiteral sourceCOOP, ASCIILiteral sourceC
     server.addResponse("/main.html"_s, HTTPResponse { WTF::move(sourceHeaders), WTF::move(popupSource) });
 
     if (doServerSideRedirect == DoServerSideRedirect::Yes) {
-        HashMap<String, String> redirectHeaders;
+        Vector<WTF::KeyValuePair<String, String>> redirectHeaders;
         String redirectionURL = isSameOrigin == IsSameOrigin::Yes ? makeString("https://127.0.0.1:"_s, server.port(), "/popup-after-redirection.html"_s) : makeString("https://localhost:"_s, server.port(), "/popup-after-redirection.html"_s);
-        redirectHeaders.add("location"_s, WTF::move(redirectionURL));
+        redirectHeaders.append({ "location"_s, WTF::move(redirectionURL) });
         HTTPResponse redirectResponse(301, WTF::move(redirectHeaders));
 
         server.addResponse("/popup.html"_s, WTF::move(redirectResponse));

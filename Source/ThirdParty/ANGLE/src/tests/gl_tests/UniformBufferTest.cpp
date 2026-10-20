@@ -8,6 +8,8 @@
 #    pragma allow_unsafe_buffers
 #endif
 
+#include <array>
+
 #include "test_utils/ANGLETest.h"
 #include "test_utils/gl_raii.h"
 #include "util/random_utils.h"
@@ -2999,7 +3001,7 @@ TEST_P(UniformBufferTest, Std140UniformBlockWithDynamicallyIndexedRowMajorArray)
     std::vector<GLubyte> v(kDataSize, 0);
     float *vAsFloat = reinterpret_cast<float *>(v.data());
     // Write out this initializer to make it clearer what the matrix contains.
-    float matrixData[kElementsPerMatrix] = {
+    static constexpr std::array<float, kElementsPerMatrix> matrixData = {
         // clang-format off
         0.0f, 0.0f, 0.0f, 0.0f,
         0.0f, 0.0f, 1.0f, 0.0f,
@@ -3055,8 +3057,8 @@ TEST_P(UniformBufferTest, ManyBlocks)
         })";
 
     ANGLE_GL_PROGRAM(program, essl3_shaders::vs::Simple(), kFS);
-    GLBuffer buffers[12];
-    GLint bufferIndex[12];
+    std::array<GLBuffer, 12> buffers;
+    std::array<GLint, 12> bufferIndex;
     bufferIndex[0]  = glGetUniformBlockIndex(program, "uboBlock[0]");
     bufferIndex[1]  = glGetUniformBlockIndex(program, "uboBlock[1]");
     bufferIndex[2]  = glGetUniformBlockIndex(program, "uboBlock[2]");
@@ -3287,9 +3289,20 @@ class UniformBlockWithOneLargeArrayMemberTest : public ANGLETest<>
     static constexpr GLuint kVectorPerMat                           = 4;
     static constexpr GLuint kFloatPerVector                         = 4;
     static constexpr GLuint kPositionCount                          = 12;
-    static constexpr unsigned int positionToTest[kPositionCount][2] = {
-        {0, 0},   {75, 0},  {98, 13}, {31, 31}, {0, 32},   {65, 33},
-        {23, 54}, {63, 63}, {0, 64},  {43, 86}, {53, 100}, {127, 127}};
+    static constexpr std::array<std::array<unsigned int, 2>, kPositionCount> positionToTest = {{
+        {0, 0},
+        {75, 0},
+        {98, 13},
+        {31, 31},
+        {0, 32},
+        {65, 33},
+        {23, 54},
+        {63, 63},
+        {0, 64},
+        {43, 86},
+        {53, 100},
+        {127, 127},
+    }};
 };
 
 // Test uniform block whose member is structure type, which contains a mat4 member.
@@ -4589,6 +4602,73 @@ void main(void){
     EXPECT_GL_NO_ERROR();
 }
 
+// Test that using different sized uniform block ranges with the same offset and stride
+// properly updates and accesses the entire buffer data without reading stale or discarded memory.
+TEST_P(UniformBufferTest, DifferentRangeSizesSameOffsetAndStride)
+{
+    // Program 1 with 100 elements (1600 bytes).
+    constexpr char kFSLarge[] =
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "out vec4 my_FragColor;\n"
+        "layout(std140) uniform BlockLarge {\n"
+        "    uvec4 data[100];\n"
+        "};\n"
+        "void main() {\n"
+        "    my_FragColor = (data[75] == uvec4(76u)) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, "
+        "0.0, 1.0);\n"
+        "}\n";
+
+    // Program 2 with 50 elements (800 bytes) at the same offset and stride.
+    constexpr char kFSSmall[] =
+        "#version 300 es\n"
+        "precision highp float;\n"
+        "out vec4 my_FragColor;\n"
+        "layout(std140) uniform BlockSmall {\n"
+        "    uvec4 data[50];\n"
+        "};\n"
+        "void main() {\n"
+        "    my_FragColor = (data[0] == uvec4(1u)) ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(1.0, 0.0, "
+        "0.0, 1.0);\n"
+        "}\n";
+
+    ANGLE_GL_PROGRAM(progLarge, essl3_shaders::vs::Simple(), kFSLarge);
+    ANGLE_GL_PROGRAM(progSmall, essl3_shaders::vs::Simple(), kFSSmall);
+
+    std::vector<GLuint> initialData(100 * 4);
+    for (size_t i = 0; i < 100; ++i)
+    {
+        initialData[i * 4 + 0] = static_cast<GLuint>(i + 1);
+        initialData[i * 4 + 1] = static_cast<GLuint>(i + 1);
+        initialData[i * 4 + 2] = static_cast<GLuint>(i + 1);
+        initialData[i * 4 + 3] = static_cast<GLuint>(i + 1);
+    }
+
+    GLBuffer ubo;
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+    glBufferData(GL_UNIFORM_BUFFER, initialData.size() * sizeof(GLuint), initialData.data(),
+                 GL_DYNAMIC_DRAW);
+
+    // 1. Initial draw with progLarge (size = 1600 bytes).
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo);
+    glUniformBlockBinding(progLarge, glGetUniformBlockIndex(progLarge, "BlockLarge"), 0);
+    drawQuad(progLarge, essl3_shaders::PositionAttrib(), 0.5f);
+    EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::green);
+
+    // 2. Modify buffer contents to increment the source buffer revision.
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, initialData.size() * sizeof(GLuint), initialData.data());
+
+    // 3. Draw with progSmall (size = 800 bytes).
+    glUniformBlockBinding(progSmall, glGetUniformBlockIndex(progSmall, "BlockSmall"), 0);
+    drawQuad(progSmall, essl3_shaders::PositionAttrib(), 0.5f);
+    EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::green);
+
+    // 4. Draw again with progLarge (size = 1600 bytes).
+    // Elements 50..99 must reflect the updated buffer values and not discarded memory.
+    drawQuad(progLarge, essl3_shaders::PositionAttrib(), 0.5f);
+    EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::green);
+}
+
 // Tests rendering with a bound, unreferenced UBO that has no data. Covers a paticular back-end bug.
 TEST_P(UniformBufferTest, EmptyUnusedUniformBuffer)
 {
@@ -4644,8 +4724,8 @@ TEST_P(UniformBufferTest, BufferDataInLoop)
     floatData[2] = 0.25f;
     floatData[3] = 1.0f;
 
-    GLTexture textures[2];
-    GLFramebuffer fbos[2];
+    std::array<GLTexture, 2> textures;
+    std::array<GLFramebuffer, 2> fbos;
     for (int i = 0; i < 2; i++)
     {
         glBindTexture(GL_TEXTURE_2D, textures[i]);

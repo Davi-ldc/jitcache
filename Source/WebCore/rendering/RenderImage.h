@@ -78,19 +78,28 @@ public:
     bool isShowingAltText() const;
 
     virtual bool shouldDisplayBrokenImageIcon() const;
-    bool shouldRespectZeroIntrinsicWidth() const override;
+    bool shouldRespectZeroIntrinsicWidth() const final;
+    bool shouldRespectZeroIntrinsicHeight() const final;
 
-    String accessibilityDescription() const { return imageResource().image()->accessibilityDescription(); }
+    String accessibilityDescription() const;
 
 #if ENABLE(MULTI_REPRESENTATION_HEIC)
     bool isMultiRepresentationHEIC() const;
 #endif
+
+    WEBCORE_EXPORT std::optional<FloatSize> usedImageSize() const final;
+
+    WEBCORE_EXPORT static FloatSize imageSizeAsRendered(const CachedImage&, const RenderElement*, float multiplier = 1.0f, CachedImage::SizeType = CachedImage::UsedSize, float density = 1.0f);
 
     FloatSize preferredAspectRatioAsSize() const final;
 
 protected:
     RenderImage(Type, Element&, Style::ComputedStyle&&, OptionSet<ReplacedFlag>, Style::Image* = nullptr, const float imageDevicePixelRatio = 1.0f);
     void willBeDestroyed() override;
+
+#if ENABLE(SMART_IMAGE_RESIZER)
+    void insertedIntoTree() override;
+#endif
 
     bool shouldInvalidateContentWidths() const final;
     RenderReplaced* embeddedSVGRoot() const final;
@@ -132,38 +141,24 @@ private:
     void repaintOrMarkForLayout(ImageSizeChangeType, const IntRect* = nullptr);
     void updateIntrinsicSizeIfNeeded(const LayoutSize&);
     // Update the size of the image to be rendered. Object-fit may cause this to be different from the CSS box's content rect.
-    void updateInnerContentRect();
+    IntSize imageContainerSize() const;
 
     void paintAreaElementFocusRing(PaintInfo&, const LayoutPoint& paintOffset);
 
-    bool isDimensionlessSVG() const;
+    bool hasNaturalAspectRatio() const;
 
     bool hasShadowContent() const { return m_hasShadowControls || m_hasImageOverlay; }
 
-    LayoutUnit computeReplacedLogicalWidth(IsComputingIntrinsicSize = IsComputingIntrinsicSize::No) const override;
-    LayoutUnit computeReplacedLogicalHeight(std::optional<LayoutUnit> estimatedUsedWidth = std::nullopt) const override;
-
-    bool shouldCollapseToEmpty() const;
-
-#if ENABLE(AX_CUSTOM_COLOR_MODE)
-    bool axCustomColorModeShouldAdjustImage(Image&);
-    RefPtr<ImageBuffer> axCustomColorModeAdjustedImageBuffer(GraphicsContext&, Image&, const FloatRect&);
-    bool axCustomColorModePaintImage(PaintInfo&, Image&, const FloatRect&);
-#endif
+    bool imageRepresentsNothing() const;
 
     // Text to display as long as the image isn't available.
     String m_altText;
-    std::unique_ptr<RenderImageResource> m_imageResource;
+    const std::unique_ptr<RenderImageResource> m_imageResource;
     bool m_needsToSetSizeForAltText { false };
     bool m_isGeneratedContent { false };
     bool m_hasShadowControls { false };
     bool m_hasImageOverlay { false };
     float m_imageDevicePixelRatio { 1 };
-#if ENABLE(AX_CUSTOM_COLOR_MODE)
-    std::optional<bool> m_axCustomColorModeShouldAdjustImage;
-    RefPtr<ImageBuffer> m_axCustomColorModeAdjustedBuffer;
-    FloatSize m_axCustomColorModeAdjustedBufferSize;
-#endif
 
     friend class RenderImageScaleObserver;
 };

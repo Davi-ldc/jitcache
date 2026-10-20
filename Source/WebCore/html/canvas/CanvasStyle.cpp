@@ -41,7 +41,7 @@
 #include "GraphicsContext.h"
 #include "HTMLCanvasElement.h"
 #include "NodeDocument.h"
-#include "StyleProperties.h"
+#include "StylePropertiesInlines.h"
 
 #if ENABLE(OFFSCREEN_CANVAS)
 #include "OffscreenCanvas.h"
@@ -66,7 +66,7 @@ Color CanvasStyleColorResolutionDelegate::currentColor() const
     if (!m_canvasElement->isConnected() || !m_canvasElement->inlineStyle())
         return Color::black;
 
-    auto colorString = protect(m_canvasElement)->inlineStyle()->getPropertyValue(CSSPropertyColor);
+    auto colorString = protect(protect(m_canvasElement)->inlineStyle())->getPropertyValue(CSSPropertyColor);
     auto color = CSSPropertyParserHelpers::parseColorRaw(colorString, m_canvasElement->cssParserContext(), protect(m_canvasElement->document()).get());
     if (color.isValid())
         return color;
@@ -117,7 +117,8 @@ Color parseColor(const String& colorString, ScriptExecutionContext& scriptExecut
     // FIXME: Add constructor for CSSParserContext that takes a ScriptExecutionContext to allow preferences to be
     //        checked correctly.
     using namespace CSSPropertyParserHelpers;
-    auto color = parseColorRawSimple(colorString, CSSParserContext(HTMLStandardMode));
+    CSSParserContext cssParserContext(HTMLStandardMode);
+    auto color = parseColorRawSimple(colorString, cssParserContext);
     if (color.isValid())
         return color;
     CSSColorParsingOptions options {
@@ -126,7 +127,7 @@ Color parseColor(const String& colorString, ScriptExecutionContext& scriptExecut
     CSS::PlatformColorResolutionState state {
         .resolvedCurrentColor = Color::black
     };
-    return parseColorRawGeneral(colorString, CSSParserContext(HTMLStandardMode), scriptExecutionContext, options, state);
+    return parseColorRawGeneral(colorString, cssParserContext, scriptExecutionContext, options, state);
 }
 
 }

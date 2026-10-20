@@ -1061,7 +1061,8 @@ select:-internal-uses-menulist {
     font: -internal-auto-base(-webkit-small-control, inherit);
 #endif /* defined(WTF_PLATFORM_IOS_FAMILY) && WTF_PLATFORM_IOS_FAMILY */
     padding-block: -internal-auto-base(0, 0.4lh);
-    align-items: center;
+    align-items: unsafe center;
+    align-content: unsafe center;
     white-space: -internal-auto-base(pre, nowrap);
     cursor: default;
     gap: -internal-auto-base(initial, 0.65em);
@@ -1114,24 +1115,25 @@ select:not(:-internal-uses-menulist):enabled {
     color: CanvasText;
 }
 
-select:not([multiple]):-internal-uses-menulist > button:first-child {
+select:-internal-uses-menulist > button:first-child {
     all: unset;
     display: contents;
+    text-overflow: inherit;
 }
 
-select selectedcontent {
+select selectedcontent,
+select::field-content {
     overflow: clip;
-    text-overflow: ellipsis;
+    text-overflow: inherit;
     min-inline-size: 0;
+    flex: 1;
 }
 
 select::picker-icon {
-    content: "\2335" / "";
+    content: picker-down / "";
     font: 100% system-ui;
     text-orientation: sideways;
     padding-inline: 0.15em;
-    margin-inline-start: auto;
-    margin-block-start: -0.25em;
 }
 
 :-internal-select-popover {
@@ -1147,6 +1149,7 @@ select::picker-icon {
     min-inline-size: -internal-auto-base(unset, anchor-size(self-inline));
     min-block-size: 1lh;
     max-block-size: calc(100svb - 8px);
+    align-self: safe normal;
     overflow: auto;
     overscroll-behavior: contain;
     box-shadow:
@@ -1164,34 +1167,34 @@ select::picker-icon {
 }
 
 select:-internal-uses-menulist option {
-    min-inline-size: 24px;
-    min-block-size: max(24px, 1lh);
-    padding-block: 0.4lh;
-    padding-inline: 0.75em 1.1em;
-    display: flex;
+    min-inline-size: -internal-auto-base(revert-rule, 24px);
+    min-block-size: -internal-auto-base(revert-rule, max(24px, 1lh));
+    padding-block: -internal-auto-base(revert-rule, 0.4lh);
+    padding-inline: -internal-auto-base(revert-rule, 0.75em 1.1em);
+    display: -internal-auto-base(revert-rule, flex);
     align-items: center;
-    gap: 0.5em;
+    gap: -internal-auto-base(revert-rule, 0.5em);
 }
 
 select option {
     white-space: nowrap;
     box-sizing: border-box;
-    outline-offset: inset;
+    outline-offset: -internal-auto-base(revert-rule, inset);
 }
 
 select option:hover,
 select option:focus-visible {
-    background-color: color-mix(currentColor 10%);
+    background-color: -internal-auto-base(revert-rule, color-mix(currentColor 10%));
 }
 
 select option:active {
-    background-color: color-mix(currentColor 15%);
+    background-color: -internal-auto-base(revert-rule, color-mix(currentColor 15%));
 }
 
 select option:disabled {
-    color: color-mix(currentColor 55%);
-    background: transparent;
-    cursor: not-allowed;
+    color: -internal-auto-base(revert-rule, color-mix(currentColor 55%));
+    background: -internal-auto-base(revert-rule, transparent);
+    cursor: -internal-auto-base(revert-rule, not-allowed);
 }
 
 select option::checkmark {
@@ -1209,8 +1212,9 @@ optgroup {
     box-sizing: border-box;
 }
 
-select:-internal-uses-menulist optgroup:not(:first-child) {
-    border-block-start: 1px solid color-mix(currentColor 12%);
+select:-internal-uses-menulist :is(optgroup, option) + optgroup,
+select:-internal-uses-menulist optgroup + option {
+    border-block-start: -internal-auto-base(revert-rule, 1px solid color-mix(currentColor 12%));
 }
 
 option {
@@ -1221,7 +1225,8 @@ select optgroup option {
     font-weight: normal;
 }
 
-select optgroup legend {
+select optgroup legend,
+optgroup::-internal-optgroup-label {
     box-sizing: border-box;
     padding-block: 0.6em 0.15em;
     padding-inline: 0.75em;
@@ -1244,7 +1249,8 @@ select optgroup legend {
         color: SelectedItemText;
     }
     select option:disabled,
-    select optgroup legend {
+    select optgroup legend,
+    optgroup::-internal-optgroup-label {
         color: GrayText;
     }
 }

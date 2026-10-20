@@ -111,6 +111,7 @@ public:
     inline bool canContainFixedPositionObjects(const Style::ComputedStyle* styleToUse = nullptr) const; // Defined in RenderElementStyleInlines.h.
     inline bool canContainAbsolutelyPositionedObjects(const Style::ComputedStyle* styleToUse = nullptr) const; // Defined in RenderElementStyleInlines.h.
     bool canEstablishContainingBlockWithTransform() const;
+    RenderBlock* nearestNonAnonymousContainingBlockIncludingSelf() const;
 
     inline bool shouldApplyLayoutContainment() const; // Defined in RenderElementStyleInlines.h
     inline bool shouldApplySizeContainment() const; // Defined in RenderElementStyleInlines.h
@@ -150,6 +151,10 @@ public:
     // createLayer and on every attach of a subtree that already has the bit.
     bool mayHaveLayerInSubtree() const { return m_mayHaveLayerInSubtree; }
     void setMayHaveLayerInSubtreeIncludingAncestors();
+
+    // Never cleared, so it may be a false positive - just like the mayHaveLayerInSubtree() logic.
+    bool mayHaveNonScalingStrokeInSubtree() const { return m_mayHaveNonScalingStrokeInSubtree; }
+    void setMayHaveNonScalingStrokeInSubtreeIncludingAncestors();
 
     virtual void dirtyLineFromChangedChild() { }
 
@@ -240,8 +245,8 @@ public:
     void setVisibleInViewportState(VisibleInViewportState);
     virtual void visibleInViewportStateChanged();
 
-    bool didContibuteToVisuallyNonEmptyPixelCount() const { return m_didContributeToVisuallyNonEmptyPixelCount; }
-    void setDidContibuteToVisuallyNonEmptyPixelCount() { m_didContributeToVisuallyNonEmptyPixelCount = true; }
+    bool didContributeToVisuallyNonEmptyPixelCount() const { return m_didContributeToVisuallyNonEmptyPixelCount; }
+    void setDidContributeToVisuallyNonEmptyPixelCount() { m_didContributeToVisuallyNonEmptyPixelCount = true; }
 
     bool scrollAnchoringSuppressionStyleChanged() const { return m_scrollAnchoringSuppressionStyleChanged; }
     void setScrollAnchoringSuppressionStyleChanged(bool b) { m_scrollAnchoringSuppressionStyleChanged = b; }
@@ -259,12 +264,13 @@ public:
     bool hasCounterNodeMap() const { return m_hasCounterNodeMap; }
     void setHasCounterNodeMap(bool f) { m_hasCounterNodeMap = f; }
 
-#if ENABLE(TEXT_AUTOSIZING)
     void adjustFontSizesOnBlocks(float size, float visibleWidth);
     WEBCORE_EXPORT void resetTextAutosizing();
-#endif
 
     WEBCORE_EXPORT ImageOrientation imageOrientation() const;
+
+    virtual std::optional<FloatSize> usedImageSize() const { return std::nullopt; }
+    inline std::optional<FloatSize> usedZoomedImageSize() const; // Defined in RenderElementInlines.h
 
     void removeFromRenderFragmentedFlow();
     virtual void resetEnclosingFragmentedFlowAndChildInfoIncludingDescendants(RenderFragmentedFlow*);
@@ -291,7 +297,6 @@ public:
     // https://www.w3.org/TR/css-transforms-1/#reference-box
     virtual FloatRect referenceBoxRect(CSSBoxType) const;
 
-    virtual void suspendAnimations(MonotonicTime = MonotonicTime()) { }
     std::unique_ptr<Style::ComputedStyle> animatedStyle();
 
     SingleThreadWeakPtr<RenderBlockFlow> pseudoElementRenderer(PseudoElementType) const;
@@ -481,7 +486,8 @@ private:
     unsigned m_didContributeToVisuallyNonEmptyPixelCount : 1 { false };
     unsigned m_scrollAnchoringSuppressionStyleChanged : 1 { false };
     unsigned m_isInPendingSVGTransformAttributeUpdates : 1 { false };
-    // 11 bits free.
+    unsigned m_mayHaveNonScalingStrokeInSubtree : 1 { false };
+    // 10 bits free.
 
     Style::ComputedStyle m_style;
 };

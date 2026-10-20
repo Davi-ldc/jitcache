@@ -38,15 +38,15 @@
     }
     print(total);
 
-    // The case happened (HARNESS.md, Tests): the producer compiled every body, so each ran its import here.
+    // The case happened: the producer compiled every body, so each ran its import here.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const imported = { };
         bodies.forEach((body, index) => imported[`body ${index}`] = body);
         sections.expectImports(role, imported);
         sections.expectTargets(role, { call: imported }, [
-            { site: "B9", kind: "Operation", form: "Pointer" },
-            { site: "A17", kind: "CommonThunk", a: "HandleException", form: "Jump" },
+            { site: "a far call to an operation", kind: "Operation", form: "Pointer" },
+            { site: "an exception check's jump to the handler", kind: "CommonThunk", a: "HandleException", form: "Jump" },
         ]);
     }
 })(...arguments);

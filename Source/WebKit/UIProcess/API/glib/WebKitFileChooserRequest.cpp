@@ -29,6 +29,7 @@
 #include <pal/text/TextEncoding.h>
 #include <wtf/FileSystem.h>
 #include <wtf/URL.h>
+#include <wtf/glib/GLibExtras.h>
 #include <wtf/glib/GSpanExtras.h>
 #include <wtf/glib/WTFGType.h>
 #include <wtf/text/CString.h>
@@ -46,8 +47,8 @@ using namespace WebCore;
  * file type, WebKit will need to show a dialog to choose one or
  * more files to be uploaded to the server along with the rest of the
  * form data. For that to happen in a general way, instead of just
- * opening a #GtkFileChooserDialog (which might be not desirable in
- * some cases, which could prefer to use their own file chooser
+ * opening a #GtkFileChooserDialog (which might not be desirable for
+ * applications that prefer to use their own file chooser
  * dialog), WebKit will fire the #WebKitWebView::run-file-chooser
  * signal with a #WebKitFileChooserRequest object, which will allow
  * the client application to specify the files to be selected, to
@@ -171,7 +172,7 @@ static void webkit_file_chooser_request_class_init(WebKitFileChooserRequestClass
      * WebKitFileChooserRequest:selected-files:
      *
      * A %NULL-terminated array of strings containing the list of
-     * selected files associated to the current request. See
+     * selected files associated with the current request. See
      * webkit_file_chooser_request_get_selected_files() for more details.
      */
     g_object_class_install_property(objectClass,
@@ -226,7 +227,7 @@ const gchar* const* webkit_file_chooser_request_get_mime_types(WebKitFileChooser
         String mimeTypeString = webMimeType->string();
         if (mimeTypeString.isEmpty())
             continue;
-        g_ptr_array_add(request->priv->mimeTypes.get(), g_strdup(mimeTypeString.utf8().data()));
+        g_ptr_array_add(request->priv->mimeTypes.get(), gStrdup(mimeTypeString.utf8()));
     }
     g_ptr_array_add(request->priv->mimeTypes.get(), 0);
 
@@ -251,7 +252,7 @@ const gchar* const* webkit_file_chooser_request_get_mime_types(WebKitFileChooser
  *
  * Returns: (transfer none): a #GtkFileFilter if a list of accepted
  * MIME types is defined or %NULL otherwise. The returned object is
- * owned by WebKit should not be modified or freed.
+ * owned by WebKit and should not be modified or freed.
  */
 GtkFileFilter* webkit_file_chooser_request_get_mime_types_filter(WebKitFileChooserRequest* request)
 {
@@ -273,7 +274,7 @@ GtkFileFilter* webkit_file_chooser_request_get_mime_types_filter(WebKitFileChoos
         String mimeTypeString = webMimeType->string();
         if (mimeTypeString.isEmpty())
             continue;
-        gtk_file_filter_add_mime_type(request->priv->filter.get(), mimeTypeString.utf8().data());
+        gtk_file_filter_add_mime_type(request->priv->filter.get(), mimeTypeString.utf8().legacyCStringPointer());
     }
 
     return request->priv->filter.get();
@@ -286,7 +287,7 @@ GtkFileFilter* webkit_file_chooser_request_get_mime_types_filter(WebKitFileChoos
  *
  * Whether the file chooser should allow selecting multiple files.
  *
- * Determine whether the file chooser associated to this
+ * Determine whether the file chooser associated with this
  * #WebKitFileChooserRequest should allow selecting multiple files,
  * which depends on the HTML input element having a 'multiple'
  * attribute defined.
@@ -333,12 +334,12 @@ void webkit_file_chooser_request_select_files(WebKitFileChooserRequest* request,
  * webkit_file_chooser_request_get_selected_files:
  * @request: a #WebKitFileChooserRequest
  *
- * Get the list of selected files associated to the request.
+ * Get the list of selected files associated with the request.
  *
- * Get the list of selected files currently associated to the
+ * Get the list of selected files currently associated with the
  * request. Initially, the return value of this method contains any
  * files selected in previous file chooser requests for this HTML
- * input element. Once webkit_file_chooser_request_select_files, the
+ * input element. Once webkit_file_chooser_request_select_files() has been called, the
  * value will reflect whatever files are given.
  *
  * This function should normally be called only before presenting the
@@ -367,8 +368,8 @@ const gchar* const* webkit_file_chooser_request_get_selected_files(WebKitFileCho
         RefPtr webFileName = downcast<API::String>(selectedFileNames->at(i));
         if (webFileName->stringView().isEmpty())
             continue;
-        CString filename = FileSystem::fileSystemRepresentation(webFileName->string());
-        g_ptr_array_add(request->priv->selectedFiles.get(), g_strdup(filename.data()));
+        auto filename = FileSystem::fileSystemRepresentation(webFileName->string());
+        g_ptr_array_add(request->priv->selectedFiles.get(), gStrdup(filename));
     }
     g_ptr_array_add(request->priv->selectedFiles.get(), 0);
 

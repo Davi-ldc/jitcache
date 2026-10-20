@@ -133,8 +133,8 @@ struct Session {
 static std::optional<Session> beginSession(const String& parentPath, Report& report)
 {
     std::optional<Session> session { std::in_place };
-    CString path = parentPath.utf8();
-    session->parent = ownedDescriptor(openAt(AT_FDCWD, path.data() ? path.data() : "", parentFlags));
+    UTF8CString path = parentPath.utf8();
+    session->parent = ownedDescriptor(openAt(AT_FDCWD, path.isNull() ? "" : path.legacyCStringPointer(), parentFlags));
     if (!session->parent) {
         int error = errno;
         if (isAbsence(error))
@@ -206,7 +206,7 @@ static HeaderRead readHeader(int cacheFd)
 
 // The names of cache/ beside header and pack: the temporaries compact removes and the names it only reports.
 struct CacheListing {
-    Vector<CString> temporaries;
+    Vector<ASCIICString> temporaries;
     Vector<String> unknownNames;
     bool hasPack { false };
 };
@@ -222,7 +222,7 @@ static std::expected<CacheListing, int> listCache(int cacheFd)
             return;
         }
         if (temporaryKindOfFileName(name)) {
-            listing.temporaries.append(CString { name });
+            listing.temporaries.append(ASCIICString { name });
             return;
         }
         listing.unknownNames.append(displayName(cachePrefix, name));
@@ -374,20 +374,20 @@ static bool stopsAfterUnlinkForTesting(uint64_t unlink)
 }
 
 // The cleanup's temporaries: each one's size, taken with fstatat before its unlinkat, counts once it is gone.
-static void removeTemporaries(int cacheFd, const Vector<CString>& temporaries, Report& report)
+static void removeTemporaries(int cacheFd, const Vector<ASCIICString>& temporaries, Report& report)
 {
     for (auto& name : temporaries) {
         struct stat status;
         if (fstatat(cacheFd, name.data(), &status, AT_SYMLINK_NOFOLLOW)) {
             int error = errno;
             if (error != ENOENT)
-                addDiagnostic(report, Codes::unlinkFailed, makeString(cachePrefix, String { name.span() }, ": "_s, errorText(error)));
+                addDiagnostic(report, Codes::unlinkFailed, makeString(cachePrefix, String { name }, ": "_s, errorText(error)));
             continue;
         }
         if (unlinkat(cacheFd, name.data(), 0)) {
             int error = errno;
             if (error != ENOENT)
-                addDiagnostic(report, Codes::unlinkFailed, makeString(cachePrefix, String { name.span() }, ": "_s, errorText(error)));
+                addDiagnostic(report, Codes::unlinkFailed, makeString(cachePrefix, String { name }, ": "_s, errorText(error)));
             continue;
         }
         ++report.temporariesRemoved;
@@ -436,6 +436,11 @@ static void finishRemnant(const Session& session, const CacheListing& cache, Rep
     if (cache.hasPack) {
         struct stat status;
         bool sized = !fstatat(session.cache.value(), ArtifactNames::pack.characters(), &status, AT_SYMLINK_NOFOLLOW);
+        // An object that maps the pack meets the mark at its next read and looks at the path again.
+        if (int error = retirePack(session.cache.value())) {
+            addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: marking it retired: "_s, errorText(error)));
+            return;
+        }
         if (unlinkat(session.cache.value(), ArtifactNames::pack.characters(), 0) && errno != ENOENT) {
             addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: "_s, errorText(errno)));
             return;
@@ -560,13 +565,13 @@ struct CommandLine {
     Answer answer { Answer::Ask };
 };
 
-static String displayArgument(const CString& argument)
+static String displayArgument(const UTF8CString& argument)
 {
     return String::fromUTF8ReplacingInvalidSequences(byteCast<Latin1Character>(argument.span()));
 }
 
 // A path is UTF-8, as the String the backend takes is.
-static std::optional<String> pathArgument(const CString& argument)
+static std::optional<String> pathArgument(const UTF8CString& argument)
 {
     if (!argument.length())
         return emptyString();
@@ -577,7 +582,7 @@ static std::optional<String> pathArgument(const CString& argument)
 }
 
 // A decimal number, read without the locale; the backend rejects one outside [0, 1] as bad-ratio.
-static std::optional<double> ratioArgument(const CString& argument)
+static std::optional<double> ratioArgument(const UTF8CString& argument)
 {
     auto characters = byteCast<Latin1Character>(argument.span());
     if (characters.empty())
@@ -591,7 +596,7 @@ static std::optional<double> ratioArgument(const CString& argument)
 
 // "compact <ratio> [<path>] [--yes | --no]", the ratio optional and 0 without it under RatioArgument::Optional, the path
 // defaulting to defaultArtifactPath; a usage error says why.
-static std::expected<CommandLine, String> parseCommandLine(std::span<const CString> arguments, RatioArgument ratioRule)
+static std::expected<CommandLine, String> parseCommandLine(std::span<const UTF8CString> arguments, RatioArgument ratioRule)
 {
     if (arguments.empty())
         return std::unexpected(String { "no command"_s });
@@ -611,7 +616,7 @@ static std::expected<CommandLine, String> parseCommandLine(std::span<const CStri
     // Every argument that starts with "--" is an option, so a mistyped one is never taken for a path.
     std::optional<String> path;
     bool answered = false;
-    for (const CString& argument : arguments.subspan(ratio ? 2 : 1)) {
+    for (const UTF8CString& argument : arguments.subspan(ratio ? 2 : 1)) {
         auto text = argument.span();
         if (!spanHasPrefix(text, "--"_span)) {
             if (path)
@@ -637,7 +642,7 @@ static void printLine(FILE* file, const String& line)
 {
     if (!file)
         return;
-    CString text = line.utf8();
+    UTF8CString text = line.utf8();
     fwrite(text.data(), 1, text.length(), file);
     fputc('\n', file);
 }
@@ -812,13 +817,19 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
 
     // A plan that keeps bodies is applied as a compaction: a new pack of every body the plan keeps, without dead bytes,
     // replaces the old one in one rename. A survivor that fails its checks on the way is left out as a damaged body. A pack
-    // without dead bytes and evictions only has its cleanup.
+    // without dead bytes and evictions keeps its file after its cleanup only when every body in it passes the checks the
+    // compaction would run, so a body that rotted in a dense pack, as every delta leaves one, still goes.
     if (!plan.deletesArtifact && pack->pack) {
         uint64_t packBytes = cleanUpPack(session->cache.value(), *pack, report);
         uint64_t liveBytes = packPrefixBytes;
         for (auto& entry : pack->entries)
             liveBytes += *packRecordExtent(entry.size);
         bool rewrites = !plan.evictions.isEmpty() || liveBytes + packIndexBlockBytes(static_cast<uint32_t>(pack->entries.size())) < pack->validEnd;
+        if (!rewrites) {
+            rewrites = std::ranges::any_of(pack->entries, [&](const PackIndexEntry& entry) {
+                return !!ArtifactWriter::checkPackedBody(*pack->pack, entry, std::span<const uint8_t, 16> { header.digest });
+            });
+        }
         if (rewrites) {
             UnixFileDescriptor fd = openPackForWriting(session->cache.value(), *pack, report);
             if (!fd) {
@@ -843,7 +854,7 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
             report.bodiesEvicted += plan.evictions.size();
             for (auto& [key, check] : compacted->droppedBodies) {
                 ++report.bodiesEvicted;
-                addDiagnostic(report, Codes::damagedBody, makeString("cache/pack: "_s, String { std::span<const char> { bodyKeyHexDigits(key) } }, ": "_s, check));
+                addDiagnostic(report, Codes::damagedBody, makeString("cache/pack: "_s, String::fromLatin1(std::span<const char> { bodyKeyHexDigits(key) }), ": "_s, check));
             }
             if (packBytes > compacted->packBytes)
                 report.bytesReclaimed += packBytes - compacted->packBytes;
@@ -886,7 +897,11 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
             }
         }
         if (!keptHeader) {
-            if (unlinkat(session->cache.value(), ArtifactNames::pack.characters(), 0) && errno != ENOENT)
+            // A reader that met the old pack's mark since the emptying may map the empty pack, so it is retired before it
+            // goes too.
+            if (int error = retirePack(session->cache.value()))
+                addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: marking it retired: "_s, errorText(error)));
+            else if (unlinkat(session->cache.value(), ArtifactNames::pack.characters(), 0) && errno != ENOENT)
                 addDiagnostic(report, Codes::unlinkFailed, makeString("cache/pack: "_s, errorText(errno)));
             else {
                 report.bytesReclaimed += emptyPackBytes;
@@ -906,7 +921,7 @@ Report compact(const String& parentPath, double ratio, const CompactOptions& opt
 #endif
 }
 
-int runCommandLine(std::span<const CString> arguments, FILE* in, FILE* out, FILE* err, RatioArgument ratioRule)
+int runCommandLine(std::span<const UTF8CString> arguments, FILE* in, FILE* out, FILE* err, RatioArgument ratioRule)
 {
     using namespace MaintenanceInternal;
     auto commandLine = parseCommandLine(arguments, ratioRule);

@@ -11,8 +11,11 @@
 #include <algorithm>
 #include <array>
 #include <span>
+#include <wtf/HexNumber.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
+#include <wtf/WeakRandom.h>
+#include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/MakeString.h>
 
 #if OS(LINUX)
@@ -21,8 +24,8 @@
 #endif
 
 // Tests of JITCachePlatform and JITCacheOptions (store/JITCachePlatform.h, store/JITCacheOptions.h and their .cpp): the
-// fixed options start requires, the must-match options the header records, the CPU feature vector, and the build IDs
-// processFacts reads from the loaded objects, crafted ones included.
+// fixed options start requires, the must-match options the header records, the CPU feature vector, the build IDs
+// processFacts reads from the loaded objects, crafted ones included, and the CRC-32C on each of its paths.
 
 #if OS(LINUX)
 namespace JSC::JITCache::PlatformInternal {
@@ -47,6 +50,29 @@ static bool hasZeroTail(const BuildID& id)
         return !byte;
     });
 }
+
+// CRC-32C of RFC 3720 bit by bit: the reflected Castagnoli polynomial, initial value and final XOR 0xFFFFFFFF.
+static uint32_t bitwiseCRC32C(std::span<const uint8_t> bytes)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint8_t byte : bytes) {
+        crc ^= byte;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            crc = (crc & 1) ? (crc >> 1) ^ 0x82F63B78 : crc >> 1;
+    }
+    return ~crc;
+}
+
+// The ways a test can run the CRC-32C: crc32cExtend, which takes the CPU's instructions where it has them, and the byte
+// table it falls back to.
+struct CRC32CPath {
+    ASCIILiteral name;
+    uint32_t (*extend)(uint32_t, std::span<const uint8_t>);
+};
+static constexpr std::array<CRC32CPath, 2> crc32cPaths { {
+    { "crc32cExtend"_s, crc32cExtend },
+    { "the byte table"_s, crc32cExtendWithTableForTesting },
+} };
 
 #if ENABLE(ASSEMBLER) && CPU(X86_64)
 // Makes the two protected predicates callable, so the feature-vector test compares bits 7 and 8 with the predicates
@@ -284,6 +310,73 @@ JITCACHE_TEST(integratorBuildIDBounds, No)
     JITCACHE_CHECK(sameBuildID(buildIDOfCraftedObject({ }), BuildID { }));
 }
 #endif // OS(LINUX)
+
+// Every CRC-32C path gives the RFC 3720 vectors, whole and fed byte by byte, and agrees with the bitwise reference over
+// random buffers, lengths and alignments, fed whole and in random pieces. The vectors pin the polynomial, the initial
+// value and the final XOR, so every checksum the container writes keeps its bytes whichever path computes it.
+JITCACHE_TEST(integratorCRC32C, No)
+{
+    auto checkVector = [&](ASCIILiteral name, std::span<const uint8_t> bytes, uint32_t expected) {
+        if (bitwiseCRC32C(bytes) != expected)
+            JITCACHE_FAIL(makeString("the bitwise reference of "_s, name, " is "_s, hex(bitwiseCRC32C(bytes)), ", expected "_s, hex(expected)));
+        for (auto& path : crc32cPaths) {
+            uint32_t whole = ~path.extend(~0u, bytes);
+            if (whole != expected)
+                JITCACHE_FAIL(makeString(path.name, " gives "_s, name, ' ', hex(whole), ", expected "_s, hex(expected)));
+            uint32_t state = ~0u;
+            for (size_t index = 0; index < bytes.size(); ++index)
+                state = path.extend(state, bytes.subspan(index, 1));
+            if (~state != expected)
+                JITCACHE_FAIL(makeString(path.name, " gives "_s, name, " fed byte by byte "_s, hex(~state)));
+        }
+    };
+
+    static constexpr std::array<uint8_t, 9> checkString { '1', '2', '3', '4', '5', '6', '7', '8', '9' };
+    checkVector("\"123456789\""_s, std::span { checkString }, 0xE3069283);
+    std::array<uint8_t, 32> pattern { };
+    checkVector("32 zero bytes"_s, std::span { pattern }, 0x8A9136AA);
+    pattern.fill(0xFF);
+    checkVector("32 0xFF bytes"_s, std::span { pattern }, 0x62A8AB43);
+    for (size_t index = 0; index < pattern.size(); ++index)
+        pattern[index] = static_cast<uint8_t>(index);
+    checkVector("the bytes 0 to 31"_s, std::span { pattern }, 0x46DD794E);
+    for (size_t index = 0; index < pattern.size(); ++index)
+        pattern[index] = static_cast<uint8_t>(pattern.size() - 1 - index);
+    checkVector("the bytes 31 down to 0"_s, std::span { pattern }, 0x113FDB5C);
+    for (auto& path : crc32cPaths) {
+        JITCACHE_CHECK(!~path.extend(~0u, { }));
+        JITCACHE_CHECK(path.extend(0x12345678, { }) == 0x12345678);
+    }
+
+    static constexpr unsigned randomSeed = 0x4a495443;
+    static constexpr size_t maximumLength = 2048;
+    static constexpr size_t maximumMisalignment = 16;
+    WeakRandom random(randomSeed);
+    Vector<uint8_t> storage(FillWith { }, maximumLength + maximumMisalignment, 0);
+    unsigned failures = 0;
+    for (unsigned iteration = 0; iteration < 4096 && failures < 8; ++iteration) {
+        size_t length = random.getUint32(maximumLength + 1);
+        size_t misalignment = random.getUint32(maximumMisalignment);
+        auto bytes = storage.mutableSpan().subspan(misalignment, length);
+        for (auto& byte : bytes)
+            byte = static_cast<uint8_t>(random.getUint32(256));
+        uint32_t expected = bitwiseCRC32C(bytes);
+        for (auto& path : crc32cPaths) {
+            uint32_t whole = ~path.extend(~0u, bytes);
+            uint32_t state = ~0u;
+            for (size_t offset = 0; offset < length;) {
+                size_t piece = 1 + random.getUint32(static_cast<unsigned>(length - offset));
+                state = path.extend(state, bytes.subspan(offset, piece));
+                offset += piece;
+            }
+            if (whole != expected || ~state != expected) {
+                ++failures;
+                JITCACHE_FAIL(makeString(path.name, ", buffer "_s, iteration, " of length "_s, length, " at misalignment "_s, misalignment,
+                    ": reference "_s, hex(expected), ", whole "_s, hex(whole), ", in pieces "_s, hex(~state)));
+            }
+        }
+    }
+}
 
 } // namespace JSC::JITCache::Tests
 

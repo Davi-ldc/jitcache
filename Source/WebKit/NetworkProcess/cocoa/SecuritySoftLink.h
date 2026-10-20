@@ -30,4 +30,4 @@
 
 SOFT_LINK_FRAMEWORK_FOR_HEADER(WebKit, Security)
 
-SOFT_LINK_FUNCTION_MAY_FAIL_FOR_HEADER(WebKit, Security, SecQWACTLSBindingVerify, bool, (CFDataRef data, SecTrustRef trust, SecTrustRef* result, CFErrorRef* error), (data, trust, result, error));
+SOFT_LINK_FUNCTION_MAY_FAIL_FOR_HEADER(WebKit, Security, SecTrustCreateAndVerifyQWACTLSBinding, SecTrustRef, (CFDataRef data, SecTrustRef trust, CFErrorRef* error), (data, trust, error));

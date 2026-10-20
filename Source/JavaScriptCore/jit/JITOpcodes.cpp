@@ -401,7 +401,7 @@ void JIT::emit_op_jfalse(const JSInstruction* currentInstruction)
     isNotInt32.link(this);
     addJump(branchIfOther(valueGPR, scratch1GPR), target);
 
-    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::ValueIsFalsey));
+    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::baselineThunk(JITCache::BaselineThunk::ValueIsFalsey));
     addJump(branchTest32(NonZero, regT0), target);
     fallThrough.link(this);
 }
@@ -577,7 +577,7 @@ void JIT::emit_op_jtrue(const JSInstruction* currentInstruction)
     isNotInt32.link(this);
     fallThrough.append(branchIfOther(valueGPR, scratch1GPR));
 
-    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::ValueIsTruthy));
+    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::baselineThunk(JITCache::BaselineThunk::ValueIsTruthy));
     addJump(branchTest32(NonZero, regT0), target);
     fallThrough.link(this);
 }
@@ -642,7 +642,7 @@ void JIT::emit_op_throw(const JSInstruction* currentInstruction)
 
     emitGetVirtualRegister(bytecode.m_value, thrownValueGPR);
     move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-    JITCache::jumpSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::OpThrowHandler));
+    JITCache::jumpSupport(*this, vm(), JITCache::SupportKey::baselineThunk(JITCache::BaselineThunk::OpThrowHandler));
 }
 
 MacroAssemblerCodeRef<JITThunkPtrTag> JIT::op_throw_handlerGenerator(VM& vm)
@@ -761,26 +761,12 @@ void JIT::compileOpStrictEq(const JSInstruction* currentInstruction)
         emitPutVirtualRegister(dst, regT2);
     };
 
-    // JITCache: the choice of the operand compared by its atom, made once, here. In twins builds it passes through the
-    // recorder, which records it, or in a twin compile answers with the producer's.
-    bool lhsIsAtom = !!tryGetAtomStringConstant(src1);
-    bool rhsIsAtom = !lhsIsAtom && tryGetAtomStringConstant(src2);
-#if ENABLE(JITCACHE_TWINS)
-    if (m_imageRecorder) {
-        using JITCache::StrictEqualityAtomOperand;
-        auto chosen = lhsIsAtom ? StrictEqualityAtomOperand::Lhs : rhsIsAtom ? StrictEqualityAtomOperand::Rhs : StrictEqualityAtomOperand::None;
-        chosen = m_imageRecorder->strictEqualityAtomOperand(m_bytecodeIndex, chosen);
-        lhsIsAtom = chosen == StrictEqualityAtomOperand::Lhs;
-        rhsIsAtom = chosen == StrictEqualityAtomOperand::Rhs;
-    }
-#endif
-
-    if (lhsIsAtom) {
+    if (tryGetAtomStringConstant(src1)) {
         emitStringConstantFastPath(regT1, regT0, src1);
         return;
     }
 
-    if (rhsIsAtom) {
+    if (tryGetAtomStringConstant(src2)) {
         emitStringConstantFastPath(regT0, regT1, src2);
         return;
     }
@@ -957,25 +943,12 @@ void JIT::compileOpStrictEqJump(const JSInstruction* currentInstruction)
         fallThrough.link(this);
     };
 
-    // JITCache: as in compileOpStrictEq.
-    bool lhsIsAtom = !!tryGetAtomStringConstant(src1);
-    bool rhsIsAtom = !lhsIsAtom && tryGetAtomStringConstant(src2);
-#if ENABLE(JITCACHE_TWINS)
-    if (m_imageRecorder) {
-        using JITCache::StrictEqualityAtomOperand;
-        auto chosen = lhsIsAtom ? StrictEqualityAtomOperand::Lhs : rhsIsAtom ? StrictEqualityAtomOperand::Rhs : StrictEqualityAtomOperand::None;
-        chosen = m_imageRecorder->strictEqualityAtomOperand(m_bytecodeIndex, chosen);
-        lhsIsAtom = chosen == StrictEqualityAtomOperand::Lhs;
-        rhsIsAtom = chosen == StrictEqualityAtomOperand::Rhs;
-    }
-#endif
-
-    if (lhsIsAtom) {
+    if (tryGetAtomStringConstant(src1)) {
         emitStringConstantFastPath(regT1, regT0, src1);
         return;
     }
 
-    if (rhsIsAtom) {
+    if (tryGetAtomStringConstant(src2)) {
         emitStringConstantFastPath(regT0, regT1, src2);
         return;
     }
@@ -1841,7 +1814,7 @@ void JIT::emit_op_super_sampler_end(const JSInstruction*)
 void JIT::emitSlow_op_enter(const JSInstruction*, Vector<SlowCaseEntry>::iterator& iter)
 {
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::OpEnterHandler));
+    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::baselineThunk(JITCache::BaselineThunk::OpEnterHandler));
 }
 
 void JIT::emitSlow_op_check_traps(const JSInstruction*, Vector<SlowCaseEntry>::iterator& iter)
@@ -1853,7 +1826,7 @@ void JIT::emitSlow_op_check_traps(const JSInstruction*, Vector<SlowCaseEntry>::i
     using BaselineJITRegisters::CheckTraps::bytecodeOffsetGPR;
 
     move(TrustedImm32(bytecodeOffset), bytecodeOffsetGPR);
-    JITCache::nearCallSupport(*this, vm(), JITCacheSupportKey::baselineThunk(JITCache::BaselineThunk::OpCheckTrapsHandler));
+    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::baselineThunk(JITCache::BaselineThunk::OpCheckTrapsHandler));
 }
 
 MacroAssemblerCodeRef<JITThunkPtrTag> JIT::op_check_traps_handlerGenerator(VM& vm)
@@ -1892,6 +1865,16 @@ void JIT::emit_op_new_reg_exp(const JSInstruction* currentInstruction)
     ASSERT(is<RegExp>(m_unlinkedCodeBlock->getConstant(regexp)));
     callOperation(operationNewRegExp, globalGPR, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, regexp));
     emitPutVirtualRegister(dst, returnValueGPR);
+}
+
+void JIT::emit_op_new_reg_exp_shared(const JSInstruction* currentInstruction)
+{
+    auto bytecode = currentInstruction->as<OpNewRegExpShared>();
+    loadGlobalObject(argumentGPR0);
+    materializePointerIntoMetadata(bytecode, OpNewRegExpShared::Metadata::offsetOfCachedObject(), argumentGPR2);
+    ASSERT(is<RegExp>(m_unlinkedCodeBlock->getConstant(bytecode.m_regexp)));
+    callOperation(operationNewRegExpShared, argumentGPR0, JITCache::ImageReference::ucbConstantCell(vm(), *m_unlinkedCodeBlock, bytecode.m_regexp), argumentGPR2, TrustedImm32(bytecode.m_forTest));
+    emitPutVirtualRegister(bytecode.m_dst, returnValueGPR);
 }
 
 template<typename Op>

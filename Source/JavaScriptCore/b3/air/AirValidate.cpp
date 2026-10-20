@@ -39,7 +39,7 @@ namespace {
 
 class Validater {
 public:
-    Validater(Code& code, const char* dumpBefore)
+    Validater(Code& code, UTF8CStringView dumpBefore)
         : m_code(code)
         , m_dumpBefore(dumpBefore)
     {
@@ -48,7 +48,7 @@ public:
 #define VALIDATE(condition, message) do {                               \
         if (condition)                                                  \
             break;                                                      \
-        fail(__FILE__, __LINE__, WTF_PRETTY_FUNCTION, #condition, toCString message); \
+        fail(__FILE__, __LINE__, WTF_PRETTY_FUNCTION, #condition, toUTF8CString message); \
     } while (false)
     
     void run()
@@ -144,16 +144,16 @@ public:
 private:
     NO_RETURN_DUE_TO_CRASH void fail(
         const char* filename, int lineNumber, const char* function, const char* condition,
-        CString message)
+        UTF8CString message)
     {
-        CString failureMessage;
+        UTF8CString failureMessage;
         {
             StringPrintStream out;
             out.print("AIR VALIDATION FAILURE\n");
             out.print("    ", condition, " (", filename, ":", lineNumber, ")\n");
             out.print("    ", message, "\n");
             out.print("    After ", m_code.lastPhaseName(), "\n");
-            failureMessage = out.toCString();
+            failureMessage = out.toUTF8CString();
         }
 
         dataLog(failureMessage);
@@ -170,12 +170,12 @@ private:
     }
     
     Code& m_code;
-    const char* m_dumpBefore;
+    UTF8CStringView m_dumpBefore;
 };
 
 } // anonymous namespace
 
-void validate(Code& code, const char* dumpBefore)
+void validate(Code& code, UTF8CStringView dumpBefore)
 {
     Validater validater(code, dumpBefore);
     validater.run();

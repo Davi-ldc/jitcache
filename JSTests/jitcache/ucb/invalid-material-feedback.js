@@ -41,9 +41,10 @@
 // 1 << 28), each profile (a prediction carrying SpecInt52Any, array modes outside ALL_ARRAY_MODES, an array flag past the
 // eight, the pruning flag, binary and unary bits out of range), the gap before the exit sites, each exit site field (an
 // unset kind and one past the last, a JIT type and an inline kind out of range, a nonzero padding byte, two equal sites),
-// the tier-up bytes (the three TriStates and byte 39), the LLInt counter (a negative threshold, a total that is not finite,
-// a progress below 0 and one of 2^31), a child bit of 2, a constant bit at C, a nonzero byte of final padding, and a
-// constant count other than the identity section's. A threshold of INT32_MAX with a progress in range obeys the
+// the tier-up bytes (the three TriStates), a copies byte of 2, the LLInt counter (a negative threshold, a total that is
+// not finite, a progress below 0 and one of 2^31), a child bit of 2, a constant bit at C, a nonzero byte of final
+// padding, and a constant count other than the identity section's. The profile cases need the UCB's copies, which
+// imPlain's body carries since it has an image. A threshold of INT32_MAX with a progress in range obeys the
 // layout's rules, which accept any threshold of at least 0 that way. No same-size rewrite can give the section the
 // wrong size; the UCB lane's section tests in testjitcache check that rule.
 load("./resources/ucb.js", "caller relative");
@@ -60,20 +61,20 @@ load("./resources/invalid-material-cases.js", "caller relative");
             c.feedbackCase("a nonzero reserved byte", () => [6, [1]]),
             c.feedbackCase("a value profile count of 1 << 28", () => [8, c.S.le32(1 << 28)]),
             c.feedbackCase("a prediction carrying SpecInt52Any", feedback => {
-                c.t.check(feedback.counts.valueProfiles, "imPlain has no value profile");
+                c.t.check(feedback.copies && feedback.counts.valueProfiles, "imPlain's body carries no value prediction");
                 return [feedback.predictions + 4, [feedback.bytes[feedback.predictions + 4] | 0x80]];
             }),
             c.feedbackCase("array modes outside ALL_ARRAY_MODES", feedback => {
-                c.t.check(feedback.counts.arrayProfiles, "imPlain has no array profile");
+                c.t.check(feedback.copies && feedback.counts.arrayProfiles, "imPlain's body carries no array profile");
                 // Bit 14 stands for indexing mode 0x0E, which no indexing type has.
                 return [feedback.arrays + 1, [feedback.bytes[feedback.arrays + 1] | 0x40]];
             }),
             c.feedbackCase("an array profile flag past the eight", feedback => {
-                c.t.check(feedback.counts.arrayProfiles, "imPlain has no array profile");
+                c.t.check(feedback.copies && feedback.counts.arrayProfiles, "imPlain's body carries no array profile");
                 return [feedback.arrays + 5, [feedback.bytes[feedback.arrays + 5] | 0x01]];
             }),
             c.feedbackCase("an array profile with DidPerformFirstRunPruning", feedback => {
-                c.t.check(feedback.counts.arrayProfiles, "imPlain has no array profile");
+                c.t.check(feedback.copies && feedback.counts.arrayProfiles, "imPlain's body carries no array profile");
                 return [feedback.arrays + 4, [feedback.bytes[feedback.arrays + 4] | 0x40]];
             }),
             c.feedbackCase("binary arithmetic bits from 1 << 14", feedback => {
@@ -112,7 +113,7 @@ load("./resources/invalid-material-cases.js", "caller relative");
             c.feedbackCase("a didOptimize of 3", () => [36, [3]]),
             c.feedbackCase("a quick DFG tier-up of 3", () => [37, [3]]),
             c.feedbackCase("a quick FTL tier-up of 2", () => [38, [2]]),
-            c.feedbackCase("a nonzero byte 39", () => [39, [1]]),
+            c.feedbackCase("a copies byte of 2", () => [39, [2]]),
             c.feedbackCase("a negative LLInt threshold", () => [40, [0xff, 0xff, 0xff, 0xff]]),
             c.feedbackCase("an LLInt total that is not finite", () => counter(Infinity, 0)),
             c.feedbackCase("an LLInt progress below 0", () => counter(0, -1)),

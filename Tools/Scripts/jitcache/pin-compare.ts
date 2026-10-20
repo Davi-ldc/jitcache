@@ -100,7 +100,7 @@ export interface PinSide {
   engine: EngineImage;
 }
 
-export type PinCheck = "pin-status" | "pin-output" | "pin-allocations" | "pin-code" | "pin-unreadable";
+export type PinCheck = "pin-crash" | "pin-status" | "pin-output" | "pin-allocations" | "pin-code" | "pin-unreadable";
 
 export interface PinDifference {
   check: PinCheck;
@@ -115,13 +115,17 @@ export interface PinComparison {
 
 // The options both runs take last, so they override the run's own. Concurrent JIT off compiles every body at a fixed
 // point of the script, and with the GC off nothing the code references dies or moves, so each address names one object
-// for the whole run; the dump and log options leave the emitted bytes unchanged.
+// for the whole run; the dump and log options leave the emitted bytes unchanged. A debug build poisons the dead
+// operands of an optimizing tier's exit, and the exit label the log options print reads that poison as a cell and
+// crashes, so the runs recover dead operands as undefined, as a release build does. Only optimizing exits and the FTL's
+// OSR entry read that option, never baseline code or a thunk.
 export function pinRunOptions(jitDumpDirectory: string): string[] {
   return [
     "--useConcurrentJIT=false",
     "--useGC=false",
     "--dumpDisassembly=true",
     "--logJIT=true",
+    "--poisonDeadOSRExitVariables=false",
     "--useJITDump=true",
     `--jitDumpDirectory=${jitDumpDirectory}`,
   ];
@@ -229,16 +233,20 @@ function loadSegments(path: string): Segment[] {
   }
 }
 
-// The llvm-nm of JITCACHE_LLVM_PREFIX, the toolchain build.ts builds with, or one on PATH.
+// The LLVM major the repository's build.ts builds with, in the package layout under JITCACHE_LLVM_PREFIX.
+const LLVM_MAJOR = 23;
+
+// The llvm-nm of JITCACHE_LLVM_PREFIX, the toolchain build.ts builds with, or one on PATH. The prefix's own llvm-nm
+// loads libLLVM.so from the prefix, so its multiarch and LLVM library directories go on LD_LIBRARY_PATH.
 function llvmNm(): { command: string; env: Record<string, string | undefined> } {
-  const prefix = resolve(process.env.JITCACHE_LLVM_PREFIX || join(homedir(), "collo-local/tools/llvm-21"));
-  const local = join(prefix, "usr/lib/llvm-21/bin/llvm-nm");
+  const prefix = resolve(process.env.JITCACHE_LLVM_PREFIX || join(homedir(), `collo-local/tools/llvm-${LLVM_MAJOR}`));
+  const local = join(prefix, `usr/lib/llvm-${LLVM_MAJOR}/bin/llvm-nm`);
   if (statSync(local, { throwIfNoEntry: false })?.isFile()) {
     const libraries = join(prefix, "usr/lib", process.arch === "arm64" ? "aarch64-linux-gnu" : "x86_64-linux-gnu");
-    const path = [libraries, join(prefix, "usr/lib/llvm-21/lib"), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
+    const path = [libraries, join(prefix, `usr/lib/llvm-${LLVM_MAJOR}/lib`), process.env.LD_LIBRARY_PATH].filter(Boolean).join(":");
     return { command: local, env: { ...process.env, LD_LIBRARY_PATH: path } };
   }
-  return { command: Bun.which("llvm-nm-21") ?? "llvm-nm", env: { ...process.env } };
+  return { command: Bun.which(`llvm-nm-${LLVM_MAJOR}`) ?? "llvm-nm", env: { ...process.env } };
 }
 
 function loadSymbols(path: string): EngineSymbol[] {
@@ -1621,6 +1629,15 @@ function compareUnits(index: number, a: Unit | null, b: Unit | null): string | n
 
 const describeStatus = (status: RunStatus) => (status.signal ? `ended by ${status.signal}` : `exited with ${status.code}`);
 
+// A run that ended by a signal crashed. The runner's environment ends a sanitizer error by SIGABRT, and a crash runs no
+// atexit handler, so its JIT dump lacks the records the profiler's queue had not yet written. The description gives the
+// signal and the line that opens the sanitizer report, when the run printed one.
+function describeCrash(label: string, capture: RunCapture): string | null {
+  if (!capture.status.signal) return null;
+  const report = /^==\d+==ERROR: .*$/m.exec(capture.stderr)?.[0];
+  return `${label} ended by ${capture.status.signal}${report ? `: ${clip(report)}` : ""}`;
+}
+
 function outputDifference(a: Uint8Array, b: Uint8Array): string | null {
   if (Buffer.from(a.buffer, a.byteOffset, a.byteLength).equals(Buffer.from(b.buffer, b.byteOffset, b.byteLength))) return null;
   const left = Buffer.from(a).toString("utf8").split("\n");
@@ -1634,7 +1651,10 @@ function outputDifference(a: Uint8Array, b: Uint8Array): string | null {
 
 export function compareRuns(architecture: Architecture, current: PinSide, pin: PinSide): PinComparison {
   const result = (check: PinCheck, detail: string, allocations = 0, bodies = 0): PinComparison => ({ difference: { check, detail }, allocations, bodies });
-  // Item 1: with JITCache off, this build behaves as the pin.
+  // With JITCache off, this build behaves as the pin: neither run crashes, and both end alike and print the same output.
+  // A crash fails even when the other run crashed alike, since a crashed run's dump does not hold the whole run.
+  const crashes = [describeCrash("this build's run", current.capture), describeCrash("the pin's run", pin.capture)].filter(crash => crash !== null);
+  if (crashes.length) return result("pin-crash", crashes.join("; "));
   if (current.capture.status.code !== pin.capture.status.code || current.capture.status.signal !== pin.capture.status.signal)
     return result("pin-status", `this build's run ${describeStatus(current.capture.status)}, the pin's ${describeStatus(pin.capture.status)}`);
   const output = outputDifference(current.capture.stdout, pin.capture.stdout);

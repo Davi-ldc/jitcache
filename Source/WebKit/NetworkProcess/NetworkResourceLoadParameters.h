@@ -34,6 +34,7 @@
 #include <WebCore/CrossOriginEmbedderPolicy.h>
 #include <WebCore/FetchOptions.h>
 #include <WebCore/FetchingWorkerIdentifier.h>
+#include <WebCore/IPAddressSpace.h>
 #include <WebCore/NavigationIdentifier.h>
 #include <WebCore/NavigationRequester.h>
 #include <WebCore/ResourceLoaderIdentifier.h>
@@ -78,7 +79,6 @@ struct NetworkResourceLoadParameters {
     bool hadMainFrameMainResourcePrivateRelayed { false };
     bool allowPrivacyProxy { true };
     OptionSet<WebCore::AdvancedPrivacyProtections> advancedPrivacyProtections { };
-    bool mayBlockNetworkRequest { false };
 
     uint64_t requiredCookiesVersion { 0 };
 
@@ -91,6 +91,7 @@ struct NetworkResourceLoadParameters {
     URL frameURL { };
     WebCore::CrossOriginEmbedderPolicy parentCrossOriginEmbedderPolicy { };
     WebCore::CrossOriginEmbedderPolicy crossOriginEmbedderPolicy { };
+    WebCore::DocumentIsolationPolicy documentIsolationPolicy { WebCore::DocumentIsolationPolicy::None };
     WebCore::HTTPHeaderMap originalRequestHeaders { };
     WebCore::PreflightPolicy preflightPolicy { WebCore::PreflightPolicy::Consider };
     bool shouldEnableCrossOriginResourcePolicy { false };
@@ -135,6 +136,15 @@ struct NetworkResourceLoadParameters {
     bool globalPrivacyControlEnabled { false };
     bool shouldConsiderEnhancedSecurityForInsecureResponse { false };
     MonotonicTime originalNavigationStartTime { };
+
+    // The connection's own address space is only known once a response arrives, so it is not a field here.
+    // FIXME: A compromised web process can under-report this to claim it is already at least as private
+    // as the target, which skips the check. Deriving it in the network process needs policy container
+    // inheritance, tracked in https://bugs.webkit.org/show_bug.cgi?id=319908
+    WebCore::IPAddressSpace clientAddressSpace { WebCore::IPAddressSpace::Public };
+    bool clientIsSecureContext { false };
+    bool localNetworkAllowedByPermissionsPolicy { false };
+    bool loopbackNetworkAllowedByPermissionsPolicy { false };
 };
 
 } // namespace WebKit

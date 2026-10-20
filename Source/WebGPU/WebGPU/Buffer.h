@@ -31,6 +31,7 @@
 #import <Metal/Metal.h>
 #import <WebGPU/WGPUBufferImpl.h>
 #import <WebGPU/WebGPU.h>
+#import <WebGPU/WebGPUCpp.h>
 #import <WebGPU/WebGPUExt.h>
 #import <utility>
 #import <wtf/CanBorrow.h>
@@ -41,22 +42,20 @@
 #import <wtf/Range.h>
 #import <wtf/RangeSet.h>
 #import <wtf/Ref.h>
-#import <wtf/RefCountedAndCanMakeWeakPtr.h>
 #import <wtf/SwiftBridging.h>
-#import <wtf/SwiftCXXThunk.h>
 #import <wtf/TZoneMalloc.h>
 #import <wtf/WeakPtr.h>
 
 IGNORE_CLANG_WARNINGS_BEGIN("nullability-completeness")
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class CommandBuffer;
 class CommandEncoder;
 class Device;
 
 // https://gpuweb.github.io/gpuweb/#gpubuffer
-class Buffer : public WGPUBufferImpl, public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<Buffer>, public CanBorrow, public TrackedResource {
+class Buffer final : public WebGPU::Buffer, public WGPUBufferImpl, public CanBorrow, public TrackedResource {
     WTF_MAKE_TZONE_ALLOCATED(Buffer);
 public:
     enum class State : uint8_t;
@@ -65,7 +64,7 @@ public:
         size_t endOffset; // Exclusive
     };
 
-    static Ref<Buffer> create(id<MTLBuffer> buffer, uint64_t initialSize, WGPUBufferUsageFlags usage, State initialState, MappingRange initialMappingRange, Device& device)
+    static Ref<Buffer> create(id<MTLBuffer> buffer, uint64_t initialSize, WGPUBufferUsage usage, State initialState, MappingRange initialMappingRange, Device& device)
     {
         return adoptRef(*new Buffer(buffer, initialSize, usage, initialState, initialMappingRange, device));
     }
@@ -77,14 +76,14 @@ public:
     ~Buffer();
 
     void destroy();
-    std::span<uint8_t> getMappedRange(size_t offset, size_t) HAS_SWIFTCXX_THUNK;
+    std::span<uint8_t> getMappedRange(size_t offset, size_t);
     void bufferCopy(std::span<const uint8_t>, size_t offset);
-    void mapAsync(WGPUMapModeFlags, size_t offset, size_t, CompletionHandler<void(WGPUBufferMapAsyncStatus)>&& callback);
+    void mapAsync(WGPUMapMode, size_t offset, size_t, CompletionHandler<void(WGPUMapAsyncStatus)>&& callback);
     void unmap();
-    void setLabel(String&&);
+    void setLabel(String&&) final;
     void generateAValidationError(String&&);
 
-    bool NODELETE isValid() const;
+    bool NODELETE isValid() const final;
 
     // https://gpuweb.github.io/gpuweb/#buffer-state
     enum class State : uint8_t {
@@ -99,7 +98,7 @@ public:
 
     uint64_t NODELETE initialSize() const;
     uint64_t currentSize() const;
-    WGPUBufferUsageFlags usage() const { return m_usage; }
+    WGPUBufferUsage usage() const { return m_usage; }
     State state() const { return m_state; }
 
     Device& device() const { return m_device; }
@@ -137,11 +136,11 @@ public:
     bool needsIndexValidation(uint32_t, uint16_t);
 
 private:
-    Buffer(id<MTLBuffer>, uint64_t initialSize, WGPUBufferUsageFlags, State initialState, MappingRange initialMappingRange, Device&);
+    Buffer(id<MTLBuffer>, uint64_t initialSize, WGPUBufferUsage, State initialState, MappingRange initialMappingRange, Device&);
     Buffer(Device&);
 
     bool validateGetMappedRange(size_t offset, size_t rangeSize) const;
-    NSString * _Nullable errorValidatingMapAsync(WGPUMapModeFlags, size_t offset, size_t rangeSize) const;
+    NSString * _Nullable errorValidatingMapAsync(WGPUMapMode, size_t offset, size_t rangeSize) const;
     bool NODELETE validateUnmap() const;
     void NODELETE setState(State);
     void incrementBufferMapCount();
@@ -152,13 +151,13 @@ private:
     // https://gpuweb.github.io/gpuweb/#buffer-interface
 
     const uint64_t m_initialSize { 0 };
-    const WGPUBufferUsageFlags m_usage { 0 };
+    const WGPUBufferUsage m_usage { 0 };
     State m_state { State::Unmapped };
     // [[mapping]] is unnecessary; we can just use m_device.contents.
     MappingRange m_mappingRange { 0, 0 };
     using MappedRanges = RangeSet<Range<size_t>>;
     MappedRanges m_mappedRanges;
-    WGPUMapModeFlags m_mapMode { WGPUMapMode_None };
+    WGPUMapMode m_mapMode { WGPUMapMode_None };
     uint32_t m_maxUnsignedIndex { 0 };
     uint16_t m_maxUshortIndex { 0 };
     uint32_t m_maxValidatedUnsignedIndex { 0 };
@@ -180,14 +179,14 @@ private:
     HashMap<uint64_t, bool, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_didReadOOB;
 } SWIFT_SHARED_REFERENCE(refBuffer, derefBuffer) SWIFT_PRIVATE_FILEID("WebGPU/Buffer.swift") SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
-inline void refBuffer(WebGPU::Buffer* obj)
+inline void refBuffer(WebGPU::Metal::Buffer* obj)
 {
     obj->ref();
 }
 
-inline void derefBuffer(WebGPU::Buffer* obj)
+inline void derefBuffer(WebGPU::Metal::Buffer* obj)
 {
     obj->deref();
 }

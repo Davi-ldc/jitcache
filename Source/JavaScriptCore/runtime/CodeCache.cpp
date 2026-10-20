@@ -54,7 +54,15 @@ void CodeCacheMap::pruneSlowCase()
         m_capacity = m_minCapacity;
 
     while (m_size > m_capacity || !canPruneQuickly()) {
-        MapType::iterator it = m_map.begin();
+        // Not begin(): it walks past every empty bucket in front of the first entry, and evicting that entry each
+        // time empties the front of the table, so one eviction costs a walk over a large part of the table.
+        // The least recently used of a few random entries instead, so a source that is used again and again stays.
+        MapType::iterator it = m_map.random();
+        for (unsigned i = 1; i < evictionSampleSize; ++i) {
+            MapType::iterator other = m_map.random();
+            if (other->value.age < it->value.age)
+                it = other;
+        }
 
         writeCodeBlock(it->key, it->value);
 
@@ -63,7 +71,28 @@ void CodeCacheMap::pruneSlowCase()
     }
 }
 
-static void generateUnlinkedCodeBlockForFunctions(VM& vm, UnlinkedCodeBlock* unlinkedCodeBlock, const SourceCode& parentSource, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, unsigned depth = std::numeric_limits<unsigned>::max())
+void CodeCacheMap::removeIfHolds(const SourceCodeKey& key, JSCell* cell)
+{
+    iterator it = m_map.find(key);
+    if (it == m_map.end() || it->value.cell.get() != cell)
+        return;
+    writeCodeBlock(it->key, it->value);
+    remove(it);
+}
+
+void CodeCacheMap::removeCodeDecodedFromPersistentPayloads()
+{
+    m_map.removeIf([&](auto& entry) {
+        auto* codeBlock = dynamicDowncast<UnlinkedCodeBlock>(entry.value.cell.get());
+        if (!codeBlock || !codeBlock->cachedPayloadIndex())
+            return false;
+        writeCodeBlock(entry.key, entry.value); // as clear() and removeIfHolds() do for what they drop
+        m_size -= entry.key.length();
+        return true;
+    });
+}
+
+static void generateUnlinkedCodeBlockForFunctions(VM& vm, UnlinkedCodeBlock* unlinkedCodeBlock, const SourceCode& parentSource, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, unsigned depth, OptimizeBytecode optimize)
 {
     if (!depth)
         return;
@@ -72,9 +101,9 @@ static void generateUnlinkedCodeBlockForFunctions(VM& vm, UnlinkedCodeBlock* unl
         // https://bugs.webkit.org/show_bug.cgi?id=193823
         CodeSpecializationKind kind = unlinkedExecutable->isClassConstructorFunction() ? CodeSpecializationKind::CodeForConstruct : CodeSpecializationKind::CodeForCall;
         SourceCode source = unlinkedExecutable->linkedSourceCode(parentSource);
-        UnlinkedFunctionCodeBlock* unlinkedFunctionCodeBlock = unlinkedExecutable->unlinkedCodeBlockFor(vm, source, kind, codeGenerationMode, error, unlinkedExecutable->parseMode());
+        UnlinkedFunctionCodeBlock* unlinkedFunctionCodeBlock = unlinkedExecutable->unlinkedCodeBlockFor(vm, source, kind, codeGenerationMode, error, unlinkedExecutable->parseMode(), optimize);
         if (unlinkedFunctionCodeBlock)
-            generateUnlinkedCodeBlockForFunctions(vm, unlinkedFunctionCodeBlock, source, codeGenerationMode, error, depth - 1);
+            generateUnlinkedCodeBlockForFunctions(vm, unlinkedFunctionCodeBlock, source, codeGenerationMode, error, depth - 1, optimize);
     };
 
     for (unsigned i = 0; i < unlinkedCodeBlock->numberOfFunctionDecls(); i++)
@@ -86,7 +115,7 @@ static void generateUnlinkedCodeBlockForFunctions(VM& vm, UnlinkedCodeBlock* unl
 // JITCache: a twin generation, the native generation an import is checked against, passes twinParseResults, which
 // receives what executable->recordParse would have, and leaves the executable alone.
 template<class UnlinkedCodeBlockType, class ExecutableType = ScriptExecutable>
-UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, DerivedContextType derivedContextType, bool isArrowFunctionContext, const TDZEnvironment* variablesUnderTDZ = nullptr, const PrivateNameEnvironment* privateNameEnvironment = nullptr, ExecutableType* executable = nullptr, JITCache::TwinParseResults* twinParseResults = nullptr)
+UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, DerivedContextType derivedContextType, bool isArrowFunctionContext, const TDZEnvironment* variablesUnderTDZ = nullptr, const PrivateNameEnvironment* privateNameEnvironment = nullptr, ExecutableType* executable = nullptr, OptimizeBytecode optimize = OptimizeBytecode::No, JITCache::TwinParseResults* twinParseResults = nullptr)
 {
     typedef typename CacheTypes<UnlinkedCodeBlockType>::RootNode RootNode;
     bool isInsideOrdinaryFunction = executable && executable->isInsideOrdinaryFunction();
@@ -97,19 +126,14 @@ UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& s
     if (!rootNode)
         return nullptr;
 
-    unsigned lineCount = rootNode->lastLine() - rootNode->firstLine();
-    unsigned startColumn = rootNode->startColumn() + 1;
-    bool endColumnIsOnStartLine = !lineCount;
-    unsigned unlinkedEndColumn = rootNode->endColumn();
-    unsigned endColumn = unlinkedEndColumn + (endColumnIsOnStartLine ? startColumn : 1);
     if (twinParseResults) {
 #if ENABLE(JITCACHE_TWINS)
-        *twinParseResults = { rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables(), static_cast<int>(rootNode->lastLine()), endColumn };
+        *twinParseResults = { rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables() };
 #else
         RELEASE_ASSERT_NOT_REACHED();
 #endif
     } else if (executable)
-        executable->recordParse(rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables(), rootNode->lastLine(), endColumn);
+        executable->recordParse(rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables());
 
     NeedsClassFieldInitializer needsClassFieldInitializer = NeedsClassFieldInitializer::No;
     PrivateBrandRequirement privateBrandRequirement = PrivateBrandRequirement::None;
@@ -120,16 +144,17 @@ UnlinkedCodeBlockType* generateUnlinkedCodeBlockImpl(VM& vm, const SourceCode& s
     ExecutableInfo executableInfo(false, privateBrandRequirement, false, ConstructorKind::None, scriptMode, SuperBinding::NotNeeded, CacheTypes<UnlinkedCodeBlockType>::parseMode, derivedContextType, needsClassFieldInitializer, isArrowFunctionContext, false, evalContextType);
 
     UnlinkedCodeBlockType* unlinkedCodeBlock = UnlinkedCodeBlockType::create(vm, executableInfo, codeGenerationMode);
-    unlinkedCodeBlock->recordParse(rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables(), lineCount, unlinkedEndColumn);
+    unlinkedCodeBlock->recordParse(rootNode->features(), rootNode->lexicallyScopedFeatures(), rootNode->hasCapturedVariables());
     if (!source.provider()->sourceURLDirective().isNull())
         unlinkedCodeBlock->setSourceURLDirective(source.provider()->sourceURLDirective());
     if (!source.provider()->sourceMappingURLDirective().isNull())
         unlinkedCodeBlock->setSourceMappingURLDirective(source.provider()->sourceMappingURLDirective());
+    unlinkedCodeBlock->setLineStarts(source.provider()->lineStartsIfBuilt());
 
     RefPtr<TDZEnvironmentLink> parentVariablesUnderTDZ;
     if (variablesUnderTDZ)
         parentVariablesUnderTDZ = TDZEnvironmentLink::create(vm.m_compactVariableMap->get(*variablesUnderTDZ), nullptr);
-    error = BytecodeGenerator::generate(vm, rootNode.get(), source, unlinkedCodeBlock, codeGenerationMode, parentVariablesUnderTDZ, nullptr, privateNameEnvironment);
+    error = BytecodeGenerator::generate(vm, rootNode.get(), source, unlinkedCodeBlock, codeGenerationMode, parentVariablesUnderTDZ, nullptr, privateNameEnvironment, optimize);
 
     if (error.isValid())
         return nullptr;
@@ -150,46 +175,44 @@ UnlinkedEvalCodeBlock* generateUnlinkedCodeBlockForDirectEval(VM& vm, DirectEval
 
 template <class UnlinkedCodeBlockType>
     requires (!std::same_as<UnlinkedCodeBlockType, UnlinkedEvalCodeBlock>)
-UnlinkedCodeBlockType* recursivelyGenerateUnlinkedCodeBlock(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, unsigned depth)
+UnlinkedCodeBlockType* recursivelyGenerateUnlinkedCodeBlock(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, unsigned depth, OptimizeBytecode optimize)
 {
     bool isArrowFunctionContext = false;
-    UnlinkedCodeBlockType* unlinkedCodeBlock = generateUnlinkedCodeBlockImpl<UnlinkedCodeBlockType>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, DerivedContextType::None, isArrowFunctionContext);
+    UnlinkedCodeBlockType* unlinkedCodeBlock = generateUnlinkedCodeBlockImpl<UnlinkedCodeBlockType>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, DerivedContextType::None, isArrowFunctionContext, nullptr, nullptr, static_cast<ScriptExecutable*>(nullptr), optimize);
     if (!unlinkedCodeBlock)
         return nullptr;
 
-    generateUnlinkedCodeBlockForFunctions(vm, unlinkedCodeBlock, source, codeGenerationMode, error, depth);
+    generateUnlinkedCodeBlockForFunctions(vm, unlinkedCodeBlock, source, codeGenerationMode, error, depth, optimize);
     return unlinkedCodeBlock;
 }
 
-void recursivelyGenerateUnlinkedCodeBlocksForFunction(VM& vm, UnlinkedFunctionExecutable* executable, const SourceCode& parentSource, ParserError& error, unsigned depth)
+void recursivelyGenerateUnlinkedCodeBlocksForFunction(VM& vm, UnlinkedFunctionExecutable* executable, const SourceCode& parentSource, ParserError& error, unsigned depth, OptimizeBytecode optimize)
 {
     SourceCode source = executable->linkedSourceCode(parentSource);
-    UnlinkedFunctionCodeBlock* codeBlock = executable->unlinkedCodeBlockFor(vm, source, executable->isClassConstructorFunction() ? CodeSpecializationKind::CodeForConstruct : CodeSpecializationKind::CodeForCall, { }, error, executable->parseMode());
+    UnlinkedFunctionCodeBlock* codeBlock = executable->unlinkedCodeBlockFor(vm, source, executable->isClassConstructorFunction() ? CodeSpecializationKind::CodeForConstruct : CodeSpecializationKind::CodeForCall, { }, error, executable->parseMode(), optimize);
     if (codeBlock)
-        generateUnlinkedCodeBlockForFunctions(vm, codeBlock, source, { }, error, depth);
+        generateUnlinkedCodeBlockForFunctions(vm, codeBlock, source, { }, error, depth, optimize);
 }
 
-UnlinkedProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForProgram(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, unsigned depth)
+UnlinkedProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForProgram(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, unsigned depth, OptimizeBytecode optimize)
 {
-    return recursivelyGenerateUnlinkedCodeBlock<UnlinkedProgramCodeBlock>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, depth);
+    return recursivelyGenerateUnlinkedCodeBlock<UnlinkedProgramCodeBlock>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, depth, optimize);
 }
 
-UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModuleProgram(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, unsigned depth)
+UnlinkedModuleProgramCodeBlock* recursivelyGenerateUnlinkedCodeBlockForModuleProgram(VM& vm, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, JSParserScriptMode scriptMode, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error, EvalContextType evalContextType, unsigned depth, OptimizeBytecode optimize)
 {
-    return recursivelyGenerateUnlinkedCodeBlock<UnlinkedModuleProgramCodeBlock>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, depth);
+    return recursivelyGenerateUnlinkedCodeBlock<UnlinkedModuleProgramCodeBlock>(vm, source, lexicallyScopedFeatures, scriptMode, codeGenerationMode, error, evalContextType, depth, optimize);
 }
 
 void recordParseFromUnlinkedCodeBlock(GlobalExecutable* executable, const SourceCode& source, UnlinkedGlobalCodeBlock* unlinkedCodeBlock)
 {
-    unsigned lineCount = unlinkedCodeBlock->lineCount();
-    unsigned startColumn = unlinkedCodeBlock->startColumn() + source.startColumn().oneBasedInt();
-    bool endColumnIsOnStartLine = !lineCount;
-    unsigned endColumn = unlinkedCodeBlock->endColumn() + (endColumnIsOnStartLine ? startColumn : 1);
-    executable->recordParse(unlinkedCodeBlock->codeFeatures(), unlinkedCodeBlock->lexicallyScopedFeatures(), unlinkedCodeBlock->hasCapturedVariables(), source.firstLine().oneBasedInt() + lineCount, endColumn);
+    executable->recordParse(unlinkedCodeBlock->codeFeatures(), unlinkedCodeBlock->lexicallyScopedFeatures(), unlinkedCodeBlock->hasCapturedVariables());
     if (unlinkedCodeBlock->sourceURLDirective())
         source.provider()->setSourceURLDirective(unlinkedCodeBlock->sourceURLDirective());
     if (unlinkedCodeBlock->sourceMappingURLDirective())
         source.provider()->setSourceMappingURLDirective(unlinkedCodeBlock->sourceMappingURLDirective());
+    if (unlinkedCodeBlock->lineStarts())
+        source.provider()->setLineStarts(LineStarts { unlinkedCodeBlock->lineStarts() });
 }
 
 template<class UnlinkedCodeBlockType, class ExecutableType>
@@ -202,47 +225,42 @@ UnlinkedCodeBlockType* CodeCache::getUnlinkedGlobalCodeBlock(VM& vm, ExecutableT
         derivedContextType, evalContextType, isArrowFunctionContext, codeGenerationMode,
         std::nullopt);
     // JITCache: snapshots executable->lexicallyScopedFeatures(), the features the key above was built from, before any
-    // step below overwrites them. Without JITCache state the request does nothing, and the
-    // sequence is the native one: map, then the provider's cached bytecode, then generation.
+    // step below overwrites them. Without JITCache state the request does nothing, and the sequence is the native one.
     JITCache::GlobalRequest jitCacheRequest(vm, *executable, source, CacheTypes<UnlinkedCodeBlockType>::codeType, scriptMode, codeGenerationMode, evalContextType);
-    UnlinkedCodeBlockType* unlinkedCodeBlock = m_sourceCode.findCacheAndUpdateAge<UnlinkedCodeBlockType>(vm, key);
+    // Code of a module whose loader has a module scope of its own resolves that scope's
+    // variables as closure variables where other records of the same source resolve
+    // globals, so it cannot use the unlinked code those share (the baseline code cached
+    // on it assumes one resolution: JIT::emit_op_resolve_scope); it gets its own, which
+    // the records that share its executable then use.
+    bool privateToExecutable = false;
+    if constexpr (std::is_same_v<ExecutableType, ModuleProgramExecutable>)
+        privateToExecutable = !executable->resolvesInGlobalScope();
+    // (Nor is it registered for being dropped and decoded again: what is remembered for that is remembered per payload
+    // and provider, which the shared code of the same source may have as well.)
+    UnlinkedCodeBlockType* unlinkedCodeBlock = privateToExecutable ? m_sourceCode.fetchFromDisk<UnlinkedCodeBlockType>(vm, key, Decoder::RecoverableCode::No) : m_sourceCode.findCacheAndUpdateAge<UnlinkedCodeBlockType>(vm, key);
     if (unlinkedCodeBlock && Options::useCodeCache()) {
         recordParseFromUnlinkedCodeBlock(executable, source, unlinkedCodeBlock);
-        jitCacheRequest.didServeLive(*unlinkedCodeBlock);
+        jitCacheRequest.didServeLive(*unlinkedCodeBlock); // a block decoded just now has no record and gets nothing
         return unlinkedCodeBlock;
-    }
-
-    if (!unlinkedCodeBlock) {
-        // A block decoded from the provider's cached bytecode is as reusable as one we generated: remember it the way
-        // generated blocks are remembered, so another global in this VM loading the same source links against this
-        // block instead of decoding its own copy of the unlinked tree. With useCodeCache off the decoded block is
-        // dropped and the code is generated.
-        unlinkedCodeBlock = m_sourceCode.fetchFromDisk<UnlinkedCodeBlockType>(vm, key);
-        if (unlinkedCodeBlock && Options::useCodeCache()) {
-            jitCacheRequest.didDecode(*unlinkedCodeBlock); // seeds it before the map publishes it
-            m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
-            recordParseFromUnlinkedCodeBlock(executable, source, unlinkedCodeBlock);
-            return unlinkedCodeBlock;
-        }
     }
 
     // JITCache: an import replaces generation only; the holder publishes it as it publishes a generated block.
     if (auto* imported = jitCacheRequest.tryImport()) {
         auto* result = uncheckedDowncast<UnlinkedCodeBlockType>(imported);
-        publishGeneratedCodeBlock(vm, key, result);
+        publishGeneratedCodeBlock(vm, key, result, privateToExecutable);
         return result;
     }
 
     unlinkedCodeBlock = generateUnlinkedCodeBlock<UnlinkedCodeBlockType, ExecutableType>(vm, executable, source, scriptMode, codeGenerationMode, error, evalContextType);
     if (unlinkedCodeBlock)
         jitCacheRequest.didGenerate(*unlinkedCodeBlock);
-    publishGeneratedCodeBlock(vm, key, unlinkedCodeBlock);
+    publishGeneratedCodeBlock(vm, key, unlinkedCodeBlock, privateToExecutable);
     return unlinkedCodeBlock;
 }
 
-void CodeCache::publishGeneratedCodeBlock(VM& vm, const SourceCodeKey& key, UnlinkedCodeBlock* unlinkedCodeBlock)
+void CodeCache::publishGeneratedCodeBlock(VM& vm, const SourceCodeKey& key, UnlinkedCodeBlock* unlinkedCodeBlock, bool privateToExecutable)
 {
-    if (!unlinkedCodeBlock || !Options::useCodeCache())
+    if (!unlinkedCodeBlock || !Options::useCodeCache() || privateToExecutable)
         return;
 
     m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
@@ -270,6 +288,15 @@ UnlinkedModuleProgramCodeBlock* CodeCache::getUnlinkedModuleProgramCodeBlock(VM&
     return getUnlinkedGlobalCodeBlock<UnlinkedModuleProgramCodeBlock>(vm, executable, source, JSParserScriptMode::Module, codeGenerationMode, error, EvalContextType::None);
 }
 
+void CodeCache::forgetUnlinkedModuleProgramCodeBlock(ModuleProgramExecutable* executable, const SourceCode& source, UnlinkedModuleProgramCodeBlock* unlinkedCodeBlock)
+{
+    SourceCodeKey key(
+        source, String(), SourceCodeType::ModuleType, executable->lexicallyScopedFeatures(), JSParserScriptMode::Module,
+        executable->derivedContextType(), EvalContextType::None, executable->isArrowFunctionContext(), unlinkedCodeBlock->codeGenerationMode(),
+        std::nullopt);
+    m_sourceCode.removeIfHolds(key, unlinkedCodeBlock);
+}
+
 UnlinkedFunctionExecutable* CodeCache::getUnlinkedGlobalFunctionExecutable(VM& vm, const Identifier& name, const SourceCode& source, LexicallyScopedFeatures lexicallyScopedFeatures, OptionSet<CodeGenerationMode> codeGenerationMode, std::optional<int> functionConstructorParametersEndPosition, ParserError& error)
 {
     bool isArrowFunctionContext = false;
@@ -291,8 +318,7 @@ UnlinkedFunctionExecutable* CodeCache::getUnlinkedGlobalFunctionExecutable(VM& v
         return executable;
     }
 
-    JSTextPosition positionBeforeLastNewline;
-    std::unique_ptr<ProgramNode> program = parseFunctionForFunctionConstructor(vm, source, lexicallyScopedFeatures, error, &positionBeforeLastNewline, functionConstructorParametersEndPosition);
+    std::unique_ptr<ProgramNode> program = parseFunctionForFunctionConstructor(vm, source, lexicallyScopedFeatures, error, functionConstructorParametersEndPosition);
     if (!program) {
         RELEASE_ASSERT(error.isValid());
         return nullptr;
@@ -313,7 +339,6 @@ UnlinkedFunctionExecutable* CodeCache::getUnlinkedGlobalFunctionExecutable(VM& v
         return nullptr;
 
     metadata->overrideName(name);
-    metadata->setEndPosition(positionBeforeLastNewline);
     // The Function constructor only has access to global variables, so no variables will be under TDZ unless they're
     // in the global lexical environment, which we always TDZ check accesses from.
     ConstructAbility constructAbility = constructAbilityForParseMode(metadata->parseMode());
@@ -397,22 +422,22 @@ UnlinkedCodeBlock* generateGlobalTwin(const RequestState& state, TwinParseResult
     case RequestKind::Program: {
         auto* executable = uncheckedDowncast<ProgramExecutable>(globalExecutable);
         return generateUnlinkedCodeBlockImpl<UnlinkedProgramCodeBlock, ProgramExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, &results);
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, OptimizeBytecode::No, &results);
     }
     case RequestKind::Module: {
         auto* executable = uncheckedDowncast<ModuleProgramExecutable>(globalExecutable);
         return generateUnlinkedCodeBlockImpl<UnlinkedModuleProgramCodeBlock, ModuleProgramExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, &results);
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, OptimizeBytecode::No, &results);
     }
     case RequestKind::IndirectEval: {
         auto* executable = uncheckedDowncast<IndirectEvalExecutable>(globalExecutable);
         return generateUnlinkedCodeBlockImpl<UnlinkedEvalCodeBlock, IndirectEvalExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, &results);
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, OptimizeBytecode::No, &results);
     }
     case RequestKind::DirectEval: {
         auto* executable = uncheckedDowncast<DirectEvalExecutable>(globalExecutable);
         return generateUnlinkedCodeBlockImpl<UnlinkedEvalCodeBlock, DirectEvalExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), state.variablesUnderTDZ, state.privateNameEnvironment, executable, &results);
+            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), state.variablesUnderTDZ, state.privateNameEnvironment, executable, OptimizeBytecode::No, &results);
     }
     case RequestKind::FunctionBody:
         break;

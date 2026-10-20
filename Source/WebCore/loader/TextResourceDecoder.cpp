@@ -246,14 +246,19 @@ TextResourceDecoder::ContentType TextResourceDecoder::determineContentType(const
         return HTML;
     if (MIMETypeRegistry::isXMLMIMEType(mimeType) || mimeType == "text/xsl"_s)
         return XML;
+    if (MIMETypeRegistry::isSupportedJSONMIMEType(mimeType))
+        return JSON;
     return PlainText;
 }
 
 const PAL::TextEncoding& TextResourceDecoder::defaultEncoding(ContentType contentType, const PAL::TextEncoding& specifiedDefaultEncoding)
 {
-    // Despite 8.5 "Text/xml with Omitted Charset" of RFC 3023, we assume UTF-8 instead of US-ASCII 
+    // Despite 8.5 "Text/xml with Omitted Charset" of RFC 3023, we assume UTF-8 instead of US-ASCII
     // for text/xml. This matches Firefox.
     if (contentType == XML)
+        return PAL::UTF8Encoding();
+    // Per RFC 8259, JSON is UTF-8 by default; a BOM or explicit charset still overrides this.
+    if (contentType == JSON)
         return PAL::UTF8Encoding();
     if (!specifiedDefaultEncoding.isValid())
         return PAL::Latin1Encoding();
@@ -319,7 +324,7 @@ bool TextResourceDecoder::hasEqualEncodingForCharset(const String& charset) cons
 }
 
 // Returns the position of the encoding string.
-static size_t NODELETE findXMLEncoding(std::span<const uint8_t> string, size_t& encodingLength)
+static size_t findXMLEncoding(std::span<const uint8_t> string, size_t& encodingLength)
 {
     size_t position = find(string, byteCast<uint8_t>("encoding"_span));
     if (position == notFound)

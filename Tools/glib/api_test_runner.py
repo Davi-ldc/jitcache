@@ -157,9 +157,9 @@ class TestRunner(object):
 
     def _setup_testing_environment_for_driver(self, driver):
         test_env = driver._setup_environ_for_test() | self._port.environment_for_api_tests()
-        # The python display-server driver may set WPE_DISPLAY, but we unset it here because it causes issues with
+        # The python display-server driver may set WPE_PLATFORM, but we unset it here because it causes issues with
         # some WPE API tests like WPEPlatform/TestDisplayDefault that check the default behaviour of the APIs.
-        test_env.pop("WPE_DISPLAY", None)
+        test_env.pop("WPE_PLATFORM", None)
         return test_env
 
     def _tear_down_testing_environment(self):
@@ -228,7 +228,7 @@ class TestRunner(object):
             if self.is_wpe_platform_test(test_program):
                 # WPE Platform tests can run without swrast since nothing is rendered.
                 env = dict(env)
-                env.pop('LIBGL_ALWAYS_SOFTWARE')
+                env.pop('LIBGL_ALWAYS_SOFTWARE', None)
 
         def is_slow_test(test, subtest):
             return self._expectations.is_slow(test, subtest)

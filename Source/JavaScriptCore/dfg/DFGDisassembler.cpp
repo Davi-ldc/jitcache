@@ -83,7 +83,7 @@ void Disassembler::dumpHeader(PrintStream& out, LinkBuffer& linkBuffer)
 
 void Disassembler::append(Vector<Disassembler::DumpedOp>& result, StringPrintStream& out, CodeOrigin& previousOrigin)
 {
-    result.append(DumpedOp(previousOrigin, out.toCString()));
+    result.append(DumpedOp(previousOrigin, out.toUTF8CString()));
     previousOrigin = CodeOrigin();
     out.reset();
 }
@@ -100,7 +100,7 @@ Vector<Disassembler::DumpedOp> Disassembler::createDumpList(LinkBuffer& linkBuff
     m_graph.ensureCPSDominators();
     m_graph.ensureCPSNaturalLoops();
     
-    const char* prefix = "    ";
+    constexpr auto prefix = "    "_s;
     const char* disassemblyPrefix = "        ";
     
     Node* lastNode = nullptr;

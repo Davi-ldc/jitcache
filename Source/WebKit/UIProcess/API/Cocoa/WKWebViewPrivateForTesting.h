@@ -66,6 +66,10 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 - (NSString *)_caLayerTreeAsTextForLayer:(CALayer *)layer;
 
 - (NSDictionary<NSString *, id> *)_propertiesOfLayerWithID:(unsigned long long)layerID;
+
+// The transient zoom override on the scrolled-contents layer, empty when there is none. macOS only.
+- (NSString *)_delegatedZoomOverrideAsTextForTesting;
+
 - (NSString*)_scrollbarStateForScrollingNodeID:(uint64_t)scrollingNodeID processID:(uint64_t)processID isVertical:(bool)isVertical;
 
 - (void)_addEventAttributionWithSourceID:(uint8_t)sourceID destinationURL:(NSURL *)destination sourceDescription:(NSString *)sourceDescription purchaser:(NSString *)purchaser reportEndpoint:(NSURL *)reportEndpoint optionalNonce:(nullable NSString *)nonce applicationBundleID:(NSString *)bundleID ephemeral:(BOOL)ephemeral WK_API_AVAILABLE(macos(13.0), ios(16.0));
@@ -78,6 +82,7 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 
 - (void)_setContinuousSpellCheckingEnabledForTesting:(BOOL)enabled;
 - (void)_setGrammarCheckingEnabledForTesting:(BOOL)enabled;
+- (void)_setUseDarkAppearanceForTesting:(BOOL)useDarkAppearance;
 - (NSDictionary *)_contentsOfUserInterfaceItem:(NSString *)userInterfaceItem;
 
 - (void)_requestActiveNowPlayingSessionInfo:(void(^)(BOOL, BOOL, NSString*, double, double, NSInteger, NSUInteger))callback;
@@ -94,6 +99,8 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 // Highest end time of the seekable ranges the playback controls manager knows about, NaN when it
 // has none. An empty range here is what leaves the fullscreen scrubber disabled.
 @property (nonatomic, readonly) double _maximumSeekableTime;
+
+@property (nonatomic, readonly) CGRect _lastVideoPresentationSetupRectForTesting;
 
 - (void)_setIndexOfGetDisplayMediaDeviceSelectedForTesting:(nullable NSNumber *)index;
 - (void)_setSystemCanPromptForGetDisplayMediaForTesting:(BOOL)canPrompt;
@@ -128,6 +135,8 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 
 @property (nonatomic, readonly) pid_t _networkProcessIdentifier;
 
+@property (nonatomic, readonly) uint64_t _webPageProxyIdentifierForTesting;
+
 @property (nonatomic, readonly) unsigned long _countOfUpdatesWithLayerChanges;
 
 - (void)_processWillSuspendForTesting:(void (^)(void))completionHandler;
@@ -144,6 +153,10 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 
 + (void)_setApplicationBundleIdentifier:(NSString *)bundleIdentifier;
 + (void)_clearApplicationBundleIdentifierTestingOverride;
+
+// Accessibility mode is a single UIProcess-wide value, so these are per-process, not per-view.
++ (BOOL)_isAccessibilityEnabledForTesting;
++ (void)_resetAccessibilityModeForTesting;
 
 - (BOOL)_hasSleepDisabler;
 - (WKWebViewAudioRoutingArbitrationStatus)_audioRoutingArbitrationStatus;
@@ -176,6 +189,8 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 
 - (void)_computePagesForPrinting:(_WKFrameHandle *)handle completionHandler:(void(^)(void))completionHandler WK_API_AVAILABLE(macos(13.0), ios(16.0));
 - (void)_endPrintingForTesting:(void(^)(void))completionHandler;
+// Blocks the main thread until the pages have been drawn, as UIKit printing does. Needs printing to have begun.
+- (NSData *)_drawPagesToPDFSynchronouslyForTesting:(_WKFrameHandle *)handle;
 
 - (void)_setConnectedToHardwareConsoleForTesting:(BOOL)connected;
 
@@ -195,6 +210,8 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 
 - (void)_textFragmentRangesWithCompletionHandlerForTesting:(void(^)(NSArray<NSValue *> *fragmentRanges))completionHandler WK_API_AVAILABLE(macos(26.0), ios(26.0), visionos(26.0));
 
+@property (nonatomic, readonly) CGRect _textIndicatorBoundingRectForTesting;
+
 @property (nonatomic, readonly) _WKRectEdge _fixedContainerEdges;
 #if TARGET_OS_IPHONE
 @property (nonatomic, readonly) UIColor *_sampledLeftFixedPositionContentColor;
@@ -207,8 +224,9 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 #endif
 - (void)_cancelFixedColorExtensionFadeAnimationsForTesting;
 
-- (void)_startMonitoringWheelEventsForTesting:(void(^)(void))completionHandler;
-- (void)_waitForWheelEventsToCompleteForTesting:(void(^)(void))completionHandler;
+- (void)_startMonitoringWheelEventsForTestingWithCompletionHandler:(void(^)(void))completionHandler;
+- (void)_waitForWheelEventsToCompleteForTestingWithCompletionHandler:(void(^)(void))completionHandler;
+- (void)_waitForWheelEventsAndMomentumToCompleteForTestingWithCompletionHandler:(void(^)(void))completionHandler;
 
 - (unsigned)_forwardedLogsCountForTesting;
 - (bool)_receivedLogsDuringLaunchForTesting;
@@ -218,12 +236,16 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 - (NSString *)_webContentProcessVariantForFrame:(nullable _WKFrameHandle *)frameHandle;
 
 #if defined(ENABLE_THREADED_ANIMATIONS) && ENABLE_THREADED_ANIMATIONS
-- (NSString *)_animationStackForLayerWithID:(unsigned long long)layerID;
+- (NSString *)_animationStackForLayerWithIDInMainFrame:(unsigned long long)layerID;
+- (NSString *)_animationStackForLayerWithID:(unsigned long long)layerID processID:(uint64_t)processID;
 - (NSString *)_progressBasedTimelinesForScrollingNodeID:(uint64_t)scrollingNodeID processID:(uint64_t)processID;
+- (NSString *)_monotonicTimelinesForProcessID:(uint64_t)processID;
 #endif
 - (bool)_displayLinkWantsHighFrameRate;
 
 - (void)_lastPageLoadNetworkActivityCompletionCodeForTesting:(void(^)(NSNumber * _Nullable completionCode))completionHandler;
+
+- (void)_topDocumentURLsInBackForwardCacheAtIndexForTesting:(NSInteger)relativeIndex completionHandler:(void(^)(NSArray<NSURL *> *topDocumentURLs))completionHandler;
 
 #if TARGET_OS_IPHONE
 + (void)_setVisibilityEndowmentForTesting:(BOOL)isVisible;

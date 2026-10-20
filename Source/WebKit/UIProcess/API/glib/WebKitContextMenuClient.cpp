@@ -40,8 +40,8 @@ private:
     {
         GRefPtr<GVariant> variant;
         if (userData) {
-            CString userDataString = downcast<API::String>(userData)->string().utf8();
-            const auto userDataSpan = userDataString.spanIncludingNullTerminator();
+            auto userDataString = downcast<API::String>(userData)->string().utf8();
+            const auto userDataSpan = byteCast<char>(userDataString.spanIncludingNullTerminator());
             variant = adoptGRef(g_variant_parse(nullptr, userDataSpan.data(), userDataSpan.last(1).data(), nullptr, nullptr));
         }
 
@@ -57,7 +57,7 @@ private:
 
 void attachContextMenuClientToView(WebKitWebView* webView)
 {
-    webkitWebViewGetPage(webView).setContextMenuClient(makeUnique<ContextMenuClient>(webView));
+    protect(webkitWebViewGetPage(webView))->setContextMenuClient(makeUnique<ContextMenuClient>(webView));
 }
 
 #endif // ENABLE(CONTEXT_MENUS)

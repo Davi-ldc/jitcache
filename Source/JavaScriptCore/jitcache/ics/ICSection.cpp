@@ -3,6 +3,7 @@
 
 #if ENABLE(JIT)
 
+#include "ArrayProfile.h"
 #include "BytecodeStructs.h"
 #include "PropertyInlineCache.h"
 #include <algorithm>
@@ -18,6 +19,17 @@ namespace JSC::JITCache::ICs {
 namespace ICSectionInternal {
 
 static constexpr size_t sectionAlignment = 8;
+
+// The eight ArrayProfileFlag bits, the pruning mark included: the flags any array profile can hold.
+static constexpr uint32_t allArrayProfileFlags = static_cast<uint32_t>(ArrayProfileFlag::MayStoreHole)
+    | static_cast<uint32_t>(ArrayProfileFlag::OutOfBounds)
+    | static_cast<uint32_t>(ArrayProfileFlag::MayBeLargeTypedArray)
+    | static_cast<uint32_t>(ArrayProfileFlag::MayInterceptIndexedAccesses)
+    | static_cast<uint32_t>(ArrayProfileFlag::UsesNonOriginalArrayStructures)
+    | static_cast<uint32_t>(ArrayProfileFlag::MayBeResizableOrGrowableSharedTypedArray)
+    | static_cast<uint32_t>(ArrayProfileFlag::DidPerformFirstRunPruning)
+    | static_cast<uint32_t>(ArrayProfileFlag::MayBeRegExpMatchesArray);
+static_assert(allArrayProfileFlags == 0xff);
 
 static bool hasBit(uint8_t bits, uint8_t bit)
 {
@@ -80,6 +92,19 @@ static std::optional<Invalid> checkHeader(std::span<const uint8_t> bytes)
     return std::nullopt;
 }
 
+// A call-link record sets no unused bit, holds this words only at an opcode with a this profile, and there only modes
+// and flags an array profile can hold.
+static bool hasOnlyKnownBits(const CallLinkOpcode& opcode, const CallLinkRecord& record)
+{
+    if (record.bits & ~CallLinkBit::mask)
+        return false;
+    uint32_t modes = readThisArrayModes(record);
+    uint32_t flags = readThisArrayProfileFlags(record);
+    if (!opcode.hasThisProfile)
+        return !modes && !flags;
+    return !(modes & ~static_cast<uint32_t>(ALL_ARRAY_MODES)) && !(flags & ~allArrayProfileFlags);
+}
+
 // The checks from CallLinkGroups to SummaryCount, on a section whose size checkHeader accepted.
 static std::optional<Invalid> checkBody(const SlicedSection& section)
 {
@@ -105,9 +130,15 @@ static std::optional<Invalid> checkBody(const SlicedSection& section)
         if ((record.learningBits & ~LearningBit::mask) || (record.stateBits & ~StateBit::mask) || record.reserved[0] || record.reserved[1])
             return Invalid { Check::ReservedBits, static_cast<uint32_t>(index) };
     }
-    for (size_t index = 0; index < view.callLinks.size(); ++index) {
-        if (view.callLinks[index].bits & ~CallLinkBit::mask)
-            return Invalid { Check::ReservedBits, static_cast<uint32_t>(index) };
+    // The groups passed CallLinkGroups, so they give each record its opcode, and their counts add up to the records.
+    size_t recordIndex = 0;
+    for (unsigned groupIndex = 0; groupIndex < view.header.callLinkGroupCount; ++groupIndex) {
+        CallLinkGroup group = view.group(groupIndex);
+        const CallLinkOpcode& opcode = callLinkOpcodes[*canonicalCallLinkPosition(static_cast<OpcodeID>(group.opcodeID))];
+        for (uint32_t siteInGroup = 0; siteInGroup < group.siteCount; ++siteInGroup, ++recordIndex) {
+            if (!hasOnlyKnownBits(opcode, view.callLinks[recordIndex]))
+                return Invalid { Check::ReservedBits, static_cast<uint32_t>(recordIndex) };
+        }
     }
     if (std::ranges::any_of(section.padding, [](uint8_t byte) -> bool { return byte; }))
         return Invalid { Check::ReservedBits, 0 };
@@ -138,28 +169,6 @@ static std::optional<Invalid> checkSection(std::span<const uint8_t> bytes)
 
 } // namespace ICSectionInternal
 
-std::optional<unsigned> canonicalCallLinkPosition(OpcodeID opcodeID)
-{
-    for (unsigned position = 0; position < numberOfCallLinkOpcodes; ++position) {
-        if (callLinkOpcodes[position] == opcodeID)
-            return position;
-    }
-    return std::nullopt;
-}
-
-bool isVarargsCallLinkOpcode(OpcodeID opcodeID)
-{
-    switch (opcodeID) {
-    case OpCallVarargs::opcodeID:
-    case OpTailCallVarargs::opcodeID:
-    case OpConstructVarargs::opcodeID:
-    case OpSuperConstructVarargs::opcodeID:
-        return true;
-    default:
-        return false;
-    }
-}
-
 std::optional<size_t> sectionSize(size_t groupCount, size_t propertyICCount, size_t callLinkSiteCount)
 {
     if (groupCount > numberOfCallLinkOpcodes)
@@ -174,6 +183,33 @@ std::optional<size_t> sectionSize(size_t groupCount, size_t propertyICCount, siz
     if (size.hasOverflowed())
         return std::nullopt;
     return size.value() & ~(ICSectionInternal::sectionAlignment - 1);
+}
+
+ASCIILiteral description(Check check)
+{
+    switch (check) {
+    case Check::SectionSize:
+        return "section-size"_s;
+    case Check::SummaryBound:
+        return "summary-bound"_s;
+    case Check::CallLinkGroups:
+        return "call-link-groups"_s;
+    case Check::ReservedBits:
+        return "reserved-bits"_s;
+    case Check::EnumRange:
+        return "enum-range"_s;
+    case Check::SummaryCount:
+        return "summary-count"_s;
+    case Check::MoldPairing:
+        return "mold-pairing"_s;
+    case Check::MetadataLayout:
+        return "metadata-layout"_s;
+    case Check::MoldMegamorphicBit:
+        return "mold-megamorphic-bit"_s;
+    case Check::NewbornCallLinks:
+        return "newborn-call-links"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 CallLinkGroup SectionView::group(unsigned index) const
@@ -233,17 +269,48 @@ RestoredPropertyIC restoredPropertyIC(const PropertyICRecord& record)
     };
 }
 
-RestoredCallLink restoredCallLink(const CallLinkRecord& record)
+RestoredCallLink restoredCallLink(const CallLinkOpcode& opcode, const CallLinkRecord& record)
 {
     using ICSectionInternal::hasBit;
-    bool isVirtual = static_cast<CallLinkModeCode>(record.bits & CallLinkBit::modeMask) == CallLinkModeCode::Virtual;
+    auto mode = static_cast<CallLinkModeCode>(record.bits & CallLinkBit::modeMask);
+    bool isVirtual = mode == CallLinkModeCode::Virtual;
+    // Only the opcodes with a this profile carry one; elsewhere the fields hold nothing.
+    uint32_t thisArrayModes = opcode.hasThisProfile ? readThisArrayModes(record) : 0;
+    uint32_t thisArrayProfileFlags = opcode.hasThisProfile ? readThisArrayProfileFlags(record) : 0;
+    // What only a CallSiteData or CallLinkInfo of the site's own can hold. A this profile with observations has no other
+    // place in the consumer: the shared data holds no site's profile, and a builtin's UCB keeps no copy to merge from.
+    bool holding = isVirtual
+        || hasBit(record.bits, CallLinkBit::hasSeenClosure)
+        || hasBit(record.bits, CallLinkBit::clearedByGC)
+        || hasBit(record.bits, CallLinkBit::clearedByVirtual)
+        || record.maxArgumentCountIncludingThisForVarargs
+        || thisArrayModes
+        || thisArrayProfileFlags;
+    // The site never ran, or a reset left it as linking did, or it is a direct eval whose callee was not eval: either way
+    // the producer's next call there would not link.
+    bool empty = !holding && mode == CallLinkModeCode::Init && !hasBit(record.bits, CallLinkBit::seenOnce);
+
+    // The site comes back as the producer's last execution left it, ready to link at its next call, with data of its own
+    // only when it has something to hold. A tail call that ran is the exception: no shared data holds a tail call's seen
+    // bit, and natively it gets data of its own before its first call.
+    CallSiteDataState data = CallSiteDataState::ExecutedOnce;
+    if (opcode.kind == CallLinkSiteKind::Inline)
+        data = CallSiteDataState::Inline;
+    else if (empty)
+        data = CallSiteDataState::NotExecuted;
+    else if (holding || opcode.kind == CallLinkSiteKind::LazyTailCall)
+        data = CallSiteDataState::Own;
+
     return RestoredCallLink {
+        .data = data,
         .isVirtual = isVirtual,
-        .seenOnce = !isVirtual,
+        .seenOnce = !empty && !isVirtual,
         .hasSeenClosure = hasBit(record.bits, CallLinkBit::hasSeenClosure),
         .clearedByGC = hasBit(record.bits, CallLinkBit::clearedByGC),
         .clearedByVirtual = hasBit(record.bits, CallLinkBit::clearedByVirtual) || isVirtual,
         .maxArgumentCountIncludingThisForVarargs = record.maxArgumentCountIncludingThisForVarargs,
+        .thisArrayModes = thisArrayModes,
+        .thisArrayProfileFlags = thisArrayProfileFlags,
     };
 }
 
@@ -266,19 +333,32 @@ PropertyICRecord recapturedPropertyIC(const PropertyICRecord& record)
     };
 }
 
-CallLinkRecord recapturedCallLink(const CallLinkRecord& record)
+CallLinkRecord recapturedCallLink(const CallLinkOpcode& opcode, const CallLinkRecord& record)
 {
     using ICSectionInternal::bitIf;
-    RestoredCallLink restored = restoredCallLink(record);
+    RestoredCallLink restored = restoredCallLink(opcode, record);
+    CallLinkRecord result { };
+    switch (restored.data) {
+    case CallSiteDataState::NotExecuted:
+        // The site points at what linking gave it, of which a capture reads nothing.
+        return result;
+    case CallSiteDataState::ExecutedOnce:
+        // The site points at the executed-once data, of which a capture reads only the seen bit.
+        result.bits = CallLinkBit::seenOnce;
+        return result;
+    case CallSiteDataState::Inline:
+    case CallSiteDataState::Own:
+        break;
+    }
     CallLinkModeCode mode = restored.isVirtual ? CallLinkModeCode::Virtual : CallLinkModeCode::Init;
-    return CallLinkRecord {
-        .bits = static_cast<uint8_t>(static_cast<uint8_t>(mode)
-            | bitIf(restored.seenOnce, CallLinkBit::seenOnce)
-            | bitIf(restored.hasSeenClosure, CallLinkBit::hasSeenClosure)
-            | bitIf(restored.clearedByGC, CallLinkBit::clearedByGC)
-            | bitIf(restored.clearedByVirtual, CallLinkBit::clearedByVirtual)),
-        .maxArgumentCountIncludingThisForVarargs = restored.maxArgumentCountIncludingThisForVarargs,
-    };
+    result.bits = static_cast<uint8_t>(static_cast<uint8_t>(mode)
+        | bitIf(restored.seenOnce, CallLinkBit::seenOnce)
+        | bitIf(restored.hasSeenClosure, CallLinkBit::hasSeenClosure)
+        | bitIf(restored.clearedByGC, CallLinkBit::clearedByGC)
+        | bitIf(restored.clearedByVirtual, CallLinkBit::clearedByVirtual));
+    result.maxArgumentCountIncludingThisForVarargs = restored.maxArgumentCountIncludingThisForVarargs;
+    writeThisProfile(result, restored.thisArrayModes, restored.thisArrayProfileFlags);
+    return result;
 }
 
 } // namespace JSC::JITCache::ICs

@@ -585,6 +585,42 @@ FloatRect FrameView::convertToRootViewAcrossIsolatedFrames(FloatRect rect) const
     return parentView->convertToRootViewAcrossIsolatedFrames(parentRect);
 }
 
+IntPoint FrameView::convertToRootViewAcrossIsolatedFrames(IntPoint point) const
+{
+    RefPtr parentView = siteIsolationAwareParentView(*this);
+    if (!parentView)
+        return point;
+
+    IntPoint parentPoint;
+    if (is<LocalFrameView>(*parentView))
+        parentPoint = convertToContainingView(point);
+    else {
+        Ref frame = this->frame();
+        point.moveBy(roundedIntPoint(parentView->childFrameOwnerContentBoxLocation(frame)));
+        parentPoint = roundedIntPoint(parentView->contentsToView(parentView->childFrameOwnerToRootContentTransform(frame).projectPoint(point)));
+    }
+
+    return parentView->convertToRootViewAcrossIsolatedFrames(parentPoint);
+}
+
+IntRect FrameView::convertToRootViewAcrossIsolatedFrames(IntRect rect) const
+{
+    RefPtr parentView = siteIsolationAwareParentView(*this);
+    if (!parentView)
+        return rect;
+
+    IntRect parentRect;
+    if (is<LocalFrameView>(*parentView))
+        parentRect = convertToContainingView(rect);
+    else {
+        Ref frame = this->frame();
+        rect.moveBy(roundedIntPoint(parentView->childFrameOwnerContentBoxLocation(frame)));
+        parentRect = roundedIntRect(parentView->contentsToView(parentView->childFrameOwnerToRootContentTransform(frame).projectQuad(FloatQuad { rect }).boundingBox()));
+    }
+
+    return parentView->convertToRootViewAcrossIsolatedFrames(parentRect);
+}
+
 FloatQuad FrameView::convertToRootViewAcrossIsolatedFrames(const FloatQuad& quad) const
 {
     // Map each corner independently so a CSS transform (which need not preserve axis alignment) is
@@ -597,9 +633,44 @@ FloatQuad FrameView::convertToRootViewAcrossIsolatedFrames(const FloatQuad& quad
     };
 }
 
+FloatPoint FrameView::contentsToMainFrameView(FloatPoint point) const
+{
+    return convertToRootViewAcrossIsolatedFrames(contentsToView(point));
+}
+
+FloatQuad FrameView::contentsToMainFrameView(const FloatQuad& quad) const
+{
+    return {
+        contentsToMainFrameView(quad.p1()),
+        contentsToMainFrameView(quad.p2()),
+        contentsToMainFrameView(quad.p3()),
+        contentsToMainFrameView(quad.p4()),
+    };
+}
+
+FloatPoint FrameView::rootViewToContentsAcrossIsolatedFrames(FloatPoint point) const
+{
+    return viewToContents(convertFromRootViewAcrossIsolatedFrames(point));
+}
+
 FloatRect FrameView::rootViewToContentsAcrossIsolatedFrames(FloatRect rect) const
 {
     return viewToContents(convertFromRootViewAcrossIsolatedFrames(rect));
+}
+
+IntRect FrameView::contentsToMainFrameView(const IntRect& rect) const
+{
+    return convertToRootViewAcrossIsolatedFrames(contentsToView(rect));
+}
+
+FloatRect FrameView::contentsToMainFrameView(FloatRect rect) const
+{
+    return convertToRootViewAcrossIsolatedFrames(contentsToView(rect));
+}
+
+IntPoint FrameView::contentsToMainFrameView(const IntPoint& point) const
+{
+    return roundedIntPoint(convertToRootViewAcrossIsolatedFrames(FloatPoint { contentsToView(point) }));
 }
 
 }

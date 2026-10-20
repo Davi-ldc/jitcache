@@ -8,6 +8,7 @@
 #include "BaselineJITCode.h"
 #include "ByteFields.h"
 #include "CBFormat.h"
+#include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "DeferGC.h"
 #include "ExecutionCounter.h"
@@ -33,10 +34,11 @@
 
 // Capture of a baseline CodeBlock's state into cb.state and cb.summary, and the score of a body, live or saved. One walk
 // reads each scored slot once, with the UCB copy it pairs with, and hands the values to a visitor: capture's writes the
-// cb.state record and, from the same value, the cb.summary slot, and scores that slot; scoreLive's only scores.
-// decodeSummary scores a saved body from its cb.summary alone, since scoring a saved body has no CodeBlock. All three
-// count richness through Richness and build the score through scoreOf, so the score capture returns is the one
-// decodeSummary later reads from the summary capture wrote.
+// cb.state record, where the slot has one, and, from the same value, the cb.summary slot, and scores that slot;
+// scoreLive's only scores. A call site's slot has no record: its this profile, which the ICs lane carries, is read for
+// the summary alone. decodeSummary scores a saved body from its cb.summary alone, since scoring a saved body has no
+// CodeBlock. All three count richness through Richness and build the score through scoreOf, so the score capture returns
+// is the one decodeSummary later reads from the summary capture wrote.
 
 namespace JSC::JITCache {
 
@@ -50,8 +52,36 @@ struct SlotCounts {
     uint32_t numArguments { 0 };
     uint32_t numValueProfiles { 0 };
     uint32_t numLazyOperandProfiles { 0 };
-    uint32_t numArrayProfiles { 0 }; // A0..A15, which the native merge pairs with unlinkedArrayProfiles()
+    // The array positions of A0..A15, call sites included, which the native merge pairs with the UCB's arrayProfiles().
+    uint32_t numArrayProfiles { 0 };
     CBFormat::FamilyEntryCounts familyEntryCount { };
+};
+
+// The UCB's copies, as the native merges reach them: none for a builtin, and none while valueAndArrayProfiles() is null,
+// as it is for any other UCB until one of its CBs is first handed to the Baseline JIT.
+static UnlinkedCodeBlock::ValueAndArrayProfiles* unlinkedProfilesOf(UnlinkedCodeBlock& unlinkedCodeBlock)
+{
+    if (unlinkedCodeBlock.isBuiltinFunction())
+        return nullptr;
+    return unlinkedCodeBlock.valueAndArrayProfiles();
+}
+
+// The copies the walk pairs each slot with: empty spans when the UCB has none.
+struct UnlinkedCopies {
+    explicit UnlinkedCopies(UnlinkedCodeBlock& unlinkedCodeBlock)
+    {
+        if (auto* profiles = unlinkedProfilesOf(unlinkedCodeBlock)) {
+            valueProfiles = profiles->valueProfiles();
+            arrayProfiles = profiles->arrayProfiles();
+        }
+    }
+
+    // A slot without a UCB copy pairs with nothing, as the native merges skip it.
+    SpeculatedType valuePrediction(size_t index) const { return valueProfiles.empty() ? SpecNone : valueProfiles[index].prediction(); }
+    OptionSet<ArrayProfileFlag> arrayProfileFlags(size_t position) const { return arrayProfiles.empty() ? OptionSet<ArrayProfileFlag> { } : arrayProfiles[position].arrayProfileFlags(); }
+
+    std::span<const UnlinkedValueProfile> valueProfiles;
+    std::span<const UnlinkedArrayProfile> arrayProfiles;
 };
 
 static SlotCounts countSlots(CodeBlock& codeBlock)
@@ -60,8 +90,7 @@ static SlotCounts countSlots(CodeBlock& codeBlock)
     counts.numArguments = codeBlock.numParameters();
     counts.numValueProfiles = codeBlock.unlinkedCodeBlock()->metadata().numValueProfiles();
     counts.familyEntryCount = CBFormat::familyEntryCounts(codeBlock);
-    for (unsigned family = CBFormat::firstArrayProfileFamily; family < CBFormat::firstArrayProfileFamily + CBFormat::numberOfArrayProfileFamilies; ++family)
-        counts.numArrayProfiles += counts.familyEntryCount[family];
+    counts.numArrayProfiles = static_cast<uint32_t>(CBFormat::arrayPositionCount(counts.familyEntryCount));
 #if ENABLE(DFG_JIT)
     codeBlock.lazyValueProfiles().forEachOperandValueProfile([&](const LazyOperandValueProfile&) {
         ++counts.numLazyOperandProfiles;
@@ -82,9 +111,11 @@ static std::optional<CBCheck> eligibilityFailure(CodeBlock& codeBlock, const Slo
         || codeBlock.argumentValueProfiles().size() != counts.numArguments)
         return CBCheck::CaptureStrict;
 
-    UnlinkedCodeBlock& unlinkedCodeBlock = *codeBlock.unlinkedCodeBlock();
-    if (unlinkedCodeBlock.unlinkedValueProfiles().size() != static_cast<uint64_t>(counts.numArguments) + counts.numValueProfiles
-        || unlinkedCodeBlock.unlinkedArrayProfiles().size() != counts.numArrayProfiles)
+    // A builtin, or a UCB without copies, pairs with nothing, as the native merges skip it.
+    auto* unlinkedProfiles = unlinkedProfilesOf(*codeBlock.unlinkedCodeBlock());
+    if (unlinkedProfiles
+        && (unlinkedProfiles->valueProfiles().size() != static_cast<uint64_t>(counts.numArguments) + counts.numValueProfiles
+            || unlinkedProfiles->arrayProfiles().size() != counts.numArrayProfiles))
         return CBCheck::CapturePairing;
     return std::nullopt;
 }
@@ -173,25 +204,24 @@ static CBScore scoreOf(const Richness& richness, uint8_t counterMode, uint32_t p
 // Walks the slots the score counts, in the native merges' order, and hands the visitor each CB value with the UCB copy it
 // pairs with: argument i with UCB value profile i, value offset k with UCB value profile numArguments + k - 1, each
 // lazy-operand profile in the holder's order (it has no UCB copy), and array position p, the running index over
-// A0..A15, with UCB array profile p. Each field is read once. The vectors are indexed through std::span's hardened
-// operator[], as the native merges index the UCB copies, so a broken pairing that strict did not catch fails as it would
-// natively.
+// A0..A15 that counts the call sites too, with UCB array profile p. An array profile with a cb.state record also comes
+// with that record's index, which skips the call sites. Each field is read once. The copies are indexed through
+// std::span's hardened operator[], as the native merges index them, so a broken pairing that strict did not catch fails
+// as it would natively.
 template<typename Visitor>
 static void forEachScoredSlot(CodeBlock& codeBlock, const SlotCounts& counts, Visitor& visitor)
 {
-    UnlinkedCodeBlock& unlinkedCodeBlock = *codeBlock.unlinkedCodeBlock();
-    std::span<const UnlinkedValueProfile> unlinkedValueProfiles = unlinkedCodeBlock.unlinkedValueProfiles().span();
-    std::span<const UnlinkedArrayProfile> unlinkedArrayProfiles = unlinkedCodeBlock.unlinkedArrayProfiles().span();
+    UnlinkedCopies unlinked(*codeBlock.unlinkedCodeBlock());
 
     // Argument profiles.
     std::span<const ArgumentValueProfile> argumentProfiles = codeBlock.argumentValueProfiles().span();
     for (unsigned index = 0; index < counts.numArguments; ++index)
-        visitor.argument(index, argumentProfiles[index].m_prediction, unlinkedValueProfiles[index].prediction());
+        visitor.argument(index, argumentProfiles[index].m_prediction, unlinked.valuePrediction(index));
 
     // The value profiles in front of the metadata table.
-    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, ValueProfile& profile) {
+    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, const ValueProfileRef& profile) {
         unsigned index = offset - 1;
-        visitor.value(index, profile.m_prediction, unlinkedValueProfiles[counts.numArguments + index].prediction());
+        visitor.value(index, profile.prediction(), unlinked.valuePrediction(counts.numArguments + index));
     });
 
     // Lazy-operand profiles: key() and m_prediction only, never the buckets.
@@ -202,15 +232,27 @@ static void forEachScoredSlot(CodeBlock& codeBlock, const SlotCounts& counts, Vi
     });
 #endif
 
-    // Array profiles: the accumulated modes and flags, never the StructureID samples.
+    // Array profiles: the accumulated modes and flags, never the StructureID samples. A call site's this profile, which
+    // the ICs lane carries, is read only for its summary slot, through LazyCallLinkInfo::arrayProfile(), null while the
+    // site has no data of its own.
     CBFormat::forEachFamily([&](auto family) {
         using FamilyType = decltype(family);
         if constexpr (FamilyType::kind == CBFormat::FamilyKind::ArrayProfile) {
-            size_t position = CBFormat::firstRecordOfFamily(counts.familyEntryCount, FamilyType::index);
-            CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](ArrayProfile& profile) {
-                visitor.arrayProfile(position, profile.observedArrayModes(), profile.arrayProfileFlags(), unlinkedArrayProfiles[position].arrayProfileFlags());
-                ++position;
-            });
+            size_t position = CBFormat::firstArrayPositionOfFamily(counts.familyEntryCount, FamilyType::index);
+            if constexpr (FamilyType::hasField) {
+                size_t record = CBFormat::firstRecordOfFamily(counts.familyEntryCount, FamilyType::index);
+                CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](ArrayProfile& profile) {
+                    visitor.arrayProfile(position, record, profile.observedArrayModes(), profile.arrayProfileFlags(), unlinked.arrayProfileFlags(position));
+                    ++position;
+                    ++record;
+                });
+            } else {
+                CBFormat::forEachFamilyEntry<typename FamilyType::Op>(codeBlock, [&](typename FamilyType::Op::Metadata& metadata) {
+                    ArrayProfile* thisProfile = metadata.m_callLinkInfo.arrayProfile();
+                    visitor.callSiteArrayFlags(position, thisProfile ? thisProfile->arrayProfileFlags() : OptionSet<ArrayProfileFlag> { }, unlinked.arrayProfileFlags(position));
+                    ++position;
+                });
+            }
         }
     });
 }
@@ -221,7 +263,8 @@ public:
     void argument(unsigned, SpeculatedType prediction, SpeculatedType unlinkedPrediction) { m_richness.addCategories(prediction | unlinkedPrediction); }
     void value(unsigned, SpeculatedType prediction, SpeculatedType unlinkedPrediction) { m_richness.addCategories(prediction | unlinkedPrediction); }
     void lazyOperand(unsigned, const LazyOperandValueProfileKey&, SpeculatedType prediction) { m_richness.addCategories(prediction); }
-    void arrayProfile(size_t, ArrayModes, OptionSet<ArrayProfileFlag> flags, OptionSet<ArrayProfileFlag> unlinkedFlags) { m_richness.addArrayFlags(summaryArrayFlags(flags, unlinkedFlags)); }
+    void arrayProfile(size_t, size_t, ArrayModes, OptionSet<ArrayProfileFlag> flags, OptionSet<ArrayProfileFlag> unlinkedFlags) { m_richness.addArrayFlags(summaryArrayFlags(flags, unlinkedFlags)); }
+    void callSiteArrayFlags(size_t, OptionSet<ArrayProfileFlag> flags, OptionSet<ArrayProfileFlag> unlinkedFlags) { m_richness.addArrayFlags(summaryArrayFlags(flags, unlinkedFlags)); }
 
     const Richness& richness() const { return m_richness; }
 
@@ -268,13 +311,17 @@ public:
         writeCategories(CBFormat::SummaryArray::LazyOperandCategories, index, prediction);
     }
 
-    void arrayProfile(size_t position, ArrayModes modes, OptionSet<ArrayProfileFlag> flags, OptionSet<ArrayProfileFlag> unlinkedFlags)
+    void arrayProfile(size_t position, size_t record, ArrayModes modes, OptionSet<ArrayProfileFlag> flags, OptionSet<ArrayProfileFlag> unlinkedFlags)
     {
-        writeState(CBFormat::StateArray::ArrayProfiles, position, CBFormat::ArrayProfileRecord { .observedArrayModes = modes, .flags = flags.toRaw() });
-        uint8_t categories = summaryArrayFlags(flags, unlinkedFlags);
-        ASSERT(position < m_summaryLayout.count(CBFormat::SummaryArray::ArrayFlags));
-        writeField<uint8_t>(m_summary, m_summaryLayout.elementOffset(CBFormat::SummaryArray::ArrayFlags, position), categories);
-        m_richness.addArrayFlags(categories);
+        writeState(CBFormat::StateArray::ArrayProfiles, record, CBFormat::ArrayProfileRecord { .observedArrayModes = modes, .flags = flags.toRaw() });
+        writeArrayFlags(position, summaryArrayFlags(flags, unlinkedFlags));
+    }
+
+    // A call site's position has no cb.state record, since this lane neither captures nor seeds the site's this profile;
+    // its summary slot holds that profile's flags ORed with the UCB copy's.
+    void callSiteArrayFlags(size_t position, OptionSet<ArrayProfileFlag> flags, OptionSet<ArrayProfileFlag> unlinkedFlags)
+    {
+        writeArrayFlags(position, summaryArrayFlags(flags, unlinkedFlags));
     }
 
     // Element index of the array, whose element type the record's size matches.
@@ -296,6 +343,13 @@ private:
         m_richness.addCategories(categories);
     }
 
+    void writeArrayFlags(size_t position, uint8_t categories)
+    {
+        ASSERT(position < m_summaryLayout.count(CBFormat::SummaryArray::ArrayFlags));
+        writeField<uint8_t>(m_summary, m_summaryLayout.elementOffset(CBFormat::SummaryArray::ArrayFlags, position), categories);
+        m_richness.addArrayFlags(categories);
+    }
+
     std::span<uint8_t> m_state;
     const CBFormat::StateLayout& m_stateLayout;
     std::span<uint8_t> m_summary;
@@ -304,14 +358,14 @@ private:
 };
 
 // The cb.state record of one entry of an unscored family: the allocation hint through the concurrent readers, which
-// never read the last array, and every other field as stored.
+// never read the last array, iterator_close_check's byte widened, and every other field as stored.
 template<CBFormat::FamilyKind kind, typename Field>
 static auto unscoredRecord(Field& field)
 {
     if constexpr (kind == CBFormat::FamilyKind::AllocationHint)
         return CBFormat::encodeAllocationHint(field.selectIndexingTypeConcurrently(), field.vectorLengthHintConcurrently());
     else if constexpr (kind == CBFormat::FamilyKind::IterationModes)
-        return static_cast<uint16_t>(field.seenModes);
+        return CBFormat::iterationModesOf(field);
     else if constexpr (kind == CBFormat::FamilyKind::EnumeratorModes)
         return static_cast<uint8_t>(field);
     else if constexpr (kind == CBFormat::FamilyKind::ToThisStatus)
@@ -322,7 +376,7 @@ static auto unscoredRecord(Field& field)
     }
 }
 
-// The unscored families, F16 to F30: each family's entries in metadata-ID order, from the family's first record in its
+// The unscored families, F16 to F31: each family's entries in metadata-ID order, from the family's first record in its
 // kind's array.
 static void writeUnscoredFamilies(CodeBlock& codeBlock, const SlotCounts& counts, SectionWriter& writer)
 {

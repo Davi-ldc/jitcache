@@ -38,7 +38,7 @@ static constexpr size_t functionExprCountOffset = 32;
 static constexpr size_t didOptimizeOffset = 36;
 static constexpr size_t quickDFGTierUpOffset = 37;
 static constexpr size_t quickFTLTierUpOffset = 38;
-static constexpr size_t reservedByteOffset = 39;
+static constexpr size_t copiesOffset = 39; // 1 when the value predictions and array profiles follow the header, 0 when they are absent
 static constexpr size_t llintActiveThresholdOffset = 40;
 static constexpr size_t llintTotalCountOffset = 44;
 static constexpr size_t llintCounterOffset = 48;
@@ -102,15 +102,22 @@ static size_t constantBitsSize(uint32_t constantCount)
 }
 
 // The regions after the header, in layout order, with checked arithmetic. The counts are 32-bit, so no offset overflows
-// a 64-bit size_t; a strict parse checks anyway.
+// a 64-bit size_t; a strict parse checks anyway. The value predictions and the array profiles take room only in a section
+// that carries the UCB's copies; V and A are the UCB's counts either way.
 static CheckedSize arraysOffset(const FeedbackCounts& counts)
 {
-    return CheckedSize(headerSize) + CheckedSize(counts.valueProfiles) * sizeof(SpeculatedType);
+    CheckedSize offset = headerSize;
+    if (counts.copies)
+        offset += CheckedSize(counts.valueProfiles) * sizeof(SpeculatedType);
+    return offset;
 }
 
 static CheckedSize binaryOffset(const FeedbackCounts& counts)
 {
-    return arraysOffset(counts) + CheckedSize(counts.arrayProfiles) * arrayProfileSize;
+    CheckedSize offset = arraysOffset(counts);
+    if (counts.copies)
+        offset += CheckedSize(counts.arrayProfiles) * arrayProfileSize;
+    return offset;
 }
 
 static CheckedSize unaryOffset(const FeedbackCounts& counts)
@@ -164,6 +171,7 @@ static FeedbackCounts countsIn(std::span<const uint8_t> bytes)
         .functionDecls = readField<uint32_t>(bytes, functionDeclCountOffset),
         .functionExprs = readField<uint32_t>(bytes, functionExprCountOffset),
         .constants = readField<uint32_t>(bytes, constantCountOffset),
+        .copies = !!bytes[copiesOffset],
     };
 }
 
@@ -203,21 +211,26 @@ static bool obeysFeedbackRules(std::span<const uint8_t> bytes)
         if (count >= countLimit)
             return false;
     }
+    // The copies byte is 0 or 1; it decides the size the rest of the checks read.
+    if (bytes[copiesOffset] > 1)
+        return false;
     CheckedSize size = sectionSize(counts);
     if (size.hasOverflowed() || size.value() != bytes.size())
         return false;
 
-    // Native value profiles see only boxed values, so no prediction carries SpecInt52Any or SpecDoubleImpureNaN.
-    for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
-        if (readField<SpeculatedType>(bytes, headerSize + i * sizeof(SpeculatedType)) & ~SpecBytecodeTop)
-            return false;
-    }
+    if (counts.copies) {
+        // Native value profiles see only boxed values, so no prediction carries SpecInt52Any or SpecDoubleImpureNaN.
+        for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
+            if (readField<SpeculatedType>(bytes, headerSize + i * sizeof(SpeculatedType)) & ~SpecBytecodeTop)
+                return false;
+        }
 
-    size_t arrays = arraysOffset(counts).value();
-    for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
-        size_t offset = arrays + i * arrayProfileSize;
-        if ((readField<uint32_t>(bytes, offset) & ~ALL_ARRAY_MODES) || (readField<uint32_t>(bytes, offset + 4) & ~restorableArrayProfileFlags.toRaw()))
-            return false;
+        size_t arrays = arraysOffset(counts).value();
+        for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
+            size_t offset = arrays + i * arrayProfileSize;
+            if ((readField<uint32_t>(bytes, offset) & ~ALL_ARRAY_MODES) || (readField<uint32_t>(bytes, offset + 4) & ~restorableArrayProfileFlags.toRaw()))
+                return false;
+        }
     }
 
     size_t binary = binaryOffset(counts).value();
@@ -247,7 +260,7 @@ static bool obeysFeedbackRules(std::span<const uint8_t> bytes)
         }
     }
 
-    if (!isTriState(bytes[didOptimizeOffset]) || !isTriState(bytes[quickDFGTierUpOffset]) || bytes[quickFTLTierUpOffset] > 1 || bytes[reservedByteOffset])
+    if (!isTriState(bytes[didOptimizeOffset]) || !isTriState(bytes[quickDFGTierUpOffset]) || bytes[quickFTLTierUpOffset] > 1)
         return false;
 
     // The counter is either in the state ExecutionCounter::deferIndefinitely leaves or armed with a progress in [0, 2^31).
@@ -321,18 +334,6 @@ static uint64_t unaryArithUnits(uint32_t bits)
     return std::popcount(bits & unaryCategoryMask);
 }
 
-// A UCB copy's richness categories: one per bit of a value prediction, and one per array flag, which a UCB copy holds
-// without the pruning mark.
-static uint64_t valueCategoryUnits(SpeculatedType prediction)
-{
-    return std::popcount(static_cast<uint64_t>(prediction));
-}
-
-static uint64_t arrayFlagUnits(OptionSet<ArrayProfileFlag> flags)
-{
-    return std::popcount((flags & restorableArrayProfileFlags).toRaw());
-}
-
 // A constant register as a SymbolTable, or null. An empty constant, which generation emits for TDZ checks, is no cell.
 static SymbolTable* symbolTableAt(UnlinkedCodeBlock& ucb, uint32_t index)
 {
@@ -342,7 +343,8 @@ static SymbolTable* symbolTableAt(UnlinkedCodeBlock& ucb, uint32_t index)
     return dynamicDowncast<SymbolTable>(value);
 }
 
-// Every count the body shares with the UCB's index spaces. The exit sites are feedback, not an index space.
+// Every count the body shares with the UCB's index spaces. The exit sites are feedback, not an index space, and whether the
+// copies travel is the body's.
 static bool countsFit(UnlinkedCodeBlock& ucb, const FeedbackCounts& counts)
 {
     return counts.valueProfiles == ucb.numberOfValueProfiles()
@@ -377,18 +379,21 @@ const FeedbackCounts& FeedbackSection::counts() const
 SpeculatedType FeedbackSection::prediction(unsigned index) const
 {
     using namespace UCBFeedbackInternal;
+    ASSERT(m_counts.copies);
     return readField<SpeculatedType>(m_bytes, elementOffset(headerSize, index, sizeof(SpeculatedType)));
 }
 
 ArrayModes FeedbackSection::observedArrayModes(unsigned index) const
 {
     using namespace UCBFeedbackInternal;
+    ASSERT(m_counts.copies);
     return readField<uint32_t>(m_bytes, elementOffset(arraysOffset(m_counts), index, arrayProfileSize));
 }
 
 OptionSet<ArrayProfileFlag> FeedbackSection::arrayProfileFlags(unsigned index) const
 {
     using namespace UCBFeedbackInternal;
+    ASSERT(m_counts.copies);
     return OptionSet<ArrayProfileFlag>::fromRaw(readField<uint32_t>(m_bytes, elementOffset(arraysOffset(m_counts), index, arrayProfileSize) + 4));
 }
 
@@ -455,7 +460,10 @@ double FeedbackSection::llintProgress() const
     return static_cast<double>(readField<float>(m_bytes, llintTotalCountOffset)) + readField<int32_t>(m_bytes, llintCounterOffset);
 }
 
-FeedbackCounts liveFeedbackCounts(UnlinkedCodeBlock& ucb)
+// A body with an image carries the UCB's copies when the UCB has them, which every non-builtin UCB has once a baseline
+// compilation or an import with an image reached it. A body without one carries none, even when its UCB had them before
+// its CodeBlocks died: a consumer runs it in the LLInt, where the native path allocates none.
+FeedbackCounts liveFeedbackCounts(UnlinkedCodeBlock& ucb, BodyImage image)
 {
     return {
         .valueProfiles = ucb.numberOfValueProfiles(),
@@ -466,13 +474,17 @@ FeedbackCounts liveFeedbackCounts(UnlinkedCodeBlock& ucb)
         .functionDecls = static_cast<uint32_t>(ucb.numberOfFunctionDecls()),
         .functionExprs = static_cast<uint32_t>(ucb.numberOfFunctionExprs()),
         .constants = static_cast<uint32_t>(ucb.constantRegisters().size()),
+        .copies = image == BodyImage::Present && ucb.valueAndArrayProfiles(),
     };
 }
 
-bool feedbackFits(UnlinkedCodeBlock& ucb, const FeedbackSection& section)
+bool feedbackFits(UnlinkedCodeBlock& ucb, const FeedbackSection& section, BodyImage image)
 {
     const FeedbackCounts& counts = section.counts();
     if (!UCBFeedbackInternal::countsFit(ucb, counts))
+        return false;
+    // A builtin's UCB never has copies, and a body without an image carries none.
+    if (counts.copies != (image == BodyImage::Present && !ucb.isBuiltinFunction()))
         return false;
     // Every exit site lies inside the instruction stream.
     unsigned instructionsSize = ucb.instructionsSize();
@@ -504,13 +516,21 @@ void seedFeedback(VM& vm, UnlinkedCodeBlock& ucb, const FeedbackSection& section
     // is trusted.
     ASSERT(UCBFeedbackInternal::countsFit(ucb, counts));
 
-    auto& valueProfiles = ucb.unlinkedValueProfiles();
-    for (uint32_t i = 0; i < counts.valueProfiles; ++i)
-        valueProfiles[i].restorePrediction(section.prediction(i));
+    // A body with an image installs without the BaselineJITPlan that would allocate the UCB's value and array copies, so
+    // they are allocated here, before any CodeBlock exists to fold into them; every CodeBlock of the UCB then folds its
+    // profiles into them from its first collection. A builtin's UCB never has them, and a body without an image leaves its
+    // CodeBlocks in the LLInt, which allocates none.
+    if (image == BodyImage::Present)
+        ucb.ensureValueAndArrayProfiles();
+    if (auto* profiles = ucb.valueAndArrayProfiles(); profiles && counts.copies) {
+        auto valueProfiles = profiles->valueProfiles();
+        for (uint32_t i = 0; i < counts.valueProfiles; ++i)
+            valueProfiles[i].restorePrediction(section.prediction(i));
 
-    auto& arrayProfiles = ucb.unlinkedArrayProfiles();
-    for (uint32_t i = 0; i < counts.arrayProfiles; ++i)
-        arrayProfiles[i].restoreAccumulatedState(section.observedArrayModes(i), section.arrayProfileFlags(i));
+        auto arrayProfiles = profiles->arrayProfiles();
+        for (uint32_t i = 0; i < counts.arrayProfiles; ++i)
+            arrayProfiles[i].restoreAccumulatedState(section.observedArrayModes(i), section.arrayProfileFlags(i));
+    }
 
     for (uint32_t i = 0; i < counts.binaryArithProfiles; ++i)
         ucb.binaryArithProfile(i).restoreBits(section.binaryArithBits(i));
@@ -563,6 +583,9 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
 
     RELEASE_ASSERT(out.size() == feedbackSectionSize(counts));
     ASSERT(countsFit(ucb, counts));
+    auto* profiles = ucb.valueAndArrayProfiles();
+    // Only the VM thread allocates the copies, and nothing frees them while the UCB lives, so counts.copies still holds.
+    RELEASE_ASSERT(!counts.copies || profiles);
 
     zeroSpan(out);
     writeField<uint32_t>(out, magicOffset, sectionMagic);
@@ -578,6 +601,7 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
     out[didOptimizeOffset] = static_cast<uint8_t>(history.didOptimize);
     out[quickDFGTierUpOffset] = static_cast<uint8_t>(history.quickDFGTierUp);
     out[quickFTLTierUpOffset] = history.quickFTLTierUp;
+    out[copiesOffset] = counts.copies;
     BaselineExecutionCounter& counter = ucb.llintExecuteCounter();
     writeField<int32_t>(out, llintActiveThresholdOffset, counter.m_activeThreshold);
     writeField<float>(out, llintTotalCountOffset, counter.m_totalCount);
@@ -585,16 +609,18 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
     writeField<uint32_t>(out, constantCountOffset, counts.constants);
 
     // Accumulated state only, from its owner: no sample is read, classified or cleared.
-    auto& valueProfiles = ucb.unlinkedValueProfiles();
-    for (uint32_t i = 0; i < counts.valueProfiles; ++i)
-        writeField<SpeculatedType>(out, headerSize + i * sizeof(SpeculatedType), valueProfiles[i].prediction());
+    if (counts.copies) {
+        auto valueProfiles = profiles->valueProfiles();
+        for (uint32_t i = 0; i < counts.valueProfiles; ++i)
+            writeField<SpeculatedType>(out, headerSize + i * sizeof(SpeculatedType), valueProfiles[i].prediction());
 
-    auto& arrayProfiles = ucb.unlinkedArrayProfiles();
-    size_t arrays = arraysOffset(counts).value();
-    for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
-        size_t offset = arrays + i * arrayProfileSize;
-        writeField<uint32_t>(out, offset, arrayProfiles[i].observedArrayModes());
-        writeField<uint32_t>(out, offset + 4, arrayProfiles[i].arrayProfileFlags().toRaw());
+        auto arrayProfiles = profiles->arrayProfiles();
+        size_t arrays = arraysOffset(counts).value();
+        for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
+            size_t offset = arrays + i * arrayProfileSize;
+            writeField<uint32_t>(out, offset, arrayProfiles[i].observedArrayModes());
+            writeField<uint32_t>(out, offset + 4, arrayProfiles[i].arrayProfileFlags().toRaw());
+        }
     }
 
     size_t binary = binaryOffset(counts).value();
@@ -696,7 +722,9 @@ bool llintCounterShowsExecution(UnlinkedCodeBlock& ucb)
     return counter.m_activeThreshold == std::numeric_limits<int32_t>::max() || counter.count() > 0;
 }
 
-UCBRichness liveRichness(UnlinkedCodeBlock& ucb, BodyImage image)
+// The arithmetic profile exists only in the UCB, so each slot is already the union richness scores, and every exit site
+// counts.
+UCBRichness liveRichness(UnlinkedCodeBlock& ucb)
 {
     using namespace UCBFeedbackInternal;
 
@@ -706,18 +734,10 @@ UCBRichness liveRichness(UnlinkedCodeBlock& ucb, BodyImage image)
     for (unsigned i = 0; i < ucb.numberOfUnaryArithProfiles(); ++i)
         richness.arithmeticUnits += unaryArithUnits(ucb.unaryArithProfile(i).bits());
     richness.exitSiteUnits = exitSiteCount(ucb);
-    if (image == BodyImage::Absent) {
-        // Accumulated state only, as writeFeedbackSection reads it; a marker's merge into a copy meanwhile costs only
-        // precision.
-        for (auto& profile : ucb.unlinkedValueProfiles())
-            richness.copyUnits += valueCategoryUnits(profile.prediction());
-        for (auto& profile : ucb.unlinkedArrayProfiles())
-            richness.copyUnits += arrayFlagUnits(profile.arrayProfileFlags());
-    }
     return richness;
 }
 
-UCBRichness savedRichness(const FeedbackSection& section, BodyImage image)
+UCBRichness savedRichness(const FeedbackSection& section)
 {
     using namespace UCBFeedbackInternal;
 
@@ -728,12 +748,6 @@ UCBRichness savedRichness(const FeedbackSection& section, BodyImage image)
     for (uint32_t i = 0; i < counts.unaryArithProfiles; ++i)
         richness.arithmeticUnits += unaryArithUnits(section.unaryArithBits(i));
     richness.exitSiteUnits = counts.exitSites;
-    if (image == BodyImage::Absent) {
-        for (uint32_t i = 0; i < counts.valueProfiles; ++i)
-            richness.copyUnits += valueCategoryUnits(section.prediction(i));
-        for (uint32_t i = 0; i < counts.arrayProfiles; ++i)
-            richness.copyUnits += arrayFlagUnits(section.arrayProfileFlags(i));
-    }
     return richness;
 }
 

@@ -32,6 +32,7 @@ set(WebCore_PRIVATE_INCLUDE_DIRECTORIES
     "${WEBCORE_DIR}/Modules/contact-picker"
     "${WEBCORE_DIR}/Modules/cookie-store"
     "${WEBCORE_DIR}/Modules/credentialmanagement"
+    "${WEBCORE_DIR}/Modules/device-posture"
     "${WEBCORE_DIR}/Modules/encryptedmedia"
     "${WEBCORE_DIR}/Modules/encryptedmedia/legacy"
     "${WEBCORE_DIR}/Modules/entriesapi"
@@ -124,6 +125,7 @@ set(WebCore_PRIVATE_INCLUDE_DIRECTORIES
     "${WEBCORE_DIR}/css/values/non-standard"
     "${WEBCORE_DIR}/css/values/primitives"
     "${WEBCORE_DIR}/css/values/shapes"
+    "${WEBCORE_DIR}/css/values/sizing"
     "${WEBCORE_DIR}/css/values/text-decoration"
     "${WEBCORE_DIR}/cssjit"
     "${WEBCORE_DIR}/dom"
@@ -312,6 +314,7 @@ set(WebCore_IDL_INCLUDES
     Modules/compression
     Modules/cookie-store
     Modules/credentialmanagement
+    Modules/device-posture
     Modules/encryptedmedia/legacy
     Modules/entriesapi
     Modules/fetch
@@ -397,6 +400,10 @@ set(WebCore_NON_SVG_IDL_FILES
     Modules/credentialmanagement/FederatedCredentialRequestOptions.idl
     Modules/credentialmanagement/IdentityCredentialRequestOptions.idl
     Modules/credentialmanagement/OTPCredentialRequestOptions.idl
+
+    Modules/device-posture/DevicePosture.idl
+    Modules/device-posture/DevicePostureType.idl
+    Modules/device-posture/Navigator+DevicePosture.idl
 
     Modules/encryptedmedia/MediaKeyEncryptionScheme.idl
     Modules/encryptedmedia/MediaKeyMessageEvent.idl
@@ -858,6 +865,7 @@ set(WebCore_NON_SVG_IDL_FILES
     Modules/webcodecs/BitrateMode.idl
     Modules/webcodecs/FlacEncoderConfig.idl
     Modules/webcodecs/HardwareAcceleration.idl
+    Modules/webcodecs/HevcEncoderConfig.idl
     Modules/webcodecs/LatencyMode.idl
     Modules/webcodecs/OpusEncoderConfig.idl
     Modules/webcodecs/PlaneLayout.idl
@@ -1009,6 +1017,7 @@ set(WebCore_NON_SVG_IDL_FILES
     css/CSSConditionRule.idl
     css/CSSContainerRule.idl
     css/CSSCounterStyleRule.idl
+    css/CSSEnvironmentMapRule.idl
     css/CSSFontFaceDescriptors.idl
     css/CSSFontFaceRule.idl
     css/CSSFontFeatureValuesRule.idl
@@ -1206,6 +1215,8 @@ set(WebCore_NON_SVG_IDL_FILES
     dom/ProcessingInstruction.idl
     dom/ProgressEvent.idl
     dom/PromiseRejectionEvent.idl
+    dom/QuotaExceededError.idl
+    dom/QuotaExceededErrorOptions.idl
     dom/Range.idl
     dom/ReducerCallback.idl
     dom/RequestAnimationFrameCallback.idl
@@ -1385,6 +1396,7 @@ set(WebCore_NON_SVG_IDL_FILES
     html/canvas/PaintRenderingContext2D.idl
     html/canvas/Path2D.idl
     html/canvas/PredefinedColorSpace.idl
+    html/canvas/UpdateElementGeometryOptions.idl
 
     html/closewatcher/CloseWatcher.idl
 
@@ -1415,6 +1427,7 @@ set(WebCore_NON_SVG_IDL_FILES
     loader/COEPInheritenceViolationReportBody.idl
     loader/CORPViolationReportBody.idl
 
+    mathml/MathMLAnchorElement.idl
     mathml/MathMLElement.idl
     mathml/MathMLMathElement.idl
 
@@ -1476,6 +1489,7 @@ set(WebCore_NON_SVG_IDL_FILES
     page/Screen.idl
     page/ScreenOrientation.idl
     page/ScrollBehavior.idl
+    page/ScrollIntoViewContainer.idl
     page/ScrollIntoViewOptions.idl
     page/ScrollLogicalPosition.idl
     page/ScrollOptions.idl
@@ -1828,14 +1842,15 @@ list(APPEND WebCore_NON_SVG_IDL_FILES
     Modules/WebGPU/GPUComputePassTimestampWrites.idl
     Modules/WebGPU/GPUComputePipeline.idl
     Modules/WebGPU/GPUComputePipelineDescriptor.idl
-    Modules/WebGPU/GPUCopyElementImageDestination.idl
-    Modules/WebGPU/GPUCopyElementImageSource.idl
     Modules/WebGPU/GPUCullMode.idl
     Modules/WebGPU/GPUDepthStencilState.idl
     Modules/WebGPU/GPUDevice.idl
     Modules/WebGPU/GPUDeviceDescriptor.idl
     Modules/WebGPU/GPUDeviceLostInfo.idl
     Modules/WebGPU/GPUDeviceLostReason.idl
+    Modules/WebGPU/GPUDrawElementImageDestination.idl
+    Modules/WebGPU/GPUDrawElementImageSource.idl
+    Modules/WebGPU/GPUError.idl
     Modules/WebGPU/GPUErrorFilter.idl
     Modules/WebGPU/GPUExtent3DDict.idl
     Modules/WebGPU/GPUExternalTexture.idl
@@ -2068,6 +2083,7 @@ set(WebCore_SUPPLEMENTAL_IDL_FILES
     dom/Element+PointerEvents.idl
     dom/Element+PointerLock.idl
     dom/Element+Typedom.idl
+    dom/Element+VolumetricScene.idl
     dom/ElementContentEditable.idl
     dom/GlobalEventHandlers+PointerEvents.idl
     dom/GlobalEventHandlers+Selection.idl
@@ -2096,6 +2112,7 @@ set(WebCore_SUPPLEMENTAL_IDL_FILES
 
     html/canvas/CanvasCompositing.idl
     html/canvas/CanvasDrawElementImage.idl
+    html/canvas/CanvasDrawElementImageOptions.idl
     html/canvas/CanvasDrawImage.idl
     html/canvas/CanvasDrawPath.idl
     html/canvas/CanvasFillStrokeStyles.idl
@@ -2219,6 +2236,8 @@ set(WebCore_USER_AGENT_STYLE_SHEETS
     ${WEBCORE_DIR}/css/mathmlLegacyFontSizeMath.css
     ${WEBCORE_DIR}/css/popover.css
     ${WEBCORE_DIR}/css/quirks.css
+    ${WEBCORE_DIR}/css/selectMultipleAndListBox.css
+    ${WEBCORE_DIR}/css/selectMultipleSelectedContent.css
     ${WEBCORE_DIR}/css/svg.css
     ${WEBCORE_DIR}/css/viewTransitions.css
     ${WEBCORE_DIR}/html/shadow/attachmentElementShadow.css
@@ -2573,7 +2592,9 @@ if (USE_LIBWEBRTC)
         "${WEBCORE_DIR}/platform/libwebrtc"
         "${WEBCORE_DIR}/platform/mediastream/libwebrtc"
     )
-    list(APPEND WebCore_LIBRARIES webrtc)
+    if (NOT APPLE)
+        list(APPEND WebCore_LIBRARIES webrtc)
+    endif ()
     list(APPEND WebCore_UNIFIED_SOURCE_LIST_FILES
         "platform/SourcesLibWebRTC.txt"
     )
@@ -2591,7 +2612,6 @@ set(WebCoreTestSupport_IDL_INCLUDES
 )
 
 set(WebCoreTestSupport_IDL_FILES
-    testing/GCObservation.idl
     testing/InternalSettings.idl
     testing/Internals.idl
     testing/InternalsMapLike.idl
@@ -2613,7 +2633,6 @@ set(WebCoreTestSupport_IDL_FILES
 list(APPEND WebCoreTestSupport_SOURCES
     bindings/js/JSMallocStatisticsCustom.cpp
     testing/EventTargetForTesting.cpp
-    testing/GCObservation.cpp
     testing/InternalSettings.cpp
     testing/Internals.cpp
     testing/InternalsMapLike.cpp
@@ -2662,8 +2681,16 @@ set(MODERN_MEDIA_CONTROLS_STYLE_SHEETS
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/ios-inline-media-controls.css"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/macos-fullscreen-media-controls.css"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/macos-inline-media-controls.css"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-inline-media-controls.css"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-fullscreen-media-controls.css"
+)
+
+if (USE_THEME_ADWAITA)
+    list(APPEND MODERN_MEDIA_CONTROLS_STYLE_SHEETS
+        "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-inline-media-controls.css"
+        "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-fullscreen-media-controls.css"
+    )
+endif ()
+
+list(APPEND MODERN_MEDIA_CONTROLS_STYLE_SHEETS
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/media-controls.css"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/media-document.css"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/metadata-container.css"
@@ -2737,21 +2764,29 @@ set(MODERN_MEDIA_CONTROLS_SCRIPTS
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/metadata-container.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/placard.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/airplay-placard.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/fullscreen-placard.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/invalid-placard.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/pip-placard.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/watchos-activity-indicator.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/watchos-media-controls.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/watchos-layout-traits.js"
+    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/fullscreen-placard.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/tvos-layout-traits.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/tvos-media-controls.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/vision-slider.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/vision-volume-container.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/vision-media-controls.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/controls/vision-layout-traits.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-inline-media-controls.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-fullscreen-media-controls.js"
-    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-layout-traits.js"
+    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/watchos-activity-indicator.js"
+    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/watchos-media-controls.js"
+    "${WEBCORE_DIR}/Modules/modern-media-controls/controls/watchos-layout-traits.js"
+)
+
+if (USE_THEME_ADWAITA)
+    list(APPEND MODERN_MEDIA_CONTROLS_SCRIPTS
+        "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-inline-media-controls.js"
+        "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-fullscreen-media-controls.js"
+        "${WEBCORE_DIR}/Modules/modern-media-controls/controls/adwaita-layout-traits.js"
+    )
+endif ()
+
+list(APPEND MODERN_MEDIA_CONTROLS_SCRIPTS
     "${WEBCORE_DIR}/Modules/modern-media-controls/media/media-controller-support.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/media/airplay-support.js"
     "${WEBCORE_DIR}/Modules/modern-media-controls/media/audio-support.js"
@@ -2938,8 +2973,7 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/WebCoreLogDefinitions
 # --defines-file.
 set(_platform_defines_file_arg)
 set(_platform_defines_file_dep)
-if (APPLE)
-    webkit_generate_platform_feature_defines_file(WEBKIT_PLATFORM_FEATURE_DEFINES_FILE)
+if (WEBKIT_PLATFORM_FEATURE_DEFINES_FILE)
     set(_platform_defines_file_arg --defines-file "${WEBKIT_PLATFORM_FEATURE_DEFINES_FILE}")
     set(_platform_defines_file_dep "${WEBKIT_PLATFORM_FEATURE_DEFINES_FILE}")
 endif ()
@@ -3021,7 +3055,7 @@ set(SETTINGS_TEMPLATES
     ${WEBCORE_DIR}/Scripts/SettingsTemplates/InternalSettingsGenerated.h.erb
     ${WEBCORE_DIR}/Scripts/SettingsTemplates/Settings.cpp.erb
     ${WEBCORE_DIR}/Scripts/SettingsTemplates/Settings.h.erb)
-set(WTF_WEB_PREFERENCES ${WTF_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml)
+set(WTF_WEB_PREFERENCES ${WTF_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml ${WEB_PREFERENCES_ADDITIONS})
 set_source_files_properties(${WTF_WEB_PREFERENCES} PROPERTIES GENERATED TRUE)
 add_custom_command(
     OUTPUT ${WebCore_DERIVED_SOURCES_DIR}/Settings.h
@@ -3030,7 +3064,7 @@ add_custom_command(
        ${WebCore_DERIVED_SOURCES_DIR}/InternalSettingsGenerated.cpp
        ${WebCore_DERIVED_SOURCES_DIR}/InternalSettingsGenerated.idl
     MAIN_DEPENDENCY ${WEBCORE_DIR}/page/Settings.yaml
-    DEPENDS ${WEBCORE_DIR}/Scripts/GenerateSettings.rb ${SETTINGS_TEMPLATES} WTF_CopyPreferences ${WTF_WEB_PREFERENCES}
+    DEPENDS ${WEBCORE_DIR}/Scripts/GenerateSettings.rb ${SETTINGS_TEMPLATES} WTF_CopyPreferences ${WTF_WEB_PREFERENCES} ${WEBKITADDITIONS_HEADERS_DEPENDENCIES}
     COMMAND ${Ruby_EXECUTABLE} ${WEBCORE_DIR}/Scripts/GenerateSettings.rb --outputDir ${WebCore_DERIVED_SOURCES_DIR} --template "$<JOIN:${SETTINGS_TEMPLATES},;--template;>" ${WTF_WEB_PREFERENCES} ${WEBCORE_DIR}/page/Settings.yaml
     COMMAND_EXPAND_LISTS
     VERBATIM)
@@ -3038,6 +3072,25 @@ list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Settings.h)
 list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/Settings.cpp)
 list(APPEND WebCoreTestSupport_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/InternalSettingsGenerated.cpp)
 list(APPEND WebCoreTestSupport_IDL_FILES ${WebCore_DERIVED_SOURCES_DIR}/InternalSettingsGenerated.idl)
+
+set(QUIRK_BEHAVIORS_TEMPLATES
+    ${WEBCORE_DIR}/Scripts/QuirkBehaviorsTemplates/QuirkBehaviorDefinitions.h.erb
+    ${WEBCORE_DIR}/Scripts/QuirkBehaviorsTemplates/QuirkBehaviorID.h.erb
+    ${WEBCORE_DIR}/Scripts/QuirkBehaviorsTemplates/QuirksAccessors.cpp.erb
+    ${WEBCORE_DIR}/Scripts/QuirkBehaviorsTemplates/QuirksAccessors.h.erb)
+add_custom_command(
+    OUTPUT ${WebCore_DERIVED_SOURCES_DIR}/QuirkBehaviorDefinitions.h
+       ${WebCore_DERIVED_SOURCES_DIR}/QuirkBehaviorID.h
+       ${WebCore_DERIVED_SOURCES_DIR}/QuirksAccessors.cpp
+       ${WebCore_DERIVED_SOURCES_DIR}/QuirksAccessors.h
+    MAIN_DEPENDENCY ${WEBCORE_DIR}/page/QuirkBehaviors.yaml
+    DEPENDS ${WEBCORE_DIR}/Scripts/GenerateQuirkBehaviors.rb ${QUIRK_BEHAVIORS_TEMPLATES}
+    COMMAND ${Ruby_EXECUTABLE} ${WEBCORE_DIR}/Scripts/GenerateQuirkBehaviors.rb --outputDir ${WebCore_DERIVED_SOURCES_DIR} --template "$<JOIN:${QUIRK_BEHAVIORS_TEMPLATES},;--template;>" ${WEBCORE_DIR}/page/QuirkBehaviors.yaml
+    COMMAND_EXPAND_LISTS
+    VERBATIM)
+list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/QuirkBehaviorDefinitions.h)
+list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/QuirkBehaviorID.h)
+list(APPEND WebCore_SOURCES ${WebCore_DERIVED_SOURCES_DIR}/QuirksAccessors.h)
 
 set(WebCore_BINDINGS_PP_INPUT_FILES ${WebCore_IDL_FILES} ${WebCore_SUPPLEMENTAL_IDL_FILES})
 if (ENABLE_WEBCORE_TEST_SUPPORT)
@@ -3285,7 +3338,37 @@ if (NOT USE_HEADER_MAPS)
     endif ()
 endif ()
 
+if (SWIFT_REQUIRED AND APPLE)
+    # FIXME: Remove SwiftStub.swift once WebCore has real Swift sources.
+    target_sources(WebCore PRIVATE ${WEBCORE_DIR}/SwiftStub.swift)
+
+    webkit_target_add_swift_options(WebCore
+        "-library-level spi"
+        "-enable-experimental-feature SafeInteropWrappers"
+        "-Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib"
+    )
+
+    # C++ sources that include WebCoreSwift-Generated.h.
+    set(WebCore_SWIFT_INTEROP_SOURCES SwiftStubInterop.cpp)
+
+    WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER(WebCore WebCore
+        "${WebCore_PRIVATE_HEADERS_DIR}"
+        "WebCoreSwift-Generated.h")
+endif ()
+
 WEBKIT_FRAMEWORK(WebCore)
+
+if (DEFINED WebCore_SWIFT_INTEROP_SOURCES)
+    WEBKIT_DEFINE_SUBTARGET(WebCore_SwiftInterop WebCore ${WebCore_SWIFT_INTEROP_SOURCES})
+    WEBKIT_REUSE_PREFIX_HEADER(WebCore_SwiftInterop WebCore WebCorePrefix.h PREFIX_LANGUAGES CXX OBJCXX)
+    target_compile_definitions(WebCore_SwiftInterop PRIVATE WEBCORE_COMPILING_SWIFT_INTEROP_SUBTARGET)
+
+    set(_interop_objs "$<FILTER:$<TARGET_OBJECTS:WebCore_SwiftInterop>,EXCLUDE,\\.(g|p)ch$>")
+    set(_interop_rsp "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/WebCore_SwiftInterop.dir/$<CONFIG>/objects.rsp")
+    file(GENERATE OUTPUT "${_interop_rsp}" CONTENT "$<JOIN:${_interop_objs},\n>")
+    target_link_options(WebCore PRIVATE "@${_interop_rsp}")
+    set_property(TARGET WebCore APPEND PROPERTY LINK_DEPENDS "${_interop_objs};${_interop_rsp}")
+endif ()
 
 if (USE_APPLE_INTERNAL_SDK)
     WEBKIT_TARGET_USE_PGO(WebCore PROFILE WebCore)
@@ -3311,12 +3394,24 @@ if (DEFINED WebCore_EXTRA_LINK_OPTIONS)
     target_link_options(WebCore PRIVATE ${WebCore_EXTRA_LINK_OPTIONS})
 endif ()
 
-# WebCore has no Swift sources. When SWIFT_REQUIRED is ON, CMake may select the
-# Swift linker for targets that transitively depend on Swift libraries (PAL).
-# Force CXX linker -- swiftc mishandles -I include paths during linking.
+# When SWIFT_REQUIRED is ON, CMake selects the Swift linker for targets that
+# have Swift sources or transitively depend on Swift libraries (PAL). Force the
+# CXX linker -- swiftc mishandles -I include paths during linking.
 set_target_properties(WebCore PROPERTIES LINKER_LANGUAGE CXX)
 
 if (APPLE)
+    if (USE_LIBWEBRTC)
+        target_link_options(WebCore PRIVATE
+            "LINKER:-weak_library,$<TARGET_FILE:webrtc>")
+        add_dependencies(WebCore webrtc)
+    endif ()
+
+    if (TARGET ANGLE-shared)
+        # ANGLE arrives through the ANGLE::* interface targets, so override the
+        # link feature rather than the link itself.
+        set_property(TARGET WebCore PROPERTY LINK_LIBRARY_OVERRIDE_ANGLE-shared WEAK_LIBRARY)
+    endif ()
+
     # Use target_link_options with LINKER: so CMake translates these for
     # whichever linker driver is used (clang or swiftc).
     target_link_options(WebCore PRIVATE
@@ -3327,6 +3422,7 @@ if (APPLE)
         "LINKER:-allowable_client,WebKit2"
         "LINKER:-allowable_client,WebKitLegacy"
         "LINKER:-allowable_client,WebKitTestRunner"
+        "LINKER:-allowable_client,WebKitTestRunnerApp"
         "LINKER:-allowable_client,WebKitTestRunnerInjectedBundle"
         "LINKER:-allowable_client,DumpRenderTree"
         "LINKER:-allowable_client,InjectedBundleTestWebKitAPI"
@@ -3370,6 +3466,14 @@ if (ENABLE_WEBCORE_TEST_SUPPORT)
 
     WEBKIT_LIBRARY(WebCoreTestSupport)
     set_target_properties(WebCoreTestSupport PROPERTIES LINKER_LANGUAGE CXX)
+
+    if (APPLE AND USE_LIBWEBRTC)
+        # testing/MockLibWebRTCPeerConnection.cpp subclasses webrtc interfaces, so
+        # this library and TestWebCore (SharedVideoFrame.mm) resolve those symbols from libwebrtc.dylib.
+        target_link_options(WebCoreTestSupport PUBLIC
+            "LINKER:-weak_library,$<TARGET_FILE:webrtc>")
+        add_dependencies(WebCoreTestSupport webrtc)
+    endif ()
 endif ()
 
 if (${WebCore_LIBRARY_TYPE} MATCHES "SHARED")

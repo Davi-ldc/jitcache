@@ -128,7 +128,9 @@ ExceptionOr<void> Range::setStart(Ref<Node>&& container, unsigned offset)
     if (childNode.hasException())
         return childNode.releaseException();
 
+    assertIsOwnerThread();
     bool shouldAlsoSetEnd = !is_lteq(treeOrder(BoundaryPoint(container.copyRef(), offset), makeBoundaryPoint(m_end)));
+    releaseOwnerThreadAssertion();
     {
         Locker locker { m_boundaryPointLock };
         m_start.set(WTF::move(container), offset, childNode.releaseReturnValue());
@@ -148,7 +150,9 @@ ExceptionOr<void> Range::setEnd(Ref<Node>&& container, unsigned offset)
     if (childNode.hasException())
         return childNode.releaseException();
 
+    assertIsOwnerThread();
     bool shouldAlsoSetStart = !is_lteq(treeOrder(makeBoundaryPoint(m_start), BoundaryPoint(container.copyRef(), offset)));
+    releaseOwnerThreadAssertion();
     {
         Locker locker { m_boundaryPointLock };
         m_end.set(WTF::move(container), offset, childNode.releaseReturnValue());
@@ -226,6 +230,7 @@ ExceptionOr<Range::CompareResults> Range::compareNode(Node& node) const
         return Exception { ExceptionCode::NotFoundError };
     }
 
+    assertIsOwnerThread();
     auto startOrdering = treeOrder(nodeRange->start, makeBoundaryPoint(m_start));
     auto endOrdering = treeOrder(nodeRange->end, makeBoundaryPoint(m_end));
     if (is_gteq(startOrdering) && is_lteq(endOrdering))
@@ -241,6 +246,8 @@ ExceptionOr<Range::CompareResults> Range::compareNode(Node& node) const
 
 ExceptionOr<short> Range::compareBoundaryPoints(unsigned short how, const Range& sourceRange) const
 {
+    assertIsOwnerThread();
+    sourceRange.assertIsOwnerThread();
     const RangeBoundaryPoint* thisPoint;
     const RangeBoundaryPoint* otherPoint;
     switch (how) {
@@ -321,6 +328,7 @@ static inline Node* NODELETE childOfCommonRootBeforeOffset(Node* container, unsi
 
 ExceptionOr<RefPtr<DocumentFragment>> Range::processContents(ActionType action)
 {
+    assertIsOwnerThread();
     RefPtr<DocumentFragment> fragment;
     if (action == Extract || action == Clone)
         fragment = DocumentFragment::create(protect(m_ownerDocument));
@@ -487,7 +495,7 @@ static ExceptionOr<RefPtr<Node>> processContentsBetweenOffsets(Range::ActionType
         endOffset = std::min(endOffset, dataNode.length());
         startOffset = std::min(startOffset, endOffset);
         if (action == Range::Extract || action == Range::Clone) {
-            Ref characters = uncheckedDowncast<CharacterData>(dataNode.cloneNode(true));
+            Ref characters = uncheckedDowncast<CharacterData>(dataNode.cloneNode(CloneSubtree::Yes));
             auto deleteResult = deleteCharacterData(characters, startOffset, endOffset);
             if (deleteResult.hasException())
                 return deleteResult.releaseException();
@@ -511,7 +519,7 @@ static ExceptionOr<RefPtr<Node>> processContentsBetweenOffsets(Range::ActionType
         endOffset = std::min(endOffset, instruction.data().length());
         startOffset = std::min(startOffset, endOffset);
         if (action == Range::Extract || action == Range::Clone) {
-            Ref processingInstruction = uncheckedDowncast<ProcessingInstruction>(instruction.cloneNode(true));
+            Ref processingInstruction = uncheckedDowncast<ProcessingInstruction>(instruction.cloneNode(CloneSubtree::Yes));
             processingInstruction->setData(processingInstruction->data().substring(startOffset, endOffset - startOffset));
             if (fragment) {
                 result = fragment;
@@ -537,7 +545,7 @@ static ExceptionOr<RefPtr<Node>> processContentsBetweenOffsets(Range::ActionType
             if (fragment)
                 result = fragment;
             else
-                result = container->cloneNode(false);
+                result = container->cloneNode(CloneSubtree::No);
         }
         Vector<Ref<Node>> nodes;
         {
@@ -576,7 +584,7 @@ static ExceptionOr<void> processNodes(Range::ActionType action, Vector<Ref<Node>
             break;
         }
         case Range::Clone: {
-            auto result = newContainer->appendChild(node->cloneNode(true));
+            auto result = newContainer->appendChild(node->cloneNode(CloneSubtree::Yes));
             if (result.hasException())
                 return result.releaseException();
             break;
@@ -604,7 +612,7 @@ ExceptionOr<RefPtr<Node>> processAncestorsAndTheirSiblings(Range::ActionType act
                 if (!shadowRoot->isClonable())
                     continue;
             }
-            Ref clonedAncestor = ancestor->cloneNode(false); // Might have been removed already during mutation event.
+            Ref clonedAncestor = ancestor->cloneNode(CloneSubtree::No); // Might have been removed already during mutation event.
             if (clonedContainer) {
                 auto result = clonedAncestor->appendChild(*clonedContainer);
                 if (result.hasException())
@@ -644,11 +652,11 @@ ExceptionOr<RefPtr<Node>> processAncestorsAndTheirSiblings(Range::ActionType act
                 break;
             case Range::Clone:
                 if (direction == ProcessContentsForward) {
-                    auto result = clonedContainer->appendChild(child->cloneNode(true));
+                    auto result = clonedContainer->appendChild(child->cloneNode(CloneSubtree::Yes));
                     if (result.hasException())
                         return result.releaseException();
                 } else {
-                    auto result = clonedContainer->insertBefore(child->cloneNode(true), protect(clonedContainer->firstChild()));
+                    auto result = clonedContainer->insertBefore(child->cloneNode(CloneSubtree::Yes), protect(clonedContainer->firstChild()));
                     if (result.hasException())
                         return result.releaseException();
                 }
@@ -792,6 +800,7 @@ ExceptionOr<RefPtr<Node>> Range::checkNodeOffsetPair(Node& node, unsigned offset
 
 Ref<Range> Range::cloneRange() const
 {
+    assertIsOwnerThread();
     auto result = create(m_ownerDocument);
     result->setStart(protect(startContainer()), m_start.offset());
     result->setEnd(protect(endContainer()), m_end.offset());
@@ -912,6 +921,7 @@ ExceptionOr<void> Range::setStartBefore(Node& node)
 #if ENABLE(TREE_DEBUGGING)
 String Range::debugDescription() const
 {
+    assertIsOwnerThread();
     return makeString("from offset "_s, m_start.offset(), " of "_s, startContainer().debugDescription(), " to offset "_s, m_end.offset(), " of "_s, endContainer().debugDescription());
 }
 #endif
@@ -968,6 +978,7 @@ void Range::nodeWillBeRemoved(Node& node)
 
 bool Range::parentlessNodeMovedToNewDocumentAffectsRange(Node& node)
 {
+    assertIsOwnerThread();
     return node.isShadowIncludingInclusiveAncestorOf(&m_start.container());
 }
 

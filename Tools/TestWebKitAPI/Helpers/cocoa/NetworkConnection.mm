@@ -101,81 +101,6 @@ void ReceiveHTTPRequestOperation::await_suspend(std::coroutine_handle<> handle)
     });
 }
 
-#if HAVE(NETWORK_FRAMEWORK_HTTP_MESSAGING)
-
-void Connection::receiveHTTPMessagingRequest(CompletionHandler<void(HTTPRequestData&&)>&& completionHandler, HTTPRequestData&& partial) const
-{
-    nw_connection_receive_message(m_connection.get(), makeBlockPtr([connection = *this, completionHandler = WTF::move(completionHandler), partial = WTF::move(partial)](dispatch_data_t content, nw_content_context_t context, bool isComplete, nw_error_t error) mutable {
-        __block HTTPRequestData blockPartial = WTF::move(partial);
-        // Discard any headers/body already accumulated from earlier chunks: an error mid-stream (e.g. the
-        // client resets the stream after sending headers but before finishing the body) must not be mistaken
-        // by callers for a successfully-received request just because path happens to already be set.
-        if (error)
-            return completionHandler({ });
-
-        if (context) {
-            if (RetainPtr metadata = adoptNS(nw_content_context_copy_protocol_metadata(context, adoptNS(nw_protocol_copy_http_definition()).get()))) {
-                if (nw_http_metadata_get_type(metadata.get()) == nw_http_metadata_type_request) {
-                    if (RetainPtr request = adoptNS(nw_http_metadata_copy_request(metadata.get()))) {
-                        nw_http_request_access_method(request.get(), ^(const char* method) {
-                            blockPartial.method = String::fromUTF8(method);
-                        });
-                        nw_http_request_access_path(request.get(), ^(const char* path) {
-                            if (path)
-                                blockPartial.path = String::fromUTF8(path);
-                        });
-                        if (RetainPtr fields = adoptNS(nw_http_request_copy_header_fields(request.get()))) {
-                            nw_http_fields_enumerate(fields.get(), ^bool(const char* name, size_t nameLength, const char* value, size_t valueLength) {
-                                String fieldName = String::fromUTF8(std::span(name, nameLength));
-                                String fieldValue = String::fromUTF8(std::span(value, valueLength));
-                                auto addResult = blockPartial.headerFields.add(fieldName, fieldValue);
-                                if (!addResult.isNewEntry) {
-                                    // RFC 7540 8.1.2.5: cookie crumbling splits a single Cookie header into multiple
-                                    // header fields on the wire, which must be rejoined with "; " to reconstruct the
-                                    // original Cookie header value. All other repeated fields are combined per RFC
-                                    // 7230 3.2.2 by joining with a comma.
-                                    ASCIILiteral separator = fieldName == "cookie"_s ? "; "_s : ", "_s;
-                                    addResult.iterator->value = makeString(addResult.iterator->value, separator, fieldValue);
-                                }
-                                return true;
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        if (content)
-            blockPartial.body.appendVector(vectorFromData(content));
-
-        if (isComplete)
-            return completionHandler(WTF::move(blockPartial));
-
-        connection.receiveHTTPMessagingRequest(WTF::move(completionHandler), WTF::move(blockPartial));
-    }).get());
-}
-
-void Connection::sendHTTPMessagingResponse(const HTTPResponse& response, CompletionHandler<void()>&& completionHandler) const
-{
-    RetainPtr httpResponse = adoptNS(nw_http_response_create(response.statusCode, nullptr));
-    RetainPtr fields = adoptNS(nw_http_fields_create());
-    for (auto& pair : response.headerFields)
-        nw_http_fields_append(fields.get(), pair.key.utf8().data(), pair.value.utf8().data());
-    nw_http_response_set_header_fields(httpResponse.get(), fields.get());
-
-    RetainPtr metadata = adoptNS(nw_http_create_metadata_for_response(httpResponse.get()));
-    RetainPtr context = adoptNS(nw_content_context_create("response"));
-    nw_content_context_set_metadata_for_protocol(context.get(), metadata.get());
-
-    nw_connection_send(m_connection.get(), makeDispatchData(Vector<uint8_t>(response.body)).get(), context.get(), true, makeBlockPtr([completionHandler = WTF::move(completionHandler)](nw_error_t error) mutable {
-        ASSERT_UNUSED(error, !error);
-        if (completionHandler)
-            completionHandler();
-    }).get());
-}
-
-#endif // HAVE(NETWORK_FRAMEWORK_HTTP_MESSAGING)
-
 ReceiveBytesOperation Connection::awaitableReceiveBytes() const
 {
     return { *this };
@@ -254,8 +179,8 @@ void Connection::webSocketHandshake(CompletionHandler<void()>&& connectionHandle
 
             constexpr auto webSocketKeyGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"_s;
             SHA1 sha1;
-            sha1.addBytes(byteCast<uint8_t>(keySpan.first(keyEnd)));
-            sha1.addBytes(webSocketKeyGUID.span());
+            sha1.addBytes(std::as_bytes(keySpan.first(keyEnd)));
+            sha1.addBytes(std::as_bytes(webSocketKeyGUID.span()));
             SHA1::Digest hash;
             sha1.computeHash(hash);
             return base64EncodeToString(hash);
@@ -271,8 +196,10 @@ void Connection::webSocketHandshake(CompletionHandler<void()>&& connectionHandle
 
 void Connection::terminate(CompletionHandler<void()>&& completionHandler)
 {
-    nw_connection_set_state_changed_handler(m_connection.get(), makeBlockPtr([completionHandler = WTF::move(completionHandler)] (nw_connection_state_t state, nw_error_t error) mutable {
-        ASSERT_UNUSED(error, !error);
+    nw_connection_set_state_changed_handler(m_connection.get(), makeBlockPtr([completionHandler = WTF::move(completionHandler)] (nw_connection_state_t state, nw_error_t) mutable {
+        // The error reported here describes the connection, not the cancellation: a connection that
+        // failed its TLS handshake still reports "bad certificate" once cancelled. Cancelling
+        // cannot itself fail, so there is nothing to check.
         if (state == nw_connection_state_cancelled && completionHandler)
             completionHandler();
     }).get());

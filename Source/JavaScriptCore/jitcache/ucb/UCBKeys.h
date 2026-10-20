@@ -21,10 +21,8 @@ class VM;
 namespace JSC::JITCache {
 
 // Key derivation: the identity digests that body keys carry, and the context, holder and source digests. The key itself is
-// in BodyKey.h.
-
-// Whether a captured core has generation's form or is a UCB the embedder decoded.
-enum class CoreProvenance : uint8_t { Generated = 0, EmbedderDecoded = 1 };
+// in BodyKey.h. No context records a line or column: a UCB holds none, so one body serves a source at any start line, and
+// deriving one would build the provider's line-start table from its whole text.
 
 // Identity digests: the SHA-256 of a 16-byte label and fixed-width little-endian fields.
 Digest256 rootIdentityDigest(IdentityKind, const Digest256& sourceDigest, LexicallyScopedFeatures, std::optional<int32_t> parameterEnd);
@@ -32,19 +30,18 @@ Digest256 childIdentityDigest(const BodyKey& parent, ChildTable, uint32_t index)
 Digest256 directEvalIdentityDigest(const BodyKey& caller, BytecodeIndex, const Digest256& textDigest);
 
 // Context digests, and the holder digest of a UFE: its descriptor and its TDZ chain.
-Digest256 globalContextDigest(IdentityKind, unsigned providerOffset, unsigned firstLine, JSParserScriptMode, DerivedContextType, EvalContextType, bool isArrowFunctionContext);
-Digest256 executableBodyContextDigest(IdentityKind, unsigned providerOffset, unsigned firstLine, const std::optional<Digest256>& rootHolderDigest);
+Digest256 globalContextDigest(IdentityKind, unsigned providerOffset, JSParserScriptMode, DerivedContextType, EvalContextType, bool isArrowFunctionContext);
+Digest256 executableBodyContextDigest(IdentityKind, unsigned providerOffset, const std::optional<Digest256>& rootHolderDigest);
 // Empty only when a budget refused a page of the descriptor encoding or the sort buffer of an environment it digested
 // first; requests pass none. `environmentsDigested`, when given, gains the number of environments this call digested
 // first.
 std::optional<Digest256> holderDigest(VM&, const UnlinkedFunctionExecutable&, CoreEncodingBudget* = nullptr, unsigned* environmentsDigested = nullptr);
-Digest256 directEvalContextDigest(unsigned providerOffset, unsigned firstLine, LexicallyScopedFeatures, DerivedContextType, NeedsClassFieldInitializer, PrivateBrandRequirement,
+Digest256 directEvalContextDigest(unsigned providerOffset, LexicallyScopedFeatures, DerivedContextType, NeedsClassFieldInitializer, PrivateBrandRequirement,
     bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType, const TDZEnvironment&, const PrivateNameEnvironment&);
 
 // What a record keeps of its context: a global's or a UFE body's inputs, or a direct eval's digest.
 struct GlobalContextInputs { // Program, Module, IndirectEval: globalContextDigest's arguments after the kind
     unsigned providerOffset;
-    unsigned firstLine;
     JSParserScriptMode scriptMode;
     DerivedContextType derivedContextType;
     EvalContextType evalContextType;
@@ -52,7 +49,6 @@ struct GlobalContextInputs { // Program, Module, IndirectEval: globalContextDige
 };
 struct BodyContextInputs { // FunctionConstructor, Builtin, Child; a root's holder digest comes from its UFE
     unsigned providerOffset;
-    unsigned firstLine;
 };
 struct DirectEvalContext {
     std::optional<Digest256> digest; // the digest its request computed, if it computed one

@@ -31,8 +31,9 @@
 #import <WebCore/ResourceLoadPriority.h>
 #import <wtf/TZoneMallocInlines.h>
 #import <wtf/cocoa/VectorCocoa.h>
+#import <wtf/text/CString.h>
 
-#if PLATFORM(COCOA) && HAVE(WK_SECURE_CODING_NSURLREQUEST)
+#if PLATFORM(COCOA)
 
 @interface NSURLRequest (WKSecureCoding)
 - (NSDictionary *)_webKitPropertyListData;
@@ -149,7 +150,7 @@ static void populateAppProperties(NSDictionary *protocolPropertiesDict, Protocol
             continue;
 
         if (isReservedProtocolPropertyKeyPrefix(key.get())) {
-            RELEASE_LOG_INFO_FORWARDABLE(API, CoreIpcNsurlRequestPropertyKeyNotAllowed, String(key.get()).utf8().data());
+            RELEASE_LOG_INFO_FORWARDABLE(API, CoreIpcNsurlRequestPropertyKeyNotAllowed, UTF8CString { key });
             continue;
         }
 
@@ -509,4 +510,4 @@ RetainPtr<id> CoreIPCNSURLRequest::toID() const
 #undef SET_PROTOCOL_DICT_BOOL
 #undef SET_PROTOCOL_DICT_MEMBER
 
-#endif // PLATFORM(COCOA) && HAVE(WK_SECURE_CODING_NSURLREQUEST)
+#endif // PLATFORM(COCOA)

@@ -121,14 +121,8 @@ static ASCIILiteral missReasonName(std::optional<MissReason> reason)
         return "requestKey"_s;
     case MissReason::Context:
         return "context"_s;
-    case MissReason::Provenance:
-        return "provenance"_s;
     case MissReason::Holder:
         return "holder"_s;
-    case MissReason::AtomMap:
-        return "atomMap"_s;
-    case MissReason::CoreDigest:
-        return "coreDigest"_s;
     case MissReason::Stack:
         return "stack"_s;
     }
@@ -191,13 +185,6 @@ void GlobalRequest::didServeLive(UnlinkedGlobalCodeBlock& codeBlock)
     attachLive(m_state, codeBlock);
 }
 
-void GlobalRequest::didDecode(UnlinkedGlobalCodeBlock& codeBlock)
-{
-    if (!ucbRequestActs(m_state))
-        return;
-    seedDecoded(m_state, codeBlock);
-}
-
 UnlinkedGlobalCodeBlock* GlobalRequest::tryImport()
 {
     if (!ucbRequestActs(m_state))
@@ -223,21 +210,6 @@ FunctionBodyRequest::FunctionBodyRequest(VM& vm, UnlinkedFunctionExecutable& exe
 {
     m_state.functionExecutable = &executable;
     m_state.specialization = specialization;
-}
-
-void FunctionBodyRequest::didDecodeCachedSlots(UnlinkedFunctionCodeBlock* forCall, UnlinkedFunctionCodeBlock* forConstruct)
-{
-    if (!ucbRequestActs(m_state))
-        return;
-    bool requestsCall = m_state.specialization == CodeSpecializationKind::CodeForCall;
-    UnlinkedFunctionCodeBlock* requested = requestsCall ? forCall : forConstruct;
-    UnlinkedFunctionCodeBlock* other = requestsCall ? forConstruct : forCall;
-    // A requested slot the decode left empty leaves the request unsettled, so it goes on to import or generate.
-    if (requested)
-        seedDecoded(m_state, *requested);
-    // The slot nobody requested is recorded as decoded without settling the request; its own first request attaches.
-    if (other)
-        recordDecodedSlot(m_state, *other, requestsCall ? CodeSpecializationKind::CodeForConstruct : CodeSpecializationKind::CodeForCall);
 }
 
 void FunctionBodyRequest::didServeLive(UnlinkedFunctionCodeBlock& codeBlock)
@@ -317,16 +289,6 @@ void didCreateBuiltinExecutable(VM& vm, UnlinkedFunctionExecutable& executable, 
         return;
     // The builtins generator's digest when it recorded one; the runtime scan records none.
     recordRoot(vm, executable, IdentityKind::Builtin, source, executable.lexicallyScopedFeatures(), std::nullopt, metadata.hasSourceDigest ? &metadata.sourceDigest : nullptr);
-}
-
-void didDecodeBuiltinExecutable(VM& vm, UnlinkedFunctionExecutable& executable, SourceProvider& provider)
-{
-    if (!ucbRequestTracksKeys(vm))
-        return;
-    // The root source is the provider's whole source, which spans the provider as the created form's does, so both forms
-    // take the same digest. Building it reads only the provider's length.
-    SourceCode rootSource { Ref<SourceProvider> { provider } };
-    recordRoot(vm, executable, IdentityKind::Builtin, rootSource, executable.lexicallyScopedFeatures(), std::nullopt);
 }
 
 // Destructor hooks, on the thread sweeping the VM's heap. vm() is valid during the sweep, and the state outlives every

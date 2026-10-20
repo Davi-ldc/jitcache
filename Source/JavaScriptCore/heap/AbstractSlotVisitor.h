@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include "CollectionScope.h"
 #include "JSCJSValue.h"
 #include "MarkStack.h"
 #include "RootMarkReason.h"
@@ -36,8 +37,10 @@
 
 namespace JSC {
 
+class Collector;
 class ConservativeRoots;
 class Heap;
+class HeapAnalyzer;
 class HeapCell;
 class JSCell;
 class MarkedBlock;
@@ -138,9 +141,12 @@ public:
 
     inline bool isEmpty(); // Defined in AbstractSlotVisitorInlines.h
 
-    VM& vm();
-    const VM& vm() const;
-    JSC::Heap* heap() const;
+    Collector& collector() const { return m_collector; }
+
+    CollectionScope collectionScope() const { return m_collectionScope; }
+    HeapAnalyzer* heapAnalyzer() const { return m_heapAnalyzer; }
+
+    inline void NODELETE didStartMarking(CollectionScope, HeapAnalyzer*); // Defined in AbstractSlotVisitorInlines.h
 
     virtual void append(const ConservativeRoots&) = 0;
 
@@ -210,10 +216,10 @@ public:
 
     virtual void visitAsConstraint(const JSCell*) = 0;
 
-    const char* codeName() const LIFETIME_BOUND { return m_codeName.data(); }
+    const ASCIICString& codeName() const LIFETIME_BOUND { return m_codeName; }
 
 protected:
-    inline AbstractSlotVisitor(Heap&, CString codeName, ConcurrentPtrHashSet&);
+    inline AbstractSlotVisitor(Collector&, ASCIICString codeName, ConcurrentPtrHashSet&);
 
     virtual void didAddOpaqueRoot(void*) { }
     virtual void didFindOpaqueRoot(void*) { }
@@ -226,9 +232,10 @@ protected:
 
     size_t m_visitCount { 0 };
 
-    JSC::Heap& m_heap;
+    HeapAnalyzer* m_heapAnalyzer { nullptr };
+    Collector& m_collector;
     ReferrerContext* m_context { nullptr };
-    CString m_codeName;
+    ASCIICString m_codeName;
 
     MarkingConstraint* m_currentConstraint { nullptr };
     SUPPRESS_FORWARD_DECL_MEMBER MarkingConstraintSolver* m_currentSolver { nullptr }; // MarkingConstraintSolver is not refcounted
@@ -238,6 +245,7 @@ protected:
     bool m_suppressVerifier { false };
     bool m_ignoreNewOpaqueRoots { false }; // Useful as a debugging mode.
     bool m_needsExtraOpaqueRootHandling { false };
+    CollectionScope m_collectionScope { CollectionScope::Full };
 
     friend class MarkingConstraintSolver;
 };

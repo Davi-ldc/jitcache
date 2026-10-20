@@ -29,7 +29,6 @@
 #include "NetworkLoadParameters.h"
 #include <WebCore/FrameIdentifier.h>
 #include <WebCore/NetworkLoadMetrics.h>
-#include <WebCore/PageIdentifier.h>
 #include <WebCore/ProtectionSpace.h>
 #include <WebCore/ResourceResponse.h>
 #include <wtf/RunLoop.h>
@@ -66,6 +65,7 @@ private:
     void stopTimeout();
 
     enum class WasBlockingCookies : bool { No, Yes };
+    bool shouldBlockCookies(const WebCore::ResourceRequest&, WasBlockingCookies) const;
     void createRequest(WebCore::ResourceRequest&&, WasBlockingCookies);
     void clearRequest();
 
@@ -85,7 +85,7 @@ private:
     bool acceptCertificate(GTlsCertificate*, GTlsCertificateFlags);
 
     static void didSniffContentCallback(SoupMessage*, const char* contentType, GHashTable* parameters, NetworkDataTaskSoup*);
-    void didSniffContent(CString&&);
+    void didSniffContent(UTF8CString&&);
 
     bool persistentCredentialStorageEnabled() const;
     void applyAuthenticationToRequest(WebCore::ResourceRequest&);
@@ -132,6 +132,11 @@ private:
 
     void didFail(const WebCore::ResourceError&);
 
+#if HAVE(SOUP_COMPRESSION_DICTIONARY_SUPPORT)
+    static gboolean requestCompressionDictionaryCallback(SoupMessage*, SoupCompressionDictionaryRequest*, NetworkDataTaskSoup*);
+    void requestCompressionDictionary(SoupCompressionDictionaryRequest*);
+#endif
+
     static void startingCallback(SoupMessage*, NetworkDataTaskSoup*);
     bool shouldAllowHSTSPolicySetting() const;
     bool shouldAllowHSTSProtocolUpgrade() const;
@@ -150,7 +155,7 @@ private:
     WebCore::AdditionalNetworkLoadMetricsForWebInspector& additionalNetworkLoadMetricsForWebInspector();
 
     Markable<WebCore::FrameIdentifier> m_frameID;
-    Markable<WebCore::PageIdentifier> m_pageID;
+    Markable<WebPageProxyIdentifier> m_webPageProxyID;
     State m_state { State::Suspended };
     WebCore::ContentSniffingPolicy m_shouldContentSniff;
     PreconnectOnly m_shouldPreconnectOnly { PreconnectOnly::No };
@@ -164,7 +169,7 @@ private:
     WebCore::Credential m_credentialForPersistentStorage;
     WebCore::ResourceRequest m_currentRequest;
     WebCore::ResourceResponse m_response;
-    CString m_sniffedContentType;
+    UTF8CString m_sniffedContentType;
     Vector<uint8_t> m_readBuffer;
     uint64_t m_bodyDataTotalBytesSent { 0 };
     GRefPtr<GFile> m_downloadDestinationFile;
@@ -173,7 +178,10 @@ private:
     bool m_allowOverwriteDownload { false };
     WebCore::NetworkLoadMetrics m_networkLoadMetrics;
     bool m_isBlockingCookies { false };
-    RefPtr<WebCore::SecurityOrigin> m_sourceOrigin;
+    const RefPtr<WebCore::SecurityOrigin> m_sourceOrigin;
+#if HAVE(SOUP_COMPRESSION_DICTIONARY_SUPPORT)
+    std::optional<CompressionDictionaryParameters> m_compressionDictionary;
+#endif
     RunLoop::Timer m_timeoutSource;
 };
 

@@ -607,7 +607,7 @@ private:
     };
 
     template<typename BitwiseOp>
-    static std::span<Digit> absoluteBitwiseOp(std::span<const Digit> x, std::span<const Digit> y, ExtraDigitsHandling, BitwiseOp&&, std::span<Digit> result);
+    static std::span<Digit> absoluteBitwiseOp(std::span<const Digit> x, std::span<const Digit> y, ExtraDigitsHandling, NOESCAPE const BitwiseOp&, std::span<Digit> result);
 
     static size_t andLength(std::span<const Digit> x, std::span<const Digit> y) { return std::min(x.size(), y.size()); }
     static size_t orLength(std::span<const Digit> x, std::span<const Digit> y) { return std::max(x.size(), y.size()); }
@@ -633,14 +633,14 @@ private:
     static constexpr unsigned maxInPlaceSubSize = 16;
     static constexpr unsigned maxInPlaceCachedModSize = 8;
     static_assert(maxInPlaceCachedModSize <= maxCachedModDivisorSize);
-    // Only divisors that remainderImpl arms have a cached inverse, and cachedModFixed reads that
-    // inverse through a span whose extent is fixed at compile time.
+    // Only divisors that remainderImpl arms have a cached inverse, and cachedModFixed takes that
+    // inverse as a span whose extent is fixed at compile time.
     static_assert(maxFixedCachedModDivisorSize <= maxCachedModDivisorSize);
     static void cachedModMakeInverse(VM&, std::span<const Digit> b);
     static Digit cachedModFoldFactor(std::span<const Digit> b);
     static std::span<const Digit> cachedMod(VM&, std::span<Digit> r, std::span<const Digit>, std::span<const Digit>);
     template<size_t N, size_t ASize>
-    static void cachedModFixed(VM&, std::span<Digit, N> r, std::span<const Digit, ASize>, std::span<const Digit, N> b);
+    static void cachedModFixed(std::span<Digit, N> r, std::span<const Digit, ASize>, std::span<const Digit, N> b, std::span<const Digit, N + 1> inverse);
     template<typename RSpan, typename ASpan, typename BSpan>
     static void cachedModFoldImpl(RSpan r, ASpan, BSpan b, Digit c);
     template<size_t N, size_t ASize>
@@ -694,9 +694,9 @@ private:
     template <typename BigIntImpl>
     static ImplResult asUintNImpl(JSGlobalObject*, uint64_t, BigIntImpl);
     template <typename BigIntImpl>
-    static ImplResult truncateToNBits(JSGlobalObject*, int32_t, BigIntImpl);
+    static ImplResult truncateToNBits(JSGlobalObject*, unsigned, BigIntImpl);
     template <typename BigIntImpl>
-    static ImplResult truncateAndSubFromPowerOfTwo(JSGlobalObject*, int32_t, BigIntImpl, bool resultSign);
+    static ImplResult truncateAndSubFromPowerOfTwo(JSGlobalObject*, unsigned, BigIntImpl, bool resultSign);
 
     JS_EXPORT_PRIVATE static uint64_t NODELETE toBigUInt64Heap(JSBigInt*);
 

@@ -21,13 +21,18 @@
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
+#include "ModuleProgramExecutable.h"
 #include "ReleaseHeapAccessScope.h"
+#include "SourceCode.h"
+#include "StrongInlines.h"
 #include "TestArtifact.h"
 #include "TestFiles.h"
 #include "TestVM.h"
 #include "UCBFeedback.h"
 #include "UCBRegistry.h"
 #include "UnlinkedCodeBlock.h"
+#include "UnlinkedModuleProgramCodeBlock.h"
+#include "VMEntryScopeInlines.h"
 #include "ValidatedBody.h"
 #include <array>
 #include <cmath>
@@ -226,7 +231,7 @@ JITCACHE_TEST(integratorScoreSectionsNamesTheReader, Yes)
     JITCACHE_CHECK(!summaryCheck);
     if (!summaryCheck)
         checkRejected("a short cb.summary"_s, feedback, shortSummary, ics, "cb"_s, description(summaryCheck.error().check));
-    checkRejected("a short ICsBaseline"_s, feedback, summary, ics.first(ics.size() - 1), "ics"_s, "SectionSize"_s);
+    checkRejected("a short ICsBaseline"_s, feedback, summary, ics.first(ics.size() - 1), "ics"_s, ICs::description(ICs::Check::SectionSize));
 
     // An ICs header that counts more IC sites with cases than ICs fails the bound the ICs lane puts on that count.
     Vector<uint8_t> unbounded;
@@ -235,7 +240,7 @@ JITCACHE_TEST(integratorScoreSectionsNamesTheReader, Yes)
     memcpySpan(asMutableByteSpan(header), unbounded.span().first(sizeof(header)));
     header.icSitesWithCases = header.propertyICCount + 1;
     memcpySpan(unbounded.mutableSpan().first(sizeof(header)), asByteSpan(header));
-    checkRejected("an ICsBaseline with more IC sites with cases than ICs"_s, feedback, summary, unbounded.span(), "ics"_s, "SummaryBound"_s);
+    checkRejected("an ICsBaseline with more IC sites with cases than ICs"_s, feedback, summary, unbounded.span(), "ics"_s, ICs::description(ICs::Check::SummaryBound));
 }
 
 // delta rejects at each step a test can reach, commits a body in a Producer, and reports Faulted after a recording fault.
@@ -299,6 +304,73 @@ JITCACHE_TEST(integratorDeltaRejectsCommitsAndFaults, Yes)
     JITCACHE_CHECK(!faulted.committedBodies && !faulted.committedBytes);
     checkFault(context, "delta's fault"_s, faulted.fault, FaultClass::RecordingFault, "cb.test-check"_s);
     JITCACHE_CHECK(state.progress().deltaRuns == before.deltaRuns + 1);
+}
+
+// Invalid material raised inside a build stops delta. A Producer with the delta capture All holds a module UCB that ran,
+// recorded without an analysis source, beside the run-once source's bodies, which ran too, under a lookup override whose
+// open, asked for the module's body, raises invalid material at container.io, as the read of a damaged saved ucb.analysis
+// would, notes how many bodies the index lists and answers Unusable. delta returns Faulted with that fault, the status
+// holds no other, and the index lists exactly the bodies it listed when the override raised: the module's capture wrote
+// nothing, and no key after it committed.
+JITCACHE_TEST(integratorDeltaStopsAfterInvalidMaterialInABuild, Yes)
+{
+    ProcessHooksScope hooks;
+    auto directory = TemporaryDirectory::create(context, "jitcache-integrator"_s);
+    if (!directory)
+        return;
+    VM& vm = *context.vm();
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, DeltaCapture::All)), StartOutcome::Started))
+        return;
+    VMState& state = *vm.jitCacheState();
+    JSGlobalObject* globalObject = createRunOnceRealm(context, vm);
+    if (!globalObject)
+        return;
+
+    // A module requested without a linker keeps no analysis source, so its capture reads the saved body's section through
+    // readBodySection. Its LLInt counter, deferred as the LLInt's tier-up leaves it when the gate refuses a body, shows
+    // that it ran.
+    SourceCode moduleSource = makeSource("export function jitcacheDeltaModule() { return 1; }\n"_s, SourceOrigin { }, SourceTaintedOrigin::Untainted, String { },
+        TextPosition { }, SourceProviderSourceType::Module);
+    Strong<ModuleProgramExecutable> moduleExecutable;
+    {
+        VMEntryScope entryScope(vm, globalObject);
+        moduleExecutable = Strong<ModuleProgramExecutable> { vm, ModuleProgramExecutable::tryCreate(globalObject, moduleSource) };
+    }
+    UnlinkedCodeBlock* moduleCodeBlock = moduleExecutable ? moduleExecutable.get()->unlinkedCodeBlock() : nullptr;
+    std::optional<BodyKey> moduleKey = moduleCodeBlock ? state.bodyKeyOf(*moduleCodeBlock) : std::nullopt;
+    if (!moduleKey || state.registry().moduleAnalysisSource(*moduleCodeBlock)) {
+        JITCACHE_FAIL("the module was not recorded, or was recorded with an analysis source"_s);
+        return;
+    }
+    moduleCodeBlock->llintExecuteCounter().deferIndefinitely();
+
+    std::optional<uint64_t> indexedAtTheRaise;
+    state.setBodyLookupForTesting([&](const BodyKey& key) {
+        return state.artifact()->token(key);
+    }, [&](const BodyKey& key) {
+        if (!(key == *moduleKey))
+            return BodyLookup::missing();
+        indexedAtTheRaise = state.artifact()->indexedBodies();
+        state.raiseInvalidMaterial("container.io"_s, makeString(errnoText(EIO), " reading the module's saved ucb.analysis"_s));
+        return BodyLookup::unusable();
+    });
+    DeltaResult result = JITCache::delta(vm);
+    state.clearBodyLookupForTesting();
+
+    JITCACHE_CHECK(result.outcome == DeltaOutcome::Faulted);
+    checkFault(context, "delta's fault"_s, result.fault, FaultClass::InvalidMaterial, "container.io"_s);
+    Status status = JITCache::status(vm);
+    checkFault(context, "the activity fault"_s, status.activityFault, FaultClass::InvalidMaterial, "container.io"_s);
+    checkFault(context, "the production fault"_s, status.productionFault, FaultClass::InvalidMaterial, "container.io"_s);
+    checkFault(context, "the first fault"_s, status.firstFault, FaultClass::InvalidMaterial, "container.io"_s);
+    if (!indexedAtTheRaise) {
+        JITCACHE_FAIL("the module's capture never read its saved ucb.analysis"_s);
+        return;
+    }
+    JITCACHE_CHECK(state.artifact()->indexedBodies() == *indexedAtTheRaise);
+    JITCACHE_CHECK(result.committedBodies == *indexedAtTheRaise);
+    JITCACHE_CHECK(!state.artifact()->token(*moduleKey));
+    JITCACHE_CHECK(!state.progress().deltaRuns);
 }
 
 #endif // ENABLE(JIT)

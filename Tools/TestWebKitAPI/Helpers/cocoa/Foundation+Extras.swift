@@ -98,7 +98,26 @@ public struct Future: Sendable, ~Copyable {
         case signaled
     }
 
-    private let state = Mutex<State>(.initial)
+    private final class Storage: Sendable {
+        let state = Mutex<State>(.initial)
+
+        func signal() {
+            let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
+                defer {
+                    state = .signaled
+                }
+
+                if case .waiting(let continuation) = state {
+                    return continuation
+                }
+
+                return nil
+            }
+            continuation?.resume()
+        }
+    }
+
+    private let storage = Storage()
 
     /// Create a new Future.
     public init() {
@@ -106,41 +125,79 @@ public struct Future: Sendable, ~Copyable {
 
     /// Resolves the promise of this Future.
     public func signal() {
-        let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
-            defer {
-                state = .signaled
-            }
-
-            if case .waiting(let continuation) = state {
-                return continuation
-            }
-
-            return nil
-        }
-        continuation?.resume()
+        storage.signal()
     }
 
-    /// Waits for the promise of this Future to be resolved.
+    /// Waits for the promise of this Future to be resolved, or for the current task to be cancelled.
     public func wait() async {
-        await withCheckedContinuation { continuation in
-            let resumeImmediately = state.withLock { state in
-                switch state {
-                case .signaled:
-                    return true
+        let storage = self.storage
 
-                case .initial:
-                    state = .waiting(continuation)
-                    return false
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let resumeImmediately = storage.state.withLock { state in
+                    switch state {
+                    case .signaled:
+                        return true
 
-                case .waiting:
-                    preconditionFailure("Future only supports a single waiter")
+                    case .initial:
+                        state = .waiting(continuation)
+                        return false
+
+                    case .waiting:
+                        preconditionFailure("Future only supports a single waiter")
+                    }
+                }
+
+                if resumeImmediately {
+                    continuation.resume()
                 }
             }
-
-            if resumeImmediately {
-                continuation.resume()
-            }
+        } onCancel: {
+            storage.signal()
         }
+    }
+}
+
+/// An error thrown when a condition doesn't become true before a timeout.
+public struct ConditionTimedOut: Error, CustomStringConvertible {
+    /// A description of the condition that was being waited for.
+    public let condition: String
+
+    /// How long the condition was waited for.
+    public let timeout: Duration
+
+    // swift-format-ignore: AllPublicDeclarationsHaveDocumentation
+    public var description: String {
+        "Timed out after \(timeout) waiting for \(condition)"
+    }
+}
+
+/// Waits until a condition becomes true, checking it periodically.
+///
+/// ```swift
+/// try await waitForCondition("the safe browsing warning to appear") {
+///     webView._safeBrowsingWarning != nil
+/// }
+/// ```
+///
+/// - Parameters:
+///   - description: A description of the condition, used when it times out.
+///   - timeout: How long to wait for the condition before giving up.
+///   - condition: A closure that returns whether the condition is true.
+/// - Throws: ``ConditionTimedOut`` if the condition isn't true before the timeout, or any error thrown by `condition`.
+@MainActor
+public func waitForCondition(
+    _ description: String,
+    timeout: Duration = .seconds(5),
+    _ condition: () async throws -> Bool
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+
+    while !(try await condition()) {
+        guard ContinuousClock.now < deadline else {
+            throw ConditionTimedOut(condition: description, timeout: timeout)
+        }
+        try await Task.sleep(for: .milliseconds(10))
     }
 }
 

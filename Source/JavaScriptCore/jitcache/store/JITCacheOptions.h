@@ -20,7 +20,7 @@ ASCIILiteral mustMatchOptionName(unsigned index); // index < numberOfMustMatchOp
 std::array<bool, numberOfMustMatchOptions> mustMatchOptionValues(); // the effective values, by index
 
 // A fixed option's value, in the type OptionsList.h declares: Bool, Unsigned, Int32, Double or OptionString.
-using FixedOptionValue = Variant<bool, unsigned, int32_t, double, const char*>;
+using FixedOptionValue = Variant<bool, unsigned, int32_t, double, const char8_t*>;
 
 // One row of options.md's fixed table.
 struct FixedOptionRow {

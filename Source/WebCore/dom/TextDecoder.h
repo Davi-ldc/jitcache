@@ -53,14 +53,14 @@ public:
     struct DecodeOptions {
         bool stream { false };
     };
-    ExceptionOr<String> decode(std::optional<BufferSource::VariantType>, DecodeOptions);
+    ExceptionOr<String> decode(std::optional<BufferSource>, DecodeOptions);
 
 private:
     TextDecoder(StringView, Options);
 
     const PAL::TextEncoding m_textEncoding;
     const Options m_options;
-    std::unique_ptr<PAL::TextCodec> m_codec;
+    const std::unique_ptr<PAL::TextCodec> m_codec;
 };
 
 }

@@ -90,7 +90,7 @@ private:
 }
 
 template <typename CharacterType, typename Functor>
-static inline void splitOnSpaces(StringParsingBuffer<CharacterType> buffer, Functor&& functor)
+static inline void splitOnSpaces(StringParsingBuffer<CharacterType> buffer, NOESCAPE Functor&& functor)
 {
     skipWhile<isASCIIWhitespace>(buffer);
 
@@ -186,7 +186,7 @@ static Ref<FormData> createReportFormData(const String& type, const URL& url, co
     auto reportList = JSON::Array::create();
     reportList->pushObject(reportObject);
 
-    return FormData::create(reportList->toJSONString().utf8());
+    return FormData::create(reportList->toJSONString().utf8().span());
 }
 
 static String addHashPrefix(ResourceCryptographicDigest::Algorithm algorithm, StringView hash)

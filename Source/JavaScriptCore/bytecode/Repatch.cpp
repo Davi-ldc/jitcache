@@ -597,7 +597,7 @@ static InlineCacheAction tryCacheGetBy(JSGlobalObject* globalObject, CodeBlock* 
 
             RefPtr<PolyProtoAccessChain> prototypeAccessChain;
 
-            PropertyOffset offset = slot.isUnset() ? invalidOffset : slot.cachedOffset();
+            PropertyOffset offset = slot.isUnset() || slot.isCustom() ? invalidOffset : slot.cachedOffset();
 
             if (slot.isCustom() && slot.slotBase() == baseValue) {
                 // To cache self customs, we must disallow dictionaries because we
@@ -664,6 +664,14 @@ static InlineCacheAction tryCacheGetBy(JSGlobalObject* globalObject, CodeBlock* 
                     }
                 }
             }
+
+            // Fresh dictionaries were flattened above, but one that has already been flattened once is not
+            // re-flattened and stays a dictionary. A custom with no backing property in the slot base's structure
+            // (invalidOffset, such as one served from a static property table) is shadowed by adding that
+            // property, which on a dictionary happens in place with no structure transition, leaving the
+            // constant custom getter recorded here stale.
+            if (slot.isCacheableCustom() && slot.slotBase()->structure()->isDictionary() && !isValidOffset(slot.cachedOffset()))
+                return GiveUpOnCache;
 
             JSFunction* getter = nullptr;
             if (slot.isCacheableGetter())
@@ -1024,6 +1032,8 @@ static InlineCacheAction tryCachePutBy(JSGlobalObject* globalObject, CodeBlock* 
     VM& vm = globalObject->vm();
     AccessGenerationResult result;
     Identifier ident = Identifier::fromUid(vm, propertyName.uid());
+    if (oldStructure->hasImmutableProperties() || (baseValue.isCell() && baseValue.asCell()->structure()->hasImmutableProperties()))
+        return GiveUpOnCache;
     {
         GCSafeConcurrentJSLocker locker(codeBlock->m_lock, globalObject->vm());
 
@@ -1206,6 +1216,13 @@ static InlineCacheAction tryCachePutBy(JSGlobalObject* globalObject, CodeBlock* 
                 if (!cacheStatus)
                     return GiveUpOnCache;
 
+                // prepareChainForCaching leaves a dictionary that has already been flattened once as a dictionary.
+                // A custom with no backing property in the base's structure (invalidOffset, such as one served from
+                // a static property table) is shadowed by adding that property, which on a dictionary happens in
+                // place with no structure transition, leaving this cache stale.
+                if (!isValidOffset(slot.cachedOffset()) && slot.base()->structure()->isDictionary())
+                    return GiveUpOnCache;
+
                 if (slot.base() != baseValue) {
                     if (cacheStatus->usesPolyProto) {
                         prototypeAccessChain = PolyProtoAccessChain::tryCreate(globalObject, baseCell, propertyName, slot.base());
@@ -1355,6 +1372,9 @@ void repatchPutBy(JSGlobalObject* globalObject, CodeBlock* codeBlock, JSValue ba
 static InlineCacheAction tryCacheArrayPutByVal(JSGlobalObject* globalObject, CodeBlock* codeBlock, JSValue baseValue, JSValue index, PropertyInlineCache& propertyCache, PutByKind putByKind)
 {
     if (!baseValue.isCell() || forceICFailure(globalObject))
+        return GiveUpOnCache;
+
+    if (baseValue.asCell()->structure()->hasImmutableProperties())
         return GiveUpOnCache;
 
     if (!index.isInt32())

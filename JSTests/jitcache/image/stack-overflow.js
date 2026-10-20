@@ -26,18 +26,18 @@
         }
     }
 
-    // The case happened (HARNESS.md, Tests): each prologue adds to the LLInt's counter, so the producer compiled both
-    // functions about a hundred frames deep, the consumer ran every frame in the imported code, and the images carry the
-    // targets the header claims.
+    // The case happened: each prologue adds to the LLInt's counter, so the producer compiled both functions about a
+    // hundred frames deep, the consumer ran every frame in the imported code, and the images carry the targets the header
+    // claims.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const bodies = { recurse, recurseWithArity };
         sections.expectImports(role, bodies);
         sections.expectTargets(role, { call: bodies }, [
-            { site: "B1", kind: "VMAddress", a: "SoftStackLimit", form: "Pointer" },
-            { site: "B3", kind: "CommonThunk", a: "ThrowStackOverflowAtPrologue", form: "Jump" },
-            { site: "B2", kind: "ProcessThunk", a: "ArityFixup", form: "Call" },
-            { site: "B5", kind: "BaselineThunk", a: "ConsistencyCheck", form: "Jump" },
+            { site: "the prologue's stack limit check", kind: "VMAddress", a: "SoftStackLimit", form: "Pointer" },
+            { site: "the prologue's stack overflow jump", kind: "CommonThunk", a: "ThrowStackOverflowAtPrologue", form: "Jump" },
+            { site: "the prologue's arity fixup call", kind: "ProcessThunk", a: "ArityFixup", form: "Call" },
+            { site: "the consistency check's tail call", kind: "BaselineThunk", a: "ConsistencyCheck", form: "Jump" },
         ]);
     }
 })(...arguments);

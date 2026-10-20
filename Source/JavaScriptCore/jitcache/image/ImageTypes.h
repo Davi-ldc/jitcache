@@ -108,12 +108,16 @@ enum class VMAddress : uint8_t {
 };
 inline constexpr uint8_t numberOfVMAddresses = static_cast<uint8_t>(VMAddress::SyncResumeCallCache);
 
-// The VM's cells an image may reference; the value is the a of a VMCell target.
+// The VM's cells an image may reference; the value is the a of a VMCell target. Every entry exists from VM construction
+// and outlives every image of the VM. The two iteration sentinels are the iterators a fast-array and a fast-string
+// iteration run with, which iterator_next and iterator_close_check compare.
 enum class VMCell : uint8_t {
     EmptyString = 1,
     SmallStringsSentinel = 2,
+    FastArraySentinel = 3,
+    FastStringSentinel = 4,
 };
-inline constexpr uint8_t numberOfVMCells = static_cast<uint8_t>(VMCell::SmallStringsSentinel);
+inline constexpr uint8_t numberOfVMCells = static_cast<uint8_t>(VMCell::FastStringSentinel);
 
 // Why a compilation's record is never captured. None of them is a fault.
 enum class Unrecordable : uint8_t {
@@ -171,20 +175,23 @@ struct MathICRecord {
     std::optional<SnippetProvenance> snippet; // only for an IC with inline code
 };
 
-// The identifier of every check the lane runs; status(vm) reports the failing one through description(ImageCheck).
+// Every check the lane runs; status(vm) reports the failing one through description(ImageCheck).
 enum class ImageCheck : uint8_t {
     None, // an outcome no check names: NotEligible, ChargeRefused, ExecutableMemoryExhausted
-    V1, V2, V3, V4, V5, V6, // the structure of image.baseline, an import's first checks
-    V7, // the structure of baked-facts.baseline
-    U1, U2, U3, U4, U5, U6, U7, // image.baseline against the import's UCB
-    W1, W2, W3, // the structure of image-twins.baseline, in twins builds
-    W4, // the twins section's compile inputs against the import's UCB
-    S1, S2, S3, S4, // capture: fixups reach their targets, and the code's MathICs and side tables match the record
-    S5, // preparation: every patched fixup reaches its target
+    // The structure of image.baseline, an import's first checks, then of baked-facts.baseline.
+    Header, CodeBounds, Fixups, SideTables, MathICEntries, MathICAndSwitchTargets, BakedFacts,
+    // image.baseline against the import's UCB.
+    SimpleSwitchTables, StringSwitchTables, UCBIndexes, BytecodeIndexes, CodeMapCount, SwitchRanks, ConstantTargets,
+    // image-twins.baseline in twins builds: its structure, then its compile inputs against the import's UCB.
+    TwinsHeader, TwinInputs, TwinRegenerations, TwinInputSites,
+    // A capture: fixups reach their targets, and the code's MathICs and side tables match the record.
+    CodeFixupTargets, SnippetFixupTargets, MathICCount, SideTablePointers,
+    // Preparation: every patched fixup reaches its target.
+    PatchReadBack,
 };
 
-// The check's name in lowercase, "v1" to "s5", or "none", with static storage, as status reports carry it.
-// ImageSection.cpp defines it.
+// The failing step status(vm) shows after the part, one hyphenated lowercase token per check such as "patch-read-back",
+// or "none", with static storage. ImageSection.cpp defines it.
 ASCIILiteral description(ImageCheck);
 
 // What the lane's section writers stream bytes through: false once the receiver refuses, and the writer then stops.

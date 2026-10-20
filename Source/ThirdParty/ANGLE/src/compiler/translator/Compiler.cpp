@@ -297,6 +297,26 @@ struct UniformSortComparator
     }
 };
 
+// To make CollectVariable's recursive algorithms more efficient, turn the "(uniform, field_chain)"
+// tuples into a map of uniform to set of (nested) fields.
+SamplersStaticallyUsedWithTexelFetch PreprocessSamplersStaticallyUsedWithTexelFetch(
+    const TUnorderedSet<SamplerAccess> samplersStaticallyUsedWithTexelFetch)
+{
+    SamplersStaticallyUsedWithTexelFetch result;
+
+    for (const SamplerAccess &access : samplersStaticallyUsedWithTexelFetch)
+    {
+        SelectedFields *fields = &result[access.uniform];
+        for (uint32_t fieldIndex : access.fields)
+        {
+            // operator[] inserts a new empty element in subfields, which is what makes this
+            // algorithm work.
+            fields = &fields->subfields[fieldIndex];
+        }
+    }
+
+    return result;
+}
 }  // anonymous namespace
 
 bool IsGLSL150OrNewer(ShShaderOutput output)
@@ -526,15 +546,6 @@ TIntermBlock *TCompiler::compileTreeImpl(angle::Span<const char *const> shaderSt
     }
 #endif
     ASSERT(root != nullptr);
-
-    if (compileOptions.skipAllValidationAndTransforms)
-    {
-        if (!compileOptions.useIR)
-        {
-            collectVariables(root);
-        }
-        return root;
-    }
 
     const bool hasAnyClipCullDistance =
         parseContext.isExtensionEnabled(TExtension::ANGLE_clip_cull_distance) ||
@@ -1022,7 +1033,10 @@ bool TCompiler::checkAndSimplifyAST(TIntermBlock *root,
         return false;
     }
 
-    collectVariables(root);
+    const SamplersStaticallyUsedWithTexelFetch samplersStaticallyUsedWithTexelFetch =
+        PreprocessSamplersStaticallyUsedWithTexelFetch(
+            parseContext.getSamplersStaticallyUsedWithTexelFetch());
+    collectVariables(root, samplersStaticallyUsedWithTexelFetch);
 
     if (compileOptions.useUnusedStandardSharedBlocks)
     {
@@ -1119,9 +1133,7 @@ bool TCompiler::checkAndSimplifyAST(TIntermBlock *root,
 
         if (!shouldRunLoopAndIndexingValidation())
         {
-            if (!SimplifyLoopConditions(this, root,
-                                        IntermNodePatternMatcher::kArrayDeclaration |
-                                            IntermNodePatternMatcher::kNamelessStructDeclaration,
+            if (!SimplifyLoopConditions(this, root, IntermNodePatternMatcher::kArrayDeclaration,
                                         &getSymbolTable()))
             {
                 return false;
@@ -1216,6 +1228,13 @@ bool TCompiler::compile(angle::Span<const char *const> shaderStrings,
         return true;
     }
 
+    // Certain extensions are not allowed in WebGL2.
+    if (mShaderSpec == SH_WEBGL2_SPEC)
+    {
+        ASSERT(!mResources.EXT_frag_depth && !mResources.EXT_shader_texture_lod &&
+               !mResources.EXT_draw_buffers && !mResources.NV_draw_buffers);
+    }
+
     // Reset the extension behavior for each compilation unit.  Support for some extensions depends
     // on compile flags.  This is done before resetting the flags that don't apply to some shader
     // stages because extensions are either exposed to all or none of the stages.
@@ -1233,7 +1252,7 @@ bool TCompiler::compile(angle::Span<const char *const> shaderStrings,
             OutputTree(root, mInfoSink.info);
         }
 
-        if (compileOptions.objectCode && !compileOptions.skipAllValidationAndTransforms)
+        if (compileOptions.objectCode)
         {
             PerformanceDiagnostics perfDiagnostics(&mDiagnostics);
             if (!translate(root, compileOptions, &perfDiagnostics))
@@ -1441,16 +1460,18 @@ void TCompiler::setResourceString()
     mBuiltInResourcesString = strstream.str();
 }
 
-void TCompiler::collectVariables(TIntermBlock *root)
+void TCompiler::collectVariables(
+    TIntermBlock *root,
+    const SamplersStaticallyUsedWithTexelFetch &samplersStaticallyUsedWithTexelFetch)
 {
     // Variable collection is done from the IR already.
     ASSERT(!mCompileOptions.useIR);
     ASSERT(!mVariablesCollected);
     CollectVariables(root, &mAttributes, &mOutputVariables, &mUniforms, &mInputVaryings,
                      &mOutputVaryings, &mSharedVariables, &mUniformBlocks, &mShaderStorageBlocks,
-                     mResources.UserVariableNamePrefix, mResources.UserBlockNamePrefix,
                      mResources.HashFunction, &mNameMap, &mSymbolTable, mShaderType,
-                     mExtensionBehavior, mCompileOptions.transformFloatUniformTo16Bits);
+                     mExtensionBehavior, mCompileOptions.transformFloatUniformTo16Bits,
+                     samplersStaticallyUsedWithTexelFetch);
     collectInterfaceBlocks();
     mVariablesCollected = true;
 }

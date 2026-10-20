@@ -6,6 +6,8 @@
 
 // WebGLCompatibilityTest.cpp : Tests of the GL_ANGLE_webgl_compatibility extension.
 
+#include <array>
+
 #include "common/unsafe_buffers.h"
 #include "test_utils/ANGLETest.h"
 
@@ -364,10 +366,7 @@ class HardenedContextTest : public ANGLETest<>
 };
 
 class HardenedContextTestES31 : public HardenedContextTest
-{
-  protected:
-    HardenedContextTestES31() { setHardenedContextEnabled(true); }
-};
+{};
 
 // Context creation would fail if EGL_ANGLE_create_context_webgl_compatibility was not available so
 // the GL extension should always be present
@@ -1405,7 +1404,7 @@ TEST_P(WebGLCompatibilityTest, FramebufferAttachmentSizeMismatch)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, textures[0], 0);
 
     ASSERT_GL_NO_ERROR();
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     GLRenderbuffer renderbuffer;
     glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
@@ -1434,7 +1433,7 @@ TEST_P(WebGLCompatibilityTest, FramebufferAttachmentSizeMismatch)
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
 
         ASSERT_GL_NO_ERROR();
-        ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+        ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 3, 3, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 
@@ -2208,7 +2207,7 @@ void main()
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture1, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, texture2, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     GLenum drawbuffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     glDrawBuffers(2, drawbuffers);
@@ -2655,7 +2654,7 @@ void main() {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     ANGLE_GL_PROGRAM(program, kVS, kFS);
 
@@ -2721,7 +2720,7 @@ void main() {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     ANGLE_GL_PROGRAM(program, kVS, kFS);
 
@@ -2829,7 +2828,7 @@ void main() {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     // Texture is still a valid name in context2.
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
     // There is no rendering feedback loop at this point.
 
     glDisable(GL_BLEND);
@@ -2950,7 +2949,7 @@ void WebGLCompatibilityTest::drawBuffersEXTFeedbackLoop(GLuint program,
     glDrawBuffersEXT(2, drawBuffers.data());
 
     // Make sure framebuffer is complete before feedback loop detection
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     drawQuad(program, "aPosition", 0.5f, 1.0f, true);
 
@@ -3058,7 +3057,7 @@ TEST_P(WebGLCompatibilityTest, TextureCopyingFeedbackLoops)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
     // framebuffer should be FRAMEBUFFER_COMPLETE.
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
     ASSERT_GL_NO_ERROR();
 
     // testing copyTexImage2D
@@ -3119,7 +3118,7 @@ TEST_P(HardenedContextTest, TextureCopyingFeedbackLoops)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
     // framebuffer should be FRAMEBUFFER_COMPLETE.
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
     ASSERT_GL_NO_ERROR();
 
     // testing copyTexImage2D
@@ -3183,7 +3182,7 @@ TEST_P(WebGLCompatibilityTest, CubeTextureCopyingFeedbackLoops)
                            texture, 0);
 
     // framebuffer should be FRAMEBUFFER_COMPLETE.
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
     ASSERT_GL_NO_ERROR();
 
     // testing copyTexImage2D
@@ -3311,7 +3310,7 @@ void WebGLCompatibilityTest::drawBuffersFeedbackLoop(GLuint program,
     glDrawBuffers(2, drawBuffers.data());
 
     // Make sure framebuffer is complete before feedback loop detection
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     drawQuad(program, "aPosition", 0.5f, 1.0f, true);
 
@@ -3868,12 +3867,12 @@ TEST_P(WebGLCompatibilityTest, FramebufferFloatColorAttachment)
     GLFramebuffer fbo1;
     glBindFramebuffer(GL_FRAMEBUFFER, fbo1);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture1, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     GLFramebuffer fbo2;
     glBindFramebuffer(GL_FRAMEBUFFER, fbo2);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture2, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
     glDrawArrays(GL_POINTS, 0, 1);
     EXPECT_GL_ERROR(GL_INVALID_OPERATION);
 
@@ -3888,7 +3887,7 @@ TEST_P(WebGLCompatibilityTest, FramebufferFloatColorAttachment)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0,
                            0);  // test unbind
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture2, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     glDrawArrays(GL_POINTS, 0, 1);
     EXPECT_GL_ERROR(GL_INVALID_OPERATION);
@@ -3986,7 +3985,7 @@ void main()
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture1, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, texture2, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     GLenum drawbuffers[] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
     if (isWebGL2)
@@ -4018,7 +4017,7 @@ void main()
         // WebGL 1 will report a FRAMEBUFFER_UNSUPPORTED for one unsigned_byte and one float
         // attachment bound to one FBO at the same time
         glDrawBuffers(1, drawbuffers);
-        ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+        ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
         glDrawArrays(GL_POINTS, 0, 1);
         EXPECT_GL_NO_ERROR();
         glDrawBuffers(2, drawbuffers);
@@ -4690,7 +4689,7 @@ void main() {
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
 
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     ANGLE_GL_PROGRAM(program, kVS, kFS);
 
@@ -4769,7 +4768,7 @@ void main() {
     // Test rendering and sampling feedback loop for depth buffer
     glBindTexture(GL_TEXTURE_2D, tex1);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, tex1, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
 
     // The same image is used as depth buffer during rendering.
     glEnable(GL_DEPTH_TEST);
@@ -4793,7 +4792,7 @@ void main() {
     glBindTexture(GL_TEXTURE_2D, tex2);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_TEXTURE_2D, tex2, 0);
-    ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
     constexpr GLint stencilClearValue = 0x40;
     glClearBufferiv(GL_STENCIL, 0, &stencilClearValue);
 
@@ -5501,7 +5500,7 @@ TEST_P(WebGLCompatibilityTest, DrawBuffers)
     ANGLE_SKIP_TEST_IF(maxDrawBuffers < 4);
 
     // Clears all the renderbuffers to red.
-    auto ClearEverythingToRed = [](GLRenderbuffer *renderbuffers) {
+    auto ClearEverythingToRed = [](const std::array<GLRenderbuffer, 4> &renderbuffers) {
         GLFramebuffer clearFBO;
         glBindFramebuffer(GL_FRAMEBUFFER, clearFBO);
 
@@ -5509,14 +5508,15 @@ TEST_P(WebGLCompatibilityTest, DrawBuffers)
         for (int i = 0; i < 4; ++i)
         {
             glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
-                                      ANGLE_UNSAFE_TODO(renderbuffers[i]));
+                                      renderbuffers[i]);
             glClear(GL_COLOR_BUFFER_BIT);
         }
         ASSERT_GL_NO_ERROR();
     };
 
     // Checks that the renderbuffers specified by mask have the correct color
-    auto CheckColors = [](GLRenderbuffer *renderbuffers, int mask, GLColor color) {
+    auto CheckColors = [](const std::array<GLRenderbuffer, 4> &renderbuffers, int mask,
+                          GLColor color) {
         GLFramebuffer readFBO;
         glBindFramebuffer(GL_FRAMEBUFFER, readFBO);
 
@@ -5525,7 +5525,7 @@ TEST_P(WebGLCompatibilityTest, DrawBuffers)
             if (mask & (1 << attachmentIndex))
             {
                 glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
-                                          ANGLE_UNSAFE_TODO(renderbuffers[attachmentIndex]));
+                                          renderbuffers[attachmentIndex]);
                 EXPECT_PIXEL_COLOR_EQ(0, 0, color) << "attachment " << attachmentIndex;
             }
         }
@@ -5548,13 +5548,13 @@ TEST_P(WebGLCompatibilityTest, DrawBuffers)
     GLFramebuffer drawFBO;
     glBindFramebuffer(GL_FRAMEBUFFER, drawFBO);
 
-    GLRenderbuffer renderbuffers[4];
+    std::array<GLRenderbuffer, 4> renderbuffers;
     for (int i = 0; i < 4; ++i)
     {
-        glBindRenderbuffer(GL_RENDERBUFFER, ANGLE_UNSAFE_TODO(renderbuffers[i]));
+        glBindRenderbuffer(GL_RENDERBUFFER, renderbuffers[i]);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA4, 1, 1);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER,
-                                  ANGLE_UNSAFE_TODO(renderbuffers[i]));
+                                  renderbuffers[i]);
     }
 
     ASSERT_GL_NO_ERROR();
@@ -6992,13 +6992,14 @@ TEST_P(WebGL2CompatibilityTest, ETC2EACFormats)
 // Test that GL_HALF_FLOAT_OES type is rejected by WebGL 2.0 contexts.
 TEST_P(WebGL2CompatibilityTest, HalfFloatOesType)
 {
-    const std::array<std::pair<GLenum, GLenum>, 6> formats = {{{GL_R16F, GL_RED},
-                                                               {GL_RG16F, GL_RG},
-                                                               {GL_RGB16F, GL_RGB},
-                                                               {GL_RGBA16F, GL_RGBA},
-                                                               {GL_R11F_G11F_B10F, GL_RGB},
-                                                               {GL_RGB9_E5, GL_RGB}}};
-    for (const auto &fmt : formats)
+    static constexpr std::array<std::pair<GLenum, GLenum>, 6> kFormats = {
+        {{GL_R16F, GL_RED},
+         {GL_RG16F, GL_RG},
+         {GL_RGB16F, GL_RGB},
+         {GL_RGBA16F, GL_RGBA},
+         {GL_R11F_G11F_B10F, GL_RGB},
+         {GL_RGB9_E5, GL_RGB}}};
+    for (const auto &fmt : kFormats)
     {
         {
             GLTexture tex;
@@ -7372,10 +7373,10 @@ void main(void) {
 
     GLBuffer buffer;
     glBindBuffer(GL_ARRAY_BUFFER, buffer);
-    std::array<int8_t, 12> data = {
+    static constexpr std::array<int8_t, 12> kData = {
         1,
     };
-    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(data[0]), data.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, kData.size() * sizeof(kData[0]), kData.data(), GL_STATIC_DRAW);
 
     ANGLE_GL_PROGRAM(program, kVS, kFS);
     glBindAttribLocation(program, 0, "attr1");
@@ -7499,14 +7500,14 @@ void main()
     ANGLE_GL_PROGRAM(program, kVS, kFS);
     glUseProgram(program);
 
-    const GLint attrLocations[4] = {
+    const std::array<GLint, 4> attrLocations = {
         glGetAttribLocation(program, "attr1"),
         glGetAttribLocation(program, "attr2"),
         glGetAttribLocation(program, "attr3"),
         glGetAttribLocation(program, "attr4"),
     };
 
-    GLBuffer buffers[4];
+    std::array<GLBuffer, 4> buffers;
 
     // Set up all the buffers as such:
     //
@@ -7514,27 +7515,27 @@ void main()
     // Buffer 2: 16 bytes + (offset) 212
     // Buffer 3: 128 bytes + (offset) 76
     // Buffer 4: 96 bytes + (offset) 52
-    constexpr GLsizei kBufferSizes[4] = {
+    static constexpr std::array<GLsizei, 4> kBufferSizes = {
         64,
         16,
         128,
         96,
     };
-    constexpr GLsizei kBufferOffsets[4] = {
+    static constexpr std::array<GLsizei, 4> kBufferOffsets = {
         124,
         212,
         76,
         52,
     };
     // Attribute component count corresponding to the shader
-    constexpr GLint kAttrComponents[4] = {
+    static constexpr std::array<GLint, 4> kAttrComponents = {
         4,
         2,
         4,
         3,
     };
     // Attribute types
-    constexpr GLenum kAttrTypes[4] = {
+    static constexpr std::array<GLenum, 4> kAttrTypes = {
         GL_SHORT,
         GL_BYTE,
         GL_FLOAT,
@@ -7550,7 +7551,7 @@ void main()
     //   drawn from this buffer.
     // - Buffer 4 has 96 bytes, each attribute is 6 bytes.  With a stride of 8, 12 vertices can be
     //   drawn from this buffer.
-    constexpr GLsizei kAttrStrides[4] = {
+    static constexpr std::array<GLsizei, 4> kAttrStrides = {
         12,
         0,
         20,
@@ -7559,15 +7560,12 @@ void main()
 
     for (int i = 0; i < 4; ++i)
     {
-        ANGLE_UNSAFE_TODO({
-            glBindBuffer(GL_ARRAY_BUFFER, buffers[i]);
-            glBufferData(GL_ARRAY_BUFFER, kBufferSizes[i] + kBufferOffsets[i], nullptr,
-                         GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, buffers[i]);
+        glBufferData(GL_ARRAY_BUFFER, kBufferSizes[i] + kBufferOffsets[i], nullptr, GL_STATIC_DRAW);
 
-            glEnableVertexAttribArray(attrLocations[i]);
-            glVertexAttribPointer(attrLocations[i], kAttrComponents[i], kAttrTypes[i], GL_TRUE,
-                                  kAttrStrides[i], reinterpret_cast<void *>(kBufferOffsets[i]));
-        })
+        glEnableVertexAttribArray(attrLocations[i]);
+        glVertexAttribPointer(attrLocations[i], kAttrComponents[i], kAttrTypes[i], GL_TRUE,
+                              kAttrStrides[i], reinterpret_cast<void *>(kBufferOffsets[i]));
     }
     ASSERT_GL_NO_ERROR();
 
@@ -8033,7 +8031,9 @@ TEST_P(WebGL2CompatibilityTest, UnpackStateValidation)
             }
 
             const void *dataPtr =
-                usePixelUnpackBuffer ? nullptr : reinterpret_cast<const void *>(data.data());
+                usePixelUnpackBuffer
+                    ? nullptr
+                    : ANGLE_UNSAFE_BUFFERS(reinterpret_cast<const void *>(data.data()));
 
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, usePixelUnpackBuffer ? buf.get() : 0);
             ASSERT_GL_NO_ERROR();
@@ -8490,13 +8490,6 @@ TEST_P(WebGL2CompatibilityTest, DrawLargeIndexOOB)
     }
 }
 
-ANGLE_INSTANTIATE_TEST_ES2_AND_ES3(WebGLCompatibilityTest);
-
-ANGLE_INSTANTIATE_TEST_ES2(WebGL1CompatibilityTest);
-
-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(WebGL2CompatibilityTest);
-ANGLE_INSTANTIATE_TEST_ES3(WebGL2CompatibilityTest);
-
 // Tests that calling draw with a uniform buffer bound range that exceeds the buffer size
 // correctly generates an error in hardened contexts.
 TEST_P(HardenedContextTest, UniformBufferRangeExceedsSize)
@@ -8549,8 +8542,754 @@ TEST_P(HardenedContextTest, UniformBufferRangeExceedsSize)
     EXPECT_GL_ERROR(GL_INVALID_OPERATION);
 }
 
+class HardenedContextTestRestrictBaseLevel : public HardenedContextTest
+{};
+
+// Test that base level cannot be non-zero when there are incompatibly defined levels in the range
+// of levels up to max.
+TEST_P(HardenedContextTestRestrictBaseLevel, Tex2D)
+{
+    const bool hasCopyTexture = EnsureGLExtensionEnabled("GL_CHROMIUM_copy_texture");
+
+    constexpr uint32_t kWidth  = 100;
+    constexpr uint32_t kHeight = 111;
+
+    // Setup source for copy
+    GLTexture src;
+    glBindTexture(GL_TEXTURE_2D, src);
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, kWidth >> level, kHeight >> level, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 4);
+    GLFramebuffer fbo;
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, src, 0);
+    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
+
+    GLTexture texture;
+    glBindTexture(GL_TEXTURE_2D, texture);
+
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kWidth, kHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Can define incompatible level while base level is 0
+    glTexImage2D(GL_TEXTURE_2D, 3, GL_RGB, kWidth >> 3, kHeight >> 3, 0, GL_RGB, GL_UNSIGNED_BYTE,
+                 nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to this incompatible level
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 3);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Can define compatible level 1
+    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, kWidth >> 1, kHeight >> 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to outside the valid [0, 1] range
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 2);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Cannot change base level to level 1 because of level 3 that is incompatible.  If we
+    // allowed this (assuming the texture would only use levels 0 and 1, because there's nothing
+    // at level 2), then level 2 could be compatibly defined after, leading to a chain from 0 to
+    // 3 that is not compatible.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Setting MAX_LEVEL to 1, we still cannot switch BASE_LEVEL to 1, because there's no
+    // restriction on MAX_LEVEL.  Otherwise, the test could switch MAX_LEVEL to 1, set
+    // BASE_LEVEL to 1, then switch MAX_LEVEL back to 1000 and include the incompatible level 3
+    // again.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Make level 3 compatible
+    glTexImage2D(GL_TEXTURE_2D, 3, GL_RGBA, kWidth >> 3, kHeight >> 3, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to 1 because level 2 is not defined but level 3 is, even if
+    // MAX_LEVEL excludes level 3.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Define level 2 compatibly as well
+    glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA, kWidth >> 2, kHeight >> 2, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Base level can now be changed
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+
+    // Now that base level has changed, cannot incompatibly redefine any level.
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGB, kWidth >> level, kHeight >> level, 0, GL_RGB,
+                     GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGB, 0, 0, kWidth >> level, kHeight >> level, 0);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible width:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (kWidth >> level) + 1, kHeight >> level, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, 0, 0, (kWidth >> level) + 2,
+                         kHeight >> level, 0);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible height:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, kWidth >> level, (kHeight >> level) + 1, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, 0, 0, kWidth >> level,
+                         (kHeight >> level) + 2, 0);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+        // Compatible is ok:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, kWidth >> level, kHeight >> level, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, 0, 0, kWidth >> level, kHeight >> level, 0);
+        EXPECT_GL_NO_ERROR();
+
+        if (hasCopyTexture)
+        {
+            // Incompatible format:
+            glCopyTextureCHROMIUM(src, level, GL_TEXTURE_2D, texture, level, GL_RGB,
+                                  GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+            EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+            // Incompatible width/height:
+            glCopyTextureCHROMIUM(src, (level + 1) % 5, GL_TEXTURE_2D, texture, level, GL_RGBA,
+                                  GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+            EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+            // Compatible is ok:
+            glCopyTextureCHROMIUM(src, level, GL_TEXTURE_2D, texture, level, GL_RGBA,
+                                  GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+            EXPECT_GL_NO_ERROR();
+        }
+    }
+
+    // Incompatible redefinition when base level is 0 is allowed.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    EXPECT_GL_NO_ERROR();
+
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGB, kWidth >> level, kHeight >> level, 0, GL_RGB,
+                     GL_UNSIGNED_BYTE, nullptr);
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGB, 0, 0, kWidth >> level, kHeight >> level, 0);
+        // Incompatible width:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, (kWidth >> level) + 1, kHeight >> level, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, 0, 0, (kWidth >> level) + 2,
+                         kHeight >> level, 0);
+        // Incompatible height:
+        glTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, kWidth >> level, (kHeight >> level) + 1, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glCopyTexImage2D(GL_TEXTURE_2D, level, GL_RGBA, 0, 0, kWidth >> level,
+                         (kHeight >> level) + 2, 0);
+
+        if (hasCopyTexture)
+        {
+            // Incompatible format:
+            glCopyTextureCHROMIUM(src, level, GL_TEXTURE_2D, texture, level, GL_RGB,
+                                  GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+            // Incompatible width/height:
+            glCopyTextureCHROMIUM(src, (level + 1) % 5, GL_TEXTURE_2D, texture, level, GL_RGBA,
+                                  GL_UNSIGNED_BYTE, GL_FALSE, GL_FALSE, GL_FALSE);
+        }
+
+        EXPECT_GL_NO_ERROR();
+    }
+}
+
+// Test that base level cannot be non-zero when there are incompatibly defined levels in the range
+// of levels up to max.
+TEST_P(HardenedContextTestRestrictBaseLevel, Tex2DCompressed)
+{
+    // Either of these must be supported on WebGL 2.0, so likely for the test to not get skipped.
+    const bool hasBC1  = EnsureGLExtensionEnabled("GL_EXT_texture_compression_dxt1");
+    const bool hasETC2 = EnsureGLExtensionEnabled("GL_ANGLE_compressed_texture_etc");
+    ANGLE_SKIP_TEST_IF(!hasBC1 && !hasETC2);
+    const GLenum format  = hasBC1 ? GL_COMPRESSED_RGB_S3TC_DXT1_EXT : GL_COMPRESSED_RGB8_ETC2;
+    const GLenum format2 = hasBC1 ? GL_COMPRESSED_RGBA_S3TC_DXT1_EXT : GL_COMPRESSED_SRGB8_ETC2;
+
+    const bool hasCopyTexture = EnsureGLExtensionEnabled("GL_CHROMIUM_compressed_copy_texture");
+
+    constexpr uint32_t kWidth  = 128;
+    constexpr uint32_t kHeight = 256;
+
+    // Both BC1 and ETC2 consume 8 bytes for 4x4 blocks, consuming kWidth*kHeight/2 bytes.
+    auto imageSize = [](uint32_t w, uint32_t h) { return w * h / 2; };
+
+    GLTexture texture;
+    glBindTexture(GL_TEXTURE_2D, texture);
+
+    glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, kWidth, kHeight, 0, imageSize(kWidth, kHeight),
+                           nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Can define incompatible level while base level is 0
+    glCompressedTexImage2D(GL_TEXTURE_2D, 3, format2, kWidth >> 3, kHeight >> 3, 0,
+                           imageSize(kWidth >> 3, kHeight >> 3), nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to this incompatible level
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 3);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Can define compatible level 1
+    glCompressedTexImage2D(GL_TEXTURE_2D, 1, format, kWidth >> 1, kHeight >> 1, 0,
+                           imageSize(kWidth >> 1, kHeight >> 1), nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to outside the valid [0, 1] range
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 2);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Cannot change base level to level 1 because of level 3 that is incompatible.  If we
+    // allowed this (assuming the texture would only use levels 0 and 1, because there's nothing
+    // at level 2), then level 2 could be compatibly defined after, leading to a chain from 0 to
+    // 3 that is not compatible.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Setting MAX_LEVEL to 1, we still cannot switch BASE_LEVEL to 1, because there's no
+    // restriction on MAX_LEVEL.  Otherwise, the test could switch MAX_LEVEL to 1, set
+    // BASE_LEVEL to 1, then switch MAX_LEVEL back to 1000 and include the incompatible level 3
+    // again.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Make level 3 compatible
+    glCompressedTexImage2D(GL_TEXTURE_2D, 3, format, kWidth >> 3, kHeight >> 3, 0,
+                           imageSize(kWidth >> 3, kHeight >> 3), nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to 1 because level 2 is not defined but level 3 is, even if
+    // MAX_LEVEL excludes level 3.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Define level 2 compatibly as well
+    glCompressedTexImage2D(GL_TEXTURE_2D, 2, format, kWidth >> 2, kHeight >> 2, 0,
+                           imageSize(kWidth >> 2, kHeight >> 2), nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Base level can now be changed
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+
+    // Now that base level has changed, cannot incompatibly redefine any level.
+    if (hasCopyTexture)
+    {
+        // Incompatible format:
+        GLTexture src;
+        glBindTexture(GL_TEXTURE_2D, src);
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, format2, kWidth, kHeight, 0,
+                               imageSize(kWidth, kHeight), nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+
+        glCompressedCopyTextureCHROMIUM(src, texture);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+        // Compatible is ok:
+        GLTexture src2;
+        glBindTexture(GL_TEXTURE_2D, src2);
+        glCompressedTexImage2D(GL_TEXTURE_2D, 0, format, kWidth, kHeight, 0,
+                               imageSize(kWidth, kHeight), nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+
+        glCompressedCopyTextureCHROMIUM(src2, texture);
+        EXPECT_GL_NO_ERROR();
+    }
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format2, kWidth >> level, kHeight >> level, 0,
+                               imageSize(kWidth >> level, kHeight >> level), nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible width:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format, (kWidth >> level) * 2,
+                               kHeight >> level, 0,
+                               imageSize((kWidth >> level) * 2, kHeight >> level), nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible height:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format, kWidth >> level,
+                               (kHeight >> level) * 2, 0,
+                               imageSize(kWidth >> level, (kHeight >> level) * 2), nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+        // Compatible is ok:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format, kWidth >> level, kHeight >> level, 0,
+                               imageSize(kWidth >> level, kHeight >> level), nullptr);
+        EXPECT_GL_NO_ERROR();
+    }
+
+    // Incompatible redefinition when base level is 0 is allowed.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+    EXPECT_GL_NO_ERROR();
+
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format2, kWidth >> level, kHeight >> level, 0,
+                               imageSize(kWidth >> level, kHeight >> level), nullptr);
+        // Incompatible width:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format, (kWidth >> level) * 2,
+                               kHeight >> level, 0,
+                               imageSize((kWidth >> level) * 2, kHeight >> level), nullptr);
+        // Incompatible height:
+        glCompressedTexImage2D(GL_TEXTURE_2D, level, format, kWidth >> level,
+                               (kHeight >> level) * 2, 0,
+                               imageSize(kWidth >> level, (kHeight >> level) * 2), nullptr);
+
+        EXPECT_GL_NO_ERROR();
+    }
+}
+
+// Test that base level cannot be non-zero when there are incompatibly defined levels in the range
+// of levels up to max.
+TEST_P(HardenedContextTestRestrictBaseLevel, TexCube)
+{
+    constexpr uint32_t kSize = 143;
+
+    GLTexture texture;
+    glBindTexture(GL_TEXTURE_CUBE_MAP, texture);
+
+    for (size_t face = 0; face < 6; ++face)
+    {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+    }
+    EXPECT_GL_NO_ERROR();
+
+    // Can define incompatible level while base level is 0
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + 2, 3, GL_RGBA, kSize - 10, kSize - 10, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to this incompatible level
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 3);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Can define compatible level 1
+    for (size_t face = 0; face < 6; ++face)
+    {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 1, GL_RGBA, kSize >> 1, kSize >> 1, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to outside the valid [0, 1] range
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 2);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Cannot change base level to level 1 because of level 3 that is incompatible.  If we
+    // allowed this (assuming the texture would only use levels 0 and 1, because there's nothing
+    // at level 2), then level 2 could be compatibly defined after, leading to a chain from 0 to
+    // 3 that is not compatible.
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Setting MAX_LEVEL to 1, we still cannot switch BASE_LEVEL to 1, because there's no
+    // restriction on MAX_LEVEL.  Otherwise, the test could switch MAX_LEVEL to 1, set
+    // BASE_LEVEL to 1, then switch MAX_LEVEL back to 1000 and include the incompatible level 3
+    // again.
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Make level 3 compatible
+    for (size_t face = 0; face < 6; ++face)
+    {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 3, GL_RGBA, kSize >> 3, kSize >> 3, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to 1 because level 2 is not defined but level 3 is, even if
+    // MAX_LEVEL excludes level 3.
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Define level 2 compatibly as well
+    for (size_t face = 0; face < 6; ++face)
+    {
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 2, GL_RGBA, kSize >> 2, kSize >> 2, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    }
+    EXPECT_GL_NO_ERROR();
+
+    // Base level can now be changed
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+
+    // Now that base level has changed, cannot incompatibly redefine any level.
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        for (size_t face = 0; face < 6; ++face)
+        {
+            // Incompatible format:
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, GL_RGB, kSize >> level,
+                         kSize >> level, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+            EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+            // Incompatible width/height:
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, GL_RGBA,
+                         (kSize >> level) + 1, (kSize >> level) + 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                         nullptr);
+            EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+            // Compatible is ok:
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, GL_RGBA, kSize >> level,
+                         kSize >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            EXPECT_GL_NO_ERROR();
+        }
+    }
+
+    // Incompatible redefinition when base level is 0 is allowed.
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BASE_LEVEL, 0);
+    EXPECT_GL_NO_ERROR();
+
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        for (size_t face = 0; face < 6; ++face)
+        {
+            // Incompatible format:
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, GL_RGB, kSize >> level,
+                         kSize >> level, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+            EXPECT_GL_NO_ERROR();
+            // Incompatible width/height:
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, GL_RGBA,
+                         (kSize >> level) + 1, (kSize >> level) + 1, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                         nullptr);
+            EXPECT_GL_NO_ERROR();
+
+            // Compatible is ok:
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, level, GL_RGBA, kSize >> level,
+                         kSize >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            EXPECT_GL_NO_ERROR();
+        }
+    }
+}
+
+// Test that base level cannot be non-zero when there are incompatibly defined levels in the range
+// of levels up to max.
+TEST_P(HardenedContextTestRestrictBaseLevel, Tex2DArray)
+{
+    constexpr uint32_t kWidth  = 133;
+    constexpr uint32_t kHeight = 99;
+    constexpr uint32_t kLayers = 17;
+
+    GLTexture texture;
+    glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, kWidth, kHeight, kLayers, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Can define incompatible level while base level is 0
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 3, GL_RGBA, kWidth >> 3, kHeight >> 3, kLayers + 2, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to this incompatible level
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 3);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Can define compatible level 1
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA, kWidth >> 1, kHeight >> 1, kLayers, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to outside the valid [0, 1] range
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 2);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Cannot change base level to level 1 because of level 3 that is incompatible.  If we
+    // allowed this (assuming the texture would only use levels 0 and 1, because there's nothing
+    // at level 2), then level 2 could be compatibly defined after, leading to a chain from 0 to
+    // 3 that is not compatible.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Setting MAX_LEVEL to 1, we still cannot switch BASE_LEVEL to 1, because there's no
+    // restriction on MAX_LEVEL.  Otherwise, the test could switch MAX_LEVEL to 1, set
+    // BASE_LEVEL to 1, then switch MAX_LEVEL back to 1000 and include the incompatible level 3
+    // again.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Make level 3 compatible
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 3, GL_RGBA, kWidth >> 3, kHeight >> 3, kLayers, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to 1 because level 2 is not defined but level 3 is, even if
+    // MAX_LEVEL excludes level 3.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Define level 2 compatibly as well
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 2, GL_RGBA, kWidth >> 2, kHeight >> 2, kLayers, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Base level can now be changed
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+
+    // Now that base level has changed, cannot incompatibly redefine any level.
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGB, kWidth >> level, kHeight >> level, kLayers,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible width:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, (kWidth >> level) + 1, kHeight >> level,
+                     kLayers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible height:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, kWidth >> level, (kHeight >> level) + 1,
+                     kLayers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible layers:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     kLayers + (level % 2 == 0 ? 1 : -1), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+        // Compatible is ok:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     kLayers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+    }
+
+    // Incompatible redefinition when base level is 0 is allowed.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+    EXPECT_GL_NO_ERROR();
+
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGB, kWidth >> level, kHeight >> level, kLayers,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        // Incompatible width:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, (kWidth >> level) + 1, kHeight >> level,
+                     kLayers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        // Incompatible height:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, kWidth >> level, (kHeight >> level) + 1,
+                     kLayers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        // Incompatible layers:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     kLayers + (level % 2 == 0 ? 1 : -1), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+
+        // Compatible is ok:
+        glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     kLayers, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+    }
+}
+
+// Test that base level cannot be non-zero when there are incompatibly defined levels in the range
+// of levels up to max.
+TEST_P(HardenedContextTestRestrictBaseLevel, Tex3D)
+{
+    constexpr uint32_t kWidth  = 133;
+    constexpr uint32_t kHeight = 99;
+    constexpr uint32_t kDepth  = 171;
+
+    GLTexture texture;
+    glBindTexture(GL_TEXTURE_3D, texture);
+
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, kWidth, kHeight, kDepth, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                 nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Can define incompatible level while base level is 0
+    glTexImage3D(GL_TEXTURE_3D, 3, GL_RGBA, kWidth >> 3, kHeight >> 3, kDepth / 2, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to this incompatible level
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 3);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Can define compatible level 1
+    glTexImage3D(GL_TEXTURE_3D, 1, GL_RGBA, kWidth >> 1, kHeight >> 1, kDepth >> 1, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to outside the valid [0, 1] range
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 2);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Cannot change base level to level 1 because of level 3 that is incompatible.  If we
+    // allowed this (assuming the texture would only use levels 0 and 1, because there's nothing
+    // at level 2), then level 2 could be compatibly defined after, leading to a chain from 0 to
+    // 3 that is not compatible.
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+    // Setting MAX_LEVEL to 1, we still cannot switch BASE_LEVEL to 1, because there's no
+    // restriction on MAX_LEVEL.  Otherwise, the test could switch MAX_LEVEL to 1, set
+    // BASE_LEVEL to 1, then switch MAX_LEVEL back to 1000 and include the incompatible level 3
+    // again.
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Make level 3 compatible
+    glTexImage3D(GL_TEXTURE_3D, 3, GL_RGBA, kWidth >> 3, kHeight >> 3, kDepth >> 3, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Cannot change base level to 1 because level 2 is not defined but level 3 is, even if
+    // MAX_LEVEL excludes level 3.
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, 3);
+    EXPECT_GL_NO_ERROR();
+
+    // Define level 2 compatibly as well
+    glTexImage3D(GL_TEXTURE_3D, 2, GL_RGBA, kWidth >> 2, kHeight >> 2, kDepth >> 2, 0, GL_RGBA,
+                 GL_UNSIGNED_BYTE, nullptr);
+    EXPECT_GL_NO_ERROR();
+
+    // Base level can now be changed
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 1);
+    EXPECT_GL_NO_ERROR();
+
+    // Now that base level has changed, cannot incompatibly redefine any level.
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGB, kWidth >> level, kHeight >> level,
+                     kDepth >> level, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible width:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, (kWidth >> level) + 1, kHeight >> level,
+                     kDepth >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible height:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, kWidth >> level, (kHeight >> level) + 1,
+                     kDepth >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+        // Incompatible layers:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     (kDepth >> level) + 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
+
+        // Compatible is ok:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     kDepth >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+    }
+
+    // Incompatible redefinition when base level is 0 is allowed.
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 0);
+    EXPECT_GL_NO_ERROR();
+
+    for (uint32_t level = 0; level < 5; ++level)
+    {
+        // Incompatible format:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGB, kWidth >> level, kHeight >> level,
+                     kDepth >> level, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        // Incompatible width:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, (kWidth >> level) + 1, kHeight >> level,
+                     kDepth >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        // Incompatible height:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, kWidth >> level, (kHeight >> level) + 1,
+                     kDepth >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+        // Incompatible layers:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     (kDepth >> level) + 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+
+        // Compatible is ok:
+        glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA, kWidth >> level, kHeight >> level,
+                     kDepth >> level, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        EXPECT_GL_NO_ERROR();
+    }
+}
+
+ANGLE_INSTANTIATE_TEST_ES2_AND_ES3(WebGLCompatibilityTest);
+
+ANGLE_INSTANTIATE_TEST_ES2(WebGL1CompatibilityTest);
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(WebGL2CompatibilityTest);
+ANGLE_INSTANTIATE_TEST_ES3(WebGL2CompatibilityTest);
+
 GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HardenedContextTest);
 ANGLE_INSTANTIATE_TEST_ES3(HardenedContextTest);
+
+GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HardenedContextTestRestrictBaseLevel);
+ANGLE_INSTANTIATE_TEST(
+    HardenedContextTestRestrictBaseLevel,
+    ES3_D3D11().enable(Feature::DisallowNonZeroBaseLevelAndIncompatibleLevelsOnHardenedContexts),
+    ES3_METAL().enable(Feature::DisallowNonZeroBaseLevelAndIncompatibleLevelsOnHardenedContexts),
+    ES3_OPENGL().enable(Feature::DisallowNonZeroBaseLevelAndIncompatibleLevelsOnHardenedContexts),
+    ES3_OPENGLES().enable(Feature::DisallowNonZeroBaseLevelAndIncompatibleLevelsOnHardenedContexts),
+    ES3_VULKAN().enable(Feature::DisallowNonZeroBaseLevelAndIncompatibleLevelsOnHardenedContexts));
 
 GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HardenedContextTestES31);
 ANGLE_INSTANTIATE_TEST_ES31(HardenedContextTestES31);

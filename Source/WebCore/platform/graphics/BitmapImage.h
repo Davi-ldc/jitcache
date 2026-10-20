@@ -38,11 +38,15 @@ class ImageSource;
 class NativeImage;
 
 class BitmapImage final : public Image {
+    friend class GraphicsContext;
 public:
     WEBCORE_EXPORT static Ref<BitmapImage> create(ImageObserver* = nullptr, AlphaOption = AlphaOption::Premultiplied, GammaAndColorProfileOption = GammaAndColorProfileOption::Applied);
     WEBCORE_EXPORT static Ref<BitmapImage> create(Ref<NativeImage>&&);
     WEBCORE_EXPORT static RefPtr<BitmapImage> create(RefPtr<NativeImage>&&);
     WEBCORE_EXPORT static RefPtr<BitmapImage> create(PlatformImagePtr&&);
+    WEBCORE_EXPORT static std::optional<Ref<BitmapImage>> create(RefPtr<ShareableBitmap>&&); // Uses `std::optional<Ref<...>>` to conform to the interface needed by IPC infrastructure.
+
+    WEBCORE_EXPORT static BitmapImage& nullImage();
 
     // Animation
     void startAnimation() final { m_source->startAnimation(); }
@@ -53,7 +57,7 @@ public:
 
     // Decoding
     bool isLargeForDecoding() const { return m_source->isLargeForDecoding(); }
-    void stopDecoderWorkQueue() { m_source->stopDecoderWorkQueue(); }
+    void stopDecodingWorkQueue() { m_source->stopDecodingWorkQueue(); }
     void decode(Function<void(DecodingStatus)>&& decodeCallback) { m_source->decode(WTF::move(decodeCallback)); }
 
     // Current ImageFrame
@@ -64,13 +68,16 @@ public:
 
     // Primary & current NativeImage
     RefPtr<NativeImage> primaryNativeImage() { return m_source->primaryNativeImage(); }
-    RefPtr<NativeImage> nativeImage(const ColorSpace& = ColorSpace::SRGB()) final { return primaryNativeImage(); }
-    RefPtr<NativeImage> currentNativeImage() final { return m_source->currentNativeImage(); }
+    RefPtr<NativeImage> nativeImage(const ColorSpace& = ColorSpace::SRGB()) { return primaryNativeImage(); }
+    RefPtr<NativeImage> currentNativeImage() { return m_source->currentNativeImage(); }
+
+    // A bitmap has a size of its own, so these ignore the concrete object size.
+    RefPtr<NativeImage> nativeImage(ConcreteObjectSize, const ColorSpace& = ColorSpace::SRGB(), const ImageDrawingExtras* = nullptr) final { return primaryNativeImage(); }
+    RefPtr<NativeImage> currentNativeImage(ConcreteObjectSize, const ImageDrawingExtras* = nullptr) final { return currentNativeImage(); }
 
     // Image Metadata
     String uti() const final { return m_source->uti(); }
     FloatSize size(ImageOrientation orientation = ImageOrientation::Orientation::FromImage) const final { return m_source->size(orientation); }
-    FloatSize sourceSize(ImageOrientation orientation = ImageOrientation::Orientation::FromImage) const { return m_source->sourceSize(orientation); }
     FloatSize density() const { return m_source->density(); }
     ColorSpace colorSpace() final { return m_source->colorSpace(); }
     bool hasHDRContent() const final { return m_source->hasHDRContent(); }
@@ -80,19 +87,23 @@ public:
     bool hasSolidColor() final { return m_source->hasSolidColor(); }
 #endif
 
+    NaturalDimensions unorientedNaturalDimensions() const final;
+
     // ImageFrame
     Seconds frameDurationAtIndex(unsigned index) const { return m_source->frameDurationAtIndex(index); }
 
     // NativeImage
-    RefPtr<NativeImage> nativeImageAtIndex(unsigned index) final { return m_source->nativeImageAtIndex(index); }
+    RefPtr<NativeImage> nativeImageAtIndex(unsigned index) { return m_source->nativeImageAtIndex(index); }
+    RefPtr<NativeImage> nativeImageAtIndex(unsigned index, ConcreteObjectSize, const ImageDrawingExtras* = nullptr) final { return nativeImageAtIndex(index); }
 
     // Testing support.
-    CString sourceUTF8() const { return sourceURL().string().utf8(); }
+    UTF8CString sourceUTF8() const { return sourceURL().string().utf8(); }
     void setAsyncDecodingEnabledForTesting(bool enabled) { m_source->setAsyncDecodingEnabledForTesting(enabled); }
     bool isAsyncDecodingEnabledForTesting() const { return m_source->isAsyncDecodingEnabledForTesting(); }
     void setMinimumDecodingDurationForTesting(Seconds duration) { m_source->setMinimumDecodingDurationForTesting(duration); }
     void setClearDecoderAfterAsyncFrameRequestForTesting(bool enabled) { m_source->setClearDecoderAfterAsyncFrameRequestForTesting(enabled); }
     void setHasHDRContentForTesting() { m_source->setHasHDRContentForTesting(); }
+    WEBCORE_EXPORT void simulateDataReplacedForTesting();
     unsigned decodeCountForTesting() const { return m_source->decodeCountForTesting(); }
     unsigned blankDrawCountForTesting() const { return m_source->blankDrawCountForTesting(); }
 
@@ -119,7 +130,8 @@ private:
     bool currentFrameIsComplete() const final { return m_source->currentImageFrame().isComplete(); }
 
     // Current NativeImage
-    RefPtr<NativeImage> currentPreTransformedNativeImage(ImageOrientation orientation) final { return m_source->currentPreTransformedNativeImage(orientation); }
+    RefPtr<NativeImage> currentPreTransformedNativeImage(ImageOrientation orientation = ImageOrientation::Orientation::FromImage) { return m_source->currentPreTransformedNativeImage(orientation); }
+    RefPtr<NativeImage> currentPreTransformedNativeImage(ConcreteObjectSize, ImageOrientation orientation = ImageOrientation::Orientation::FromImage, const ImageDrawingExtras* = nullptr) final { return currentPreTransformedNativeImage(orientation); }
 
     // Image Metadata
     bool hasDensityCorrectedSize() const final { return m_source->hasDensityCorrectedSize(); }
@@ -142,8 +154,8 @@ private:
 
     bool hasHDRContentForTesting() const { return m_source->hasHDRContentForTesting(); }
 
-    ImageDrawResult draw(GraphicsContext&, const FloatRect& destinationRect, const FloatRect& sourceRect, ImagePaintingOptions = { }) final;
-    void drawPattern(GraphicsContext&, const FloatRect& destinationRect, const FloatRect& tileRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions = { }) final;
+    ImageDrawResult draw(GraphicsContext&, ConcreteObjectSize, const FloatRect& destinationRect, const FloatRect& sourceRect, ImagePaintingOptions = { }, const ImageDrawingExtras* = nullptr) final;
+    void drawPattern(GraphicsContext&, ConcreteObjectSize, const FloatRect& destinationRect, const FloatRect& tileRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions = { }, const ImageDrawingExtras* = nullptr) final;
     void drawLuminanceMaskPattern(GraphicsContext&, const FloatRect& destinationRect, const FloatRect& tileRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions);
 
     void dump(WTF::TextStream&) const final;

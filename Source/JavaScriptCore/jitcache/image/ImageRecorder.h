@@ -59,9 +59,9 @@ class ImageRecorder final : private BakedFactsBuilder::StorageAllowance {
 public:
     ImageRecorder(RecordingScope, VM&, UnlinkedCodeBlock&, Ref<ProducerBudget>&&);
 #if ENABLE(JITCACHE_TWINS)
-    // A twin compile: it seeds its assembler and each BinarySwitch with the producer's seeds, and answers what emission
-    // asks from the producer's compile inputs. Both must outlive the recorder.
-    ImageRecorder(RecordingScope, VM&, UnlinkedCodeBlock&, Ref<ProducerBudget>&&, const TwinSeeds&, const TwinCompileInputs&);
+    // A twin compile: it seeds its assembler and each BinarySwitch with the producer's seeds, which must outlive the
+    // recorder.
+    ImageRecorder(RecordingScope, VM&, UnlinkedCodeBlock&, Ref<ProducerBudget>&&, const TwinSeeds&);
 #endif
     ~ImageRecorder(); // Releases every byte it charged and did not hand to a record.
 
@@ -108,9 +108,6 @@ public:
     // BaselineCompile only, at compile start: snapshotCompileInputs' result, already allocated at its exact size, whose
     // bytes the recorder charges as it takes them over.
     void recordCompileInputs(TwinCompileInputs&&);
-    // BaselineCompile only, from the strict-equality templates: records chosen as the instruction's compile input and
-    // returns it; a twin recorder returns the producer's input for the instruction instead, and records that.
-    StrictEqualityAtomOperand strictEqualityAtomOperand(BytecodeIndex, StrictEqualityAtomOperand chosen);
     // The seed the attached assembler drew or was given, which a MathIC regeneration logs for its attach slot.
     std::optional<uint32_t> assemblerSeed() const { return m_assemblerSeed; }
 #endif
@@ -171,9 +168,8 @@ private:
     // Operation fixup when it has inline code. Empty once the recorder stops.
     Vector<MathICRecord> buildMathICRecords(std::span<const uint8_t> linkedCode);
 #if ENABLE(JITCACHE_TWINS)
-    // The twin data the record keeps: the seeds, and the snapshot's inputs with the strict-equality inputs merged in by
-    // bytecode offset. Nullopt once a refused charge stopped the recorder.
-    std::optional<TwinData> finishTwinData();
+    // The twin data the record keeps, on a recorder that still records: the seeds and the snapshot's inputs.
+    TwinData finishTwinData();
 #endif
 
     RecordingScope m_scope;
@@ -198,9 +194,7 @@ private:
     std::optional<uint32_t> m_assemblerSeed;
     Vector<uint32_t> m_binarySwitchSeeds;
     TwinCompileInputs m_compileInputs; // the snapshot, charged once received
-    Vector<CompileInput> m_strictEqualityInputs; // kind 8, in bytecode order, as the main pass asks
     const TwinSeeds* m_twinSeeds { nullptr };
-    const TwinCompileInputs* m_twinCompileInputs { nullptr };
     size_t m_nextTwinBinarySwitchSeed { 0 };
 #endif
 };

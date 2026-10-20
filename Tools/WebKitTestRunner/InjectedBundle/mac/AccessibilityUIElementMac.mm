@@ -34,6 +34,7 @@
 #import <AppKit/NSAccessibility.h>
 #import <Foundation/Foundation.h>
 #import <JavaScriptCore/JSObjectRef.h>
+#import <JavaScriptCore/JSRetainPtr.h>
 #import <JavaScriptCore/JSStringRefCF.h>
 #import <WebCore/CocoaAccessibilityConstants.h>
 #import <WebCore/DateComponents.h>
@@ -201,6 +202,7 @@ static id attributeValue(id element, NSString *attribute)
         @"AXControllerFor",
         @"AXControllers",
         @"AXDRTSpeechAttribute",
+        @"AXDateTimeComponents",
         @"AXDateTimeComponentsType",
         @"AXDescribedBy",
         @"AXDescriptionFor",
@@ -295,7 +297,7 @@ RetainPtr<NSString> AccessibilityUIElementMac::descriptionOfValue(id valueObject
     return [valueObject description];
 }
 
-static JSRetainPtr<JSStringRef> concatenateAttributeAndValue(NSString* attribute, NSString* value)
+static RefPtr<OpaqueJSString> concatenateAttributeAndValue(NSString* attribute, NSString* value)
 {
     Vector<UniChar> buffer([attribute length]);
     [attribute getCharacters:buffer.mutableSpan().data()];
@@ -306,10 +308,10 @@ static JSRetainPtr<JSStringRef> concatenateAttributeAndValue(NSString* attribute
     [value getCharacters:valueBuffer.mutableSpan().data()];
     buffer.appendVector(valueBuffer);
 
-    return adopt(JSStringCreateWithCharacters(buffer.span().data(), buffer.size()));
+    return adoptRef(JSStringCreateWithCharacters(buffer.span().data(), buffer.size()));
 }
 
-static JSRetainPtr<JSStringRef> descriptionOfElements(const Vector<RefPtr<AccessibilityUIElement>>& elements)
+static RefPtr<OpaqueJSString> descriptionOfElements(const Vector<RefPtr<AccessibilityUIElement>>& elements)
 {
     NSMutableString *allElementString = [NSMutableString string];
     for (auto element : elements) {
@@ -466,7 +468,7 @@ unsigned AccessibilityUIElementMac::arrayAttributeCount(NSString *attributeName)
     return count;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::domIdentifier() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::domIdentifier() const
 {
     return stringAttributeValueNS(NSAccessibilityDOMIdentifierAttribute);
 }
@@ -537,7 +539,7 @@ RefPtr<AccessibilityUIElement> AccessibilityUIElementMac::childAtIndexWithRemote
     return resultChildren.size() == 1 ? resultChildren[0] : nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::customContent() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::customContent() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
 #if HAVE(ACCESSIBILITY_FRAMEWORK)
@@ -806,26 +808,26 @@ RefPtr<AccessibilityUIElement> AccessibilityUIElementMac::disclosedByRow()
     return elementForAttribute(NSAccessibilityDisclosedByRowAttribute);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfLinkedUIElements()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfLinkedUIElements()
 {
     Vector<RefPtr<AccessibilityUIElement> > linkedElements;
     getLinkedUIElements(linkedElements);
     return descriptionOfElements(linkedElements);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfDocumentLinks()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfDocumentLinks()
 {
     Vector<RefPtr<AccessibilityUIElement> > linkElements;
     getDocumentLinks(linkElements);
     return descriptionOfElements(linkElements);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfChildren()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfChildren()
 {
     return descriptionOfElements(getChildren());
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::allAttributes()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::allAttributes()
 {
     auto attributes = supportedAttributes(m_element.get());
 
@@ -862,19 +864,19 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::allAttributes()
     return [values createJSStringRef];
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringDescriptionOfAttributeValue(JSStringRef attribute)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::stringDescriptionOfAttributeValue(JSStringRef attribute)
 {
     auto value = attributeValue([NSString stringWithJSStringRef:attribute]);
     auto valueDescription = descriptionOfValue(value.get());
     return [valueDescription createJSStringRef];
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringAttributeValue(JSStringRef attribute)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::stringAttributeValue(JSStringRef attribute)
 {
     return stringAttributeValueNS([NSString stringWithJSStringRef:attribute]);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringAttributeValueNS(NSString *attribute) const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::stringAttributeValueNS(NSString *attribute) const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValue(attribute);
@@ -990,7 +992,7 @@ bool AccessibilityUIElementMac::isAttributeSupported(JSStringRef attribute)
     return false;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::parameterizedAttributeNames()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::parameterizedAttributeNames()
 {
     NSArray *attributes = nil;
 
@@ -1006,7 +1008,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::parameterizedAttributeNames(
     return [attributesString createJSStringRef];
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::role()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::role()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto role = descriptionOfValue(attributeValue(NSAccessibilityRoleAttribute).get());
@@ -1016,7 +1018,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::role()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::subrole()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::subrole()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto subrole = descriptionOfValue(attributeValue(NSAccessibilitySubroleAttribute).get());
@@ -1026,7 +1028,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::subrole()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::roleDescription()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::roleDescription()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto role = descriptionOfValue(attributeValue(NSAccessibilityRoleDescriptionAttribute).get());
@@ -1036,7 +1038,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::roleDescription()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::computedRoleString()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::computedRoleString()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto computedRoleString = descriptionOfValue(attributeValue(@"AXARIARole").get());
@@ -1046,7 +1048,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::computedRoleString()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::title()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::title()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto title = descriptionOfValue(attributeValue(NSAccessibilityTitleAttribute).get());
@@ -1056,7 +1058,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::title()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::description()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::description()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(NSAccessibilityDescriptionAttribute).get());
@@ -1066,7 +1068,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::description()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::debugDescription()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::debugDescription()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(@"_AXDebugDescription").get());
@@ -1076,7 +1078,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::debugDescription()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rawRoleForTesting()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::rawRoleForTesting()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(@"_AXRawRoleForTesting").get());
@@ -1086,7 +1088,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rawRoleForTesting()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::brailleLabel() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::brailleLabel() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(@"AXBrailleLabel").get());
@@ -1096,7 +1098,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::brailleLabel() const
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::brailleRoleDescription() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::brailleRoleDescription() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(@"AXBrailleRoleDescription").get());
@@ -1106,17 +1108,17 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::brailleRoleDescription() con
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::liveRegionStatus() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::liveRegionStatus() const
 {
     return stringAttributeValueNS(@"AXARIALive");
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::liveRegionRelevant() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::liveRegionRelevant() const
 {
     return stringAttributeValueNS(@"AXARIARelevant");
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::orientation() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::orientation() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(NSAccessibilityOrientationAttribute).get());
@@ -1126,7 +1128,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::orientation() const
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringValue()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::stringValue()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     RetainPtr<id> value;
@@ -1143,7 +1145,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringValue()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::dateValue()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::dateValue()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValue(NSAccessibilityValueAttribute);
@@ -1163,7 +1165,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::dateValue()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::dateTimeValue() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::dateTimeValue() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     return stringAttributeValueNS(@"AXDateTimeValue");
@@ -1172,7 +1174,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::dateTimeValue() const
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::language()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::language()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(@"AXLanguage").get());
@@ -1182,7 +1184,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::language()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::helpText() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::helpText() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto description = descriptionOfValue(attributeValue(NSAccessibilityHelpAttribute).get());
@@ -1272,7 +1274,7 @@ double AccessibilityUIElementMac::clickPointY()
     return 0.0f;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::lineRectsAndText() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::lineRectsAndText() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto lineRectsAndText = attributeValue(@"AXLineRectsAndText");
@@ -1299,7 +1301,7 @@ double AccessibilityUIElementMac::maxValue()
     return numberAttributeValueNS(NSAccessibilityMaxValueAttribute);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::valueDescription()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::valueDescription()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto valueDescription = attributeValue(NSAccessibilityValueDescriptionAttribute);
@@ -1427,12 +1429,12 @@ bool AccessibilityUIElementMac::isChecked() const
     return intValue() == 1;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::currentStateValue() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::currentStateValue() const
 {
     return stringAttributeValueNS(NSAccessibilityARIACurrentAttribute);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::sortDirection() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::sortDirection() const
 {
     return stringAttributeValueNS(NSAccessibilitySortDirectionAttribute);
 }
@@ -1448,7 +1450,7 @@ int AccessibilityUIElementMac::hierarchicalLevel() const
     return 0;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::classList() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::classList() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValue(@"AXDOMClassList");
@@ -1469,7 +1471,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::classList() const
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::speakAs()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::speakAs()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValue(@"AXDRTSpeechAttribute");
@@ -1485,7 +1487,7 @@ bool AccessibilityUIElementMac::isGrabbed() const
     return boolAttributeValueNS(NSAccessibilityGrabbedAttribute);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::ariaDropEffects() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::ariaDropEffects() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValue(NSAccessibilityDropEffectsAttribute);
@@ -1518,7 +1520,7 @@ int AccessibilityUIElementMac::lineForIndex(int index)
     return -1;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rangeForLine(int line)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::rangeForLine(int line)
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValueForParameter(NSAccessibilityRangeForLineParameterizedAttribute, @(line));
@@ -1529,7 +1531,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rangeForLine(int line)
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rangeForPosition(int x, int y)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::rangeForPosition(int x, int y)
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValueForParameter(NSAccessibilityRangeForPositionParameterizedAttribute, [NSValue valueWithPoint:NSMakePoint(x, y)]);
@@ -1545,7 +1547,7 @@ static NSMutableString* makeBoundsDescription(NSRect rect, bool exposePosition)
     return [NSMutableString stringWithFormat:@"{{%f, %f}, {%f, %f}}", exposePosition ? rect.origin.x : -1.0f, exposePosition ? rect.origin.y : -1.0f, rect.size.width, rect.size.height];
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::boundsForRange(unsigned location, unsigned length)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::boundsForRange(unsigned location, unsigned length)
 {
     NSRange range = NSMakeRange(location, length);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1562,7 +1564,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::boundsForRange(unsigned loca
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::boundsForRangeWithPagePosition(unsigned location, unsigned length)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::boundsForRangeWithPagePosition(unsigned location, unsigned length)
 {
     NSRange range = NSMakeRange(location, length);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1578,7 +1580,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::boundsForRangeWithPagePositi
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringForRange(unsigned location, unsigned length)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::stringForRange(unsigned location, unsigned length)
 {
     NSRange range = NSMakeRange(location, length);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1592,7 +1594,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringForRange(unsigned loca
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributedStringForRange(unsigned location, unsigned length)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributedStringForRange(unsigned location, unsigned length)
 {
     NSRange range = NSMakeRange(location, length);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1680,7 +1682,7 @@ JSValueRef AccessibilityUIElementMac::uiElementsForSearchPredicate(JSContextRef 
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::selectTextWithCriteria(JSContextRef context, JSStringRef ambiguityResolution, JSValueRef searchStrings, JSStringRef replacementString, JSStringRef activity)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::selectTextWithCriteria(JSContextRef context, JSStringRef ambiguityResolution, JSValueRef searchStrings, JSStringRef replacementString, JSStringRef activity)
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     NSDictionary *parameterizedAttribute = selectTextParameterizedAttributeForCriteria(context, ambiguityResolution, searchStrings, replacementString, activity);
@@ -1718,7 +1720,7 @@ JSValueRef AccessibilityUIElementMac::performTextOperation(JSContextRef context,
 }
 #endif
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfColumnHeaders()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfColumnHeaders()
 {
     // not yet defined in AppKit... odd
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1730,7 +1732,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfColumnHeaders()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfRowHeaders()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfRowHeaders()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto rowHeaders = attributeValue(@"AXRowHeaderUIElements");
@@ -1741,7 +1743,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfRowHeaders()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfColumns()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfColumns()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto columns = attributeValue(NSAccessibilityColumnsAttribute);
@@ -1759,7 +1761,7 @@ JSValueRef AccessibilityUIElementMac::columns(JSContextRef context)
     END_AX_OBJC_EXCEPTIONS
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfRows()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfRows()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto rows = attributeValue(NSAccessibilityRowsAttribute);
@@ -1770,7 +1772,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfRows()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfVisibleCells()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfVisibleCells()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto cells = attributeValue(@"AXVisibleCells");
@@ -1781,7 +1783,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfVisibleCells()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributesOfHeader()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributesOfHeader()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto header = attributeValue(NSAccessibilityHeaderAttribute);
@@ -1817,7 +1819,7 @@ int AccessibilityUIElementMac::indexInTable()
     return -1;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rowIndexRange()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::rowIndexRange()
 {
     NSRange range = NSMakeRange(0, 0);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1831,7 +1833,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rowIndexRange()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::columnIndexRange()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::columnIndexRange()
 {
     NSRange range = NSMakeRange(0, 0);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1907,7 +1909,7 @@ void AccessibilityUIElementMac::scrollToMakeVisibleWithSubFocus(int x, int y, in
     END_AX_OBJC_EXCEPTIONS
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::selectedText()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::selectedText()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto string = attributeValue(@"AXSelectedText");
@@ -1919,7 +1921,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::selectedText()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::selectedTextRange()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::selectedTextRange()
 {
     NSRange range = NSMakeRange(NSNotFound, 0);
     BEGIN_AX_OBJC_EXCEPTIONS
@@ -1952,7 +1954,7 @@ bool AccessibilityUIElementMac::setSelectedTextRange(unsigned location, unsigned
     return true;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textInputMarkedRange() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::textInputMarkedRange() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = attributeValue(NSAccessibilityTextInputMarkedRangeAttribute);
@@ -2062,12 +2064,12 @@ void AccessibilityUIElementMac::clearSelectedChildren() const
 {
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::accessibilityValue() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::accessibilityValue() const
 {
     return createJSString();
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::url()
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::url()
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto url = attributeValue(NSAccessibilityURLAttribute);
@@ -2149,7 +2151,7 @@ bool AccessibilityUIElementMac::isCollapsed() const
     return false;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::embeddedImageDescription() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::embeddedImageDescription() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = descriptionOfValue(attributeValue(@"AXEmbeddedImageDescription").get());
@@ -2158,7 +2160,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::embeddedImageDescription() c
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataSize() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::imageDataSize() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto value = descriptionOfValue(attributeValue(@"AXImageDataSize").get());
@@ -2167,12 +2169,12 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataSize() const
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataForParameters(int resizeWidth, int resizeHeight) const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::imageDataForParameters(int resizeWidth, int resizeHeight) const
 {
     return imageDataForParametersWithFormat(resizeWidth, resizeHeight, nullptr);
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataForParametersWithFormat(int resizeWidth, int resizeHeight, JSStringRef format) const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::imageDataForParametersWithFormat(int resizeWidth, int resizeHeight, JSStringRef format) const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     NSString *formatString = format ? [NSString stringWithJSStringRef:format] : @"RGBA";
@@ -2183,15 +2185,15 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataForParametersWithFo
     };
     auto value = attributeValueForParameter(@"AXImageData", dictionary);
     if (!value)
-        return adopt(JSStringCreateWithUTF8CString("(null)"));
+        return adoptRef(JSStringCreateWithUTF8CString("(null)"));
     NSData *data = (NSData *)value.get();
     RetainPtr description = adoptNS([[NSString alloc] initWithFormat:@"AXImageData: %lu bytes", (unsigned long)[data length]]);
-    return adopt(JSStringCreateWithCFString((__bridge CFStringRef)description.get()));
+    return adoptRef(JSStringCreateWithCFString((__bridge CFStringRef)description.get()));
     END_AX_OBJC_EXCEPTIONS
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataForSubrect(int resizeWidth, int resizeHeight, int left, int top, int width, int height) const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::imageDataForSubrect(int resizeWidth, int resizeHeight, int left, int top, int width, int height) const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     NSDictionary *dictionary = @{
@@ -2205,10 +2207,10 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::imageDataForSubrect(int resi
     };
     auto value = attributeValueForParameter(@"AXImageData", dictionary);
     if (!value)
-        return adopt(JSStringCreateWithUTF8CString("(null)"));
+        return adoptRef(JSStringCreateWithUTF8CString("(null)"));
     NSData *data = (NSData *)value.get();
     RetainPtr description = adoptNS([[NSString alloc] initWithFormat:@"AXImageData: %lu bytes", (unsigned long)[data length]]);
-    return adopt(JSStringCreateWithCFString((__bridge CFStringRef)description.get()));
+    return adoptRef(JSStringCreateWithCFString((__bridge CFStringRef)description.get()));
     END_AX_OBJC_EXCEPTIONS
     return nullptr;
 }
@@ -2248,7 +2250,7 @@ bool AccessibilityUIElementMac::hasPopup() const
     return boolAttributeValueNS(@"AXHasPopup");
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::popupValue() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::popupValue() const
 {
     if (auto result = stringAttributeValueNS(@"AXPopupValue"))
         return result;
@@ -2308,7 +2310,11 @@ bool AccessibilityUIElementMac::isInTable() const
 
 void AccessibilityUIElementMac::takeFocus()
 {
-    setAttributeValue(m_element.get(), NSAccessibilityFocusedAttribute, @YES);
+    BEGIN_AX_OBJC_EXCEPTIONS
+    s_controller->executeOnAXThread([element = m_element] {
+        [element.get() accessibilitySetValue:@YES forAttribute:NSAccessibilityFocusedAttribute];
+    });
+    END_AX_OBJC_EXCEPTIONS
 }
 
 void AccessibilityUIElementMac::takeSelection()
@@ -2505,7 +2511,7 @@ RefPtr<AccessibilityTextMarkerRange> AccessibilityUIElementMac::textMarkerRangeF
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringForTextMarkerRange(AccessibilityTextMarkerRange* markerRange)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::stringForTextMarkerRange(AccessibilityTextMarkerRange* markerRange)
 {
     if (!markerRange)
         return nullptr;
@@ -2518,7 +2524,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::stringForTextMarkerRange(Acc
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::rectsForTextMarkerRange(AccessibilityTextMarkerRange*, JSStringRef)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::rectsForTextMarkerRange(AccessibilityTextMarkerRange*, JSStringRef)
 {
     // Not implemented on macOS
     return nullptr;
@@ -2730,7 +2736,7 @@ static void appendColorDescription(RetainPtr<NSMutableString> string, NSString* 
         [string appendFormat:@"%@:%@\n", attributeKey, descriptionForColor((CGColorRef)color)];
 }
 
-static JSRetainPtr<JSStringRef> createJSStringRef(id string, bool includeDidSpellCheck)
+static RefPtr<OpaqueJSString> createJSStringRef(id string, bool includeDidSpellCheck)
 {
     auto mutableString = adoptNS([[NSMutableString alloc] init]);
     id attributeEnumerationBlock = ^(NSDictionary<NSString *, id> *attributes, NSRange range, BOOL *stop) {
@@ -2788,7 +2794,7 @@ static JSRetainPtr<JSStringRef> createJSStringRef(id string, bool includeDidSpel
     return [mutableString createJSStringRef];
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributedStringForTextMarkerRange(AccessibilityTextMarkerRange* markerRange)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributedStringForTextMarkerRange(AccessibilityTextMarkerRange* markerRange)
 {
     if (!markerRange)
         return nullptr;
@@ -2802,7 +2808,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributedStringForTextMarke
     return nil;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributedStringForTextMarkerRangeWithDidSpellCheck(AccessibilityTextMarkerRange* markerRange)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributedStringForTextMarkerRangeWithDidSpellCheck(AccessibilityTextMarkerRange* markerRange)
 {
     if (!markerRange)
         return nullptr;
@@ -2816,7 +2822,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributedStringForTextMarke
     return nil;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::attributedStringForTextMarkerRangeWithOptions(AccessibilityTextMarkerRange* markerRange, bool includeSpellCheck)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::attributedStringForTextMarkerRangeWithOptions(AccessibilityTextMarkerRange* markerRange, bool includeSpellCheck)
 {
     if (!markerRange || !markerRange->platformTextMarkerRange())
         return nullptr;
@@ -3076,7 +3082,7 @@ RefPtr<AccessibilityTextMarker> AccessibilityUIElementMac::nextSentenceEndTextMa
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerDebugDescription(AccessibilityTextMarker* marker)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::textMarkerDebugDescription(AccessibilityTextMarker* marker)
 {
     if (!marker)
         return nullptr;
@@ -3089,7 +3095,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerDebugDescription(A
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerRangeDebugDescription(AccessibilityTextMarkerRange* range)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::textMarkerRangeDebugDescription(AccessibilityTextMarkerRange* range)
 {
     if (!range)
         return nullptr;
@@ -3102,7 +3108,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerRangeDebugDescript
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerDescription(AccessibilityTextMarker* marker)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::textMarkerDescription(AccessibilityTextMarker* marker)
 {
     if (!marker)
         return nullptr;
@@ -3115,7 +3121,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerDescription(Access
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::textMarkerRangeDescription(AccessibilityTextMarkerRange* range)
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::textMarkerRangeDescription(AccessibilityTextMarkerRange* range)
 {
     if (!range)
         return nullptr;
@@ -3142,7 +3148,7 @@ static NSString *_convertMathMultiscriptPairsToString(NSArray *pairs)
     return result;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::mathPostscriptsDescription() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::mathPostscriptsDescription() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto pairs = attributeValue(@"AXMathPostscripts");
@@ -3152,7 +3158,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::mathPostscriptsDescription()
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::mathPrescriptsDescription() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::mathPrescriptsDescription() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto pairs = attributeValue(@"AXMathPrescripts");
@@ -3171,7 +3177,7 @@ JSValueRef AccessibilityUIElementMac::mathRootRadicand(JSContextRef context)
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::pathDescription() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::pathDescription() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     NSMutableString *result = [NSMutableString stringWithString:@"\nStart Path\n"];
@@ -3204,7 +3210,7 @@ JSRetainPtr<JSStringRef> AccessibilityUIElementMac::pathDescription() const
     return nullptr;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::pathAsBounds() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::pathAsBounds() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     auto bezierPath = attributeValue(NSAccessibilityPathAttribute);
@@ -3231,7 +3237,7 @@ NSArray *AccessibilityUIElementMac::actionNames() const
     return actions;
 }
 
-JSRetainPtr<JSStringRef> AccessibilityUIElementMac::supportedActions() const
+RefPtr<OpaqueJSString> AccessibilityUIElementMac::supportedActions() const
 {
     BEGIN_AX_OBJC_EXCEPTIONS
     return [[actionNames() componentsJoinedByString:@","] createJSStringRef];

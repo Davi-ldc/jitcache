@@ -30,7 +30,6 @@ interface TestRunner {
     readonly attribute boolean isMac;
     readonly attribute boolean isKeyboardImmediatelyAvailable;
     readonly attribute boolean keyboardAppearsOverContent;
-    readonly attribute boolean haveSecureCodingRequest;
     readonly attribute boolean haveSecureCodingDataDetectors;
 
     // The basics.
@@ -141,6 +140,7 @@ interface TestRunner {
     // For Web Inspector tests
     undefined showWebInspector();
     undefined closeWebInspector();
+    undefined disconnectFrameInspectorTarget();
     undefined evaluateInWebInspector(DOMString script);
     readonly attribute DOMString inspectorTestStubURL;
 

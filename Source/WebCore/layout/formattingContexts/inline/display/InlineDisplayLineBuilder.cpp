@@ -28,6 +28,7 @@
 
 #include "InlineDisplayContentBuilder.h"
 #include "LayoutBoxGeometry.h"
+#include "LayoutIntegrationUtils.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "TextUtil.h"
 
@@ -138,8 +139,13 @@ InlineDisplay::Line InlineDisplayLineBuilder::build(const LineLayoutResult& line
         ? rootInlineBoxRect.left()
         : lineBoxLogicalRect.width() - lineLayoutResult.contentGeometry.logicalRightIncludingNegativeMargin; // Note that with hanging content lineLayoutResult.contentGeometry.logicalRight is not the same as rootLineBoxRect.right().
 
-    auto hasInflowContent = [&] {
+    auto hasContentfulContent = [&] {
         if (lineLayoutResult.hasContentfulInFlowContent())
+            return true;
+        return lineLayoutResult.isFirstLast.isFirstFormattedLine == IsFirstFormattedLine::Yes && !formattingContext().layoutState().excludedMarkerLayoutBounds().isEmpty();
+    };
+    auto hasInflowContent = [&] {
+        if (hasContentfulContent())
             return true;
         for (auto& run : lineLayoutResult.runs) {
             if (!run.isOutOfFlow())
@@ -149,7 +155,7 @@ InlineDisplay::Line InlineDisplayLineBuilder::build(const LineLayoutResult& line
     };
     auto writingMode = root().writingMode();
     return InlineDisplay::Line { hasInflowContent()
-        , lineLayoutResult.hasContentfulInFlowContent()
+        , hasContentfulContent()
         , lineLayoutResult.isBlockContent()
         , lineBoxLogicalRect
         , mapLineRectLogicalToVisual(lineBoxLogicalRect, constraints.formattingRootBorderBoxSize(), writingMode)
@@ -488,14 +494,36 @@ void InlineDisplayLineBuilder::addLegacyLineClampTrailingLinkBoxIfApplicable(con
     clampedLine.setHasContentAfterEllipsisBox();
 }
 
-std::optional<InlineDisplay::Line::Ellipsis> InlineDisplayLineBuilder::applyEllipsisIfNeeded(LineEndingTruncationPolicy truncationPolicy, InlineDisplay::Line& displayLine, std::span<InlineDisplay::Box> displayBoxes, bool isLegacyLineClamp)
+static InlineDisplay::Line::Ellipsis trailingBlockEllipsis(const BlockOverflowEllipsis& blockEllipsis, const InlineDisplay::Line& displayLine, const InlineDisplay::Box& rootInlineBox)
 {
-    if (truncationPolicy == LineEndingTruncationPolicy::NoTruncation || !displayBoxes.size())
+    ASSERT(rootInlineBox.isRootInlineBox());
+    // Being an isolate at the paragraph embedding level that follows the content, it always ends up at the visual end of the line in the paragraph direction.
+    auto ellipsisWidth = blockEllipsis.logicalWidth + blockEllipsis.hangingWidth;
+    auto lineBoxVisualLeft = displayLine.isHorizontal() ? displayLine.left() : displayLine.top();
+    auto ellipsisStart = displayLine.isLeftToRightInlineDirection() ? lineBoxVisualLeft + displayLine.contentLogicalLeft() + displayLine.contentLogicalWidth() : lineBoxVisualLeft + displayLine.contentLogicalLeftIgnoringInlineDirection() - ellipsisWidth;
+    auto visualRect = displayLine.isHorizontal() ? FloatRect { ellipsisStart, rootInlineBox.top(), ellipsisWidth, rootInlineBox.height() } : FloatRect { rootInlineBox.left(), ellipsisStart, rootInlineBox.width(), ellipsisWidth };
+    return { InlineDisplay::Line::Ellipsis::Type::Block, visualRect, blockEllipsis.text };
+}
+
+std::optional<InlineDisplay::Line::Ellipsis> InlineDisplayLineBuilder::placeTrailingEllipsisIfNeeded(LineEndingTruncationPolicy truncationPolicy, const std::optional<BlockOverflowEllipsis>& blockEllipsis, InlineDisplay::Line& displayLine, std::span<InlineDisplay::Box> displayBoxes, bool isLegacyLineClamp)
+{
+    if (!displayBoxes.size())
         return { };
+    // Line breaking already made room for the block ellipsis. Otherwise the content is truncated here to make room for the ellipsis.
+    if (blockEllipsis)
+        return trailingBlockEllipsis(*blockEllipsis, displayLine, displayBoxes[0]);
+    if (truncationPolicy == LineEndingTruncationPolicy::NoTruncation)
+        return { };
+    // Without a block ellipsis from line breaking (e.g. block-ellipsis: none), only legacy line clamp gets an ellipsis in the block direction.
+    if (truncationPolicy == LineEndingTruncationPolicy::WhenContentOverflowsInBlockDirection && !isLegacyLineClamp)
+        return { };
+
+    CheckedRef rootBox = displayBoxes[0].layoutBox();
+    CheckedRef styleForTruncation = rootBox->isAnonymous() ? IntegrationUtils::firstNonAnonymousAncestorStyle(rootBox) : rootBox->style();
 
     auto ellipsisText = [&] -> AtomString {
         if (truncationPolicy == LineEndingTruncationPolicy::WhenContentOverflowsInInlineDirection) {
-            return WTF::switchOn(displayBoxes[0].layoutBox().style().textOverflow(),
+            return WTF::switchOn(styleForTruncation->textOverflow(),
                 [&](const CSS::Keyword::Clip&) -> AtomString {
                     return nullAtom();
                 },
@@ -507,21 +535,8 @@ std::optional<InlineDisplay::Line::Ellipsis> InlineDisplayLineBuilder::applyElli
                 }
             );
         }
-        if (isLegacyLineClamp) {
-            // Legacy line clamp always uses ...
-            return TextUtil::ellipsisTextInInlineDirection(displayLine.isHorizontal());
-        }
-        return WTF::switchOn(displayBoxes[0].layoutBox().style().blockEllipsis(),
-            [&](const CSS::Keyword::NoEllipsis&) -> AtomString {
-                return nullAtom();
-            },
-            [&](const CSS::Keyword::Auto&) -> AtomString {
-                return TextUtil::ellipsisTextInInlineDirection(displayLine.isHorizontal());
-            },
-            [&](const Style::String& string) -> AtomString {
-                return AtomString { string.value };
-            }
-        );
+        // Legacy line clamp always uses ...
+        return TextUtil::ellipsisTextInInlineDirection(displayLine.isHorizontal());
     }();
 
     if (ellipsisText.isEmpty())

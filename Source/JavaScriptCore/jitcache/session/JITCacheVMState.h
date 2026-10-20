@@ -36,7 +36,7 @@ class OpenedArtifact;
 class ProducerLock;
 struct ImageTwinCheckState; // twins builds; defined in JITCacheInstall.cpp
 struct KeptSummaries; // the capture glue's kept summaries; defined in JITCacheCapture.cpp
-class SupportTargetTable; // the Image lane's resolved support targets; defined in ImageSupport.h
+class SupportTargetTable; // the Image lane's resolved support targets; defined in ImageSupport.cpp
 class UCBRegistry; // the UCB lane's registry; its users include UCBRegistry.h
 
 class VMState final {
@@ -57,6 +57,7 @@ public:
     std::optional<BodyKey> bodyKeyOf(const UnlinkedCodeBlock&) const;
     uint64_t bodyVersion(const BodyKey&);
     BodyLookup openBody(const BodyKey&);
+    SectionLookup readBodySection(const BodyKey&, SectionKind); // one section, checksummed without the body's others
     void raiseInvalidMaterial(ASCIILiteral step, String detail); // step is a full name, such as "ucb.identity"
     void raiseInvalidMaterial(ASCIILiteral part, ASCIILiteral check, String detail);
     void raiseRecordingFault(ASCIILiteral part, ASCIILiteral check, String detail);
@@ -68,7 +69,7 @@ public:
 #if ENABLE(JITCACHE_TWINS)
     TwinReportSink* twinReportSink(); // non-null while a twin report is open
     Ref<ProducerBudget> twinBudget(); // ProducerBudget::createUnlimited(), for twin compiles
-    // Tests: while set, bodyVersion and openBody answer from these alone; token answers index tokens.
+    // Tests: while set, bodyVersion, openBody and readBodySection answer from these alone; token answers index tokens.
     void setBodyLookupForTesting(Function<uint64_t(const BodyKey&)>&& token, Function<BodyLookup(const BodyKey&)>&& open);
     void clearBodyLookupForTesting();
 #endif
@@ -98,7 +99,7 @@ public:
     // The integrator's progress counters, which the glue counts.
     Progress& progress();
     // What status reports as progress: a copy of the counters with the opened artifact's indexed bodies and the UCB
-    // registry's imports, seeded decodes, attaches, gate drops and misses.
+    // registry's imports, attaches, gate drops and misses.
     Progress statusProgress();
     ProducerBudget* producerBudget(); // producing roles, a faulted start included; null otherwise
     ArtifactWriter* writer(); // producing roles whose start did not fault; null otherwise
@@ -198,7 +199,8 @@ private:
     RefPtr<OpenedArtifact> m_artifact; // shared by the VMs of the process that open the artifact; null after a start fault
 
 #if ENABLE(JITCACHE_TWINS)
-    // The body-lookup override: while set, bodyVersion answers from the first and openBody from the second.
+    // The body-lookup override: while set, bodyVersion answers from the first, and openBody and readBodySection from the
+    // second.
     Function<uint64_t(const BodyKey&)> m_bodyVersionOverride;
     Function<BodyLookup(const BodyKey&)> m_openBodyOverride;
 #endif

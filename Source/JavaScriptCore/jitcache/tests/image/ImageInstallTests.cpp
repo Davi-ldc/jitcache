@@ -28,7 +28,10 @@
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
+#include "JSModuleLoader.h"
+#include "JSPromise.h"
 #include "ProducerBudget.h"
+#include "ScriptFetchParameters.h"
 #include "SourceCode.h"
 #include "SourceProvider.h"
 #include "TestFiles.h"
@@ -115,12 +118,11 @@ static NEVER_INLINE std::optional<CapturedImage> imageCompileAndCapture(TestCont
 
     TwinSeeds seeds { };
     seeds.assembler = assemblerSeed;
-    TwinCompileInputs noInputs { };
     CapturedImage captured;
     {
         Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(producer));
         JIT jit(vm, plan.get(), producer);
-        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, noInputs);
+        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds);
         captured.code = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
         if (!captured.code || JIT::finalizeOnMainThread(producer, plan.get(), captured.code) != CompilationResult::CompilationSuccessful) {
             JITCACHE_FAIL("the producer's compilation failed"_s);
@@ -594,6 +596,94 @@ static NEVER_INLINE std::optional<ImageSlackOfBody> imageCheckSlackOfBody(TestCo
     return slack;
 }
 
+// The sections an import reads, from a twin recorder's compilation of codeBlock: the baked facts its record holds,
+// beside the smallest image.baseline that passes the image section's checks (four zero bytes of code and no fixup,
+// call, mold, table, code-map entry or MathIC) and the record's twin data with no producer value, since that image holds
+// no fixup. The view borrows the buffers, which live in sections.
+struct ImageBakedFactsSections {
+    Vector<uint8_t> image;
+    Vector<uint8_t> bakedFacts;
+    Vector<uint8_t> twins;
+};
+
+static std::optional<ImageSectionsView> imageBakedFactsSectionsOf(TestContext& context, VM& vm, CodeBlock& codeBlock, ASCIILiteral name, ImageBakedFactsSections& sections)
+{
+    // The twin recorder is the one recorder a compilation outside production can have. The bodies have no switch, so it
+    // answers nothing but the assembler's seed.
+    RefPtr<BaselineJITCode> code = compileUnderTwinRecorder(vm, codeBlock);
+    auto* record = code ? code->m_jitCacheImageRecord.get() : nullptr;
+    if (!record || record->state() != RecordState::Complete) {
+        JITCACHE_FAIL(makeString(name, "'s record is missing or not complete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ", reason "_s, record ? static_cast<unsigned>(record->unrecordableReason()) : 0u, ')'));
+        return std::nullopt;
+    }
+    bool written = collectSection(sections.bakedFacts, [&](const ImageSectionSink& sink) { return writeBakedFactsSection(record->bakedFacts(), sink); })
+        && collectSection(sections.twins, [&](const ImageSectionSink& sink) { return writeTwinsSection(record->twinData(), { }, captureProcessToken(), sink); });
+    if (!written) {
+        JITCACHE_FAIL(makeString("writing "_s, name, "'s sections failed"_s));
+        return std::nullopt;
+    }
+    ImageSectionHeader header;
+    header.codeSize = 4;
+    sections.image = Vector<uint8_t>(FillWith { }, static_cast<size_t>(ImageSectionSize(header).bytes()), 0);
+    auto encodedHeader = encodeImageSectionHeader(header);
+    memcpySpan(sections.image.mutableSpan(), std::span<const uint8_t> { encodedHeader });
+
+    auto view = parseImageSections(ImageSectionSpans { .image = sections.image.span(), .bakedFacts = sections.bakedFacts.span(), .twins = sections.twins.span() }, true);
+    if (!view) {
+        JITCACHE_FAIL(makeString(name, "'s sections do not parse: "_s, description(view.error())));
+        return std::nullopt;
+    }
+    return *view;
+}
+
+// Links a newborn CodeBlock of fresh with newCodeBlockFor, applies change to it and compares it with the section's baked
+// facts, all inside the deferral scope that created it. None is ever installed or run, so each is the executable's first
+// CodeBlock for calls. Neither linking nor the comparison may memoize the newborn's capability level.
+template<typename Change>
+static void imageCompareNewborn(TestContext& context, VM& vm, const ImageSectionsView& view, JSFunction& fresh, ASCIILiteral name, BakedFactsResult expected, const Change& change)
+{
+    DeferGCForAWhile deferGC(vm);
+    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+    CodeBlock* newborn = fresh.jsExecutable()->newCodeBlockFor(CodeSpecializationKind::CodeForCall, &fresh, fresh.scope());
+    if (scope.exception()) {
+        scope.clearException();
+        JITCACHE_FAIL(makeString(name, ": newCodeBlockFor threw"_s));
+        return;
+    }
+    if (!newborn || newborn->jitType() != JITType::None) {
+        JITCACHE_FAIL(makeString(name, ": newCodeBlockFor gave no newborn CB"_s));
+        return;
+    }
+    if (newborn->capabilityLevelState() != DFG::CapabilityLevelNotSet) {
+        JITCACHE_FAIL(makeString(name, ": linking memoized the capability level"_s));
+        return;
+    }
+    change(*newborn);
+    if (compareBakedFacts(view, *newborn) != expected)
+        JITCACHE_FAIL(makeString(name, ": compareBakedFacts gives the wrong result"_s));
+    if (newborn->capabilityLevelState() != DFG::CapabilityLevelNotSet)
+        JITCACHE_FAIL(makeString(name, ": the comparison memoized the capability level"_s));
+}
+
+// The scope facts of the section with this opcode and resolve type, in bytecode order.
+static Vector<ScopeFact> imageScopeFactsOf(const BakedFactsView& facts, ScopeOpcode opcode, ResolveType resolveType)
+{
+    Vector<ScopeFact> found;
+    for (unsigned index = 0; index < facts.scopeFactCount(); ++index) {
+        ScopeFact fact = facts.scopeFact(index);
+        if (fact.opcode == opcode && fact.resolveType == resolveType)
+            found.append(fact);
+    }
+    return found;
+}
+
+// A get_from_scope entry linked with another resolve type and the entry's own modes.
+static void imageRelinkGetFromScope(CodeBlock& newborn, uint32_t bytecodeOffset, ResolveType resolveType)
+{
+    auto& metadata = newborn.instructions().at(BytecodeIndex(bytecodeOffset))->as<OpGetFromScope>().metadata(&newborn);
+    metadata.m_getPutInfo = GetPutInfo(metadata.m_getPutInfo.resolveMode(), resolveType, metadata.m_getPutInfo.initializationMode(), metadata.m_getPutInfo.ecmaMode());
+}
+
 } // namespace ImageInstallTestsInternal
 
 using namespace ImageInstallTestsInternal;
@@ -618,68 +708,19 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
         return;
     }
 
-    // The twin recorder is the one recorder a compilation outside production can have. The counters have no switch and no
-    // strict equality, so it answers nothing from its seeds and inputs but the assembler's seed, and both outlive it.
-    RefPtr<BaselineJITCode> code;
-    {
-        TwinSeeds seeds { };
-        seeds.assembler = assemblerSeed;
-        TwinCompileInputs compileInputs { };
-        Ref<BaselineJITPlan> plan = adoptRef(*new BaselineJITPlan(codeBlock));
-        JIT jit(vm, plan.get(), codeBlock);
-        jit.setJITCacheTwin(ProducerBudget::createUnlimited(), seeds, compileInputs);
-        code = jit.compileAndLinkWithoutFinalizing(JITCompilationCanFail);
-    }
-    auto* record = code ? code->m_jitCacheImageRecord.get() : nullptr;
-    if (!record || record->state() != RecordState::Complete) {
-        JITCACHE_FAIL(makeString("counter's record is missing or not complete (state "_s, record ? static_cast<unsigned>(record->state()) : 0u, ", reason "_s, record ? static_cast<unsigned>(record->unrecordableReason()) : 0u, ')'));
+    // The counters have no switch, so the twin recorder answers nothing from its seeds but the assembler's.
+    ImageBakedFactsSections sections;
+    auto view = imageBakedFactsSectionsOf(context, vm, *codeBlock, "counter"_s, sections);
+    if (!view)
         return;
-    }
-
-    // The baked-facts section the record gives, and beside it the smallest image.baseline section that passes the image
-    // section's checks: four zero bytes of code and no fixup, call, mold, table, code-map entry or MathIC.
-    Vector<uint8_t> bakedFactsBytes;
-    auto append = [&](std::span<const uint8_t> bytes) {
-        bakedFactsBytes.append(bytes);
-        return true;
-    };
-    ImageSectionSink sink = append;
-    if (!writeBakedFactsSection(record->bakedFacts(), sink)) {
-        JITCACHE_FAIL("writing the baked facts failed"_s);
-        return;
-    }
-    ImageSectionHeader header;
-    header.codeSize = 4;
-    Vector<uint8_t> imageBytes(FillWith { }, static_cast<size_t>(ImageSectionSize(header).bytes()), 0);
-    auto encodedHeader = encodeImageSectionHeader(header);
-    memcpySpan(imageBytes.mutableSpan(), std::span<const uint8_t> { encodedHeader });
-
-    // A twins build parses the twins section beside them: the record's twin data, with no producer value, since the
-    // image holds no fixup.
-    Vector<uint8_t> twinsBytes;
-    auto appendTwins = [&](std::span<const uint8_t> bytes) {
-        twinsBytes.append(bytes);
-        return true;
-    };
-    ImageSectionSink twinsSink = appendTwins;
-    if (!writeTwinsSection(record->twinData(), { }, captureProcessToken(), twinsSink)) {
-        JITCACHE_FAIL("writing the twins section failed"_s);
-        return;
-    }
-
-    auto facts = parseBakedFactsSection(bakedFactsBytes.span(), true);
-    auto view = parseImageSections(ImageSectionSpans { .image = imageBytes.span(), .bakedFacts = bakedFactsBytes.span(), .twins = twinsBytes.span() }, true);
-    if (!facts || !view) {
-        JITCACHE_FAIL(makeString("the sections do not parse: "_s, description(!facts ? facts.error() : view.error())));
-        return;
-    }
-    if (facts->capabilityLevel() == DFG::CannotCompile || facts->couldBeTainted()) {
+    auto& facts = view->bakedFacts();
+    if (facts.capabilityLevel() == DFG::CannotCompile || facts.couldBeTainted()) {
         JITCACHE_FAIL("counter compiled as CannotCompile or tainted, so neither flag can make a newborn differ"_s);
         return;
     }
     auto hasFact = [&](ScopeOpcode opcode) {
-        for (unsigned index = 0; index < facts->scopeFactCount(); ++index) {
-            if (facts->scopeFact(index).opcode == opcode)
+        for (unsigned index = 0; index < facts.scopeFactCount(); ++index) {
+            if (facts.scopeFact(index).opcode == opcode)
                 return true;
         }
         return false;
@@ -688,31 +729,9 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
     JITCACHE_CHECK(hasFact(ScopeOpcode::GetFromScope));
     JITCACHE_CHECK(hasFact(ScopeOpcode::PutToScope));
 
-    // Runs change, then the comparison, on a newborn CB of freshCounter, used only inside the deferral scope that created
-    // it. None is ever installed, so each is the executable's first CB for calls.
     FunctionExecutable* freshExecutable = freshCounter->jsExecutable();
     auto compareNewborn = [&](ASCIILiteral name, BakedFactsResult expected, const auto& change) {
-        DeferGCForAWhile deferGC(vm);
-        auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
-        CodeBlock* newborn = freshExecutable->newCodeBlockFor(CodeSpecializationKind::CodeForCall, freshCounter, freshCounter->scope());
-        if (scope.exception()) {
-            scope.clearException();
-            JITCACHE_FAIL(makeString(name, ": newCodeBlockFor threw"_s));
-            return;
-        }
-        if (!newborn || newborn->jitType() != JITType::None) {
-            JITCACHE_FAIL(makeString(name, ": newCodeBlockFor gave no newborn CB"_s));
-            return;
-        }
-        if (newborn->capabilityLevelState() != DFG::CapabilityLevelNotSet) {
-            JITCACHE_FAIL(makeString(name, ": linking memoized the capability level"_s));
-            return;
-        }
-        change(*newborn);
-        if (compareBakedFacts(*view, *newborn) != expected)
-            JITCACHE_FAIL(makeString(name, ": compareBakedFacts gives the wrong result"_s));
-        if (newborn->capabilityLevelState() != DFG::CapabilityLevelNotSet)
-            JITCACHE_FAIL(makeString(name, ": the comparison memoized the capability level"_s));
+        imageCompareNewborn(context, vm, *view, *freshCounter, name, expected, change);
     };
     auto unchanged = [](CodeBlock&) { };
 
@@ -731,21 +750,20 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
     provider->setSourceTaintedOrigin(originalTaint);
 
     // Each scope fact's resolve type becomes GlobalVar, which no baked fact has. The collector reads a resolve_scope
-    // entry's cell union whatever its type, and skips the structure-or-watchpoint union of a GlobalVar get_from_scope or
-    // put_to_scope entry (CodeBlock::reconcileLLIntInlineCachesAtGCEnd), so the newborn stays safe to collect.
-    for (unsigned index = 0; index < facts->scopeFactCount(); ++index) {
-        ScopeFact fact = facts->scopeFact(index);
+    // entry's cell union as a SymbolTable unless the type is ModuleVar, and these entries hold the symbol table their
+    // ClosureVar linking stored; it skips the structure-or-watchpoint union of a GlobalVar get_from_scope or put_to_scope
+    // entry (CodeBlock::reconcileLLIntInlineCachesAtGCEnd), so the newborn stays safe to collect.
+    for (unsigned index = 0; index < facts.scopeFactCount(); ++index) {
+        ScopeFact fact = facts.scopeFact(index);
         compareNewborn("a changed scope type"_s, BakedFactsResult::Mismatch, [&](CodeBlock& newborn) {
             auto instruction = newborn.instructions().at(BytecodeIndex(fact.bytecodeOffset));
             switch (fact.opcode) {
             case ScopeOpcode::ResolveScope:
                 instruction->as<OpResolveScope>().metadata(&newborn).m_resolveType = GlobalVar;
                 return;
-            case ScopeOpcode::GetFromScope: {
-                auto& metadata = instruction->as<OpGetFromScope>().metadata(&newborn);
-                metadata.m_getPutInfo = GetPutInfo(metadata.m_getPutInfo.resolveMode(), GlobalVar, metadata.m_getPutInfo.initializationMode(), metadata.m_getPutInfo.ecmaMode());
+            case ScopeOpcode::GetFromScope:
+                imageRelinkGetFromScope(newborn, fact.bytecodeOffset, GlobalVar);
                 return;
-            }
             case ScopeOpcode::PutToScope: {
                 auto& metadata = instruction->as<OpPutToScope>().metadata(&newborn);
                 metadata.m_getPutInfo = GetPutInfo(metadata.m_getPutInfo.resolveMode(), GlobalVar, metadata.m_getPutInfo.initializationMode(), metadata.m_getPutInfo.ecmaMode());
@@ -759,6 +777,78 @@ JITCACHE_TEST(imageBakedFactsCompareWithNewbornCodeBlocks, Yes)
                 newborn.instructions().at(BytecodeIndex(fact.bytecodeOffset))->as<OpResolveScope>().metadata(&newborn).m_localScopeDepth = fact.localScopeDepth + 1;
             });
         }
+    }
+}
+
+// The scope facts of module code. A module function that reads an import compiles to a resolve_scope of type ModuleVar,
+// whose code walks its depth and then loads the import slot at a displacement, and to a get_from_scope of type
+// LazyClosureVar; reading the module's own function declaration gives a get_from_scope of type LazyClosureVar too.
+// moduleReader and freshModuleReader have the same body text in the module's scope, so their UCBs share bytecode offsets
+// and link every scope access alike. A twin recorder compiles moduleReader's CodeBlock, and the baked facts its record
+// holds become the section. Each newborn CodeBlock of freshModuleReader must match it unchanged, and mismatch it once the
+// test writes another depth or, separately, another import slot into the ModuleVar resolve_scope's metadata, or links a
+// LazyClosureVar get_from_scope as ClosureVar, whose code would also run correctly but which linking never chooses for a
+// CodeBlock of this body. The collector skips a ModuleVar entry's cell union, and reads a ClosureVar get_from_scope's
+// structure, which linking left null or live, so every newborn stays safe to collect.
+JITCACHE_TEST(imageModuleBakedFactsCompareWithNewbornCodeBlocks, Yes)
+{
+    VM& vm = *context.vm();
+    auto* globalObject = JSGlobalObject::create(vm, JSGlobalObject::createStructure(vm, jsNull()));
+    auto moduleSource = [](ASCIILiteral text) {
+        return makeSource(text, SourceOrigin(), SourceTaintedOrigin::Untainted, String(), TextPosition(), SourceProviderSourceType::Module);
+    };
+    // The dependency sits in the loader's registry, fetched, before the module that imports it loads, so the loader of a
+    // plain global object, which fetches nothing, finds it by its specifier.
+    globalObject->moduleLoader()->provideFetch(globalObject, Identifier::fromString(vm, "jitcache-image-dependency"_s), ScriptFetchParameters::Type::JavaScript, moduleSource("export let shared = 1;\n"_s));
+    JSPromise* promise = loadAndEvaluateModule(globalObject, moduleSource(
+        "import { shared } from 'jitcache-image-dependency';\n"
+        "function declared(n) { return n + 1; }\n"
+        "globalThis.moduleReader = function (n) { return shared + declared(n); };\n"
+        "globalThis.freshModuleReader = function (n) { return shared + declared(n); };\n"
+        "moduleReader(1);\n"_s), nullptr);
+    vm.drainMicrotasks();
+    if (!promise || promise->status() != JSPromise::Status::Fulfilled) {
+        JITCACHE_FAIL("the module did not load and evaluate"_s);
+        return;
+    }
+    auto* moduleReader = globalFunctionOrNull(*globalObject, "moduleReader"_s);
+    auto* freshModuleReader = globalFunctionOrNull(*globalObject, "freshModuleReader"_s);
+    CodeBlock* codeBlock = moduleReader ? moduleReader->jsExecutable()->codeBlockForCall() : nullptr;
+    if (!codeBlock || !freshModuleReader || freshModuleReader->jsExecutable()->codeBlockForCall()) {
+        JITCACHE_FAIL("moduleReader has no CodeBlock, or freshModuleReader is missing or was called"_s);
+        return;
+    }
+
+    ImageBakedFactsSections sections;
+    auto view = imageBakedFactsSectionsOf(context, vm, *codeBlock, "moduleReader"_s, sections);
+    if (!view)
+        return;
+    auto moduleVars = imageScopeFactsOf(view->bakedFacts(), ScopeOpcode::ResolveScope, ModuleVar);
+    auto lazyClosureVars = imageScopeFactsOf(view->bakedFacts(), ScopeOpcode::GetFromScope, LazyClosureVar);
+    if (moduleVars.size() != 1 || lazyClosureVars.size() != 2) {
+        JITCACHE_FAIL(makeString("moduleReader's record holds "_s, moduleVars.size(), " ModuleVar facts and "_s, lazyClosureVars.size(), " LazyClosureVar facts, not one and two"_s));
+        return;
+    }
+    ScopeFact moduleVar = moduleVars[0];
+
+    auto compareNewborn = [&](ASCIILiteral name, BakedFactsResult expected, const auto& change) {
+        imageCompareNewborn(context, vm, *view, *freshModuleReader, name, expected, change);
+    };
+    auto moduleVarMetadata = [&](CodeBlock& newborn) -> OpResolveScope::Metadata& {
+        return newborn.instructions().at(BytecodeIndex(moduleVar.bytecodeOffset))->as<OpResolveScope>().metadata(&newborn);
+    };
+
+    compareNewborn("an unchanged module newborn"_s, BakedFactsResult::Match, [](CodeBlock&) { });
+    compareNewborn("another depth of the ModuleVar resolve_scope"_s, BakedFactsResult::Mismatch, [&](CodeBlock& newborn) {
+        moduleVarMetadata(newborn).m_localScopeDepth = moduleVar.localScopeDepth + 1;
+    });
+    compareNewborn("another import slot of the ModuleVar resolve_scope"_s, BakedFactsResult::Mismatch, [&](CodeBlock& newborn) {
+        moduleVarMetadata(newborn).m_moduleImportSlot = moduleVar.moduleImportSlot + 1;
+    });
+    for (auto& fact : lazyClosureVars) {
+        compareNewborn("a LazyClosureVar get_from_scope linked as ClosureVar"_s, BakedFactsResult::Mismatch, [&](CodeBlock& newborn) {
+            imageRelinkGetFromScope(newborn, fact.bytecodeOffset, ClosureVar);
+        });
     }
 }
 

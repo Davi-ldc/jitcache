@@ -117,6 +117,7 @@ private:
         bool takeFocus(WebPageProxy*, WKFocusDirection) final;
         void handleAutoplayEvent(WebPageProxy&, WebCore::AutoplayEvent, OptionSet<WebCore::AutoplayEventFlags>) final;
         void decidePolicyForNotificationPermissionRequest(WebPageProxy&, API::SecurityOrigin&, CompletionHandler<void(bool allowed)>&&) final;
+        void decidePolicyForLocalNetworkAccessPermissionRequest(WebPageProxy&, API::SecurityOrigin&, API::SecurityOrigin&, WebCore::IPAddressSpace, CompletionHandler<void(bool granted)>&&) final;
         bool focusFromServiceWorker(WebKit::WebPageProxy&) final;
         bool runOpenPanel(WebPageProxy&, WebFrameProxy*, FrameInfoData&&, API::OpenPanelParameters*, WebOpenPanelResultListenerProxy*) final;
 #if PLATFORM(MAC) || HAVE(UIKIT_WITH_MOUSE_SUPPORT)
@@ -134,7 +135,7 @@ private:
         void pageDidScroll(WebPageProxy*) final;
         void setIsResizable(WebPageProxy&, bool) final;
         void setWindowFrame(WebPageProxy&, const WebCore::FloatRect&) final;
-        void windowFrame(WebPageProxy&, Function<void(WebCore::FloatRect)>&&) final;
+        void windowFrame(WebPageProxy&, Function<void(std::optional<WebCore::FloatRect>)>&&) final;
         void didNotHandleWheelEvent(WebPageProxy*, const NativeWebWheelEvent&) final;
 
         // Printing.
@@ -332,6 +333,7 @@ private:
         bool webViewSupportedXRSessionFeatures : 1;
 #endif
         bool webViewRequestNotificationPermissionForSecurityOriginDecisionHandler : 1;
+        bool webViewRequestLocalNetworkAccessPermissionForSecurityOriginTopLevelOriginIsLoopbackDecisionHandler : 1;
         bool webViewUpdatedAppBadge : 1;
         bool webViewDidAdjustVisibilityWithSelectors : 1;
 

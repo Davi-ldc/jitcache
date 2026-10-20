@@ -67,7 +67,6 @@ JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheDelta);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheStartOutcome);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheBodyKey);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheReadSection);
-JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheRewriteSection);
 #if ENABLE(JIT)
 // jitcacheICsSnapshot(fn, kind), the ICs lane's ICs::functionSnapshotBaselineICs, which the shell reaches through the
 // harness so that it includes no lane header.
@@ -78,7 +77,7 @@ JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheICsSnapshot);
 // description. These run only in test processes, so a file that cannot be opened, written or closed prints the path and
 // the error to stderr and calls exit(1), and the runner fails the run on its exit code.
 enum class TestFileWrite : bool { Replace, Append };
-void writeTestFile(const String& path, const CString& bytes, TestFileWrite);
+void writeTestFile(const String& path, const UTF8CString& bytes, TestFileWrite);
 
 } // namespace JSC::JITCache
 

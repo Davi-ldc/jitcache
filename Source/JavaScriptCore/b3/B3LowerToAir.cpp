@@ -169,7 +169,6 @@ public:
                     dataLog("Phi tmp for ", *value, ": ", m_phiToTmp[value], "\n");
                 break;
             }
-            case Get:
             case Patchpoint:
             case B3::CCall:
             case BottomTuple: {
@@ -182,12 +181,7 @@ public:
             }
         }
 
-        for (Variable* variable : m_procedure.variables()) {
-            auto addResult = m_variableToTmps.add(variable, Vector<Tmp>(m_procedure.resultCount(variable->type())));
-            ASSERT(addResult.isNewEntry);
-            for (unsigned i = 0; i < m_procedure.resultCount(variable->type()); ++i)
-                addResult.iterator->value[i] = tmpForType(m_procedure.typeAtOffset(variable->type(), i));
-        }
+        RELEASE_ASSERT(m_procedure.variables().isEmpty());
 
         // Figure out which blocks are not rare.
         m_fastWorklist.push(m_procedure[0]);
@@ -478,9 +472,6 @@ private:
         case BottomTuple: {
             return m_tupleValueToTmps.find(tupleValue)->value;
         }
-        case Get:
-        case Set:
-            return m_variableToTmps.find(tupleValue->as<VariableValue>()->variable())->value;
         default:
             break;
         }
@@ -651,14 +642,15 @@ private:
         case WasmAddress: {
             WasmAddressValue* wasmAddress = address->as<WasmAddressValue>();
             Value* pointer = wasmAddress->child(0);
-            // Why don't we need to check m_locked here? WasmAddressValue is purely used for address computation,
+            // Why don't we need to check m_locked for the WasmAddressValue itself? It is purely used for address computation,
             // which is different from the other operations. And we already know that numUses(address) is below the threshold.
             // If we ensure that all use of WasmAddress gets indexArg form, we do not need to have WasmAddressValue's instruction actually.
             if (!Arg::isValidIndexForm(1, offset, width))
                 return fallback();
 
             Tmp base = Tmp(wasmAddress->pinnedGPR());
-            if (std::optional<unsigned> scale = scaleForShl(pointer, offset, width))
+            std::optional<unsigned> scale = scaleForShl(pointer, offset, width);
+            if (scale && !m_locked.contains(pointer->child(0)))
                 return indexArg(base, pointer->child(0), *scale, offset);
 
             return indexArg(base, pointer, 1, offset);
@@ -834,26 +826,11 @@ private:
     }
 
     template<typename Functor>
-    void forEachImmOrTmp(Value* value, const Functor& func)
+    void forEachImmOrTmp(Value* value, NOESCAPE const Functor& func)
     {
         ASSERT(value->type() != Void);
         if (!value->type().isTuple()) {
             func(immOrTmp(value), value->type(), 0);
-            return;
-        }
-
-        const Vector<Type>& tuple = m_procedure.tupleForType(value->type());
-        const auto& tmps = tmpsForTuple(value);
-        for (unsigned i = 0; i < tuple.size(); ++i)
-            func(tmps[i], tuple[i], i);
-    }
-
-    template<typename Functor>
-    void forEachImmOrTmpOrZeroReg(Value* value, const Functor& func)
-    {
-        ASSERT(value->type() != Void);
-        if (!value->type().isTuple()) {
-            func(immOrTmpOrZeroReg(value), value->type(), 0);
             return;
         }
 
@@ -1673,35 +1650,9 @@ private:
         }
 
         Tmp maskTmp = m_code.newTmp(FP);
-
-        {
-            v128_t towerOfPower { };
-            switch (simdInfo.lane) {
-            case SIMDLane::i32x4:
-                for (unsigned i = 0; i < 4; ++i)
-                    towerOfPower.u32x4[i] = 1 << i;
-                break;
-            case SIMDLane::i16x8:
-                for (unsigned i = 0; i < 8; ++i)
-                    towerOfPower.u16x8[i] = 1 << i;
-                break;
-            case SIMDLane::i8x16:
-                for (unsigned i = 0; i < 8; ++i)
-                    towerOfPower.u8x16[i] = 1 << i;
-                for (unsigned i = 0; i < 8; ++i)
-                    towerOfPower.u8x16[i + 8] = 1 << i;
-                break;
-            default:
-                RELEASE_ASSERT_NOT_REACHED();
-            }
-
-            // FIXME: this is bad, we should load
-            auto gpTmp = m_code.newTmp(GP);
-            append(Air::Move, Arg::bigImm(towerOfPower.u64x2[0]), gpTmp);
-            append(Air::VectorSplatInt64, gpTmp, maskTmp);
-            append(Air::Move, Arg::bigImm(towerOfPower.u64x2[1]), gpTmp);
-            append(Air::VectorReplaceLaneInt64, Arg::imm(1), gpTmp, maskTmp);
-        }
+        auto gpTmp = m_code.newTmp(GP);
+        append(Air::Move, Arg::immPtr(vectorBitmaskTower(simdInfo.lane)), gpTmp);
+        append(Air::MoveVector, Arg::addr(gpTmp), maskTmp);
 
         Tmp vectorTmp = m_code.newTmp(FP);
 
@@ -1873,12 +1824,12 @@ private:
     template<typename CompareFunctor, typename TestFunctor, typename CompareDoubleFunctor, typename CompareFloatFunctor, typename CompareDoubleWithZeroFunctor, typename CompareFloatWithZeroFunctor>
     Inst createGenericCompare(
         Value* value,
-        const CompareFunctor& compare, // Signature: (Width, Arg relCond, Arg, Arg) -> Inst
-        const TestFunctor& test, // Signature: (Width, Arg resCond, Arg, Arg) -> Inst
-        const CompareDoubleFunctor& compareDouble, // Signature: (Arg doubleCond, Arg, Arg) -> Inst
-        const CompareFloatFunctor& compareFloat, // Signature: (Arg doubleCond, Arg, Arg) -> Inst
-        const CompareDoubleWithZeroFunctor& compareDoubleWithZero, // Signature: (Arg doubleCond, Arg) -> Inst
-        const CompareFloatWithZeroFunctor& compareFloatWithZero, // Signature: (Arg doubleCond, Arg) -> Inst
+        NOESCAPE const CompareFunctor& compare, // Signature: (Width, Arg relCond, Arg, Arg) -> Inst
+        NOESCAPE const TestFunctor& test, // Signature: (Width, Arg resCond, Arg, Arg) -> Inst
+        NOESCAPE const CompareDoubleFunctor& compareDouble, // Signature: (Arg doubleCond, Arg, Arg) -> Inst
+        NOESCAPE const CompareFloatFunctor& compareFloat, // Signature: (Arg doubleCond, Arg, Arg) -> Inst
+        NOESCAPE const CompareDoubleWithZeroFunctor& compareDoubleWithZero, // Signature: (Arg doubleCond, Arg) -> Inst
+        NOESCAPE const CompareFloatWithZeroFunctor& compareFloatWithZero, // Signature: (Arg doubleCond, Arg) -> Inst
         bool inverted = false)
     {
         // NOTE: This is totally happy to match comparisons that have already been computed elsewhere
@@ -4114,6 +4065,35 @@ private:
             if (tryAppendMultiplyWithExtend())
                 return;
 
+            auto tryAppendMultiplyNegOperand = [&] () -> bool {
+                // MNEG/FNMUL : d = (-n) * m or d = n * (-m).
+                Air::Opcode airOpcode = tryOpcodeForType(MultiplyNeg32, MultiplyNeg64, MultiplyNegDouble, MultiplyNegFloat, m_value->type());
+                if (!isValidForm(airOpcode, Arg::Tmp, Arg::Tmp, Arg::Tmp))
+                    return false;
+
+                Value* negated = nullptr;
+                Value* other = nullptr;
+                if (left->opcode() == Neg && canBeInternal(left)) {
+                    negated = left;
+                    other = right;
+                } else if (right->opcode() == Neg && canBeInternal(right)) {
+                    negated = right;
+                    other = left;
+                } else
+                    return false;
+
+                Value* negatedInput = negated->child(0);
+                if (m_locked.contains(negatedInput) || m_locked.contains(other))
+                    return false;
+
+                append(airOpcode, tmp(negatedInput), tmp(other), tmp(m_value));
+                commitInternal(negated);
+                return true;
+            };
+
+            if (tryAppendMultiplyNegOperand())
+                return;
+
             appendBinOp<Mul32, Mul64, MulDouble, MulFloat, Commutative>(left, right);
             return;
         }
@@ -4481,7 +4461,7 @@ private:
             // This pattern is super useful on both x86 and ARM64, since the inversion of the CAS result
             // can be done with zero cost on x86 (just flip the set from E to NE) and it's a progression
             // on ARM64 (since STX returns 0 on success, so ordinarily we have to flip it).
-            if (right->isInt(1) && left->opcode() == AtomicWeakCAS && canBeInternal(left)) {
+            if (right->isInt(1) && left->opcode() == AtomicWeakCAS && canBeInternal(left) && !crossesInterference(left)) {
                 commitInternal(left);
                 appendCAS(left, true);
                 return;
@@ -5953,10 +5933,11 @@ private:
             if (m_value->child(0)->opcode() == AtomicStrongCAS
                 && m_value->child(0)->as<AtomicValue>()->isCanonicalWidth()
                 && m_value->child(0)->child(0) == m_value->child(1)
-                && canBeInternal(m_value->child(0))) {
+                && canBeInternal(m_value->child(0))
+                && !crossesInterference(m_value->child(0))) {
                 ASSERT(!m_locked.contains(m_value->child(0)->child(1)));
                 ASSERT(!m_locked.contains(m_value->child(1)));
-                
+
                 commitInternal(m_value->child(0));
                 appendCAS(m_value->child(0), m_value->opcode() == NotEqual);
                 return;
@@ -6487,27 +6468,10 @@ private:
             return;
         }
 
-        case Set: {
-            Value* value = m_value->child(0);
-            const Vector<Tmp>& variableTmps = m_variableToTmps.get(m_value->as<VariableValue>()->variable());
-            forEachImmOrTmpOrZeroReg(value, [&] (Arg immOrTmpOrZeroReg, Type type, unsigned index) {
-                moveToTmp(relaxedMoveForType(type), immOrTmpOrZeroReg, variableTmps[index]);
-            });
+        case Set:
+        case Get:
+            RELEASE_ASSERT_NOT_REACHED();
             return;
-        }
-
-        case Get: {
-            // Snapshot the value of the Get. It may change under us because you could do:
-            // a = Get(var)
-            // Set(@x, var)
-            // @a => this should get the value of the Get before the Set, i.e. not @x.
-
-            const Vector<Tmp>& variableTmps = m_variableToTmps.get(m_value->as<VariableValue>()->variable());
-            forEachImmOrTmp(m_value, [&] (Arg tmp, Type type, unsigned index) {
-                append(relaxedMoveForType(type), variableTmps[index], tmp.tmp());
-            });
-            return;
-        }
 
         case Branch: {
             if (canBeInternal(m_value->child(0))) {
@@ -6596,22 +6560,26 @@ private:
                     break;
                 }
                 case AtomicWeakCAS:
-                    commitInternal(branchChild);
-                    appendCAS(branchChild, false);
-                    return;
-                    
+                    if (!crossesInterference(branchChild)) {
+                        commitInternal(branchChild);
+                        appendCAS(branchChild, false);
+                        return;
+                    }
+                    break;
+
                 case AtomicStrongCAS:
                     // A branch is a comparison to zero.
                     // FIXME: Teach this to match patterns that arise from subwidth CAS.
                     // https://bugs.webkit.org/show_bug.cgi?id=169250
                     if (branchChild->child(0)->isInt(0)
-                        && branchChild->as<AtomicValue>()->isCanonicalWidth()) {
+                        && branchChild->as<AtomicValue>()->isCanonicalWidth()
+                        && !crossesInterference(branchChild)) {
                         commitInternal(branchChild);
                         appendCAS(branchChild, true);
                         return;
                     }
                     break;
-                    
+
                 case Equal:
                 case NotEqual:
                     // FIXME: Teach this to match patterns that arise from subwidth CAS.
@@ -6619,7 +6587,8 @@ private:
                     if (branchChild->child(0)->opcode() == AtomicStrongCAS
                         && branchChild->child(0)->as<AtomicValue>()->isCanonicalWidth()
                         && canBeInternal(branchChild->child(0))
-                        && branchChild->child(0)->child(0) == branchChild->child(1)) {
+                        && branchChild->child(0)->child(0) == branchChild->child(1)
+                        && !crossesInterference(branchChild->child(0))) {
                         commitInternal(branchChild);
                         commitInternal(branchChild->child(0));
                         appendCAS(branchChild->child(0), branchChild->opcode() == NotEqual);
@@ -6816,7 +6785,6 @@ private:
     UncheckedKeyHashMap<Value*, Vector<Tmp>> m_tupleValueToTmps; // This is the same as m_valueToTmp for Values that are Tuples.
     UncheckedKeyHashMap<Value*, Vector<Tmp>> m_tuplePhiToTmps; // This is the same as m_phiToTmp for Phis that are Tuples.
     IndexMap<B3::BasicBlock*, Air::BasicBlock*> m_blockToBlock;
-    UncheckedKeyHashMap<Variable*, Vector<Tmp>> m_variableToTmps;
 
     UseCounts m_useCounts;
     PhiChildren m_phiChildren;

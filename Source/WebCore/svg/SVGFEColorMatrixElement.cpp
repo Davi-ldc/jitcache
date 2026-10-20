@@ -24,6 +24,7 @@
 
 #include "FEColorMatrix.h"
 #include "NodeName.h"
+#include "SVGElementTypeHelpers.h"
 #include "SVGNames.h"
 #include "SVGPropertyOwnerRegistry.h"
 #include <wtf/TZoneMallocInlines.h>
@@ -33,7 +34,7 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGFEColorMatrixElement);
 
 inline SVGFEColorMatrixElement::SVGFEColorMatrixElement(const QualifiedName& tagName, Document& document)
-    : SVGFilterPrimitiveStandardAttributes(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGFilterPrimitiveStandardAttributes(tagName, document, PropertyRegistry::singleton())
 {
     ASSERT(hasTagName(SVGNames::feColorMatrixTag));
 
@@ -61,7 +62,7 @@ void SVGFEColorMatrixElement::attributeChanged(const QualifiedName& name, const 
         Ref { m_in1 }->setBaseValInternal(newValue);
         break;
     case AttributeNames::valuesAttr:
-        protect(m_values)->baseVal()->parse(newValue);
+        protect(protect(m_values)->baseVal())->parse(newValue);
         break;
     default:
         break;
@@ -77,7 +78,7 @@ bool SVGFEColorMatrixElement::setFilterEffectAttribute(FilterEffect& effect, con
     if (attrName == SVGNames::typeAttr)
         return feColorMatrix.setType(type());
     if (attrName == SVGNames::valuesAttr)
-        return feColorMatrix.setValues(values());
+        return feColorMatrix.setValues(protect(values()).get());
 
     ASSERT_NOT_REACHED();
     return false;
@@ -94,7 +95,7 @@ void SVGFEColorMatrixElement::svgAttributeChanged(const QualifiedName& attrName)
     case AttributeNames::typeAttr:
     case AttributeNames::valuesAttr: {
         InstanceInvalidationGuard guard(*this);
-        if (!FEColorMatrix::areValuesValidForType(type(), values()))
+        if (!FEColorMatrix::areValuesValidForType(type(), protect(values()).get()))
             markFilterEffectForRebuild();
         else
             primitiveAttributeChanged(attrName);
@@ -131,7 +132,7 @@ RefPtr<FilterEffect> SVGFEColorMatrixElement::createFilterEffect(const FilterEff
             break;
         }
     } else {
-        filterValues = values();
+        filterValues = protect(values()).get();
         filterValues.shrinkToFit();
 
         if (!FEColorMatrix::areValuesValidForType(type(), filterValues))

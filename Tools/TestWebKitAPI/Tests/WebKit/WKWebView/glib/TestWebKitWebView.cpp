@@ -22,6 +22,7 @@
 #include "WebKitTestServer.h"
 #include "WebViewTest.h"
 #include <glib/gstdio.h>
+#include <wtf/glib/GLibExtras.h>
 #include <wtf/glib/GRefPtr.h>
 #include <wtf/glib/GSpanExtras.h>
 
@@ -282,7 +283,7 @@ static void testWebViewEphemeral(WebViewTest* test, gconstpointer)
 #endif
 
     g_signal_connect(webView.get(), "load-changed", G_CALLBACK(ephemeralViewloadChanged), test);
-    webkit_web_view_load_uri(webView.get(), gServer->getURIForPath("/").data());
+    webkit_web_view_load_uri(webView.get(), gServer->getURIForPath("/").legacyCStringPointer());
     g_main_loop_run(test->m_mainLoop);
 
     // Disk cache delays the storing of initial resources for 1 second to avoid
@@ -300,7 +301,7 @@ static void testWebViewEphemeral(WebViewTest* test, gconstpointer)
 
 static void testWebViewCustomCharset(WebViewTest* test, gconstpointer)
 {
-    test->loadURI(gServer->getURIForPath("/").data());
+    test->loadURI(gServer->getURIForPath("/"));
     test->waitUntilLoadFinished();
     g_assert_null(webkit_web_view_get_custom_charset(test->webView()));
     webkit_web_view_set_custom_charset(test->webView(), "utf8");
@@ -1292,6 +1293,194 @@ static void testWebViewColorQuadrants(SnapshotWebViewTest* test, gconstpointer)
 #endif
 }
 
+#if USE(GTK4)
+class PresentationWebViewTest : public WebViewTest {
+public:
+    MAKE_GLIB_TEST_FIXTURE(PresentationWebViewTest);
+
+    explicit PresentationWebViewTest(WebKitHardwareAccelerationPolicy policy = WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER)
+    {
+        webkit_settings_set_hardware_acceleration_policy(webkit_web_view_get_settings(webView()), policy);
+        showInWindow(320, 192);
+        m_paintable = adoptGRef(gtk_widget_paintable_new(GTK_WIDGET(webView())));
+        g_signal_connect(m_paintable.get(), "invalidate-contents", G_CALLBACK(+[](GdkPaintable*, PresentationWebViewTest* test) {
+            ++test->m_presentations;
+        }), this);
+    }
+
+    ~PresentationWebViewTest()
+    {
+        g_signal_handlers_disconnect_by_data(m_paintable.get(), this);
+    }
+
+    void waitForColor(uint32_t expectedColor)
+    {
+        auto* widget = GTK_WIDGET(webView());
+        while (true) {
+            unsigned lastPresentation = m_presentations;
+            int width = gtk_widget_get_width(widget);
+            int height = gtk_widget_get_height(widget);
+            auto* snapshot = gtk_snapshot_new();
+            gdk_paintable_snapshot(m_paintable.get(), snapshot, width, height);
+            if (auto* node = gtk_snapshot_free_to_node(snapshot)) {
+                uint32_t pixel = 0;
+                auto* surface = cairo_image_surface_create_for_data(reinterpret_cast<unsigned char*>(&pixel), CAIRO_FORMAT_ARGB32, 1, 1, sizeof(pixel));
+                auto* cr = cairo_create(surface);
+                cairo_translate(cr, -width / 2, -height / 2);
+                gsk_render_node_draw(node, cr);
+                cairo_destroy(cr);
+                cairo_surface_flush(surface);
+                cairo_surface_destroy(surface);
+                gsk_render_node_unref(node);
+                if (pixel == expectedColor)
+                    return;
+            }
+            while (m_presentations == lastPresentation)
+                g_main_context_iteration(nullptr, TRUE);
+        }
+    }
+
+    void waitForNextFrame()
+    {
+        // Let GTK replace the render node cached before reparenting.
+        auto* frameClock = gtk_widget_get_frame_clock(GTK_WIDGET(webView()));
+        g_assert_nonnull(frameClock);
+        auto signalID = g_signal_connect_after(frameClock, "after-paint", G_CALLBACK(+[](GdkFrameClock*, PresentationWebViewTest* test) {
+            test->quitMainLoop();
+        }), this);
+        gdk_frame_clock_request_phase(frameClock, GDK_FRAME_CLOCK_PHASE_AFTER_PAINT);
+        g_main_loop_run(m_mainLoop);
+        g_signal_handler_disconnect(frameClock, signalID);
+    }
+
+    void waitForAnimationFrames()
+    {
+        GUniqueOutPtr<GError> error;
+        auto* value = runAsyncJavaScriptFunctionInWorldAndWaitUntilFinished(
+            "let frames = 0;"
+            "while (frames < 20) {"
+            "    await new Promise(resolve => requestAnimationFrame(resolve));"
+            "    ++frames;"
+            "}"
+            "return frames;", nullptr, nullptr, &error.outPtr());
+        g_assert_no_error(error.get());
+        g_assert_nonnull(value);
+        g_assert_cmpfloat(WebViewTest::javascriptResultToNumber(value), ==, 20);
+        while (g_main_context_pending(nullptr))
+            g_main_context_iteration(nullptr, TRUE);
+    }
+
+    void assertAnimationFramesWithoutDamage()
+    {
+        // Let pending native window updates settle before counting presentations.
+        waitForAnimationFrames();
+        unsigned initialPresentations = m_presentations;
+        waitForAnimationFrames();
+        g_assert_cmpuint(m_presentations, ==, initialPresentations);
+    }
+
+    void loadPageForReparenting()
+    {
+        loadHtml("<!DOCTYPE html><html style='background: #0000ff; overflow: hidden'></html>", nullptr);
+        waitUntilLoadFinished();
+        waitForColor(0xff0000ff);
+        assertAnimationFramesWithoutDamage();
+    }
+
+    unsigned m_presentations { 0 };
+
+private:
+    GRefPtr<GdkPaintable> m_paintable;
+};
+
+class AcceleratedPresentationWebViewTest : public PresentationWebViewTest {
+public:
+    MAKE_GLIB_TEST_FIXTURE(AcceleratedPresentationWebViewTest);
+
+    AcceleratedPresentationWebViewTest()
+        : PresentationWebViewTest(WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS)
+    {
+    }
+};
+
+static void testWebViewPresentationWithoutDamage(PresentationWebViewTest* test, gconstpointer)
+{
+    test->loadHtml("<!DOCTYPE html><html style='background: #0000ff; overflow: hidden'></html>", nullptr);
+    test->waitUntilLoadFinished();
+
+    // Observe the initial paint before counting presentations from animation callbacks.
+    test->waitForColor(0xff0000ff);
+    unsigned initialPresentations = test->m_presentations;
+    test->assertAnimationFramesWithoutDamage();
+
+    GUniqueOutPtr<GError> error;
+    auto* value = test->runJavaScriptAndWaitUntilFinished("document.documentElement.style.backgroundColor = '#ff0000';", &error.outPtr());
+    g_assert_no_error(error.get());
+    g_assert_nonnull(value);
+    test->waitForColor(0xffff0000);
+    g_assert_cmpuint(test->m_presentations, >, initialPresentations);
+}
+
+static void testWebViewPresentationAfterReparentToNewWindow(PresentationWebViewTest* test, gconstpointer)
+{
+    test->loadPageForReparenting();
+    GRefPtr<WebKitWebView> webView = test->webView();
+    auto* widget = GTK_WIDGET(webView.get());
+    GRefPtr<GtkWidget> window = gtk_window_new();
+    gtk_window_set_default_size(GTK_WINDOW(window.get()), gtk_widget_get_width(widget), gtk_widget_get_height(widget));
+
+    gtk_window_set_child(GTK_WINDOW(test->m_parentWindow), nullptr);
+    g_assert_false(gtk_widget_get_realized(widget));
+    gtk_window_set_child(GTK_WINDOW(window.get()), widget);
+    gtk_widget_show(window.get());
+
+    test->waitForNextFrame();
+    test->waitForColor(0xff0000ff);
+    test->assertAnimationFramesWithoutDamage();
+    gtk_window_destroy(GTK_WINDOW(window.get()));
+}
+
+static void testWebViewPresentationAfterRapidReparent(PresentationWebViewTest* test, gconstpointer)
+{
+    auto* window = GTK_WINDOW(test->m_parentWindow);
+    // Avoid GTK retaining the focused widget repeatedly until the next frame.
+    gtk_window_set_focus(window, nullptr);
+    test->loadPageForReparenting();
+    GRefPtr<WebKitWebView> webView = test->webView();
+    for (unsigned i = 0; i < 8; ++i) {
+        gtk_window_set_child(window, nullptr);
+        gtk_window_set_child(window, GTK_WIDGET(webView.get()));
+    }
+    test->waitForNextFrame();
+    test->waitForColor(0xff0000ff);
+    test->assertAnimationFramesWithoutDamage();
+}
+
+static void testWebViewPresentationAfterReparentDuringLoad(PresentationWebViewTest* test, gconstpointer)
+{
+    test->loadPageForReparenting();
+    GRefPtr<WebKitWebView> webView = test->webView();
+    auto* window = GTK_WINDOW(test->m_parentWindow);
+    test->loadHtml("<!DOCTYPE html><html style='background: #ff0000; overflow: hidden'></html>", nullptr);
+    gtk_window_set_child(window, nullptr);
+    gtk_window_set_child(window, GTK_WIDGET(webView.get()));
+    test->waitUntilLoadFinished();
+    test->waitForNextFrame();
+    test->waitForColor(0xffff0000);
+    test->assertAnimationFramesWithoutDamage();
+}
+
+static void testWebViewCloseAfterReparent(PresentationWebViewTest* test, gconstpointer)
+{
+    test->loadPageForReparenting();
+    GRefPtr<WebKitWebView> webView = test->webView();
+    auto* window = GTK_WINDOW(test->m_parentWindow);
+    gtk_window_set_child(window, nullptr);
+    gtk_window_set_child(window, GTK_WIDGET(webView.get()));
+}
+
+#endif
+
 static void testWebViewSnapshot(SnapshotWebViewTest* test, gconstpointer)
 {
     test->loadHtml("<html><head><style>html { width: 200px; height: 100px; } ::-webkit-scrollbar { display: none; }</style></head><body><p>Whatever</p></body></html>", nullptr);
@@ -1603,7 +1792,7 @@ static void testWebViewNotification(NotificationWebViewTest* test, gconstpointer
     test->initialize();
 
     // Notifications don't work with local or special schemes.
-    test->loadURI(gServer->getURIForPath("/").data());
+    test->loadURI(gServer->getURIForPath("/"));
     test->waitUntilLoadFinished();
     g_assert_false(test->hasPermission());
 
@@ -1644,14 +1833,14 @@ static void testWebViewNotification(NotificationWebViewTest* test, gconstpointer
 
 static void setInitialNotificationPermissionsAllowedCallback(WebKitWebContext* context, NotificationWebViewTest* test)
 {
-    GList* allowedOrigins = g_list_prepend(nullptr, webkit_security_origin_new_for_uri(gServer->baseURL().string().utf8().data()));
+    GList* allowedOrigins = g_list_prepend(nullptr, webkit_security_origin_new_for_uri(gServer->baseURL().string().utf8().legacyCStringPointer()));
     webkit_web_context_initialize_notification_permissions(test->m_webContext.get(), allowedOrigins, nullptr);
     g_list_free_full(allowedOrigins, reinterpret_cast<GDestroyNotify>(webkit_security_origin_unref));
 }
 
 static void setInitialNotificationPermissionsDisallowedCallback(WebKitWebContext* context, NotificationWebViewTest* test)
 {
-    GList* disallowedOrigins = g_list_prepend(nullptr, webkit_security_origin_new_for_uri(gServer->baseURL().string().utf8().data()));
+    GList* disallowedOrigins = g_list_prepend(nullptr, webkit_security_origin_new_for_uri(gServer->baseURL().string().utf8().legacyCStringPointer()));
     webkit_web_context_initialize_notification_permissions(test->m_webContext.get(), nullptr, disallowedOrigins);
     g_list_free_full(disallowedOrigins, reinterpret_cast<GDestroyNotify>(webkit_security_origin_unref));
 }
@@ -1661,7 +1850,7 @@ static void testWebViewNotificationInitialPermissionAllowed(NotificationWebViewT
     g_signal_connect(test->m_webContext.get(), "initialize-notification-permissions", G_CALLBACK(setInitialNotificationPermissionsAllowedCallback), test);
     test->initialize();
 
-    test->loadURI(gServer->getURIForPath("/").data());
+    test->loadURI(gServer->getURIForPath("/"));
     test->waitUntilLoadFinished();
     g_assert_true(test->hasPermission());
 
@@ -1674,7 +1863,7 @@ static void testWebViewNotificationInitialPermissionDisallowed(NotificationWebVi
     g_signal_connect(test->m_webContext.get(), "initialize-notification-permissions", G_CALLBACK(setInitialNotificationPermissionsDisallowedCallback), test);
     test->initialize();
 
-    test->loadURI(gServer->getURIForPath("/").data());
+    test->loadURI(gServer->getURIForPath("/"));
     test->waitUntilLoadFinished();
     g_assert_false(test->hasPermission());
 }
@@ -1690,8 +1879,8 @@ static void testWebViewIsPlayingAudio(IsPlayingAudioWebViewTest* test, gconstpoi
     g_assert_false(webkit_web_view_is_playing_audio(test->webView()));
     g_assert_false(webkit_web_view_get_is_muted(test->webView()));
 
-    GUniquePtr<char> resourcePath(g_build_filename(Test::getResourcesDir(Test::WebKit2Resources).data(), "file-with-video.html", nullptr));
-    GUniquePtr<char> resourceURL(g_filename_to_uri(resourcePath.get(), nullptr, nullptr));
+    auto resourcePath = gBuildFilename(Test::getResourcesDir(Test::WebKit2Resources), "file-with-video.html");
+    GUniquePtr<char> resourceURL(g_filename_to_uri(resourcePath.utf8(), nullptr, nullptr));
     webkit_web_view_load_uri(test->webView(), resourceURL.get());
     test->waitUntilLoadFinished();
     g_assert_false(webkit_web_view_is_playing_audio(test->webView()));
@@ -1881,7 +2070,7 @@ static void testWebViewOffscreenWindow(WebViewTest* test, gconstpointer)
 {
     GtkWidget* window = gtk_offscreen_window_new();
     gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(test->webView()));
-    test->loadURI(gServer->getURIForPath("/").data());
+    test->loadURI(gServer->getURIForPath("/"));
     test->waitUntilLoadFinished();
     gtk_widget_show_all(window);
     gtk_widget_destroy(window);
@@ -1895,7 +2084,7 @@ public:
 
     static void titleChangedCallback(WebKitWebView* view, GParamSpec*, WebViewTitleTest* test)
     {
-        test->m_webViewTitles.append(webkit_web_view_get_title(view));
+        test->m_webViewTitles.append(UTF8CString::unsafeFromUTF8(webkit_web_view_get_title(view)));
     }
 
     WebViewTitleTest()
@@ -1903,7 +2092,7 @@ public:
         g_signal_connect(m_webView.get(), "notify::title", G_CALLBACK(titleChangedCallback), this);
     }
 
-    Vector<CString> m_webViewTitles;
+    Vector<UTF8CString> m_webViewTitles;
 };
 
 static void testWebViewTitleChange(WebViewTitleTest* test, gconstpointer)
@@ -1913,26 +2102,26 @@ static void testWebViewTitleChange(WebViewTitleTest* test, gconstpointer)
     test->loadHtml("<head><title>Page Title</title></head>", nullptr);
     test->waitUntilTitleChanged();
     g_assert_cmpint(test->m_webViewTitles.size(), ==, 1);
-    g_assert_cmpstr(test->m_webViewTitles[0].data(), ==, "Page Title");
+    ASSERT_CMP_CSTRING(test->m_webViewTitles[0], ==, "Page Title");
 
     test->loadHtml("<head><title>Another Page Title</title></head>", nullptr);
     test->waitUntilTitleChanged();
     g_assert_cmpint(test->m_webViewTitles.size(), ==, 2);
-    g_assert_cmpstr(test->m_webViewTitles[1].data(), ==, "");
+    ASSERT_CMP_CSTRING(test->m_webViewTitles[1], ==, "");
     test->waitUntilTitleChanged();
     g_assert_cmpint(test->m_webViewTitles.size(), ==, 3);
     /* Page title should be immediately unset when loading a new page. */
-    g_assert_cmpstr(test->m_webViewTitles[2].data(), ==, "Another Page Title");
+    ASSERT_CMP_CSTRING(test->m_webViewTitles[2], ==, "Another Page Title");
 
     test->loadHtml("<p>This page has no title!</p>", nullptr);
     test->waitUntilLoadFinished();
     g_assert_cmpint(test->m_webViewTitles.size(), ==, 4);
-    g_assert_cmpstr(test->m_webViewTitles[3].data(), ==, "");
+    ASSERT_CMP_CSTRING(test->m_webViewTitles[3], ==, "");
 
     test->loadHtml("<script>document.title = 'one'; document.title = 'two'; document.title = 'three';</script>", nullptr);
     test->waitUntilTitleChanged();
     g_assert_cmpint(test->m_webViewTitles.size(), ==, 5);
-    g_assert_cmpstr(test->m_webViewTitles[4].data(), ==, "three");
+    ASSERT_CMP_CSTRING(test->m_webViewTitles[4], ==, "three");
 }
 
 #if PLATFORM(WPE)
@@ -1942,7 +2131,7 @@ public:
 
     static void titleChangedCallback(WebKitWebView* view, GParamSpec*, WebViewTitleTest* test)
     {
-        test->m_webViewTitles.append(webkit_web_view_get_title(view));
+        test->m_webViewTitles.append(UTF8CString::unsafeFromUTF8(webkit_web_view_get_title(view)));
     }
 
     FrameDisplayedTest()
@@ -2196,6 +2385,13 @@ static void testWebViewWebExtensionMode(WebViewTest* test, gconstpointer)
 
     // Create a new web view with an extension mode that blocks the unsafe-inline keyword.
     auto webView = test->createWebView("web-extension-mode", WEBKIT_WEB_EXTENSION_MODE_MANIFESTV3, nullptr);
+
+    // The extension CSP mode only applies to schemes that bypass CSP, so opt in to applying it to about:blank.
+    g_autoptr(WebKitFeatureList) featureList = webkit_settings_get_development_features();
+    WebKitFeature* feature = webkit_feature_list_find(featureList, "ContentSecurityPolicyExtensionModeAppliesToAllSchemesForTesting");
+    g_assert_nonnull(feature);
+    webkit_settings_set_feature_enabled(webkit_web_view_get_settings(webView.get()), feature, TRUE);
+
     test->loadHtml(html, nullptr, webView.get());
     test->waitUntilLoadFinished(webView.get());
     value = test->runJavaScriptAndWaitUntilFinished("document.title == 'unset';", &error.outPtr(), webView.get());
@@ -2335,6 +2531,16 @@ void beforeAll()
 #if PLATFORM(GTK) || ENABLE(2022_GLIB_API)
     SnapshotWebViewTest::add("WebKitWebView", "snapshot", testWebViewSnapshot);
     SnapshotWebViewTest::add("WebKitWebView", "snapshot-color-quadrants", testWebViewColorQuadrants);
+#endif
+#if USE(GTK4)
+    PresentationWebViewTest::add("WebKitWebView", "presentation-without-damage", testWebViewPresentationWithoutDamage);
+    PresentationWebViewTest::add("WebKitWebView", "presentation-after-reparent-to-new-window", testWebViewPresentationAfterReparentToNewWindow);
+    PresentationWebViewTest::add("WebKitWebView", "presentation-after-rapid-reparent", testWebViewPresentationAfterRapidReparent);
+    PresentationWebViewTest::add("WebKitWebView", "presentation-after-reparent-during-load", testWebViewPresentationAfterReparentDuringLoad);
+    PresentationWebViewTest::add("WebKitWebView", "close-after-reparent", testWebViewCloseAfterReparent);
+    AcceleratedPresentationWebViewTest::add("WebKitWebView", "accelerated-presentation-without-damage", [](AcceleratedPresentationWebViewTest* test, gconstpointer data) {
+        testWebViewPresentationWithoutDamage(test, data);
+    });
 #endif
     WebViewTest::add("WebKitWebView", "page-visibility", testWebViewPageVisibility);
     WebViewTest::add("WebKitWebView", "document-focus", testWebViewDocumentFocus);

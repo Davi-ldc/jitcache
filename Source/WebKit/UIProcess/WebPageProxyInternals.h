@@ -28,6 +28,7 @@
 #if ENABLE(WEBDRIVER_BIDI)
 #include "BidiDigitalCredentialsAgent.h"
 #endif
+#include "Connection.h"
 #include "ContextMenuContextData.h"
 #include "EditorState.h"
 #include "EnhancedSecurityTracking.h"
@@ -53,11 +54,13 @@
 #include "WindowKind.h"
 #include <WebCore/BackForwardItemIdentifier.h>
 #include <WebCore/CornerRadii.h>
+#include <WebCore/DevicePostureType.h>
 #include <WebCore/FrameIdentifier.h>
 #include <WebCore/FrameLoaderTypes.h>
 #include <WebCore/IntPointHash.h>
 #include <WebCore/PrivateClickMeasurement.h>
 #include <WebCore/RegistrableDomain.h>
+#include <WebCore/RemoteUserInputEventData.h>
 #include <WebCore/ResourceRequest.h>
 #include <WebCore/SecurityOriginData.h>
 #include <pal/HysteresisActivity.h>
@@ -65,6 +68,10 @@
 
 #if ENABLE(APPLE_PAY)
 #include "WebPaymentCoordinatorProxy.h"
+#endif
+
+#if __has_include(<WebKitAdditions/WebPageProxyAdditionsIncludes.h>)
+#include <WebKitAdditions/WebPageProxyAdditionsIncludes.h>
 #endif
 
 #if ENABLE(DRAG_SUPPORT)
@@ -103,6 +110,7 @@
 
 #if PLATFORM(COCOA)
 #include "CocoaWindow.h"
+#include "InteractionInformationRequest.h"
 #endif
 
 #if PLATFORM(IOS_FAMILY) && ENABLE(MODEL_PROCESS)
@@ -111,6 +119,11 @@
 
 #if ENABLE(IMAGE_ANALYSIS)
 #include <WebCore/ImageAnalysisQueue.h>
+#endif
+
+#if USE(GLIB)
+#include "WebKitWebView.h"
+#include <wtf/glib/GWeakPtr.h>
 #endif
 
 namespace WebKit {
@@ -248,6 +261,7 @@ public:
     WebCore::FloatSize minimumUnobscuredSize;
     Deque<Ref<NativeWebMouseEvent>> mouseEventQueue;
     Vector<Ref<WebMouseEvent>> coalescedMouseEvents;
+    RunLoop::Timer remoteFrameMouseEventTimeoutTimer;
     WebCore::MediaProducerMutedStateFlags mutedState;
     WebNotificationManagerMessageHandler notificationManagerMessageHandler;
     OptionSet<WebCore::LayoutMilestone> observedLayoutMilestones;
@@ -266,6 +280,9 @@ public:
     bool alwaysBounceVertical { true };
     bool alwaysBounceHorizontal { true };
     WebCore::Color sampledPageTopColor;
+#if __has_include(<WebKitAdditions/WebPageProxyInternalsAdditions.h>)
+#include <WebKitAdditions/WebPageProxyInternalsAdditions.h>
+#endif
     WebCore::ScrollPinningBehavior scrollPinningBehavior { WebCore::ScrollPinningBehavior::DoNotPin };
     WebCore::IntSize sizeToContentAutoSizeMaximumSize;
     WebCore::Color themeColor;
@@ -308,6 +325,19 @@ public:
 #if PLATFORM(COCOA)
     WeakObjCPtr<WKWebView> cocoaView;
     std::optional<TransactionID> firstLayerTreeTransactionIdAfterDidCommitLoad;
+
+    struct OutstandingPositionInformationRequest {
+        InteractionInformationRequest request;
+        IPC::AsyncReplyID replyID;
+        WeakPtr<WebProcessProxy> process;
+    };
+    std::optional<OutstandingPositionInformationRequest> outstandingPositionInformationRequest;
+
+    Markable<WebCore::FrameIdentifier> interactionFrameID;
+#endif
+
+#if USE(GLIB)
+    GWeakPtr<WebKitWebView> platformView;
 #endif
 
 #if ENABLE(CONTEXT_MENUS)
@@ -405,6 +435,7 @@ public:
 
 #if PLATFORM(MAC)
     WebCore::FloatPoint scrollPositionDuringLastEditorStateUpdate;
+    std::optional<WebCore::RemoteUserInputEventData> acceptsFirstMouseRemoteUserInputEventData;
 #endif
 
 #if PLATFORM(IOS_FAMILY) && ENABLE(MODEL_PROCESS)
@@ -439,6 +470,8 @@ public:
 #if HAVE(NSVIEW_CORNER_CONFIGURATION)
     WebCore::CornerRadii scrollbarAvoidanceCornerRadii;
 #endif
+
+    std::optional<WebCore::DevicePostureType> currentDevicePostureType;
 
     explicit Internals(WebPageProxy&, bool processInheritedFromOpener);
 

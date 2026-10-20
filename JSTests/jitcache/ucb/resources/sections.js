@@ -185,26 +185,23 @@ var ucbSections = (function () {
     {
         const read = byteReader(bytes);
         const constantCount = read.u32(148);
-        const mapBytes = Math.ceil(constantCount / 8);
         const section = {
             bytes,
             magic: read.u32(0),
             version: read.u16(4),
             coreKind: bytes[6],
-            provenance: bytes[7],
+            reserved: bytes[7],
             key: hex(bytes.subarray(8, 48)),
             holderDigest: hex(bytes.subarray(112, 144)),
             features: read.u16(144),
             lexicallyScopedFeatures: bytes[146],
             hasCapturedVariables: bytes[147],
             constantCount,
-            atomMap: 152,
-            butterflyMap: 152 + mapBytes,
-            end: 152 + 2 * mapBytes,
+            butterflyMap: 152,
+            end: 152 + Math.ceil(constantCount / 8),
         };
-        section.atom = index => bit(bytes, section.atomMap, index);
         section.butterfly = index => bit(bytes, section.butterflyMap, index);
-        // The child holder digests, 32 bytes each, follow the maps' padding: declarations, then expressions.
+        // The child holder digests, 32 bytes each, follow the map's padding: declarations, then expressions.
         section.childHolderDigests = align(section.end, 8);
         section.childHolderDigestCount = (bytes.length - section.childHolderDigests) / 32;
         section.childHolderDigest = index => hex(bytes.subarray(section.childHolderDigests + 32 * index, section.childHolderDigests + 32 * (index + 1)));
@@ -214,7 +211,8 @@ var ucbSections = (function () {
     }
 
     // ucb.feedback, with the LLInt counter its header carries: the active threshold, and the progress, the float total
-    // count plus the int32 counter, as FeedbackSection::llintProgress adds them.
+    // count plus the int32 counter, as FeedbackSection::llintProgress adds them. The UCB's value predictions and array
+    // profiles are there only when the copies byte, byte 39, is 1; V and A count the UCB's profiles either way.
     function feedback(bytes)
     {
         const read = byteReader(bytes);
@@ -228,16 +226,17 @@ var ucbSections = (function () {
             functionExprs: read.u32(32),
             constants: read.u32(52),
         };
+        const copies = bytes[39];
         const predictions = 56;
-        const arrays = predictions + 8 * counts.valueProfiles;
-        const binary = arrays + 8 * counts.arrayProfiles;
+        const arrays = predictions + (copies ? 8 * counts.valueProfiles : 0);
+        const binary = arrays + (copies ? 8 * counts.arrayProfiles : 0);
         const unary = binary + 2 * counts.binaryArithProfiles;
         const exits = align(unary + 2 * counts.unaryArithProfiles, 4);
         const children = exits + 8 * counts.exitSites;
         const constants = children + counts.functionDecls + counts.functionExprs;
         const end = constants + Math.ceil(counts.constants / 8);
-        const section = { bytes, counts, predictions, arrays, binary, unary, exits, children, constants, end };
-        if (read.u32(0) !== 0x46424355 || read.u16(4) !== 1 || align(end, 8) !== bytes.length)
+        const section = { bytes, counts, copies, predictions, arrays, binary, unary, exits, children, constants, end };
+        if (read.u32(0) !== 0x46424355 || read.u16(4) !== 1 || copies > 1 || align(end, 8) !== bytes.length)
             throw failure("ucb.feedback does not have the lane's feedback layout", bytes);
         section.llintActiveThreshold = read.i32(40);
         section.llintProgress = read.f32(44) + read.i32(48);

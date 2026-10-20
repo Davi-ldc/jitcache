@@ -26,8 +26,9 @@
 #include <WebCore/HTMLElement.h>
 
 namespace WebCore {
-    
+
 class HTMLDivElement;
+class HTMLLegendElement;
 class HTMLSelectElement;
 
 class HTMLOptGroupElement final : public HTMLElement {
@@ -39,11 +40,8 @@ public:
     bool isDisabledFormControl() const final;
     bool isActuallyDisabled() const final;
     WEBCORE_EXPORT HTMLSelectElement* NODELETE ownerSelectElement() const;
-    
-    WEBCORE_EXPORT String groupLabelText() const;
 
-    void legendChildAdded();
-    void legendChildRemoved();
+    WEBCORE_EXPORT String groupLabelText() const;
 
     void updateUserAgentShadowTree() final;
 
@@ -56,6 +54,7 @@ private:
     const AtomString& formControlType() const;
     bool isFocusable() const final;
     void attributeChanged(const QualifiedName&, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason) final;
+    void parseDisabledAttribute(const AtomString&);
 
     void didAddUserAgentShadowRoot(ShadowRoot&) final;
 
@@ -65,11 +64,12 @@ private:
 
     void recalcSelectOptions();
 
+    HTMLLegendElement* NODELETE legendElement() const;
+
     void invalidateShadowTree();
 
     bool m_isDisabled { false };
     bool m_shadowTreeNeedsUpdate { false };
-    unsigned m_legendChildCount { 0 };
     WeakPtr<HTMLSelectElement, WeakPtrImplWithEventTargetData> m_ownerSelect;
     WeakPtr<HTMLDivElement, WeakPtrImplWithEventTargetData> m_labelContainer;
 };

@@ -58,20 +58,20 @@
         return nil;
     _card = card;
     _invalidationHandler = WTF::move(handler);
-    [_card addObserver:self forKeyPath:@"valid" options:NSKeyValueObservingOptionNew context:nil];
+    [protect(_card) addObserver:self forKeyPath:@"valid" options:NSKeyValueObservingOptionNew context:nil];
     return self;
 }
 
 - (void)dealloc
 {
-    [_card removeObserver:self forKeyPath:@"valid"];
+    [protect(_card) removeObserver:self forKeyPath:@"valid"];
     [super dealloc];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
     if ([keyPath isEqualToString:@"valid"]) {
-        BOOL valid = [[change objectForKey:NSKeyValueChangeNewKey] boolValue];
+        BOOL valid = [protect([change objectForKey:NSKeyValueChangeNewKey]) boolValue];
         if (!valid) {
             @synchronized(self) {
                 if (_invalidationHandler) {
@@ -100,7 +100,7 @@ CcidConnection::CcidConnection(RetainPtr<TKSmartCard>&& smartCard, RetainPtr<TKS
 {
     CCID_RELEASE_LOG("created, smartCard=%p, slot=%p", m_smartCard.get(), m_slot.get());
 
-    m_observer = adoptNS([[WKSmartCardObserver alloc]
+    lazyInitialize(m_observer, adoptNS([[WKSmartCardObserver alloc]
         initWithCard:m_smartCard.get()
         invalidationHandler:[weakThis = ThreadSafeWeakPtr { *this }] {
             if (RefPtr protectedThis = weakThis.get()) {
@@ -112,7 +112,7 @@ CcidConnection::CcidConnection(RetainPtr<TKSmartCard>&& smartCard, RetainPtr<TKS
                     protectedThis->m_hasSession = false;
                 }
             }
-        }]);
+        }]));
 
     startPolling();
 }

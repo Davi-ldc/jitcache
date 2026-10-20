@@ -36,7 +36,6 @@
 #include "HTMLSrcsetParser.h"
 #include "Logging.h"
 #include "MediaQueryParser.h"
-#include "MediaQueryParserContext.h"
 #include "NodeName.h"
 #include <wtf/TZoneMallocInlines.h>
 
@@ -124,15 +123,30 @@ void HTMLSourceElement::removingSteps(RemovalType removalType, ContainerNode& ol
     }
 }
 
-void HTMLSourceElement::movingSteps(IsSubtreeRoot isSubtreeRoot, ContainerNode& oldParent)
+void HTMLSourceElement::movingSteps(MovingType movingType, ContainerNode& oldParent)
 {
-    HTMLElement::movingSteps(isSubtreeRoot, oldParent);
+    HTMLElement::movingSteps(movingType, oldParent);
 
-    if (isSubtreeRoot == IsSubtreeRoot::No)
+    if (!movingType.isSubtreeRoot)
         return;
 
+    RefPtr newParent { parentElement() };
+
+#if ENABLE(VIDEO)
+    if (RefPtr newMediaElement = dynamicDowncast<HTMLMediaElement>(newParent))
+        newMediaElement->sourceWasAdded(*this);
+#endif
+
+#if ENABLE(MODEL_ELEMENT)
+    if (RefPtr oldModelElement = dynamicDowncast<HTMLModelElement>(oldParent))
+        oldModelElement->sourcesChanged();
+
+    if (RefPtr newModelElement = dynamicDowncast<HTMLModelElement>(newParent))
+        newModelElement->sourcesChanged();
+#endif
+
     RefPtr oldParentPicture = dynamicDowncast<HTMLPictureElement>(oldParent);
-    RefPtr parentPicture = dynamicDowncast<HTMLPictureElement>(parentElement());
+    RefPtr parentPicture = dynamicDowncast<HTMLPictureElement>(newParent);
 
     m_shouldCallSourcesChanged = false;
     if (parentPicture) {

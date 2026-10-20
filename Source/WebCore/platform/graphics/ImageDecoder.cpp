@@ -26,7 +26,6 @@
 #include "config.h"
 #include "ImageDecoder.h"
 
-#include "AsyncImageDecoder.h"
 #include "ImageFrame.h"
 #include "ScalableImageDecoder.h"
 #include <wtf/TZoneMallocInlines.h>
@@ -105,11 +104,12 @@ bool ImageDecoder::supportsMediaType(MediaType type)
 
 bool ImageDecoder::fetchFrameMetaDataAtIndex(size_t index, SubsamplingLevel subsamplingLevel, const DecodingOptions& options, ImageFrame& frame) const
 {
+    frame.m_naturalSize = frameSizeAtIndex(index, subsamplingLevel);
     if (options.hasSizeForDrawing()) {
         ASSERT(frame.hasNativeImage(options.decodingDestination()));
         frame.m_size = frame.nativeImage(options.decodingDestination())->size();
     } else
-        frame.m_size = frameSizeAtIndex(index, subsamplingLevel);
+        frame.m_size = frame.m_naturalSize;
 
     frame.m_densityCorrectedSize = frameDensityCorrectedSizeAtIndex(index);
     frame.m_subsamplingLevel = subsamplingLevel;

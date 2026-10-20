@@ -351,7 +351,7 @@ ExceptionOr<void> DocumentFullscreen::willEnterFullscreen(Element& element, HTML
     m_fullscreenElement = element;
 
     Vector<Ref<Element>> ancestors { { element } };
-    for (RefPtr<Frame> frame = element.document().frame(); frame; frame = frame->tree().parent()) {
+    for (Ref frame : inclusiveAncestorFrames(element.document().frame())) {
         if (RefPtr ownerElement = frame->ownerElement())
             ancestors.append(ownerElement.releaseNonNull());
     }
@@ -442,10 +442,7 @@ LocalFrame* DocumentFullscreen::frame() const
 static Vector<Ref<Document>> documentsToUnfullscreen(Frame& firstFrame)
 {
     Vector<Ref<Document>> documents;
-    for (RefPtr frame = firstFrame; frame; frame = frame->tree().parent()) {
-        RefPtr localFrame = dynamicDowncast<LocalFrame>(frame);
-        if (!localFrame)
-            continue;
+    for (Ref localFrame : inclusiveAncestorFrames<LocalFrame>(firstFrame)) {
         RefPtr document = localFrame->document();
         if (!document)
             continue;
@@ -526,7 +523,7 @@ void DocumentFullscreen::exitFullscreen(CompletionHandler<void(ExceptionOr<void>
     }
 
     // Return promise, and run the remaining steps in parallel.
-    exitingDocument->eventLoop().queueTask(TaskSource::MediaElement, [scope = CompletionHandlerScope(WTF::move(completionHandler)), resetPendingExitFullscreenScope = WTF::move(resetPendingExitFullscreenScope), weakThis = WeakPtr { *this }, mode, identifier = LOGIDENTIFIER]() mutable {
+    protect(exitingDocument->eventLoop())->queueTask(TaskSource::MediaElement, [scope = CompletionHandlerScope(WTF::move(completionHandler)), resetPendingExitFullscreenScope = WTF::move(resetPendingExitFullscreenScope), weakThis = WeakPtr { *this }, mode, identifier = LOGIDENTIFIER]() mutable {
         auto completionHandler = scope.release();
         RefPtr protectedThis = weakThis.get();
         if (!protectedThis)

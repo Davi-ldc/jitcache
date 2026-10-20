@@ -56,7 +56,6 @@ set(TestWTF_SOURCES
     Tests/WTF/BoxPtr.cpp
     Tests/WTF/BumpPointerAllocator.cpp
     Tests/WTF/CString.cpp
-    Tests/WTF/CStringView.cpp
     Tests/WTF/CharacterProperties.cpp
     Tests/WTF/CheckedArithmeticOperations.cpp
     Tests/WTF/CheckedPtr.cpp
@@ -100,6 +99,7 @@ set(TestWTF_SOURCES
     Tests/WTF/JSONValue.cpp
     Tests/WTF/LEBDecoder.cpp
     Tests/WTF/LEBEncoder.cpp
+    Tests/WTF/LayeredHashMap.cpp
     Tests/WTF/LazyRef.cpp
     Tests/WTF/LazyUniqueRef.cpp
     Tests/WTF/LifecycleLogger.cpp
@@ -125,9 +125,11 @@ set(TestWTF_SOURCES
     Tests/WTF/PackedRef.cpp
     Tests/WTF/PackedRefPtr.cpp
     Tests/WTF/ParkingLot.cpp
+    Tests/WTF/PlainGregorianDateTime.cpp
     Tests/WTF/PreciseSum.cpp
     Tests/WTF/PriorityQueue.cpp
     Tests/WTF/RapidHash.cpp
+    Tests/WTF/ReadWriteLock.cpp
     Tests/WTF/RedBlackTree.cpp
     Tests/WTF/Ref.cpp
     Tests/WTF/RefCountedFixedVector.cpp
@@ -176,6 +178,7 @@ set(TestWTF_SOURCES
     Tests/WTF/TruncateFloat.cpp
     Tests/WTF/URL.cpp
     Tests/WTF/URLParser.cpp
+    Tests/WTF/UTF8CStringView.cpp
     Tests/WTF/UTF8Conversion.cpp
     Tests/WTF/UUID.cpp
     Tests/WTF/UniqueArray.cpp
@@ -253,6 +256,7 @@ if (ENABLE_WEBCORE)
         Helpers/Utilities.cpp
         Helpers/WebCoreTestUtilities.cpp
 
+        Tests/WebCore/AV1UtilitiesTests.cpp
         Tests/WebCore/AffineTransform.cpp
         Tests/WebCore/AnimationFrameRate.cpp
         Tests/WebCore/ApduTest.cpp
@@ -266,11 +270,13 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/CSSParser.cpp
         Tests/WebCore/CSSParserFastPaths.cpp
         Tests/WebCore/CSSTokenizerTests.cpp
+        Tests/WebCore/CSSValueAggregates.cpp
         Tests/WebCore/CachedMatchFinder.cpp
         Tests/WebCore/ColorTests.cpp
         Tests/WebCore/ComplexTextController.cpp
         Tests/WebCore/ContextMenuAction.cpp
         Tests/WebCore/CookieJar.cpp
+        Tests/WebCore/CredentialStorage.cpp
         Tests/WebCore/CryptoDigest.cpp
         Tests/WebCore/CtapPinTest.cpp
         Tests/WebCore/CtapRequestTest.cpp
@@ -282,6 +288,7 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/DocumentOrder.cpp
         Tests/WebCore/FidoHidMessageTest.cpp
         Tests/WebCore/FileMonitor.cpp
+        Tests/WebCore/FlexLineBreakerTests.cpp
         Tests/WebCore/FloatPointTests.cpp
         Tests/WebCore/FloatQuadTests.cpp
         Tests/WebCore/FloatRectTests.cpp
@@ -291,6 +298,8 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/FontCascade.cpp
         Tests/WebCore/FontShadowTests.cpp
         Tests/WebCore/GridPosition.cpp
+        Tests/WebCore/H264UtilitiesTests.cpp
+        Tests/WebCore/HEVCUtilitiesTests.cpp
         Tests/WebCore/HTMLParserIdioms.cpp
         Tests/WebCore/HTTPHeaderField.cpp
         Tests/WebCore/HTTPHeaderMap.cpp
@@ -307,15 +316,18 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/KeyedCoding.cpp
         Tests/WebCore/LayoutRoundedRectTests.cpp
         Tests/WebCore/LayoutUnitTests.cpp
+        Tests/WebCore/LocalNetworkAccess.cpp
         Tests/WebCore/LoginStatus.cpp
         Tests/WebCore/MIMESniffer.cpp
         Tests/WebCore/MIMETypeRegistry.cpp
         Tests/WebCore/MediaConstraintsTests.cpp
+        Tests/WebCore/MediaQueryListCapacity.cpp
         Tests/WebCore/MediaReorderQueue.cpp
         Tests/WebCore/MixedContentChecker.cpp
         Tests/WebCore/MonospaceFontTests.cpp
         Tests/WebCore/NativeImageTests.cpp
         Tests/WebCore/NowPlayingInfoTests.cpp
+        Tests/WebCore/ObjectSizeNegotiationTests.cpp
         Tests/WebCore/PODIntervalTree.cpp
         Tests/WebCore/ParsedContentRange.cpp
         Tests/WebCore/ParsedContentType.cpp
@@ -332,7 +344,6 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/RegistrableDomain.cpp
         Tests/WebCore/RenderStyleChange.cpp
         Tests/WebCore/STUNMessageParsingTest.cpp
-        Tests/WebCore/SVGImageCasts.cpp
         Tests/WebCore/SampleMap.cpp
         Tests/WebCore/SecurityOrigin.cpp
         Tests/WebCore/SerializedScriptValue.cpp
@@ -354,6 +365,7 @@ if (ENABLE_WEBCORE)
         Tests/WebCore/URLMatch.cpp
         Tests/WebCore/URLParserTextEncoding.cpp
         Tests/WebCore/URLPatternTests.cpp
+        Tests/WebCore/WebCodecsBufferTransfer.cpp
         Tests/WebCore/WebGPUFramePacer.cpp
         Tests/WebCore/WebTransportHeaderValidation.cpp
         Tests/WebCore/WellKnownOriginList.cpp
@@ -497,9 +509,11 @@ if (ENABLE_WEBKIT)
 
     set(TestWebKit_PRIVATE_INCLUDE_DIRECTORIES
         ${CMAKE_BINARY_DIR}
+        ${bmalloc_FRAMEWORK_HEADERS_DIR}
         ${JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS_DIR}
         ${PAL_FRAMEWORK_HEADERS_DIR}
         ${TESTWEBKITAPI_DIR}
+        ${WTF_FRAMEWORK_HEADERS_DIR}
         ${WebCore_PRIVATE_FRAMEWORK_HEADERS_DIR}
         ${WebKit_FRAMEWORK_HEADERS_DIR}
         ${WebKit_PRIVATE_FRAMEWORK_HEADERS_DIR}
@@ -588,7 +602,7 @@ if (ENABLE_WEBKIT)
         set(TestWebKitAPIInjectedBundle_LIBRARY_TYPE SHARED)
     endif ()
     add_library(TestWebKitAPIInjectedBundle ${TestWebKitAPIInjectedBundle_LIBRARY_TYPE} ${TestWebKitAPIInjectedBundle_SOURCES})
-    WEBKIT_ADD_PREFIX_HEADER(TestWebKitAPIInjectedBundle Helpers/TestWebKitAPIPrefix.h PREFIX_LANGUAGES CXX)
+    WEBKIT_ADD_PREFIX_HEADER(TestWebKitAPIInjectedBundle Helpers/TestWebKitAPIPrefix.h PREFIX_LANGUAGES CXX OBJCXX)
 
     target_compile_definitions(TestWebKitAPIInjectedBundle PRIVATE BUILDING_TestWebKit)
     target_include_directories(TestWebKitAPIInjectedBundle PRIVATE ${TestWebKit_PRIVATE_INCLUDE_DIRECTORIES})
@@ -600,7 +614,7 @@ if (ENABLE_WEBKIT)
 
     WEBKIT_EXECUTABLE_DECLARE(TestWebKit)
 
-    if (APPLE)
+    if (APPLE OR PORT STREQUAL "GTK" OR PORT STREQUAL "WPE")
         # TestIPC definitions
         set(TestIPC_SOURCES
             Helpers/Utilities.cpp
@@ -646,6 +660,71 @@ if (ENABLE_WEBKIT)
         set(TestIPC_FRAMEWORKS
             WebKit
         )
+
+        if (NOT APPLE)
+            # TestIPC compiles the IPC implementation directly rather than linking WebKit.
+            list(APPEND TestIPC_SOURCES
+                generic/main.cpp
+
+                ${WEBKIT_DIR}/Platform/IPC/ArgumentCoders.cpp
+                ${WEBKIT_DIR}/Platform/IPC/Connection.cpp
+                ${WEBKIT_DIR}/Platform/IPC/Decoder.cpp
+                ${WEBKIT_DIR}/Platform/IPC/Encoder.cpp
+                ${WEBKIT_DIR}/Platform/IPC/IPCUtilities.cpp
+                ${WEBKIT_DIR}/Platform/IPC/MessageLog.cpp
+                ${WEBKIT_DIR}/Platform/IPC/MessageReceiveQueueMap.cpp
+                ${WEBKIT_DIR}/Platform/IPC/MessageReceiverMap.cpp
+                ${WEBKIT_DIR}/Platform/IPC/MessageSender.cpp
+                ${WEBKIT_DIR}/Platform/IPC/SharedBufferReference.cpp
+                ${WEBKIT_DIR}/Platform/IPC/SharedFileHandle.cpp
+                ${WEBKIT_DIR}/Platform/IPC/StreamClientConnection.cpp
+                ${WEBKIT_DIR}/Platform/IPC/StreamConnectionBuffer.cpp
+                ${WEBKIT_DIR}/Platform/IPC/StreamConnectionWorkQueue.cpp
+                ${WEBKIT_DIR}/Platform/IPC/StreamServerConnection.cpp
+                ${WEBKIT_DIR}/Platform/IPC/TransferString.cpp
+                ${WEBKIT_DIR}/Platform/IPC/glib/ConnectionGLib.cpp
+                ${WEBKIT_DIR}/Platform/IPC/unix/ArgumentCodersUnix.cpp
+                ${WEBKIT_DIR}/Platform/IPC/unix/IPCSemaphoreUnix.cpp
+                ${WEBKIT_DIR}/Platform/IPC/unix/IPCUtilitiesUnix.cpp
+
+                ${WEBCORE_DIR}/platform/SharedMemory.cpp
+                ${WEBCORE_DIR}/platform/unix/SharedMemoryUnix.cpp
+                ${WEBKIT_DIR}/Platform/EditingRangeClamping.cpp
+                ${WEBKIT_DIR}/Platform/Logging.cpp
+                ${WEBKIT_DIR}/Shared/WebFoundTextRange.cpp
+                ${WebKit_DERIVED_SOURCES_DIR}/MessageNames.cpp
+                ${WebKit_DERIVED_SOURCES_DIR}/WebKitPlatformGeneratedSerializers.cpp
+            )
+
+            list(APPEND TestIPC_PRIVATE_INCLUDE_DIRECTORIES
+                ${CMAKE_SOURCE_DIR}/Source
+                ${WEBCORE_DIR}
+                ${WEBCORE_DIR}/platform
+                ${WEBCORE_DIR}/platform/graphics
+                ${WEBCORE_DIR}/platform/graphics/gstreamer
+                ${WEBCORE_DIR}/platform/network
+                ${WEBCORE_DIR}/platform/text
+                ${GSTREAMER_INCLUDE_DIRS}
+                ${GSTREAMER_AUDIO_INCLUDE_DIRS}
+                ${GSTREAMER_PBUTILS_INCLUDE_DIRS}
+                ${GSTREAMER_VIDEO_INCLUDE_DIRS}
+                ${WEBKIT_DIR}
+                ${WEBKIT_DIR}/Platform
+                ${WEBKIT_DIR}/Platform/IPC
+                ${WEBKIT_DIR}/Platform/IPC/glib
+                ${WEBKIT_DIR}/Platform/IPC/unix
+                ${WEBKIT_DIR}/Shared
+                ${WEBKIT_DIR}/Shared/glib
+                ${WebKit_DERIVED_SOURCES_DIR}
+            )
+
+            list(APPEND TestIPC_LIBRARIES
+                WebKit::WTF
+                WebKit::WebCore
+                ${GLIB_LIBRARIES}
+            )
+
+        endif ()
 
         WEBKIT_EXECUTABLE_DECLARE(TestIPC)
         target_compile_definitions(TestIPC PRIVATE BUILDING_TEST_IPC)
@@ -746,7 +825,7 @@ if (ENABLE_WEBKIT)
         WEBKIT_COMPUTE_SOURCES(TestWebKit)
     endif ()
     WEBKIT_TEST(TestWebKit)
-    if (APPLE)
+    if (APPLE OR PORT STREQUAL "GTK" OR PORT STREQUAL "WPE")
         WEBKIT_TEST(TestIPC)
     endif ()
 endif ()

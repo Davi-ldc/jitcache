@@ -28,21 +28,29 @@
 #if ENABLE(SPATIAL_PORTAL)
 
 #include <WebCore/LayoutSize.h>
+#include <WebCore/ModelPlayer.h>
 #include <WebCore/NodeIdentifier.h>
 #include <WebCore/PortalAction.h>
 #include <WebCore/PortalTransform.h>
+#include <WebCore/ResolvedScopedName.h>
 #include <WebCore/TransformationMatrix.h>
 #include <wtf/CheckedPtr.h>
 #include <wtf/HashMap.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
+#include <wtf/URL.h>
 #include <wtf/WeakPtr.h>
 #include <wtf/text/WTFString.h>
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+#include <WebCore/ModelPresentationMode.h>
+#endif
 
 namespace WebCore {
 
 class Color;
 class Element;
+class EnvironmentMapLoader;
 class GraphicsLayer;
 class HTMLModelElement;
 class IntersectionObserver;
@@ -53,9 +61,16 @@ class Page;
 class PlaceholderModelPlayer;
 class PortalModelPlayerClient;
 class PortalVisibilityChangeClient;
+class RenderBox;
 class ResourceError;
+class SharedBuffer;
 class SpatialPortalEventListener;
 class WeakPtrImplWithEventTargetData;
+
+namespace Style {
+class ComputedStyle;
+struct ScopedName;
+}
 
 // Manages the portal / ModelPlayer for an element with `spatial: portal`.
 class SpatialPortalController : public CanMakeWeakPtr<SpatialPortalController>, public CanMakeCheckedPtr<SpatialPortalController> {
@@ -64,6 +79,9 @@ class SpatialPortalController : public CanMakeWeakPtr<SpatialPortalController>, 
     friend class PortalModelPlayerClient;
     friend class PortalIntersectionObserverCallback;
     friend class PortalVisibilityChangeClient;
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    friend class ElementVolumetricScene;
+#endif
 public:
     explicit SpatialPortalController(Element&);
     ~SpatialPortalController();
@@ -76,18 +94,30 @@ public:
     void childVisibilityStateChanged(HTMLModelElement&);
     void childWasSuspended(HTMLModelElement&);
     void childTransformDidChange(HTMLModelElement&, const TransformationMatrix&);
+    void scheduleAnchorUpdate();
 
     Element* portalElement() const { return m_portalElement.get(); }
     unsigned numberOfHostedModels() const { return m_hostedModels.size(); }
     bool childIsLoaded(NodeIdentifier) const;
     ModelPlayer* playerForChild(NodeIdentifier) const;
+    WEBCORE_EXPORT HTMLModelElement* anchorModelForChild(NodeIdentifier) const;
     void configureGraphicsLayer(GraphicsLayer&, const Color& backgroundColor);
     void sizeMayHaveChanged();
 
-    void setPortalTransform(PortalTransformKind);
+    void updatePortalTransform(const RenderBox&);
+    void updatePortalTransform();
     const std::optional<TransformationMatrix>& resolvedPortalTransform() const { return m_resolvedPortalTransform; }
 
     void setPortalAction(PortalActionKind);
+
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+    void environmentMapStyleDidChange();
+    WEBCORE_EXPORT String effectiveEnvironmentMapForTesting() const;
+#endif
+
+#if ENABLE(MODEL_PROCESS)
+    WEBCORE_EXPORT void sceneGraphAsTextForTesting(std::optional<NodeIdentifier> rootNode, const ModelSceneGraphAsTextOptions&, CompletionHandler<void(String&&)>&&);
+#endif
 
 #if ENABLE(MODEL_ELEMENT_STAGE_MODE_INTERACTION)
     WEBCORE_EXPORT static CheckedPtr<SpatialPortalController> interactiveControllerForHitTestedElement(Element*);
@@ -99,12 +129,27 @@ public:
 
     bool isPortalVisible() const;
 
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    RefPtr<ModelPlayer> liveModelPlayer() const;
+#endif
+
 private:
     struct HostedModel {
         WeakPtr<HTMLModelElement, WeakPtrImplWithEventTargetData> element;
         RefPtr<Model> loadedModel;
         RefPtr<PlaceholderModelPlayer> placeholder;
+
+        std::optional<NodeIdentifier> anchorNode;
+        String anchorPlacement;
+        bool anchorWarningIssued { false };
     };
+
+    struct AnchorResolution {
+        std::optional<NodeIdentifier> node;
+        String warning;
+    };
+
+    using AnchorsByName = HashMap<Style::ResolvedScopedName, Vector<NodeIdentifier>>;
 
     void modelDidFinishLoading(ModelPlayer&, NodeIdentifier);
     void modelDidFailLoading(ModelPlayer&, NodeIdentifier, const ResourceError&);
@@ -114,6 +159,7 @@ private:
     void logWarning(ModelPlayer&, const String&);
     RefPtr<GraphicsLayer> portalGraphicsLayer() const;
     void viewportIntersectionChanged(bool isIntersecting);
+    void portalVisibilityChanged();
     void documentVisibilityChanged();
 
     ModelPlayer* ensureModelPlayer();
@@ -124,11 +170,32 @@ private:
     void unloadAllChildModels();
     void saveChildState(NodeIdentifier, HostedModel&, bool onSuspend);
     HTMLModelElement* hostedModelElement(NodeIdentifier) const;
+    Vector<Ref<HTMLModelElement>> hostedModelsInTreeOrder() const;
+    void updateAnchors();
+    static AnchorsByName collectAnchorNames(const Vector<Ref<HTMLModelElement>>& modelsInTreeOrder);
+    AnchorResolution resolvedAnchorNode(const HTMLModelElement&, const Style::ComputedStyle&, const AnchorsByName&) const;
+    void updateAnchorForChild(const HTMLModelElement&, HostedModel&, const Style::ComputedStyle&, const AnchorsByName&);
+    static std::optional<NodeIdentifier> anchorNodeForName(const HTMLModelElement&, const Style::ScopedName&, const AnchorsByName&);
+    bool anchorChainReaches(NodeIdentifier startNode, NodeIdentifier targetNode, const AnchorsByName&) const;
+    void addConsoleWarning(const String&) const;
     void reconfigurePortalLayer();
     void observePortalVisibility();
     void stopObservingPortalVisibility();
     LayoutSize portalContentSize() const;
     void updateGestureHandling();
+
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+
+    void pushEnvironmentMapToPlayer(ModelPlayer&) const;
+    void updateEnvironmentMap();
+    void startEnvironmentMapLoad();
+    void environmentMapDidLoad(const URL&, RefPtr<SharedBuffer>&&);
+#endif
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    ModelPresentationMode presentationMode() const { return m_presentationMode; }
+    void setPresentationMode(ModelPresentationMode);
+#endif
 
     const WeakPtr<Element, WeakPtrImplWithEventTargetData> m_portalElement;
 
@@ -143,12 +210,23 @@ private:
     RefPtr<IntersectionObserver> m_intersectionObserver;
     RefPtr<PortalVisibilityChangeClient> m_visibilityChangeClient;
 #if ENABLE(TOUCH_EVENTS)
-    RefPtr<SpatialPortalEventListener> m_eventListener;
+    const RefPtr<SpatialPortalEventListener> m_eventListener;
 #endif
     std::optional<LayoutSize> m_lastPushedContentSize;
     std::optional<TransformationMatrix> m_resolvedPortalTransform;
-    PortalTransformKind m_portalTransform { PortalTransformKind::Auto };
+    UsedPortalTransform m_portalTransform;
     PortalActionKind m_portalAction { PortalActionKind::None };
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+    URL m_environmentMapURL;
+    RefPtr<SharedBuffer> m_environmentMapData;
+    const RefPtr<EnvironmentMapLoader> m_environmentMapLoader;
+    EnvironmentMapKind m_environmentMapKind { EnvironmentMapKind::Default };
+    bool m_environmentMapFailed { false };
+#endif
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    ModelPresentationMode m_presentationMode { ModelPresentationMode::Inline };
+#endif
+    bool m_anchorUpdateScheduled { false };
     bool m_handlesGesture { false };
     bool m_isIntersectingViewport { false };
 };

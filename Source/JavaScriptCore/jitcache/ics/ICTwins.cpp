@@ -17,6 +17,7 @@
 #include "JITCode.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
+#include "MetadataTable.h"
 #include "ObjectConstructor.h"
 #include "PropertyInlineCache.h"
 #include <algorithm>
@@ -74,20 +75,38 @@ static PropertyICSnapshot snapshotPropertyIC(const ConcurrentJSLocker& locker, V
     };
 }
 
-static CallLinkSnapshot snapshotCallLink(const ConcurrentJSLocker& locker, OpcodeID opcodeID, unsigned metadataID, CallLinkInfo& callLinkInfo)
+// Which CallSiteData a site points at: none for an inline site, and for a lazy site data of its own once
+// LazyCallLinkInfo::get() finds some, the VM's executed-once data, or what linking gave it.
+static CallSiteDataState dataStateOf(const CallLinkSite& site)
 {
-    CallLinkRecord record = readCallLinkRecord(locker, callLinkInfo);
+    if (site.inlineInfo)
+        return CallSiteDataState::Inline;
+    if (site.lazyInfo->get())
+        return CallSiteDataState::Own;
+    if (site.lazyInfo->hasExecutedOnce())
+        return CallSiteDataState::ExecutedOnce;
+    return CallSiteDataState::NotExecuted;
+}
+
+// A lazy site without data of its own holds no callee: its shared CallLinkInfo describes no site.
+static CallLinkSnapshot snapshotCallLink(const ConcurrentJSLocker& locker, const CallLinkSite& site)
+{
+    CallLinkRecord record = readCallLinkRecord(locker, site);
+    CallLinkInfo* callLinkInfo = site.ownCallLinkInfo();
     return CallLinkSnapshot {
-        .opcodeID = opcodeID,
-        .metadataID = metadataID,
+        .opcodeID = site.opcode().opcodeID,
+        .metadataID = site.metadataID,
+        .data = dataStateOf(site),
         .mode = callLinkMode(static_cast<CallLinkModeCode>(record.bits & CallLinkBit::modeMask)),
         .seenOnce = hasBit(record.bits, CallLinkBit::seenOnce),
         .hasSeenClosure = hasBit(record.bits, CallLinkBit::hasSeenClosure),
         .clearedByGC = hasBit(record.bits, CallLinkBit::clearedByGC),
         .clearedByVirtual = hasBit(record.bits, CallLinkBit::clearedByVirtual),
         .maxArgumentCountIncludingThisForVarargs = record.maxArgumentCountIncludingThisForVarargs,
-        .hasStub = !!callLinkInfo.stub(),
-        .hasLastSeenCallee = callLinkInfo.haveLastSeenCallee(),
+        .thisArrayModes = readThisArrayModes(record),
+        .thisArrayProfileFlags = readThisArrayProfileFlags(record),
+        .hasStub = callLinkInfo && callLinkInfo->stub(),
+        .hasLastSeenCallee = callLinkInfo && callLinkInfo->haveLastSeenCallee(),
     };
 }
 
@@ -132,26 +151,40 @@ static void expectCount(Vector<TwinMismatch>& mismatches, TwinMismatch::Site sit
     expectField(mismatches, site, 0, field, static_cast<uint32_t>(expected), static_cast<uint32_t>(actual));
 }
 
-// After seeding, every call-link site holds the mode, seen bit, history bits and varargs maximum its record derives, and
-// no callee beyond what linking or setVirtualCall left: no stub and no last-seen callee.
-static void checkSeededCallLinks(const PreparedBaselineICs& prepared, const BaselineICsSnapshot& snapshot, Vector<TwinMismatch>& mismatches)
+// After seeding, every call-link site points at the CallSiteData its record derives and reads as that derivation: the
+// mode, seen bit, history bits, varargs maximum and this profile, with no callee beyond what linking, ensure or
+// setVirtualCall left, so no stub and no last-seen callee. A site without a CallLinkInfo of its own reads as the
+// derivation gives it too, since its record is then zero but for the seen bit of the executed-once data. The CB owns
+// exactly one CallSiteData for each site that comes back with data of its own.
+static void checkSeededCallLinks(const PreparedBaselineICs& prepared, CodeBlock& codeBlock, const BaselineICsSnapshot& snapshot, Vector<TwinMismatch>& mismatches)
 {
     constexpr auto site = TwinMismatch::Site::CallLink;
     std::span<const CallLinkRecord> records = prepared.callLinks();
     expectCount(mismatches, site, "callLinkSiteCount"_s, records.size(), snapshot.callLinks.size());
+    size_t ownSiteCount = 0;
     for (size_t index = 0, count = std::min<size_t>(records.size(), snapshot.callLinks.size()); index < count; ++index) {
-        RestoredCallLink expected = restoredCallLink(records[index]);
         const CallLinkSnapshot& actual = snapshot.callLinks[index];
+        // A snapshot names only call-link opcodes.
+        const CallLinkOpcode& opcode = callLinkOpcodes[*canonicalCallLinkPosition(actual.opcodeID)];
+        RestoredCallLink expected = restoredCallLink(opcode, records[index]);
+        if (expected.data == CallSiteDataState::Own)
+            ++ownSiteCount;
         auto expectedMode = expected.isVirtual ? CallLinkInfo::Mode::Virtual : CallLinkInfo::Mode::Init;
+        expectField(mismatches, site, index, "data"_s, static_cast<uint32_t>(expected.data), static_cast<uint32_t>(actual.data));
         expectField(mismatches, site, index, "mode"_s, static_cast<uint32_t>(expectedMode), static_cast<uint32_t>(actual.mode));
         expectField(mismatches, site, index, "seenOnce"_s, expected.seenOnce, actual.seenOnce);
         expectField(mismatches, site, index, "hasSeenClosure"_s, expected.hasSeenClosure, actual.hasSeenClosure);
         expectField(mismatches, site, index, "clearedByGC"_s, expected.clearedByGC, actual.clearedByGC);
         expectField(mismatches, site, index, "clearedByVirtual"_s, expected.clearedByVirtual, actual.clearedByVirtual);
         expectField(mismatches, site, index, "maxArgumentCountIncludingThisForVarargs"_s, expected.maxArgumentCountIncludingThisForVarargs, actual.maxArgumentCountIncludingThisForVarargs);
+        expectField(mismatches, site, index, "thisArrayModes"_s, expected.thisArrayModes, actual.thisArrayModes);
+        expectField(mismatches, site, index, "thisArrayProfileFlags"_s, expected.thisArrayProfileFlags, actual.thisArrayProfileFlags);
         expectField(mismatches, site, index, "hasStub"_s, false, actual.hasStub);
         expectField(mismatches, site, index, "hasLastSeenCallee"_s, false, actual.hasLastSeenCallee);
     }
+    // The newborn CB owned no CallSiteData before seeding, so every one it owns now came from seeding.
+    MetadataTable* metadataTable = codeBlock.metadataTable();
+    expectCount(mismatches, site, "ownCallSiteDatas"_s, ownSiteCount, metadataTable ? metadataTable->numberOfOwnCallSiteDatas() : 0);
 }
 
 // After attach, every IC holds the learning fields its record derives, the fold bit ORed into its mold's, the *GaveUp
@@ -193,46 +226,6 @@ static void checkAttachedPropertyICs(const PreparedBaselineICs& prepared, CodeBl
     }
 }
 
-static ASCIILiteral captureCheckField(CaptureCheck check)
-{
-    switch (check) {
-    case CaptureCheck::NoBaselineJITData:
-        return "capture.NoBaselineJITData"_s;
-    case CaptureCheck::OutputSizeMismatch:
-        return "capture.OutputSizeMismatch"_s;
-    case CaptureCheck::MoldMismatch:
-        return "capture.MoldMismatch"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-static ASCIILiteral sectionCheckField(Check check)
-{
-    switch (check) {
-    case Check::SectionSize:
-        return "capture.SectionSize"_s;
-    case Check::SummaryBound:
-        return "capture.SummaryBound"_s;
-    case Check::CallLinkGroups:
-        return "capture.CallLinkGroups"_s;
-    case Check::ReservedBits:
-        return "capture.ReservedBits"_s;
-    case Check::EnumRange:
-        return "capture.EnumRange"_s;
-    case Check::SummaryCount:
-        return "capture.SummaryCount"_s;
-    case Check::MoldPairing:
-        return "capture.MoldPairing"_s;
-    case Check::MetadataLayout:
-        return "capture.MetadataLayout"_s;
-    case Check::MoldMegamorphicBit:
-        return "capture.MoldMegamorphicBit"_s;
-    case Check::NewbornCallLinks:
-        return "capture.NewbornCallLinks"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
 // The round trip: a strict capture of the CB, taken before any of its sites runs, writes for every IC and call-link site
 // the recapture of the record it was restored from. A record that differs is reported at its own site and index, so a
 // field that seeding or attach got wrong is reported twice at one index, once by checkSeededCallLinks or
@@ -246,12 +239,12 @@ static void checkRecapture(const PreparedBaselineICs& prepared, CodeBlock& codeB
     Vector<uint8_t> bytes(codeBlock.baselineJITData() ? baselineICsSectionSize(codeBlock) : 0);
     auto captured = captureBaselineICs(codeBlock, bytes.mutableSpan(), StrictChecks::Yes);
     if (!captured) {
-        expectField(mismatches, captureSite, captured.error().siteIndex, captureCheckField(captured.error().check), false, true);
+        expectField(mismatches, captureSite, captured.error().siteIndex, description(captured.error().check), false, true);
         return;
     }
     auto view = parseSection(bytes.span(), StrictChecks::Yes);
     if (!view) {
-        expectField(mismatches, captureSite, view.error().siteIndex, sectionCheckField(view.error().check), false, true);
+        expectField(mismatches, captureSite, view.error().siteIndex, description(view.error().check), false, true);
         return;
     }
 
@@ -270,14 +263,26 @@ static void checkRecapture(const PreparedBaselineICs& prepared, CodeBlock& codeB
         expectField(mismatches, site, index, "recaptured.reserved"_s, expected.reserved[0] | (expected.reserved[1] << 8), actual.reserved[0] | (actual.reserved[1] << 8));
     }
 
+    // The captured groups give each captured record the opcode of its site; the strict parse checked them.
+    Vector<const CallLinkOpcode*> opcodes;
+    opcodes.reserveInitialCapacity(view->callLinks.size());
+    for (unsigned groupIndex = 0; groupIndex < view->header.callLinkGroupCount; ++groupIndex) {
+        CallLinkGroup group = view->group(groupIndex);
+        const CallLinkOpcode& opcode = callLinkOpcodes[*canonicalCallLinkPosition(static_cast<OpcodeID>(group.opcodeID))];
+        for (uint32_t siteInGroup = 0; siteInGroup < group.siteCount; ++siteInGroup)
+            opcodes.append(&opcode);
+    }
+
     std::span<const CallLinkRecord> callLinks = prepared.callLinks();
     expectCount(mismatches, captureSite, "capture.callLinkSiteCount"_s, callLinks.size(), view->callLinks.size());
-    for (size_t index = 0, count = std::min(callLinks.size(), view->callLinks.size()); index < count; ++index) {
+    for (size_t index = 0, count = std::min({ callLinks.size(), view->callLinks.size(), opcodes.size() }); index < count; ++index) {
         constexpr auto site = TwinMismatch::Site::CallLink;
-        CallLinkRecord expected = recapturedCallLink(callLinks[index]);
+        CallLinkRecord expected = recapturedCallLink(*opcodes[index], callLinks[index]);
         const CallLinkRecord& actual = view->callLinks[index];
         expectField(mismatches, site, index, "recaptured.bits"_s, expected.bits, actual.bits);
         expectField(mismatches, site, index, "recaptured.maxArgumentCountIncludingThisForVarargs"_s, expected.maxArgumentCountIncludingThisForVarargs, actual.maxArgumentCountIncludingThisForVarargs);
+        expectField(mismatches, site, index, "recaptured.thisArrayModes"_s, readThisArrayModes(expected), readThisArrayModes(actual));
+        expectField(mismatches, site, index, "recaptured.thisArrayProfileFlags"_s, readThisArrayProfileFlags(expected), readThisArrayProfileFlags(actual));
     }
 }
 
@@ -334,6 +339,21 @@ static ASCIILiteral summaryName(PropertyInlineCacheSummary summary)
         return "TakesSlowPath"_s;
     case PropertyInlineCacheSummary::TakesSlowPathAndMakesCalls:
         return "TakesSlowPathAndMakesCalls"_s;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+static ASCIILiteral dataStateName(CallSiteDataState data)
+{
+    switch (data) {
+    case CallSiteDataState::Inline:
+        return "Inline"_s;
+    case CallSiteDataState::NotExecuted:
+        return "NotExecuted"_s;
+    case CallSiteDataState::ExecutedOnce:
+        return "ExecutedOnce"_s;
+    case CallSiteDataState::Own:
+        return "Own"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -404,12 +424,15 @@ static JSObject* callLinkToJS(JSGlobalObject* globalObject, const CallLinkSnapsh
     JSObject* object = constructEmptyObject(globalObject);
     putField(vm, object, "opcode"_s, nameString(vm, opcodeNames[callLink.opcodeID]));
     putField(vm, object, "metadataID"_s, jsNumber(callLink.metadataID));
+    putField(vm, object, "data"_s, nameString(vm, dataStateName(callLink.data)));
     putField(vm, object, "mode"_s, nameString(vm, modeName(callLink.mode)));
     putField(vm, object, "seenOnce"_s, jsBoolean(callLink.seenOnce));
     putField(vm, object, "hasSeenClosure"_s, jsBoolean(callLink.hasSeenClosure));
     putField(vm, object, "clearedByGC"_s, jsBoolean(callLink.clearedByGC));
     putField(vm, object, "clearedByVirtual"_s, jsBoolean(callLink.clearedByVirtual));
     putField(vm, object, "maxArgumentCountIncludingThisForVarargs"_s, jsNumber(callLink.maxArgumentCountIncludingThisForVarargs));
+    putField(vm, object, "thisArrayModes"_s, jsNumber(callLink.thisArrayModes));
+    putField(vm, object, "thisArrayProfileFlags"_s, jsNumber(callLink.thisArrayProfileFlags));
     putField(vm, object, "hasStub"_s, jsBoolean(callLink.hasStub));
     putField(vm, object, "hasLastSeenCallee"_s, jsBoolean(callLink.hasLastSeenCallee));
     return object;
@@ -482,8 +505,8 @@ BaselineICsSnapshot snapshotBaselineICs(CodeBlock& codeBlock)
         for (unsigned index = 0; index < count; ++index)
             snapshot.propertyICs.append(ICTwinsInternal::snapshotPropertyIC(locker, vm, jitData->propertyCache(index)));
     }
-    forEachCallLinkSite(codeBlock, [&](unsigned canonicalPosition, unsigned metadataID, CallLinkInfo& callLinkInfo) {
-        snapshot.callLinks.append(ICTwinsInternal::snapshotCallLink(locker, callLinkOpcodes[canonicalPosition], metadataID, callLinkInfo));
+    forEachCallLinkSite(codeBlock, [&](const CallLinkSite& site) {
+        snapshot.callLinks.append(ICTwinsInternal::snapshotCallLink(locker, site));
     });
     ICTwinsInternal::appendSuperConstructs<OpSuperConstruct>(codeBlock, snapshot.superConstructs);
     ICTwinsInternal::appendSuperConstructs<OpSuperConstructVarargs>(codeBlock, snapshot.superConstructs);
@@ -496,7 +519,7 @@ Vector<TwinMismatch> checkRestoredBaselineICs(const PreparedBaselineICs& prepare
     {
         // The snapshot releases the CB's lock before the capture takes it again.
         BaselineICsSnapshot snapshot = snapshotBaselineICs(codeBlock);
-        ICTwinsInternal::checkSeededCallLinks(prepared, snapshot, mismatches);
+        ICTwinsInternal::checkSeededCallLinks(prepared, codeBlock, snapshot, mismatches);
         ICTwinsInternal::checkAttachedPropertyICs(prepared, codeBlock, snapshot, mismatches);
     }
     ICTwinsInternal::checkRecapture(prepared, codeBlock, mismatches);

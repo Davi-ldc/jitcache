@@ -30,12 +30,13 @@
 #include <wtf/text/MakeString.h>
 
 // Tests of UCBFeedback.h and UCBFeedback.cpp. The ucb.feedback section carries a body's profiles, exit sites, tier-up
-// history and LLInt counter: writeFeedbackSection puts each field at its offset, FeedbackSection::parse reads it back and
-// rejects each rule of the layout broken once, feedbackFits and constantBitsFit refuse a UCB the section does not fit,
-// seedFeedback leaves the captured feedback in a second generation of the program, and liveRichness and savedRichness
-// agree. armLLIntCounter arms the counter as native setThreshold would. A body without an image carries its LLInt
-// progress through carriedLLIntProgress; an import arms the counter from it unless jitCacheImportLLIntProgress is off,
-// and JITCacheCapture's beats ranks such a capture below any capture with an image.
+// history and LLInt counter, and the UCB's value and array copies exactly when the body has an image and the UCB has them:
+// writeFeedbackSection puts each field at its offset, FeedbackSection::parse reads it back and rejects each rule of the
+// layout broken once, feedbackFits and constantBitsFit refuse a UCB the section does not fit, seedFeedback leaves the
+// captured feedback in a second generation of the program, allocating the copies for a body with an image only, and
+// liveRichness and savedRichness agree. armLLIntCounter arms the counter as native setThreshold would. A body without an
+// image carries its LLInt progress through carriedLLIntProgress; an import arms the counter from it unless
+// jitCacheImportLLIntProgress is off, and JITCacheCapture's beats ranks such a capture below any capture with an image.
 
 namespace JSC::JITCache::Tests {
 
@@ -51,18 +52,19 @@ static constexpr std::array<size_t, 8> feedbackCountOffsets { 8, 12, 16, 20, 24,
 static constexpr size_t feedbackDidOptimizeOffset = 36;
 static constexpr size_t feedbackQuickDFGTierUpOffset = 37;
 static constexpr size_t feedbackQuickFTLTierUpOffset = 38;
-static constexpr size_t feedbackReservedByteOffset = 39;
+static constexpr size_t feedbackCopiesOffset = 39;
 static constexpr size_t feedbackThresholdOffset = 40;
 static constexpr size_t feedbackTotalCountOffset = 44;
 static constexpr size_t feedbackCounterOffset = 48;
 static constexpr size_t feedbackHeaderSize = 56;
 static constexpr size_t exitSiteRecordSize = 8;
 
-// Where each array of ucb.feedback starts for the given counts, and where the section ends.
+// Where each array of ucb.feedback starts for the given counts, and where the section ends. The value predictions and
+// array profiles take room only in a section with copies.
 struct FeedbackLayout {
     explicit FeedbackLayout(const FeedbackCounts& counts)
-        : arrayProfiles(feedbackHeaderSize + sizeof(SpeculatedType) * counts.valueProfiles)
-        , binaryArithProfiles(arrayProfiles + 8 * static_cast<size_t>(counts.arrayProfiles))
+        : arrayProfiles(feedbackHeaderSize + (counts.copies ? sizeof(SpeculatedType) * counts.valueProfiles : 0))
+        , binaryArithProfiles(arrayProfiles + (counts.copies ? 8 * static_cast<size_t>(counts.arrayProfiles) : 0))
         , unaryArithProfiles(binaryArithProfiles + 2 * static_cast<size_t>(counts.binaryArithProfiles))
         , unaryEnd(unaryArithProfiles + 2 * static_cast<size_t>(counts.unaryArithProfiles))
         , exitSites(roundUpToMultipleOf<4>(unaryEnd))
@@ -138,14 +140,36 @@ static constexpr int32_t fixtureThreshold = 500;
 static constexpr double fixtureProgress = 123.25;
 static constexpr unsigned fixtureExitSiteCount = 3;
 
+// A UCB copy's prediction and array state, or the zeros writeFeedbackSection writes for a UCB without copies.
+static SpeculatedType copiedPrediction(UnlinkedCodeBlock& codeBlock, unsigned index)
+{
+    auto* profiles = codeBlock.valueAndArrayProfiles();
+    return profiles ? profiles->valueProfiles()[index].prediction() : SpecNone;
+}
+
+static ArrayModes copiedArrayModes(UnlinkedCodeBlock& codeBlock, unsigned index)
+{
+    auto* profiles = codeBlock.valueAndArrayProfiles();
+    return profiles ? profiles->arrayProfiles()[index].observedArrayModes() : 0;
+}
+
+static OptionSet<ArrayProfileFlag> copiedArrayFlags(UnlinkedCodeBlock& codeBlock, unsigned index)
+{
+    auto* profiles = codeBlock.valueAndArrayProfiles();
+    return profiles ? profiles->arrayProfiles()[index].arrayProfileFlags() : OptionSet<ArrayProfileFlag> { };
+}
+
 // Gives a generated UCB that no holder has published every kind of feedback a body carries, as a run would leave it. The
 // UCB is Strong-held, so markers visit it while the test runs.
 static void giveFeedback(VM& vm, UnlinkedCodeBlock& codeBlock, uint32_t symbolTableIndex)
 {
-    auto& valueProfiles = codeBlock.unlinkedValueProfiles();
+    // A generated UCB has value and array copies only once a baseline compilation reaches it, so the fixture allocates them
+    // as that compilation would.
+    codeBlock.ensureValueAndArrayProfiles();
+    auto valueProfiles = codeBlock.valueAndArrayProfiles()->valueProfiles();
     for (unsigned i = 0; i < valueProfiles.size(); ++i)
         valueProfiles[i].restorePrediction(slotPattern(i) & SpecBytecodeTop);
-    auto& arrayProfiles = codeBlock.unlinkedArrayProfiles();
+    auto arrayProfiles = codeBlock.valueAndArrayProfiles()->arrayProfiles();
     for (unsigned i = 0; i < arrayProfiles.size(); ++i) {
         OptionSet<ArrayProfileFlag> flags;
         for (unsigned flag = 0; flag < restorableArrayProfileFlags.size(); ++flag) {
@@ -197,22 +221,23 @@ static bool feedbackBytesMatch(std::span<const uint8_t> bytes, UnlinkedCodeBlock
     }
     TierUpHistory history = tierUpHistoryOf(codeBlock);
     if (bytes[feedbackDidOptimizeOffset] != static_cast<uint8_t>(history.didOptimize) || bytes[feedbackQuickDFGTierUpOffset] != static_cast<uint8_t>(history.quickDFGTierUp)
-        || bytes[feedbackQuickFTLTierUpOffset] != static_cast<uint8_t>(history.quickFTLTierUp) || bytes[feedbackReservedByteOffset])
+        || bytes[feedbackQuickFTLTierUpOffset] != static_cast<uint8_t>(history.quickFTLTierUp) || bytes[feedbackCopiesOffset] != static_cast<uint8_t>(counts.copies))
         return false;
     BaselineExecutionCounter& counter = codeBlock.llintExecuteCounter();
     if (readField<int32_t>(bytes, feedbackThresholdOffset) != counter.m_activeThreshold || readField<uint32_t>(bytes, feedbackTotalCountOffset) != std::bit_cast<uint32_t>(counter.m_totalCount)
         || readField<int32_t>(bytes, feedbackCounterOffset) != counter.m_counter)
         return false;
 
-    for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
-        if (readField<SpeculatedType>(bytes, feedbackHeaderSize + sizeof(SpeculatedType) * i) != codeBlock.unlinkedValueProfiles()[i].prediction())
-            return false;
-    }
-    for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
-        auto& profile = codeBlock.unlinkedArrayProfiles()[i];
-        size_t offset = layout.arrayProfiles + 8 * static_cast<size_t>(i);
-        if (readField<uint32_t>(bytes, offset) != profile.observedArrayModes() || readField<uint32_t>(bytes, offset + 4) != profile.arrayProfileFlags().toRaw())
-            return false;
+    if (counts.copies) {
+        for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
+            if (readField<SpeculatedType>(bytes, feedbackHeaderSize + sizeof(SpeculatedType) * i) != copiedPrediction(codeBlock, i))
+                return false;
+        }
+        for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
+            size_t offset = layout.arrayProfiles + 8 * static_cast<size_t>(i);
+            if (readField<uint32_t>(bytes, offset) != copiedArrayModes(codeBlock, i) || readField<uint32_t>(bytes, offset + 4) != copiedArrayFlags(codeBlock, i).toRaw())
+                return false;
+        }
     }
     for (uint32_t i = 0; i < counts.binaryArithProfiles; ++i) {
         if (readField<uint16_t>(bytes, layout.binaryArithProfiles + 2 * static_cast<size_t>(i)) != codeBlock.binaryArithProfile(i).bits())
@@ -252,20 +277,22 @@ static bool feedbackBytesMatch(std::span<const uint8_t> bytes, UnlinkedCodeBlock
     return isAllZero(bytes.subspan(layout.end));
 }
 
-// Whether a parsed section reads back the UCB's feedback through every accessor FeedbackSection has.
-static bool feedbackSectionDescribes(const FeedbackSection& section, UnlinkedCodeBlock& codeBlock)
+// Whether a parsed section reads back the UCB's feedback, for a body with or without an image, through every accessor
+// FeedbackSection has.
+static bool feedbackSectionDescribes(const FeedbackSection& section, UnlinkedCodeBlock& codeBlock, BodyImage image)
 {
     const FeedbackCounts& counts = section.counts();
-    if (counts != liveFeedbackCounts(codeBlock))
+    if (counts != liveFeedbackCounts(codeBlock, image))
         return false;
-    for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
-        if (section.prediction(i) != codeBlock.unlinkedValueProfiles()[i].prediction())
-            return false;
-    }
-    for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
-        auto& profile = codeBlock.unlinkedArrayProfiles()[i];
-        if (section.observedArrayModes(i) != profile.observedArrayModes() || section.arrayProfileFlags(i) != profile.arrayProfileFlags())
-            return false;
+    if (counts.copies) {
+        for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
+            if (section.prediction(i) != copiedPrediction(codeBlock, i))
+                return false;
+        }
+        for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
+            if (section.observedArrayModes(i) != copiedArrayModes(codeBlock, i) || section.arrayProfileFlags(i) != copiedArrayFlags(codeBlock, i))
+                return false;
+        }
     }
     for (uint32_t i = 0; i < counts.binaryArithProfiles; ++i) {
         if (section.binaryArithBits(i) != codeBlock.binaryArithProfile(i).bits())
@@ -299,21 +326,22 @@ static bool feedbackSectionDescribes(const FeedbackSection& section, UnlinkedCod
         && section.llintActiveThreshold() == counter.m_activeThreshold && section.llintProgress() == counter.count();
 }
 
-// Whether two UCBs of one program hold the same feedback, the fields the twin check compares: what seeding must leave in
-// the UCB it seeds. Exit sites compare as a set, and the counter's progress up to the float rounding of m_totalCount.
-static bool sameFeedback(UnlinkedCodeBlock& expected, UnlinkedCodeBlock& actual)
+// Whether two UCBs of one program hold the same feedback, the fields the twin check compares: what seeding a body with or
+// without an image must leave in the UCB it seeds. The copies compare only for a body with an image, which carries them.
+// Exit sites compare as a set, and the counter's progress up to the float rounding of m_totalCount.
+static bool sameFeedback(UnlinkedCodeBlock& expected, UnlinkedCodeBlock& actual, BodyImage image)
 {
-    if (liveFeedbackCounts(expected) != liveFeedbackCounts(actual))
+    if (liveFeedbackCounts(expected, image) != liveFeedbackCounts(actual, image))
         return false;
-    for (unsigned i = 0; i < expected.numberOfValueProfiles(); ++i) {
-        if (expected.unlinkedValueProfiles()[i].prediction() != actual.unlinkedValueProfiles()[i].prediction())
-            return false;
-    }
-    for (unsigned i = 0; i < expected.numberOfArrayProfiles(); ++i) {
-        auto& expectedProfile = expected.unlinkedArrayProfiles()[i];
-        auto& actualProfile = actual.unlinkedArrayProfiles()[i];
-        if (expectedProfile.observedArrayModes() != actualProfile.observedArrayModes() || expectedProfile.arrayProfileFlags() != actualProfile.arrayProfileFlags())
-            return false;
+    if (image == BodyImage::Present) {
+        for (unsigned i = 0; i < expected.numberOfValueProfiles(); ++i) {
+            if (copiedPrediction(expected, i) != copiedPrediction(actual, i))
+                return false;
+        }
+        for (unsigned i = 0; i < expected.numberOfArrayProfiles(); ++i) {
+            if (copiedArrayModes(expected, i) != copiedArrayModes(actual, i) || copiedArrayFlags(expected, i) != copiedArrayFlags(actual, i))
+                return false;
+        }
     }
     for (unsigned i = 0; i < expected.numberOfBinaryArithProfiles(); ++i) {
         if (expected.binaryArithProfile(i).bits() != actual.binaryArithProfile(i).bits())
@@ -353,94 +381,111 @@ static bool sameFeedback(UnlinkedCodeBlock& expected, UnlinkedCodeBlock& actual)
     return true;
 }
 
-// ucb.feedback: a UCB given every kind of feedback writes a section at the layout's offsets, which round-trips with strict
-// on and off and seeds a second generation of the same program to the same feedback; the richness of the live UCB and of
-// the saved section agree; feedbackFits and constantBitsFit refuse a UCB the section does not fit; and strict parsing
-// rejects each rule of the layout broken once.
+// ucb.feedback: a UCB given every kind of feedback writes a section at the layout's offsets, with its copies for a body
+// with an image and without them, V and A still the UCB's counts, for a body without one. Both round-trip with strict on
+// and off and seed second generations of the same program to the same feedback, allocating the copies for the body with
+// an image alone; the richness of the live UCB and of both saved sections agree; feedbackFits and constantBitsFit refuse a
+// UCB the section does not fit; and strict parsing rejects each rule of the layout broken once.
 static bool testFeedbackSection(VM& vm, TestPart& part)
 {
     auto producer = generateSectionFixture(vm);
     if (!part.check(!!producer, "the section fixture program failed to generate"_s))
         return false;
     ProgramFixture consumer = generateFixture(vm, producer->text);
+    ProgramFixture imagelessConsumer = generateFixture(vm, producer->text);
     ProgramFixture unrelated = generateFixture(vm, "0;"_s);
-    if (!part.check(consumer.codeBlock && unrelated.codeBlock, "a test program failed to generate"_s))
+    if (!part.check(consumer.codeBlock && imagelessConsumer.codeBlock && unrelated.codeBlock, "a test program failed to generate"_s))
         return false;
     UnlinkedCodeBlock& source = *producer->codeBlock.get();
     UnlinkedCodeBlock& target = *consumer.codeBlock.get();
+    UnlinkedCodeBlock& imagelessTarget = *imagelessConsumer.codeBlock.get();
     auto symbolTable = symbolTableConstantIndex(source);
     bool coversEveryArray = source.numberOfValueProfiles() && source.numberOfArrayProfiles() && source.numberOfBinaryArithProfiles() && source.numberOfUnaryArithProfiles()
         && source.numberOfFunctionDecls() && source.numberOfFunctionExprs() && symbolTable;
     if (!part.check(coversEveryArray, "the fixture program lacks a profile, a child table or a SymbolTable constant"_s))
         return false;
-    if (!part.check(liveFeedbackCounts(source) == liveFeedbackCounts(target), "two generations of one program differ in their feedback counts"_s))
+    if (!part.check(liveFeedbackCounts(source, BodyImage::Absent) == liveFeedbackCounts(target, BodyImage::Absent), "two generations of one program differ in their feedback counts"_s))
+        return false;
+    // A generated UCB has no copies until a baseline compilation, or an import with an image, reaches it.
+    if (!part.check(!target.valueAndArrayProfiles() && !imagelessTarget.valueAndArrayProfiles(), "a generated UCB has value and array copies before any baseline compilation"_s))
         return false;
 
     giveFeedback(vm, source, *symbolTable);
-    FeedbackCounts counts = liveFeedbackCounts(source);
+    FeedbackCounts counts = liveFeedbackCounts(source, BodyImage::Present);
+    FeedbackCounts imagelessCounts = liveFeedbackCounts(source, BodyImage::Absent);
+    bool copiesFollowTheImage = counts.copies && !imagelessCounts.copies && imagelessCounts.valueProfiles == counts.valueProfiles && imagelessCounts.arrayProfiles == counts.arrayProfiles;
+    if (!part.check(copiesFollowTheImage, "liveFeedbackCounts does not carry the copies exactly for a body with an image, or changes V or A without them"_s))
+        return false;
     FeedbackLayout layout { counts };
-    if (!part.check(counts.exitSites == fixtureExitSiteCount && feedbackSectionSize(counts) == layout.size, "feedbackSectionSize disagrees with the feedback section's layout"_s))
+    FeedbackLayout imagelessLayout { imagelessCounts };
+    bool sizesFollowTheLayout = counts.exitSites == fixtureExitSiteCount && feedbackSectionSize(counts) == layout.size && feedbackSectionSize(imagelessCounts) == imagelessLayout.size
+        && imagelessLayout.size < layout.size;
+    if (!part.check(sizesFollowTheLayout, "feedbackSectionSize disagrees with the feedback section's layout"_s))
         return false;
     Vector<uint8_t> section(feedbackSectionSize(counts));
     writeFeedbackSection(section.mutableSpan(), source, counts);
-    if (!part.check(feedbackBytesMatch(section.span(), source, counts), "writeFeedbackSection did not lay out the feedback at the feedback section's offsets"_s))
+    Vector<uint8_t> imagelessSection(feedbackSectionSize(imagelessCounts));
+    writeFeedbackSection(imagelessSection.mutableSpan(), source, imagelessCounts);
+    if (!part.check(feedbackBytesMatch(section.span(), source, counts), "writeFeedbackSection did not lay out the feedback and the copies at the feedback section's offsets"_s))
+        return false;
+    if (!part.check(feedbackBytesMatch(imagelessSection.span(), source, imagelessCounts), "writeFeedbackSection did not lay out the feedback of a body without an image at the feedback section's offsets, with the copies byte 0"_s))
         return false;
     for (bool strict : { true, false }) {
         auto parsed = FeedbackSection::parse(section.span(), strict);
-        if (!part.check(parsed && feedbackSectionDescribes(*parsed, source), strict ? "ucb.feedback does not round-trip with strict on"_s : "ucb.feedback does not round-trip with strict off"_s))
+        auto parsedImageless = FeedbackSection::parse(imagelessSection.span(), strict);
+        bool roundTrips = parsed && feedbackSectionDescribes(*parsed, source, BodyImage::Present) && parsedImageless && feedbackSectionDescribes(*parsedImageless, source, BodyImage::Absent);
+        if (!part.check(roundTrips, strict ? "ucb.feedback does not round-trip with strict on"_s : "ucb.feedback does not round-trip with strict off"_s))
             return false;
     }
 
-    // Richness: a binary profile's 13 low bits, a unary profile's 10, and one unit per exit site.
+    // Richness: a binary profile's 13 low bits, a unary profile's 10, and one unit per exit site; no copy counts, with or
+    // without an image.
     UCBRichness expectedRichness;
     for (unsigned i = 0; i < source.numberOfBinaryArithProfiles(); ++i)
         expectedRichness.arithmeticUnits += static_cast<uint64_t>(std::popcount(source.binaryArithProfile(i).bits() & ((1u << 13) - 1)));
     for (unsigned i = 0; i < source.numberOfUnaryArithProfiles(); ++i)
         expectedRichness.arithmeticUnits += static_cast<uint64_t>(std::popcount(source.unaryArithProfile(i).bits() & ((1u << 10) - 1)));
     expectedRichness.exitSiteUnits = fixtureExitSiteCount;
-    UCBRichness live = liveRichness(source, BodyImage::Present);
+    auto agrees = [&](const UCBRichness& richness) {
+        return richness.arithmeticUnits == expectedRichness.arithmeticUnits && richness.exitSiteUnits == expectedRichness.exitSiteUnits && richness.total() == expectedRichness.total();
+    };
     auto savedSection = FeedbackSection::parse(section.span(), true);
-    std::optional<UCBRichness> saved;
-    if (savedSection)
-        saved = savedRichness(*savedSection, BodyImage::Present);
-    bool richnessAgrees = live.arithmeticUnits == expectedRichness.arithmeticUnits && live.exitSiteUnits == expectedRichness.exitSiteUnits && !live.copyUnits
-        && saved && saved->arithmeticUnits == expectedRichness.arithmeticUnits && saved->exitSiteUnits == expectedRichness.exitSiteUnits && !saved->copyUnits;
-    if (!part.check(richnessAgrees, "liveRichness or savedRichness does not count the richness units"_s))
-        return false;
-    // Without an image the UCB copies count too, one unit per prediction bit and per array flag, alike live and saved.
-    UCBRichness liveWithoutImage = liveRichness(source, BodyImage::Absent);
-    UCBRichness savedWithoutImage = savedSection ? savedRichness(*savedSection, BodyImage::Absent) : UCBRichness { };
-    uint64_t expectedCopyUnits = 0;
-    for (auto& profile : source.unlinkedValueProfiles())
-        expectedCopyUnits += static_cast<uint64_t>(std::popcount(static_cast<uint64_t>(profile.prediction())));
-    for (auto& profile : source.unlinkedArrayProfiles())
-        expectedCopyUnits += static_cast<uint64_t>(std::popcount(profile.arrayProfileFlags().toRaw()));
-    if (!part.check(liveWithoutImage.copyUnits == expectedCopyUnits && savedWithoutImage.copyUnits == expectedCopyUnits && liveWithoutImage.total() == savedWithoutImage.total(),
-        "the richness of a body without an image does not count its UCB copies alike live and saved"_s))
+    auto savedImagelessSection = FeedbackSection::parse(imagelessSection.span(), true);
+    bool richnessAgrees = agrees(liveRichness(source)) && savedSection && agrees(savedRichness(*savedSection)) && savedImagelessSection && agrees(savedRichness(*savedImagelessSection));
+    if (!part.check(richnessAgrees, "liveRichness or savedRichness does not count the richness units alike, with and without copies"_s))
         return false;
     Vector<uint8_t> brokenMagic = section;
     brokenMagic[0] ^= 0xff;
     if (!part.check(!FeedbackSection::parse(brokenMagic.span(), true) && FeedbackSection::parse(brokenMagic.span(), false), "FeedbackSection::parse does not reject a broken magic with strict on alone"_s))
         return false;
 
-    // Seeding a second generation of the program, which no holder has published.
+    // Seeding second generations of the program, which no holder has published: with an image, the copies are allocated and
+    // seeded; without one, none are allocated.
     auto parsed = FeedbackSection::parse(section.span(), true);
-    if (!part.check(parsed && feedbackFits(target, *parsed) && constantBitsFit(target, *parsed), "feedbackFits or constantBitsFit refuses a UCB its section fits"_s))
+    auto parsedImageless = FeedbackSection::parse(imagelessSection.span(), true);
+    bool fits = parsed && parsedImageless && feedbackFits(target, *parsed, BodyImage::Present) && feedbackFits(imagelessTarget, *parsedImageless, BodyImage::Absent)
+        && constantBitsFit(target, *parsed);
+    if (!part.check(fits, "feedbackFits or constantBitsFit refuses a UCB its section fits"_s))
         return false;
-    if (!part.check(!feedbackFits(*unrelated.codeBlock.get(), *parsed), "feedbackFits accepts a UCB with other counts"_s))
+    if (!part.check(!feedbackFits(target, *parsed, BodyImage::Absent) && !feedbackFits(imagelessTarget, *parsedImageless, BodyImage::Present), "feedbackFits accepts copies in a body without an image, or none in a body with one"_s))
+        return false;
+    if (!part.check(!feedbackFits(*unrelated.codeBlock.get(), *parsed, BodyImage::Present), "feedbackFits accepts a UCB with other counts"_s))
         return false;
     seedFeedback(vm, target, *parsed, BodyImage::Present);
-    if (!part.check(sameFeedback(source, target), "seedFeedback did not leave the captured feedback in the seeded UCB"_s))
+    if (!part.check(target.valueAndArrayProfiles() && sameFeedback(source, target, BodyImage::Present), "seedFeedback with an image did not allocate the copies, or did not leave the captured feedback in the seeded UCB"_s))
         return false;
     BaselineExecutionCounter& seededCounter = target.llintExecuteCounter();
     if (!part.check(seededCounter.m_activeThreshold == fixtureThreshold && equalUpToFloatRounding(seededCounter.count(), fixtureProgress, seededCounter.m_totalCount), "seedFeedback did not arm the LLInt counter with the captured threshold and progress"_s))
+        return false;
+    seedFeedback(vm, imagelessTarget, *parsedImageless, BodyImage::Absent);
+    if (!part.check(!imagelessTarget.valueAndArrayProfiles() && sameFeedback(source, imagelessTarget, BodyImage::Absent), "seedFeedback without an image allocated copies, or did not leave the captured feedback in the seeded UCB"_s))
         return false;
 
     // An exit site at or past the end of the instruction stream.
     Vector<uint8_t> pastTheStream = section;
     writeField<uint32_t>(pastTheStream.mutableSpan(), layout.exitSites, BytecodeIndex(source.instructionsSize()).asBits());
     auto pastTheStreamSection = FeedbackSection::parse(pastTheStream.span(), true);
-    if (!part.check(pastTheStreamSection && !feedbackFits(source, *pastTheStreamSection), "feedbackFits accepts an exit site past the instruction stream"_s))
+    if (!part.check(pastTheStreamSection && !feedbackFits(source, *pastTheStreamSection, BodyImage::Present), "feedbackFits accepts an exit site past the instruction stream"_s))
         return false;
     // A singleton bit on a constant that is not a SymbolTable.
     auto stringIndex = stringConstantIndex(source, "jitcache-u5-atom-constant"_s);
@@ -469,7 +514,8 @@ static bool testFeedbackSection(VM& vm, TestPart& part)
     auto parseFeedback = [](std::span<const uint8_t> bytes, bool strict) {
         return FeedbackSection::parse(bytes, strict);
     };
-    // Parsing with strict off reads only the header, so every crafted section below keeps its layout readable.
+    // Parsing with strict off reads only the header, so every crafted section below keeps its layout readable. They break
+    // the section with copies, whose regions every rule reaches, but for a copies byte set on the section without them.
     auto rejects = [&](ASCIILiteral rule, const auto& mutate) {
         return strictRejects(part, "ucb.feedback"_s, parseFeedback, section, rule, true, mutate);
     };
@@ -504,7 +550,8 @@ static bool testFeedbackSection(VM& vm, TestPart& part)
         && rejects("didOptimize 3"_s, [](auto& bytes) { bytes[feedbackDidOptimizeOffset] = 3; })
         && rejects("quick DFG tier-up 3"_s, [](auto& bytes) { bytes[feedbackQuickDFGTierUpOffset] = 3; })
         && rejects("quick FTL tier-up 2"_s, [](auto& bytes) { bytes[feedbackQuickFTLTierUpOffset] = 2; })
-        && rejects("a nonzero byte 39"_s, [](auto& bytes) { bytes[feedbackReservedByteOffset] = 1; })
+        && rejects("a copies byte of 2"_s, [](auto& bytes) { bytes[feedbackCopiesOffset] = 2; })
+        && strictRejects(part, "ucb.feedback"_s, parseFeedback, imagelessSection, "a copies byte of 1 on a section that carries no copies"_s, true, [](auto& bytes) { bytes[feedbackCopiesOffset] = 1; })
         && rejects("a negative counter threshold"_s, [&](auto& bytes) { setCounter(bytes, -1, 499.25f, -376); })
         && rejects("a NaN counter total"_s, [&](auto& bytes) { setCounter(bytes, fixtureThreshold, std::numeric_limits<float>::quiet_NaN(), 0); })
         && rejects("an infinite counter total"_s, [&](auto& bytes) { setCounter(bytes, fixtureThreshold, std::numeric_limits<float>::infinity(), 0); })
@@ -516,6 +563,40 @@ static bool testFeedbackSection(VM& vm, TestPart& part)
         && (layout.size == layout.end || rejects("nonzero final padding"_s, [&](auto& bytes) {
             bytes[layout.end] = 1;
         }));
+}
+
+// A builtin's UCB never has value and array copies: a capture of its body with an image writes none, with the copies byte
+// 0 and V and A still the UCB's counts, which round-trips and fits a second generation of the body, and seeding that one
+// with an image leaves its copies null.
+static bool testBuiltinFeedback(VM& vm, TestPart& part)
+{
+    SourceCode source = makeSource("(function (a, b) { return [a, b][0] + b; })"_s, SourceOrigin { }, SourceTaintedOrigin::Untainted);
+    Strong<UnlinkedFunctionExecutable> builtin { vm, BuiltinExecutables::createExecutable(vm, source, Identifier { }, ImplementationVisibility::Public,
+        ConstructorKind::None, ConstructAbility::CannotConstruct, InlineAttribute::None, NeedsClassFieldInitializer::No) };
+    if (!part.check(builtin && builtin.get()->isBuiltinFunction(), "the builtin root failed to create"_s))
+        return false;
+    SourceCode bodySource = builtin.get()->linkedSourceCode(source);
+    Strong<UnlinkedFunctionCodeBlock> producer = generateBodyOf(vm, *builtin.get(), bodySource, CodeSpecializationKind::CodeForCall);
+    Strong<UnlinkedFunctionCodeBlock> consumer = generateBodyOf(vm, *builtin.get(), bodySource, CodeSpecializationKind::CodeForCall);
+    if (!part.check(producer && consumer && producer.get()->isBuiltinFunction() && producer.get()->numberOfValueProfiles() && producer.get()->numberOfArrayProfiles(), "the builtin's body failed to generate, or lacks a value or array profile"_s))
+        return false;
+
+    // A baseline compilation allocates no copies for a builtin either.
+    producer.get()->ensureValueAndArrayProfiles();
+    FeedbackCounts counts = liveFeedbackCounts(*producer.get(), BodyImage::Present);
+    bool noCopies = !producer.get()->valueAndArrayProfiles() && !counts.copies && counts.valueProfiles == producer.get()->numberOfValueProfiles()
+        && counts.arrayProfiles == producer.get()->numberOfArrayProfiles();
+    if (!part.check(noCopies, "a builtin's UCB has copies, or its feedback counts are not the UCB's"_s))
+        return false;
+    Vector<uint8_t> section(feedbackSectionSize(counts));
+    writeFeedbackSection(section.mutableSpan(), *producer.get(), counts);
+    if (!part.check(section.size() == FeedbackLayout { counts }.size && feedbackBytesMatch(section.span(), *producer.get(), counts), "a builtin's feedback section is not laid out without copies"_s))
+        return false;
+    auto parsed = FeedbackSection::parse(section.span(), true);
+    if (!part.check(parsed && feedbackSectionDescribes(*parsed, *producer.get(), BodyImage::Present) && feedbackFits(*consumer.get(), *parsed, BodyImage::Present), "a builtin's feedback section does not round-trip or fit a second generation of the body"_s))
+        return false;
+    seedFeedback(vm, *consumer.get(), *parsed, BodyImage::Present);
+    return part.check(!consumer.get()->valueAndArrayProfiles() && sameFeedback(*producer.get(), *consumer.get(), BodyImage::Present), "seeding a builtin's body with an image allocated copies, or did not leave the captured feedback"_s);
 }
 
 // armLLIntCounter keeps the captured threshold and progress, arms the slice native setThreshold arms from them, and arms a
@@ -570,6 +651,12 @@ JITCACHE_TEST(ucbFeedbackSectionLayoutAndSeeding, Yes)
 {
     TestPart part { context };
     testFeedbackSection(*context.vm(), part);
+}
+
+JITCACHE_TEST(ucbFeedbackBuiltinCarriesNoCopies, Yes)
+{
+    TestPart part { context };
+    testBuiltinFeedback(*context.vm(), part);
 }
 
 JITCACHE_TEST(ucbFeedbackArmLLIntCounter, No)

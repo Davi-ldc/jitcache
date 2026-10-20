@@ -39,11 +39,6 @@ class TrackedReferences;
 
 namespace FTL {
 
-struct OSRExitStub {
-    unsigned exitIndex;
-    MacroAssemblerCodeRef<OSRExitPtrTag> code;
-};
-
 class JITCode : public JSC::JITCode {
 public:
     JITCode();
@@ -85,6 +80,22 @@ public:
     int osrExitLocalsOffset() const { return m_osrExitLocalsOffset; }
     void setOSRExitLocalsOffset(int offset) { m_osrExitLocalsOffset = offset; }
 
+    OSRExit osrExit(unsigned index) const { return m_osrExits.at(index, *this); }
+    CodeLocationLabel<JSInternalPtrTag> osrExitEntrance(const OSRExit& exit) const
+    {
+        return CodeLocationLabel<JSEntryPtrTag>(m_b3Code.code()).labelAtOffset<JSInternalPtrTag>(exit.m_entranceOffset);
+    }
+    unsigned osrExitIndexForReturnPC(void* returnPC) const
+    {
+        uintptr_t entrance = reinterpret_cast<uintptr_t>(returnPC) - DFG::osrExitEntranceSize;
+        return m_osrExits.indexForEntranceOffset(entrance - m_b3Code.code().dataLocation<uintptr_t>(), *this);
+    }
+
+    OSRExitDescriptor& appendOSRExitDescriptor(DataFormat profileDataFormat, MethodOfGettingAValueProfile valueProfile)
+    {
+        return osrExitDescriptors.alloc(osrExitDescriptors.size(), profileDataFormat, valueProfile);
+    }
+
     unsigned numberOfCompiledDFGNodes() const { return m_numberOfCompiledDFGNodes; }
     void setNumberOfCompiledDFGNodes(unsigned numberOfCompiledDFGNodes)
     {
@@ -92,12 +103,11 @@ public:
     }
     
     DFG::CommonData common;
-    Vector<OSRExit> m_osrExit;
-    Vector<OSRExitStub, 0, CrashOnOverflow, 4> m_osrExitStubs;
+    OSRExitStream m_osrExits;
+    DFG::OSRExitStubs m_osrExitStubs;
     RegisterAtOffsetList m_calleeSaveRegisters;
     SegmentedVector<OSRExitDescriptor, 8> osrExitDescriptors;
     Vector<EncodedJSValue> osrExitConstants;
-    OSRExitValueReps osrExitValueReps;
     Vector<std::unique_ptr<LazySlowPath>> lazySlowPaths;
     
 private:

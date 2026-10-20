@@ -34,6 +34,9 @@ struct Config {
     std::optional<size_t> producerLimitBytes; // producing roles; empty: defaultProducerLimitBytes (JITCacheParameters.h)
     bool strict { false }; // off unless the host turns it on; strict reads run every check, structure checks included
     DeltaCapture deltaCapture { DeltaCapture::All }; // All unless the host sets Compiled
+    // The app the host runs, a value it computes from the code it runs, which JITCache only compares with the app an
+    // artifact's header names and writes into the header of an artifact it creates; empty: no app.
+    std::optional<uint64_t> appDigest;
     String benchReportPath; // empty: no bench report
     String twinReportPath; // ENABLE(JITCACHE_TWINS) builds; ignored elsewhere
 };
@@ -42,11 +45,13 @@ struct Config {
 static constexpr ASCIILiteral defaultArtifactPath = "./.jitcache"_s;
 
 // The role says what a start did: a Producer created its artifact and the other roles opened theirs, or, for a
-// ConsumerProducer, replaced an incompatible one, which the step says.
+// ConsumerProducer, replaced an incompatible one or one made for another app, which the step says.
 enum class StartOutcome : uint8_t { Started, Busy, Rejected, Fault };
 struct StartResult {
     StartOutcome outcome;
-    ASCIILiteral step; // for Started, empty, or "start.replaced" when a ConsumerProducer replaced an incompatible artifact
+    // For Started, empty, or "start.replaced" when a ConsumerProducer replaced an incompatible artifact or one made for
+    // another app.
+    ASCIILiteral step;
     String detail;
 };
 
@@ -66,8 +71,7 @@ struct Progress {
     uint64_t indexedBodies { 0 };
     uint64_t bodyOpens { 0 };
     uint64_t transientOpenFailures { 0 };
-    uint64_t imports { 0 }; // UCB statistics: imports, seededDecodes, attaches, gateDrops, misses (summed)
-    uint64_t seededDecodes { 0 };
+    uint64_t imports { 0 }; // UCB statistics: imports, attaches, gateDrops, misses (summed)
     uint64_t attaches { 0 };
     uint64_t gateDrops { 0 };
     uint64_t misses { 0 };

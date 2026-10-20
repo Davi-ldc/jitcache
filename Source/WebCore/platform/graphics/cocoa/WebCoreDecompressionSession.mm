@@ -32,8 +32,9 @@
 #import "Logging.h"
 #import "MediaSampleAVFObjC.h"
 #import "PixelBufferConformerCV.h"
+#import "SharedBuffer.h"
 #import "VideoDecoder.h"
-#import "VideoDecoderVTB.h"
+#import "VideoDecoderVTBSession.h"
 #import "VideoFrame.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreMedia/CMBufferQueue.h>
@@ -247,11 +248,11 @@ static RetainPtr<CMTaggedBufferGroupRef> createTaggedBufferGroupWithRequiredVide
     return adoptCF(refinedTaggedBufferGroup);
 }
 
-std::expected<RefPtr<VideoDecoderVTB>, OSStatus> WebCoreDecompressionSession::ensureDecoderForSample(CMSampleBufferRef cmSample)
+std::expected<RefPtr<VideoDecoderVTBSession>, OSStatus> WebCoreDecompressionSession::ensureDecoderForSample(CMSampleBufferRef cmSample)
 {
     if (m_waitingForKeyframe) {
         if (!isCMSampleBufferRandomAccess(cmSample))
-            return RefPtr<VideoDecoderVTB> { };
+            return RefPtr<VideoDecoderVTBSession> { };
         RELEASE_LOG_INFO(Media, "VTDecompressionSession received keyframe after format change, creating new VTDecompressionSession");
         m_waitingForKeyframe = false;
     }
@@ -268,7 +269,7 @@ std::expected<RefPtr<VideoDecoderVTB>, OSStatus> WebCoreDecompressionSession::en
         std::exchange(m_videoDecoder, nullptr)->close();
 
     if (m_videoDecoder)
-        return RefPtr<VideoDecoderVTB> { };
+        return RefPtr<VideoDecoderVTBSession> { };
 
     RefPtr videoDecoderVTB = m_videoDecoderVTB;
     if (videoFormatDescriptionChanged && videoDecoderVTB && !videoDecoderVTB->canAccept(videoFormatDescription.get())) {
@@ -278,7 +279,7 @@ std::expected<RefPtr<VideoDecoderVTB>, OSStatus> WebCoreDecompressionSession::en
         if (!isCMSampleBufferRandomAccess(cmSample)) {
             RELEASE_LOG_ERROR(Media, "VTDecompressionSession can't accept format description change on non-keyframe, waiting for keyframe status:%d", int(status));
             m_waitingForKeyframe = true;
-            return RefPtr<VideoDecoderVTB> { };
+            return RefPtr<VideoDecoderVTBSession> { };
         }
         RELEASE_LOG_INFO(Media, "VTDecompressionSession can't accept format description change on keyframe, creating new VTDecompressionSession status:%d", int(status));
     }
@@ -286,7 +287,7 @@ std::expected<RefPtr<VideoDecoderVTB>, OSStatus> WebCoreDecompressionSession::en
     m_lastFormatDescription = videoFormatDescription;
 
     if (!m_videoDecoderVTB) {
-        m_videoDecoderVTB = VideoDecoderVTB::create(videoFormatDescription.get(), (__bridge CFDictionaryRef)m_pixelBufferAttributes.get());
+        m_videoDecoderVTB = VideoDecoderVTBSession::create(videoFormatDescription.get(), (__bridge CFDictionaryRef)m_pixelBufferAttributes.get());
         if (m_dispatcher->isCurrent()) {
             assertIsCurrent(m_dispatcher.get());
 
@@ -475,18 +476,10 @@ Ref<WebCoreDecompressionSession::DecodingPromise> WebCoreDecompressionSession::d
                 MediaTime presentationTimestamp = PAL::toMediaTime(PAL::CMSampleBufferGetPresentationTimeStamp(cmSample.get()));
                 RetainPtr rawBuffer = PAL::CMSampleBufferGetDataBuffer(cmSample.get());
                 ASSERT(rawBuffer);
-                RetainPtr buffer = rawBuffer;
-                // Make sure block buffer is contiguous.
-                if (!PAL::CMBlockBufferIsRangeContiguous(rawBuffer.get(), 0, 0)) {
-                    CMBlockBufferRef contiguousBuffer;
-                    if (auto status = PAL::CMBlockBufferCreateContiguous(nullptr, rawBuffer.get(), nullptr, nullptr, 0, 0, 0, &contiguousBuffer))
-                        return DecodingPromise::createAndReject(status);
-                    buffer = adoptCF(contiguousBuffer);
-                }
-                auto data = PAL::CMBlockBufferGetDataSpan(buffer.get());
-                if (!data.data())
-                    return DecodingPromise::createAndReject(-1);
-                promises.append(videoDecoder->decode({ data, true, presentationTimestamp.toMicroseconds(), 0 }));
+                Ref data = sharedBufferFromCMBlockBuffer(rawBuffer.get());
+                if (data->isEmpty())
+                    return DecodingPromise::createAndReject(kVTAllocationFailedErr);
+                promises.append(videoDecoder->decode({ WTF::move(data), true, presentationTimestamp.toMicroseconds(), 0 }));
             }
             DecodingPromise::Producer producer;
             auto promise = producer.promise();

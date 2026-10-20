@@ -1086,6 +1086,7 @@ private:
         case GetGlobalVar:
         case GetGlobalLexicalVariable:
         case GetClosureVar:
+        case GetLazyClosureVar:
         case GetInternalField:
         case GetFromArguments:
         case LoadMapValue:
@@ -1777,7 +1778,7 @@ private:
         case RecordRegExpCachedResult:
         case CallDOM: {
             // This node should never be visible at this stage of compilation.
-            DFG_CRASH(m_graph, m_currentNode, "Unexpected node during prediction propagation");
+            DFG_CRASH(m_graph, m_currentNode, "Unexpected node during prediction propagation"_s);
             break;
         }
         

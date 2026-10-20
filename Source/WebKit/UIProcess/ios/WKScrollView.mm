@@ -31,6 +31,7 @@
 #import "Logging.h"
 #import "UIKitSPI.h"
 #import "UIKitUtilities.h"
+#import "VisibleContentRectUpdateInfo.h"
 #import "WKBrowserEngineDefinitions.h"
 #import "WKContentViewInteraction.h"
 #import "WKDeferringGestureRecognizer.h"
@@ -128,7 +129,7 @@ static BOOL shouldForwardScrollViewDelegateMethodToExternalDelegate(SEL selector
     BOOL externalDelegateWillRespond = shouldForwardScrollViewDelegateMethodToExternalDelegate(aSelector) && [externalDelegate respondsToSelector:aSelector];
 
     if (internalDelegateWillRespond && !externalDelegateWillRespond)
-        return _internalDelegate.getAutoreleased();
+        return internalDelegate.getAutoreleased();
     if (externalDelegateWillRespond && !internalDelegateWillRespond)
         return externalDelegate.getAutoreleased();
     return nil;

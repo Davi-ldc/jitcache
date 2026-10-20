@@ -94,6 +94,7 @@ private:
 
     CanvasType htmlOrOffscreenCanvas() const;
     ExceptionOr<void> configure(GPUCanvasConfiguration&&, bool);
+    void expireCurrentTexture();
     void present(uint32_t frameIndex);
     void updateFramePacing();
     Page* page() const;
@@ -132,7 +133,7 @@ private:
     GPUIntegerCoordinate m_height { 0 };
 #if HAVE(SUPPORT_HDR_DISPLAY)
     using ScreenPropertiesChangedObserver = Observer<void(PlatformDisplayID)>;
-    RefPtr<ScreenPropertiesChangedObserver> m_screenPropertiesChangedObserver;
+    const RefPtr<ScreenPropertiesChangedObserver> m_screenPropertiesChangedObserver;
     PlatformDynamicRangeLimit m_dynamicRangeLimit { PlatformDynamicRangeLimit::initialValue() };
     float m_currentEDRHeadroom { 1 };
     float m_screenEDRHeadroom { 0.f };

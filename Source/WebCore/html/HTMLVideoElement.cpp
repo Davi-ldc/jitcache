@@ -43,7 +43,7 @@
 #include "ImageBuffer.h"
 #include "JSDOMPromiseDeferred.h"
 #include "JSVideoFrameRequestCallback.h"
-#include "LazyLoadVideoObserver.h"
+#include "LazyLoadElementObserver.h"
 #include "LocalDOMWindow.h"
 #include "LocalFrame.h"
 #include "Logging.h"
@@ -106,7 +106,7 @@ inline HTMLVideoElement::HTMLVideoElement(const QualifiedName& tagName, Document
 
 HTMLVideoElement::~HTMLVideoElement()
 {
-    LazyLoadVideoObserver::unobserve(*this, protect(document()));
+    LazyLoadElementObserver::unobserve(*this, protect(document()));
 }
 
 Ref<HTMLVideoElement> HTMLVideoElement::create(const QualifiedName& tagName, Document& document, bool createdByParser)
@@ -117,7 +117,7 @@ Ref<HTMLVideoElement> HTMLVideoElement::create(const QualifiedName& tagName, Doc
     HTMLVideoElementPictureInPicture::providePictureInPictureTo(videoElement);
 #endif
 
-    LazyLoadVideoObserver::observe(videoElement);
+    LazyLoadElementObserver::observe(videoElement);
 
     videoElement->suspendIfNeeded();
     return videoElement;
@@ -243,11 +243,26 @@ void HTMLVideoElement::attributeChanged(const QualifiedName& name, const AtomStr
         if (name == webkitprojectionAttr && oldValue != newValue && document().settings().spatialVideoRenderingEnabled())
             scheduleEvent(eventNames().webkitprojectionchangedEvent);
 
+        if ((name == webkitfieldofviewAttr || name == webkityawAttr || name == webkitpitchAttr) && document().settings().spatialVideoRenderingEnabled())
+            scheduleEvent(eventNames().webkitcameraviewchangedEvent);
+
 #if PLATFORM(IOS_FAMILY) && ENABLE(WIRELESS_PLAYBACK_TARGET)
         if (name == webkitairplayAttr)
             protect(mediaSession())->setWirelessVideoPlaybackDisabled(isWirelessPlaybackTargetDisabled());
 #endif
     }
+}
+
+void HTMLVideoElement::spatialCameraDidMove(double yaw, double pitch, double fieldOfView)
+{
+    if (m_cameraYaw == yaw && m_cameraPitch == pitch && m_cameraFieldOfView == fieldOfView)
+        return;
+
+    m_cameraYaw = yaw;
+    m_cameraPitch = pitch;
+    m_cameraFieldOfView = fieldOfView;
+
+    scheduleEvent(eventNames().webkitcameramovedEvent);
 }
 
 bool HTMLVideoElement::supportsFullscreen(HTMLMediaElementEnums::VideoFullscreenMode videoFullscreenMode) const
@@ -515,8 +530,8 @@ void HTMLVideoElement::didMoveToNewDocument(Document& oldDocument, Document& new
     if (m_imageLoader)
         m_imageLoader->elementDidMoveToNewDocument(oldDocument);
 
-    LazyLoadVideoObserver::unobserve(*this, oldDocument);
-    LazyLoadVideoObserver::observe(*this);
+    LazyLoadElementObserver::unobserve(*this, oldDocument);
+    LazyLoadElementObserver::observe(*this);
 
     HTMLMediaElement::didMoveToNewDocument(oldDocument, newDocument);
 }
@@ -720,12 +735,27 @@ void HTMLVideoElement::didExitFullscreenOrPictureInPicture()
 }
 
 #if ENABLE(LINEAR_MEDIA_PLAYER)
+// External playback does not go through setFullscreenMode(), so it fires no
+// 'webkitpresentationmodechanged' and leaves webkitPresentationMode reading "inline". Sites whose
+// in-page captions we mirror need to know about it to decide when to mirror, so notify them here.
+// Quirked so the event is never dispatched anywhere else; see webkitIsInExternalPlayback in
+// HTMLVideoElement.idl.
+void HTMLVideoElement::scheduleExternalPlaybackChangedEventIfNeeded()
+{
+    if (!protect(document())->quirks().needsCaptionMirroringQuirk())
+        return;
+
+    scheduleEvent(eventNames().webkitexternalplaybackchangedEvent);
+}
+
 void HTMLVideoElement::didEnterExternalPlayback()
 {
     m_isInExternalPlayback = true;
 
     if (RefPtr player = this->player())
         player->setInFullscreenOrPictureInPicture(true);
+
+    scheduleExternalPlaybackChangedEventIfNeeded();
 }
 
 void HTMLVideoElement::didExitExternalPlayback()
@@ -734,6 +764,8 @@ void HTMLVideoElement::didExitExternalPlayback()
 
     if (RefPtr player = this->player())
         player->setInFullscreenOrPictureInPicture(false);
+
+    scheduleExternalPlaybackChangedEventIfNeeded();
 }
 #endif
 
@@ -831,7 +863,7 @@ void HTMLVideoElement::stop()
     HTMLMediaElement::stop();
 }
 
-void HTMLVideoElement::viewportIntersectionChanged(bool isIntersecting)
+void HTMLVideoElement::lazyLoadIntersectionCallbackInvoked(bool isIntersecting)
 {
     if (m_isIntersectingViewport == isIntersecting)
         return;
@@ -894,7 +926,7 @@ void HTMLVideoElement::serviceRequestVideoFrameCallbacks(ReducedResolutionSecond
         if (RefPtr callback = std::exchange(request->callback, { }))
             callback->invoke(now.milliseconds(), *videoFrameMetadata);
     }
-    m_servicedVideoFrameRequests.clear();
+    m_servicedVideoFrameRequests.shrink(0);
 
     if (m_videoFrameRequests.isEmpty()) {
         if (RefPtr player = this->player())

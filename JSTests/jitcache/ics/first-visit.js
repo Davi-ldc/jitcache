@@ -3,11 +3,16 @@
 
 // What an imported site does at its first consumer visit. The producer folds a get, a put, an in and an
 // instanceof site, gives one site up with no case listed, makes a get_by_id of name, a name the megamorphic fold
-// refuses, give up on its eighth case, leaves one site unreached, links a call site and sends a construct site virtual,
+// refuses, give up on its eighth case, leaves one site unreached, links a call site, calls a second call site once,
+// leaves a third call site and a varargs site never called, runs a tail call once and sends a construct site virtual,
 // each body holding an anchor (its first property IC, with one case). After a skip call the consumer visits each site
-// once, and the name site seven more times: each folded site folds at its first caching visit, the unreached site
-// caches at its first, the name site gives up again at its eighth case, the call links natively and creates its
-// callee's CodeBlock, the construct site stays virtual and the site that gave up with no case never caches.
+// once, the name site seven more times and the call and varargs sites the producer never called once more, with a
+// snapshot after each visit: each folded site folds at its first caching visit, the unreached site caches at its
+// first, the name site gives up again at its eighth case, the linked call site and the one called once, which come
+// back on the executed-once call data, and the tail call, which comes back with call data of its own and seen, link at
+// their first call, the linked one creating its callee's CodeBlock then, the never-called call and varargs sites take
+// the two native trips to their link, the construct site stays virtual and the site that gave up with no case never
+// caches.
 load("./resources/ics.js", "caller relative");
 
 (function main(role) {
@@ -51,7 +56,8 @@ load("./resources/ics.js", "caller relative");
     const limitsSite = { anchor: 0, dictionary: 1, name: 2, unreached: 3 };
     const limitsLayout = ["GetById", "GetById", "GetById", "GetById"];
 
-    function linker(skip, op, o, f) {
+    // Three op_call sites, a varargs site and a construct site. Case n reads op_call site n - 1.
+    function linker(skip, op, o, f, args) {
         if (skip)
             return;
         switch (op) {
@@ -60,10 +66,27 @@ load("./resources/ics.js", "caller relative");
         case 1:
             return f();
         case 2:
+            return f();
+        case 3:
+            return f();
+        case 4:
+            return f(...args);
+        case 5:
             return new f();
         }
     }
-    const linkerOp = { anchor: 0, call: 1, construct: 2 };
+    const linkerOp = { anchor: 0, linked: 1, once: 2, never: 3, varargs: 4, construct: 5 };
+    const linkerCallSite = { linked: 0, once: 1, never: 2 };
+
+    // In strict code the call in return position is a tail call.
+    function tailLinker(skip, op, o, f) {
+        "use strict";
+        if (skip)
+            return;
+        if (op === 0)
+            return o.anchor;
+        return f();
+    }
 
     function target() {
         return 1;
@@ -76,14 +99,14 @@ load("./resources/ics.js", "caller relative");
     }
 
     function produce() {
-        underTest(folds, limits, linker);
-        for (const body of [folds, limits, linker])
+        underTest(folds, limits, linker, tailLinker);
+        for (const body of [folds, limits, linker, tailLinker])
             toBaseline(body);
 
         const anchor = { anchor: 1 };
         const alive = [anchor, target, Built, Other, Instance];
         const icOf = (body, index) => snapshot(body).propertyICs[index];
-        for (const body of [folds, limits, linker]) {
+        for (const body of [folds, limits, linker, tailLinker]) {
             body(false, 0, anchor);
             body(false, 0, anchor);
         }
@@ -110,11 +133,14 @@ load("./resources/ics.js", "caller relative");
             return ic.caseCount === 8 && ic.holdsGaveUp;
         });
 
-        linker(false, linkerOp.call, anchor, target);
-        linker(false, linkerOp.call, anchor, target);
+        // The never-called call and varargs sites stay as linking left them.
+        linker(false, linkerOp.linked, anchor, target);
+        linker(false, linkerOp.linked, anchor, target);
+        linker(false, linkerOp.once, anchor, target);
         linker(false, linkerOp.construct, anchor, Built);
         linker(false, linkerOp.construct, anchor, Built);
         linker(false, linkerOp.construct, anchor, Other);
+        tailLinker(false, 1, anchor, target);
 
         const foldsState = snapshot(folds);
         expectLayout("folds", foldsState, foldsLayout);
@@ -127,17 +153,24 @@ load("./resources/ics.js", "caller relative");
         expectFields("limits unreached", limitsState.propertyICs[limitsSite.unreached], { everConsidered: false });
         const linkerState = snapshot(linker);
         expectLayout("linker", linkerState, ["GetById"]);
-        expectFields("linker call", callSite("linker", linkerState, "op_call", 0), { mode: "Monomorphic" });
+        const linkerCall = site => callSite("linker", linkerState, "op_call", linkerCallSite[site]);
+        expectFields("linker linked", linkerCall("linked"), { data: "Own", mode: "Monomorphic" });
+        expectFields("linker once", linkerCall("once"), { data: "ExecutedOnce", mode: "Init", seenOnce: true });
+        expectFields("linker never", linkerCall("never"), { data: "NotExecuted", mode: "Init", seenOnce: false });
+        expectFields("linker varargs", callSite("linker", linkerState, "op_call_varargs", 0), { data: "Inline", mode: "Init", seenOnce: false });
         expectFields("linker construct", callSite("linker", linkerState, "op_construct", 0), { mode: "Virtual" });
+        const tailLinkerState = snapshot(tailLinker);
+        expectLayout("tailLinker", tailLinkerState, ["GetById"]);
+        expectFields("tailLinker tail call", callSite("tailLinker", tailLinkerState, "op_tail_call", 0), { data: "Own", mode: "Init", seenOnce: true });
 
-        delta(folds, limits, linker);
+        delta(folds, limits, linker, tailLinker);
         keepAlive(alive);
     }
 
     // The consumer's visits, which an Off run makes too, with their results checked and without the checks of state.
     function consume(checking) {
-        underTest(folds, limits, linker);
-        for (const body of [folds, limits, linker])
+        underTest(folds, limits, linker, tailLinker);
+        for (const body of [folds, limits, linker, tailLinker])
             body(true);
 
         const anchor = { anchor: 1 };
@@ -145,8 +178,12 @@ load("./resources/ics.js", "caller relative");
             if (checking)
                 expectFields(`${label} after its first consumer visit`, snapshot(body).propertyICs[index], fields);
         };
+        const expectCallSite = (label, body, opcode, metadataID, fields) => {
+            if (checking)
+                expectFields(label, callSite(body.name, snapshot(body), opcode, metadataID), fields);
+        };
         if (checking) {
-            for (const body of [folds, limits, linker])
+            for (const body of [folds, limits, linker, tailLinker])
                 checkSame(snapshot(body).jitType, "Baseline", `${body.name}'s JIT type after its skip call`);
         }
 
@@ -172,18 +209,42 @@ load("./resources/ics.js", "caller relative");
         checkSame(limits(false, limitsSite.unreached, visited.unreached), 1, "the unreached site's result");
         expectIC(limits, "the unreached site", limitsSite.unreached, { caseCount: 1 });
 
+        // Each call site as the producer's last execution left it: the linked site and the one called once on the
+        // executed-once call data, ready to link at their next call, the tail call with call data of its own and seen,
+        // and the sites never called as linking left them.
+        expectCallSite("the linked call site before any call", linker, "op_call", linkerCallSite.linked, { data: "ExecutedOnce", mode: "Init", seenOnce: true });
+        expectCallSite("the call site called once before any call", linker, "op_call", linkerCallSite.once, { data: "ExecutedOnce", mode: "Init", seenOnce: true });
+        expectCallSite("the call site never called before any call", linker, "op_call", linkerCallSite.never, { data: "NotExecuted", mode: "Init", seenOnce: false });
+        expectCallSite("the varargs site before any call", linker, "op_call_varargs", 0, { data: "Inline", mode: "Init", seenOnce: false });
+        expectCallSite("the tail call before any call", tailLinker, "op_tail_call", 0, { data: "Own", mode: "Init", seenOnce: true });
+
         // The import creates no callee CodeBlock; the first call links natively and creates it.
         if (checking)
             checkSame(snapshot(target), undefined, "target's CodeBlock before the consumer's first call");
-        checkSame(linker(false, linkerOp.call, anchor, target), 1, "the call site's result");
-        if (checking) {
-            expectFields("the call site after one consumer call", callSite("linker", snapshot(linker), "op_call", 0), { mode: "Monomorphic" });
-            check(snapshot(target), "target has no CodeBlock after the consumer's first call");
-        }
-        check(linker(false, linkerOp.construct, anchor, Built) instanceof Built, "the construct site's result is no Built");
+        checkSame(linker(false, linkerOp.linked, anchor, target), 1, "the linked call site's result");
+        expectCallSite("the linked call site after one consumer call", linker, "op_call", linkerCallSite.linked, { data: "Own", mode: "Monomorphic" });
         if (checking)
-            expectFields("the construct site after one consumer construction", callSite("linker", snapshot(linker), "op_construct", 0), { mode: "Virtual" });
-        keepAlive(visited);
+            check(snapshot(target), "target has no CodeBlock after the consumer's first call");
+        checkSame(linker(false, linkerOp.once, anchor, target), 1, "the result of the call site called once");
+        expectCallSite("the call site called once, after one consumer call", linker, "op_call", linkerCallSite.once, { data: "Own", mode: "Monomorphic" });
+        checkSame(tailLinker(false, 1, anchor, target), 1, "the tail call's result");
+        expectCallSite("the tail call after one consumer call", tailLinker, "op_tail_call", 0, { data: "Own", mode: "Monomorphic" });
+
+        // The sites the producer never called take the two native trips: the first leaves an op_call site on the
+        // executed-once data and an inline site seen, the second links.
+        checkSame(linker(false, linkerOp.never, anchor, target), 1, "the never-called call site's first result");
+        expectCallSite("the never-called call site after one consumer call", linker, "op_call", linkerCallSite.never, { data: "ExecutedOnce", mode: "Init", seenOnce: true });
+        checkSame(linker(false, linkerOp.never, anchor, target), 1, "the never-called call site's second result");
+        expectCallSite("the never-called call site after two consumer calls", linker, "op_call", linkerCallSite.never, { data: "Own", mode: "Monomorphic" });
+        const spreadArguments = [1, 2];
+        checkSame(linker(false, linkerOp.varargs, anchor, target, spreadArguments), 1, "the varargs site's first result");
+        expectCallSite("the varargs site after one consumer call", linker, "op_call_varargs", 0, { data: "Inline", mode: "Init", seenOnce: true });
+        checkSame(linker(false, linkerOp.varargs, anchor, target, spreadArguments), 1, "the varargs site's second result");
+        expectCallSite("the varargs site after two consumer calls", linker, "op_call_varargs", 0, { data: "Inline", mode: "Monomorphic" });
+
+        check(linker(false, linkerOp.construct, anchor, Built) instanceof Built, "the construct site's result is no Built");
+        expectCallSite("the construct site after one consumer construction", linker, "op_construct", 0, { mode: "Virtual" });
+        keepAlive(visited, spreadArguments);
     }
 
     switch (role) {

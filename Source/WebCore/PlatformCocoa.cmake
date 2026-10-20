@@ -150,9 +150,7 @@ if (ACCESSIBILITYSUPPORT_LIBRARY)
     list(APPEND WebCore_LIBRARIES ${ACCESSIBILITYSUPPORT_LIBRARY})
 endif ()
 
-if (USE_LIBWEBRTC)
-    list(APPEND WebCore_PRIVATE_LIBRARIES webrtc opus vpx webm yuv libsrtp webrtc_objc_categories)
-else ()
+if (NOT USE_LIBWEBRTC)
     set(_webm_parser_dir "${CMAKE_SOURCE_DIR}/Source/ThirdParty/libwebrtc/Source/third_party/libwebm/webm_parser")
     file(GLOB _webm_parser_srcs "${_webm_parser_dir}/src/*.cc")
     add_library(WebMParser OBJECT ${_webm_parser_srcs})
@@ -168,13 +166,8 @@ if (ENABLE_AV1)
     list(APPEND WebCore_PRIVATE_LIBRARIES dav1d)
 endif ()
 
-if (NOT ENABLE_WEBGPU)
-    if (NOT WEBKIT_SDK_IS_IOS_FAMILY)
-        target_link_options(WebCore PRIVATE "LINKER:-undefined,dynamic_lookup")
-    endif ()
-else ()
-    list(APPEND WebCore_LIBRARIES "$<TARGET_LINKER_FILE:WebGPU>")
-    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/WebGPU/Headers")
+if (ENABLE_WEBGPU)
+    list(APPEND WebCore_FRAMEWORKS WebGPU)
 endif ()
 
 set(WebCore_EXTRA_LINK_OPTIONS "LINKER:-force_load,$<TARGET_FILE:PAL>")
@@ -429,10 +422,9 @@ list(APPEND WebCore_SOURCES
 
     platform/graphics/ca/FrameProcessIndicators.cpp
     platform/graphics/ca/GraphicsLayerCA.cpp
-    platform/graphics/ca/LayerPool.cpp
     platform/graphics/ca/PlatformCAAnimation.cpp
     platform/graphics/ca/PlatformCALayer.mm
-    platform/graphics/ca/TileController.cpp
+    platform/graphics/ca/TileController.mm
     platform/graphics/ca/TileCoverageMap.cpp
     platform/graphics/ca/TileGrid.cpp
     platform/graphics/ca/TransformationMatrixCA.cpp
@@ -526,21 +518,19 @@ list(APPEND WebCore_SOURCES
     platform/mediastream/libwebrtc/LibWebRTCDav1dDecoder.cpp
 
     platform/network/cf/CertificateInfoCFNet.cpp
-    platform/network/cf/DNSResolveQueueCFNet.cpp
+    platform/network/cf/CookieStorageSessionCFNet.cpp
+    platform/network/cf/DNSResolveQueueCFNet.mm
     platform/network/cf/FormDataStreamCFNet.mm
-    platform/network/cf/NetworkStorageSessionCFNet.cpp
     platform/network/cf/ResourceRequestCFNet.cpp
 
     platform/network/cocoa/AuthenticationCocoa.mm
     platform/network/cocoa/BlobDataFileReferenceCocoa.mm
     platform/network/cocoa/CookieCocoa.mm
-    platform/network/cocoa/CookieStorageCocoa.mm
-    platform/network/cocoa/CookieStorageObserver.mm
+    platform/network/cocoa/CookieStorageSessionCocoa.mm
     platform/network/cocoa/CredentialCocoa.mm
     platform/network/cocoa/CredentialStorageCocoa.mm
     platform/network/cocoa/FormDataStreamCocoa.mm
     platform/network/cocoa/NetworkLoadMetrics.mm
-    platform/network/cocoa/NetworkStorageSessionCocoa.mm
     platform/network/cocoa/ProtectionSpaceCocoa.mm
     platform/network/cocoa/ResourceErrorCocoa.mm
     platform/network/cocoa/ResourceHandleCocoa.mm
@@ -820,6 +810,7 @@ list(REMOVE_ITEM WebCore_PRIVATE_FRAMEWORK_HEADERS
     Modules/WebGPU/GPUVertexState.h
     Modules/WebGPU/GPUVertexStepMode.h
 
+    Modules/WebGPU/Implementation/WebGPUAPIUtilities.h
     Modules/WebGPU/Implementation/WebGPUAdapterImpl.h
     Modules/WebGPU/Implementation/WebGPUBindGroupImpl.h
     Modules/WebGPU/Implementation/WebGPUBindGroupLayoutImpl.h
@@ -1330,7 +1321,6 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
 
     platform/graphics/ca/FrameProcessIndicators.h
     platform/graphics/ca/GraphicsLayerCA.h
-    platform/graphics/ca/LayerPool.h
     platform/graphics/ca/PlatformCAAnimation.h
     platform/graphics/ca/PlatformCAFilters.h
     platform/graphics/ca/PlatformCALayer.h
@@ -1479,7 +1469,6 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
     platform/network/cf/ResourceResponse.h
 
     platform/network/cocoa/AuthenticationCocoa.h
-    platform/network/cocoa/CookieStorageObserver.h
     platform/network/cocoa/CredentialCocoa.h
     platform/network/cocoa/FormDataStreamCocoa.h
     platform/network/cocoa/HTTPCookieAcceptPolicyCocoa.h
@@ -1492,7 +1481,8 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
     platform/network/ios/LegacyPreviewLoaderClient.h
     platform/network/ios/WebCoreURLResponseIOS.h
 
-    platform/video-codecs/cocoa/WebRTCVideoDecoder.h
+    platform/video-codecs/cocoa/GPUVideoDecoder.h
+    platform/video-codecs/cocoa/GPUVideoEncoder.h
 
     platform/xr/cocoa/PlatformXRPose.h
 
@@ -1640,8 +1630,17 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
     platform/mac/WebCoreView.h
 )
 
+# Used to substitute placeholders in Info.plist.
+set(BUNDLE_VERSION "${MACOSX_FRAMEWORK_BUNDLE_VERSION}")
+set(SHORT_VERSION_STRING "${MACOSX_FRAMEWORK_SHORT_VERSION_STRING}")
+set(PRODUCT_NAME "WebCore")
+set(PRODUCT_BUNDLE_IDENTIFIER "com.apple.WebCore")
+set(PLATFORM_NAME "${WEBKIT_SDK_NAME}")
 
 if (WEBKIT_SDK_IS_MACOS)
+
+set_target_properties(WebCore PROPERTIES
+    MACOSX_FRAMEWORK_INFO_PLIST ${WEBCORE_DIR}/Info.plist)
 
 # Localizable.strings for copyLocalizedString(). Xcode copies via CopyFiles build phase.
 # Configure-time -- files rarely change, no build edge needed.
@@ -1678,11 +1677,24 @@ WEBKIT_COPY_FILES(WebCore_CopyBundleResources
     FLATTENED NO_SYMLINK)
 add_dependencies(WebCore WebCore_CopyBundleResources)
 
-# Stage the in-tree WebCore_Private module map into the framework bundle so the
-# Swift Clang importer finds it as a real module via -F (as JavaScriptCore does,
-# and as iOS does below).
+WEBKIT_COPY_FILES(WebCore_CopyAudioResources
+    DESTINATION "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/WebCore.framework/Versions/A/Resources/audio"
+    FILES ${WEBCORE_DIR}/platform/audio/resources/Composite.wav
+    FLATTENED NO_SYMLINK)
+add_dependencies(WebCore WebCore_CopyAudioResources)
+
+# Stage the in-tree WebCore module maps into the framework bundle so the Swift
+# Clang importer finds them as real modules via -F (as JavaScriptCore does, and
+# as iOS does below). -import-underlying-module needs the public one.
 if (SWIFT_REQUIRED)
     set(_webcore_modules_dir "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/WebCore.framework/Versions/A/Modules")
+    add_custom_command(
+        OUTPUT "${_webcore_modules_dir}/module.modulemap"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_webcore_modules_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${WEBCORE_DIR}/WebCore.modulemap" "${_webcore_modules_dir}/module.modulemap"
+        MAIN_DEPENDENCY "${WEBCORE_DIR}/WebCore.modulemap"
+        VERBATIM)
     add_custom_command(
         OUTPUT "${_webcore_modules_dir}/module.private.modulemap"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_webcore_modules_dir}"
@@ -1691,6 +1703,7 @@ if (SWIFT_REQUIRED)
         MAIN_DEPENDENCY "${WEBCORE_DIR}/WebCore_Private.modulemap"
         VERBATIM)
     add_custom_target(WebCore_CopyPrivateModuleMap ALL DEPENDS
+        "${_webcore_modules_dir}/module.modulemap"
         "${_webcore_modules_dir}/module.private.modulemap")
     add_dependencies(WebCore WebCore_CopyPrivateModuleMap)
 endif ()
@@ -1801,13 +1814,6 @@ set(CSS_VALUE_PLATFORM_DEFINES "WTF_PLATFORM_MAC WTF_PLATFORM_COCOA ENABLE_APPLE
 
 else ()
 
-
-target_compile_options(WebCore PRIVATE -Wno-\#warnings -Wno-abstract-final-class)
-
-set(BUNDLE_VERSION "${MACOSX_FRAMEWORK_BUNDLE_VERSION}")
-set(SHORT_VERSION_STRING "${WEBKIT_MAC_VERSION}")
-set(PRODUCT_NAME "WebCore")
-set(PRODUCT_BUNDLE_IDENTIFIER "com.apple.WebCore")
 configure_file(${WEBCORE_DIR}/Info.plist ${CMAKE_CURRENT_BINARY_DIR}/WebCore-Info.plist)
 
 set(_wc_fw "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/WebCore.framework")
@@ -1840,6 +1846,8 @@ add_custom_command(TARGET WebCore POST_BUILD
         "${_wc_fw}/Info.plist"
     COMMENT "Installing WebCore.framework resources (flat iOS layout)")
 
+configure_file("${WEBCORE_DIR}/WebCore.modulemap"
+               "${_wc_fw}/Modules/module.modulemap" COPYONLY)
 configure_file("${WEBCORE_DIR}/WebCore_Private.modulemap"
                "${_wc_fw}/Modules/module.private.modulemap" COPYONLY)
 

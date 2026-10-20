@@ -24,6 +24,7 @@
 
 #include "CSSContainerRule.h"
 #include "CSSCounterStyleRule.h"
+#include "CSSEnvironmentMapRule.h"
 #include "CSSFontFaceRule.h"
 #include "CSSFontFeatureValuesRule.h"
 #include "CSSFontPaletteValuesRule.h"
@@ -91,71 +92,83 @@ Ref<CSSRule> StyleRuleBase::createCSSOMWrapper() const
     return createCSSOMWrapper(nullptr, nullptr);
 }
 
-template<typename Visitor> constexpr decltype(auto) StyleRuleBase::visitDerived(Visitor&& visitor)
+template<typename Visitor> constexpr decltype(auto) StyleRuleBase::visitDerived(NOESCAPE const Visitor& visitor)
 {
     switch (type()) {
     case StyleRuleType::Style:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRule>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRule>(*this));
     case StyleRuleType::StyleWithNesting:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleWithNesting>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleWithNesting>(*this));
     case StyleRuleType::NestedDeclarations:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleNestedDeclarations>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleNestedDeclarations>(*this));
     case StyleRuleType::Page:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRulePage>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRulePage>(*this));
     case StyleRuleType::FontFace:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleFontFace>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleFontFace>(*this));
     case StyleRuleType::FontFeatureValues:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleFontFeatureValues>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleFontFeatureValues>(*this));
     case StyleRuleType::FontFeatureValuesBlock:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleFontFeatureValuesBlock>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleFontFeatureValuesBlock>(*this));
     case StyleRuleType::FontPaletteValues:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleFontPaletteValues>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleFontPaletteValues>(*this));
     case StyleRuleType::Media:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleMedia>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleMedia>(*this));
     case StyleRuleType::Supports:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleSupports>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleSupports>(*this));
     case StyleRuleType::Import:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleImport>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleImport>(*this));
     case StyleRuleType::Keyframes:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleKeyframes>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleKeyframes>(*this));
     case StyleRuleType::Namespace:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleNamespace>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleNamespace>(*this));
     case StyleRuleType::Keyframe:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleKeyframe>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleKeyframe>(*this));
     case StyleRuleType::Charset:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleCharset>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleCharset>(*this));
     case StyleRuleType::CounterStyle:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleCounterStyle>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleCounterStyle>(*this));
     case StyleRuleType::LayerBlock:
     case StyleRuleType::LayerStatement:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleLayer>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleLayer>(*this));
     case StyleRuleType::Container:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleContainer>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleContainer>(*this));
     case StyleRuleType::Property:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleProperty>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleProperty>(*this));
     case StyleRuleType::Scope:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleScope>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleScope>(*this));
     case StyleRuleType::StartingStyle:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleStartingStyle>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleStartingStyle>(*this));
     case StyleRuleType::ViewTransition:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleViewTransition>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleViewTransition>(*this));
     case StyleRuleType::PositionTry:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRulePositionTry>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRulePositionTry>(*this));
     case StyleRuleType::Function:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleFunction>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleFunction>(*this));
     case StyleRuleType::FunctionDeclarations:
-        return std::invoke(std::forward<Visitor>(visitor), uncheckedDowncast<StyleRuleFunctionDeclarations>(*this));
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleFunctionDeclarations>(*this));
+#if ENABLE(SPATIAL_PORTAL)
+    case StyleRuleType::EnvironmentMap:
+        return std::invoke(visitor, uncheckedDowncast<StyleRuleEnvironmentMap>(*this));
+#else
+    case StyleRuleType::EnvironmentMap:
+        break;
+#endif
     case StyleRuleType::Margin:
         break;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-template<typename Visitor> constexpr decltype(auto) StyleRuleBase::visitDerived(Visitor&& visitor) const
+template<typename Visitor> constexpr decltype(auto) StyleRuleBase::visitDerived(NOESCAPE const Visitor& visitor) const
 {
     return const_cast<StyleRuleBase&>(*this).visitDerived([&](auto& value) {
-        return std::invoke(std::forward<Visitor>(visitor), std::as_const(value));
+        return std::invoke(visitor, std::as_const(value));
     });
+}
+
+template<typename... F> requires (sizeof...(F) > 1) constexpr decltype(auto) StyleRuleBase::visitDerived(NOESCAPE F&&... f)
+{
+    return visitDerived(WTF::makeVisitor(std::forward<F>(f)...));
 }
 
 void StyleRuleBase::operator delete(StyleRuleBase* rule, std::destroying_delete_t)
@@ -179,7 +192,7 @@ Ref<StyleRuleBase> StyleRuleBase::copy() const
 Ref<CSSRule> StyleRuleBase::createCSSOMWrapper(CSSStyleSheet* parentSheet, CSSRule* parentRule) const
 {
     // FIXME: const_cast is required here because a wrapper for a style rule can be used to *modify* the style rule's selector; use of const in the style system is thus inaccurate.
-    auto wrapper = const_cast<StyleRuleBase&>(*this).visitDerived(WTF::makeVisitor(
+    auto wrapper = const_cast<StyleRuleBase&>(*this).visitDerived(
         [&](StyleRule& rule) -> Ref<CSSRule> {
             return CSSStyleRule::create(rule, parentSheet);
         },
@@ -251,13 +264,18 @@ Ref<CSSRule> StyleRuleBase::createCSSOMWrapper(CSSStyleSheet* parentSheet, CSSRu
         [&](StyleRuleFunctionDeclarations& rule) -> Ref<CSSRule> {
             return CSSFunctionDeclarations::create(rule, parentSheet);
         },
+#if ENABLE(SPATIAL_PORTAL)
+        [&](StyleRuleEnvironmentMap& rule) -> Ref<CSSRule> {
+            return CSSEnvironmentMapRule::create(rule, parentSheet);
+        },
+#endif
         [](StyleRuleCharset&) -> Ref<CSSRule> {
             RELEASE_ASSERT_NOT_REACHED();
         },
         [](StyleRuleKeyframe&) -> Ref<CSSRule> {
             RELEASE_ASSERT_NOT_REACHED();
         }
-    ));
+    );
     if (parentRule)
         wrapper->setParentRule(parentRule);
     return wrapper;

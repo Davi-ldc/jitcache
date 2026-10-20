@@ -274,12 +274,6 @@ module WebKit_Internal [system] {
         export *
     }
 
-    module SwiftDemoLogoConfirmation {
-        requires cplusplus20
-        header "../../UIProcess/SwiftDemoLogoConfirmation.h"
-        export *
-    }
-
     module WebBackForwardCacheEntry {
         requires cplusplus20
         header "../../UIProcess/WebBackForwardCacheEntry.h"
@@ -327,6 +321,12 @@ module WebKit_Internal [system] {
         requires objc
     }
 
+    module StreamServerConnection {
+        requires cplusplus20
+        header "../../Platform/IPC/StreamServerConnection.h"
+        export *
+    }
+
     module TransferString {
         requires cplusplus23
         header "../../Platform/IPC/TransferString.h"
@@ -353,6 +353,12 @@ module WebKit_Internal [system] {
 
     module WKMouseDeviceObserver {
         header "../../UIProcess/ios/WKMouseDeviceObserver.h"
+        export *
+        requires objc
+    }
+
+    module WKPortalVolumetricGestureController {
+        header "../../UIProcess/Cocoa/WKPortalVolumetricGestureController.h"
         export *
         requires objc
     }
@@ -432,6 +438,12 @@ module WebKit_Internal [system] {
     module WKMouseTrackingGestureRecognizer {
         requires objc
         header "../../UIProcess/mac/AppKitGestures/WKMouseTrackingGestureRecognizer.h"
+        export *
+    }
+
+    module WKPressGestureRecognizer {
+        requires objc
+        header "../../UIProcess/mac/AppKitGestures/WKPressGestureRecognizer.h"
         export *
     }
 

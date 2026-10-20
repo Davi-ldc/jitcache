@@ -113,7 +113,7 @@
 #include "RenderImage.h"
 #include "RenderListBox.h"
 #include "RenderListItem.h"
-#include "RenderListMarker.h"
+#include "RenderListOutsideMarker.h"
 #include "RenderTableCell.h"
 #include "RenderView.h"
 #include "RuleFeature.h"
@@ -414,8 +414,8 @@ Document* AccessibilityNodeObject::document() const
 
 LocalFrameView* AccessibilityNodeObject::documentFrameView() const
 {
-    if (auto* node = this->node())
-        return node->document().view();
+    if (RefPtr node = this->node())
+        return protect(node->document())->view();
     return AccessibilityObject::documentFrameView();
 }
 
@@ -919,7 +919,7 @@ bool AccessibilityNodeObject::canHaveChildren() const
     if (node() && !renderer() && WebCore::elementName(node()) == ElementName::HTML_noscript)
         return false;
 
-    if (CheckedPtr listMarker = dynamicDowncast<RenderListMarker>(renderer()))
+    if (CheckedPtr listMarker = dynamicDowncast<RenderListOutsideMarker>(renderer()))
         return listMarker->hasContentProperty();
 
     // If this is an AccessibilityRenderObject, then it's okay if this object
@@ -2259,15 +2259,16 @@ bool AccessibilityNodeObject::isDataTable() const
     // When a section of the document is contentEditable, all tables should be
     // treated as data tables, otherwise users may not be able to work with rich
     // text editors that allow creating and editing tables.
-    if (node() && protect(node())->hasEditableStyle())
+    RefPtr node = this->node();
+    if (node && node->hasEditableStyle())
         return true;
 
-    if (RefPtr tableElement = AXTableHelpers::tableElementIncludingAncestors(node(), renderer())) {
+    if (RefPtr tableElement = AXTableHelpers::tableElementIncludingAncestors(node, renderer())) {
         if (AXTableHelpers::tableElementIndicatesAccessibleTable(*tableElement))
             return true;
     }
 
-    RefPtr table = dynamicDowncast<HTMLTableElement>(node());
+    RefPtr table = dynamicDowncast<HTMLTableElement>(node);
     // The following checks should only apply if this is a real <table> element.
     if (!table)
         return false;
@@ -3221,7 +3222,7 @@ bool AccessibilityNodeObject::isTable() const
 AccessibilityObject* AccessibilityNodeObject::controlForLabelElement() const
 {
     RefPtr labelElement = labelElementContainer();
-    return labelElement ? axObjectCache()->getOrCreate(Accessibility::controlForLabelElement(*labelElement).get()) : nullptr;
+    return labelElement ? protect(axObjectCache())->getOrCreate(Accessibility::controlForLabelElement(*labelElement).get()) : nullptr;
 }
 
 String AccessibilityNodeObject::ariaAccessibilityDescription() const
@@ -3331,10 +3332,17 @@ String AccessibilityNodeObject::textForLabelElements(Vector<Ref<HTMLElement>>&& 
     // "...if more than one label is associated; concatenate by DOM order, delimited by spaces."
     StringBuilder result;
 
+    RefPtr thisElement = this->element();
+    bool referencedByARIA = thisElement && (thisElement->hasAttributeWithoutSynchronization(aria_labelledbyAttr)
+        || thisElement->hasAttributeWithoutSynchronization(aria_labeledbyAttr));
+
     WeakPtr cache = axObjectCache();
     for (auto& labelElement : labelElements) {
         RefPtr label = cache ? cache->getOrCreate(labelElement.get()) : nullptr;
         if (!label)
+            continue;
+
+        if (!referencedByARIA && label->isARIAHidden())
             continue;
 
         if (label.get() == this) {
@@ -3554,7 +3562,7 @@ void AccessibilityNodeObject::visibleText(Vector<AccessibilityText>& textOrder) 
 
         // Base-appearance select options can have interactive content (buttons, links) whose text
         // should be included in the menu item's title for VoiceOver to read.
-        if (RefPtr optionElement = dynamicDowncast<HTMLOptionElement>(node.get()); optionElement && optionElement->belongsToBaseAppearancePicker())
+        if (RefPtr optionElement = dynamicDowncast<HTMLOptionElement>(node.get()); optionElement && optionElement->isRenderedWithBaseAppearance())
             mode.includeFocusableContent = true;
 
         // Track nodes referenced via aria-labelledby to avoid double-counting them
@@ -4039,7 +4047,8 @@ String AccessibilityNodeObject::textUnderElement(TextUnderElementMode mode) cons
         // contribute to the owning element's name, not this DOM parent's name.
         // Only skip if the owner is not hidden, as per the ARIA spec, aria-owns must
         // not be resolved when set on an element excluded from the accessibility tree.
-        auto owners = protect(*child)->owners();
+        Ref childObject = *child;
+        auto owners = childObject->owners();
         if (owners.size()) {
             bool isOwnedByOtherObject = false;
             for (const auto& owner : owners) {
@@ -4056,7 +4065,7 @@ String AccessibilityNodeObject::textUnderElement(TextUnderElementMode mode) cons
                 continue;
         }
 
-        processChild(protect(*child));
+        processChild(childObject);
     }
 
     // Include children that this element owns via aria-owns. These are not in
@@ -4172,14 +4181,40 @@ Vector<AXStitchGroup> AccessibilityNodeObject::stitchGroups() const
             currentGroup.clear();
         representativeID = std::nullopt;
     };
+    // Our own outside marker takes no part in our lines, so it is not one of the leaf boxes below, but it belongs at
+    // the start of the group for the line it was positioned against, when that line is one of ours.
+    auto stitchableExcludedMarker = [&]() -> CheckedPtr<RenderListOutsideMarker> {
+        // The marker's list item is this block flow itself when the item's own content makes the line, and an
+        // ancestor of it when the line is in a descendant block of the item.
+        for (CheckedPtr<const RenderBlock> ancestor = renderBlockFlow.get(); ancestor; ancestor = ancestor->containingBlock()) {
+            CheckedPtr listItem = dynamicDowncast<RenderListItem>(ancestor.get());
+            CheckedPtr marker = listItem ? listItem->markerBox() : nullptr;
+            if (!marker || !marker->isExcludedMarker() || marker->isDisclosureMarker())
+                continue;
+            auto excludedPosition = marker->excludedPosition();
+            if (excludedPosition && excludedPosition->firstFormattedLineRoot.get() == renderBlockFlow.get())
+                return marker;
+        }
+        return { };
+    }();
+    if (stitchableExcludedMarker) {
+        if (RefPtr object = cache->getOrCreate(*stitchableExcludedMarker))
+            appendToCurrentGroup(object->objectID());
+    }
+
     for (auto lineBox = inlineLayout->firstLineBox(); lineBox; lineBox.traverseNext()) {
         for (auto box = lineBox->logicalLeftmostLeafBox(); box; box.traverseLogicalRightwardOnLine()) {
             auto updateLastRenderer = makeScopeExit([&] {
                 context.lastRenderer = box->renderer();
             });
 
-            if (CheckedPtr renderListMarker = dynamicDowncast<RenderListMarker>(box->renderer()); renderListMarker && !renderListMarker->isDisclosureMarker()) {
-                if (RefPtr object = cache->getOrCreate(const_cast<RenderListMarker&>(*renderListMarker)))
+            if (listMarkerIsDisclosure(protect(dynamicDowncast<RenderElement>(box->renderer()))) || listMarkerIsDisclosure(protect(box->renderer().parent()))) {
+                finalizeCurrentGroup();
+                continue;
+            }
+
+            if (CheckedPtr renderListMarker = dynamicDowncast<RenderListOutsideMarker>(box->renderer())) {
+                if (RefPtr object = cache->getOrCreate(const_cast<RenderListOutsideMarker&>(*renderListMarker)))
                     appendToCurrentGroup(object->objectID());
                 continue;
             }
@@ -4307,10 +4342,11 @@ String AccessibilityNodeObject::stringValue() const
                 if (!runStartNode)
                     runStartNode = memberNode;
                 runEndNode = memberNode;
-            } else if (CheckedPtr renderListMarker = dynamicDowncast<RenderListMarker>(object->renderer())) {
+            } else if (CheckedPtr renderListMarker = dynamicDowncast<RenderListOutsideMarker>(object->renderer())) {
                 // List markers have no DOM node. Flush any pending text run, then append marker text.
                 flushRun();
-                builder.append(renderListMarker->textContent());
+                if (CheckedPtr listItem = renderListMarker->listItem())
+                    builder.append(listItem->markerText());
             }
         }
         flushRun();
@@ -4335,7 +4371,7 @@ String AccessibilityNodeObject::stringValue() const
                 continue;
 
             if (auto selectedChildren = child->selectedChildren(); selectedChildren.size())
-                return selectedChildren.first()->stringValue();
+                return protect(selectedChildren.first())->stringValue();
             break;
         }
     }
@@ -4380,6 +4416,8 @@ SRGBA<uint8_t> AccessibilityNodeObject::colorValue() const
     return input->valueAsColor().toColorTypeLossy<SRGBA<uint8_t>>();
 }
 
+static constexpr unsigned maxNestedAccessibleNameComputations = 128;
+
 // This function implements the ARIA accessible name as described by the Mozilla
 // ARIA Implementer's Guide.
 static String accessibleNameForNode(Node& node, Node* labelledbyNode, DescendIntoContainers descendIntoContainers)
@@ -4399,6 +4437,19 @@ static String accessibleNameForNode(Node& node, Node* labelledbyNode, DescendInt
         if (String title = svgElement->title(); !title.isEmpty())
             return title;
     }
+
+    // Acc-name computation can recurse. If it does, the node whose traversal is already in
+    // progress contributes the empty string: https://w3c.github.io/accname/#computation-steps
+    // Track and check visited nodes to support this.
+    Ref protectedNode { node };
+    static NeverDestroyed<HashSet<const Node*>> nodesCurrentlyBeingNamed;
+    if (nodesCurrentlyBeingNamed->size() >= maxNestedAccessibleNameComputations)
+        return { };
+    if (!nodesCurrentlyBeingNamed->add(protectedNode.ptr()).isNewEntry)
+        return { };
+    auto removeOnExit = makeScopeExit([&] {
+        nodesCurrentlyBeingNamed->remove(protectedNode.ptr());
+    });
 
     // If the node can be turned into an AX object, we can use standard name computation rules.
     // If however, the node cannot (because there's no renderer e.g.) fallback to using the basic text underneath.
@@ -4683,7 +4734,7 @@ void AccessibilityNodeObject::setFocused(bool on)
     // If we return from setFocusedElement and our element has been removed from a tree, axObjectCache() may be null.
     if (CheckedPtr cache = axObjectCache()) {
         cache->setIsSynchronizingSelection(true);
-        protect(downcast<Element>(*m_node))->focus();
+        protect(downcast<Element>(*m_node))->focus({ .preventInputViewPresentation = true });
         cache->setIsSynchronizingSelection(false);
     }
 }
@@ -4958,7 +5009,7 @@ Vector<Ref<HTMLElement>> labelsForElement(Element* element)
         if (htmlElement->hasAttributeWithoutSynchronization(aria_labelAttr))
             return { };
 
-        if (auto* treeScopeLabels = htmlElement->treeScope().labelElementsForId(idAttribute); treeScopeLabels && !treeScopeLabels->isEmpty()) {
+        if (auto* treeScopeLabels = protect(htmlElement->treeScope())->labelElementsForId(idAttribute); treeScopeLabels && !treeScopeLabels->isEmpty()) {
             result.appendVector(WTF::compactMap(*treeScopeLabels, [] (auto& label) {
                 return RefPtr { dynamicDowncast<HTMLLabelElement>(label.get()) };
             }));

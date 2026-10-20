@@ -45,7 +45,6 @@
 
 #include <WebCore/DocumentLoader.h>
 #include <WebCore/Element.h>
-#include <WebCore/NetworkStorageSession.h>
 
 #include <WebCore/Document.h>
 #include <WebCore/RenderObject.h>
@@ -169,7 +168,6 @@
 #include <WebCore/RenderText.h>
 #include <WebCore/RenderTextLineBoxes.h>
 #include <WebCore/RotationDirection.h>
-#include <WebCore/SVGImageCache.h>
 #include <WebCore/SVGInlineTextBox.h>
 #include <WebCore/SVGTextLayoutAttributes.h>
 #include <WebCore/SVGTextMetrics.h>

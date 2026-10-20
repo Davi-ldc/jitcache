@@ -44,7 +44,7 @@ namespace WebCore {
 using namespace Inspector;
 
 #define ERROR_IF_NO_ACTIVE_AUDIT() \
-    if (!m_auditAgent.hasActiveAudit()) \
+    if (!m_auditAgent->hasActiveAudit()) \
         return Exception { ExceptionCode::NotAllowedError, "Cannot be called outside of a Web Inspector Audit"_s };
 
 InspectorAuditAccessibilityObject::InspectorAuditAccessibilityObject(InspectorAuditAgent& auditAgent)
@@ -56,7 +56,7 @@ static AccessibilityObject* accessibilityObjectForNode(Node& node)
 {
     AXObjectCache::enableAccessibility();
 
-    if (CheckedPtr axObjectCache = protect(node)->document().axObjectCache())
+    if (CheckedPtr axObjectCache = protect(protect(node)->document())->axObjectCache())
         return axObjectCache->getOrCreate(node);
 
     return nullptr;
@@ -181,7 +181,7 @@ ExceptionOr<std::optional<InspectorAuditAccessibilityObject::ComputedProperties>
         computedProperties.ignored = axObject->isIgnored();
         computedProperties.ignoredByDefault = axObject->isIgnoredByDefault();
 
-        String invalidValue = axObject->invalidStatus();
+        String invalidValue = axObject->invalidStatusIncludingInferred();
         if (invalidValue == "false"_s)
             computedProperties.invalidStatus = "false"_s;
         else if (invalidValue == "grammar"_s)

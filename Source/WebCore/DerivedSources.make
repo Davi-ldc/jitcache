@@ -99,8 +99,6 @@ JS_BINDING_IDLS := \
     $(WebCore)/Modules/WebGPU/GPUComputePassTimestampWrites.idl \
     $(WebCore)/Modules/WebGPU/GPUComputePipeline.idl \
     $(WebCore)/Modules/WebGPU/GPUComputePipelineDescriptor.idl \
-	$(WebCore)/Modules/WebGPU/GPUCopyElementImageDestination.idl \
-	$(WebCore)/Modules/WebGPU/GPUCopyElementImageSource.idl \
     $(WebCore)/Modules/WebGPU/GPUCullMode.idl \
     $(WebCore)/Modules/WebGPU/GPUDebugCommandsMixin.idl \
     $(WebCore)/Modules/WebGPU/GPUDepthStencilState.idl \
@@ -111,6 +109,9 @@ JS_BINDING_IDLS := \
     $(WebCore)/Modules/WebGPU/GPUDeviceLostInfo.idl \
     $(WebCore)/Modules/WebGPU/GPUDeviceLostReason.idl \
     $(WebCore)/Modules/WebGPU/GPUDeviceUncapturedError.idl \
+	$(WebCore)/Modules/WebGPU/GPUDrawElementImageDestination.idl \
+	$(WebCore)/Modules/WebGPU/GPUDrawElementImageSource.idl \
+    $(WebCore)/Modules/WebGPU/GPUError.idl \
     $(WebCore)/Modules/WebGPU/GPUErrorFilter.idl \
     $(WebCore)/Modules/WebGPU/GPUExtent3DDict.idl \
     $(WebCore)/Modules/WebGPU/GPUExternalTexture.idl \
@@ -314,6 +315,9 @@ JS_BINDING_IDLS := \
     $(WebCore)/Modules/credentialmanagement/IdentityCredentialRequestOptions.idl \
     $(WebCore)/Modules/credentialmanagement/Navigator+Credentials.idl \
     $(WebCore)/Modules/credentialmanagement/OTPCredentialRequestOptions.idl \
+    $(WebCore)/Modules/device-posture/DevicePosture.idl \
+    $(WebCore)/Modules/device-posture/DevicePostureType.idl \
+    $(WebCore)/Modules/device-posture/Navigator+DevicePosture.idl \
     $(WebCore)/Modules/encryptedmedia/MediaKeyEncryptionScheme.idl \
     $(WebCore)/Modules/encryptedmedia/MediaKeyMessageEventInit.idl \
     $(WebCore)/Modules/encryptedmedia/MediaKeyMessageEvent.idl \
@@ -791,6 +795,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/Modules/webcodecs/FlacEncoderConfig.idl \
     $(WebCore)/Modules/webcodecs/LatencyMode.idl \
     $(WebCore)/Modules/webcodecs/HardwareAcceleration.idl \
+    $(WebCore)/Modules/webcodecs/HevcEncoderConfig.idl \
     $(WebCore)/Modules/webcodecs/OpusEncoderConfig.idl \
     $(WebCore)/Modules/webcodecs/PlaneLayout.idl \
     $(WebCore)/Modules/webcodecs/VideoColorPrimaries.idl \
@@ -1018,6 +1023,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/css/CSSConditionRule.idl \
     $(WebCore)/css/CSSContainerRule.idl \
     $(WebCore)/css/CSSCounterStyleRule.idl \
+    $(WebCore)/css/CSSEnvironmentMapRule.idl \
     $(WebCore)/css/CSSFontFaceDescriptors.idl \
     $(WebCore)/css/CSSFontFaceRule.idl \
     $(WebCore)/css/CSSFontFeatureValuesRule.idl \
@@ -1192,6 +1198,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/dom/Element+PointerEvents.idl \
     $(WebCore)/dom/Element+PointerLock.idl \
     $(WebCore)/dom/Element+Typedom.idl \
+    $(WebCore)/dom/Element+VolumetricScene.idl \
     $(WebCore)/dom/Element.idl \
     $(WebCore)/dom/ElementContentEditable.idl \
     $(WebCore)/dom/ElementCreationOptions.idl \
@@ -1251,6 +1258,8 @@ JS_BINDING_IDLS := \
     $(WebCore)/dom/ProcessingInstruction.idl \
     $(WebCore)/dom/ProgressEvent.idl \
     $(WebCore)/dom/PromiseRejectionEvent.idl \
+    $(WebCore)/dom/QuotaExceededError.idl \
+    $(WebCore)/dom/QuotaExceededErrorOptions.idl \
     $(WebCore)/dom/Range+CSSOMView.idl \
     $(WebCore)/dom/Range+DOMParsing.idl \
     $(WebCore)/dom/Range.idl \
@@ -1425,6 +1434,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/html/canvas/CanvasCompositing.idl \
     $(WebCore)/html/canvas/CanvasDirection.idl \
 	$(WebCore)/html/canvas/CanvasDrawElementImage.idl \
+	$(WebCore)/html/canvas/CanvasDrawElementImageOptions.idl \
     $(WebCore)/html/canvas/CanvasDrawImage.idl \
     $(WebCore)/html/canvas/CanvasDrawPath.idl \
 	$(WebCore)/html/canvas/CanvasElementImage.idl \
@@ -1492,6 +1502,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/html/canvas/PaintRenderingContext2D.idl \
     $(WebCore)/html/canvas/Path2D.idl \
     $(WebCore)/html/canvas/PredefinedColorSpace.idl \
+	$(WebCore)/html/canvas/UpdateElementGeometryOptions.idl \
     $(WebCore)/html/canvas/WebGL2RenderingContext.idl \
     $(WebCore)/html/canvas/WebGLActiveInfo.idl \
     $(WebCore)/html/canvas/WebGLBlendFuncExtended.idl \
@@ -1552,6 +1563,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/html/track/VideoTrack.idl \
     $(WebCore)/html/track/VideoTrackConfiguration.idl \
     $(WebCore)/html/track/VideoTrackList.idl \
+    $(WebCore)/mathml/MathMLAnchorElement.idl \
     $(WebCore)/mathml/MathMLElement.idl \
     $(WebCore)/mathml/MathMLMathElement.idl \
     $(WebCore)/inspector/CommandLineAPIHost.idl \
@@ -1646,6 +1658,7 @@ JS_BINDING_IDLS := \
     $(WebCore)/page/Screen.idl \
     $(WebCore)/page/ScreenOrientation.idl \
     $(WebCore)/page/ScrollBehavior.idl \
+    $(WebCore)/page/ScrollIntoViewContainer.idl \
     $(WebCore)/page/ScrollIntoViewOptions.idl \
     $(WebCore)/page/ScrollLogicalPosition.idl \
     $(WebCore)/page/ScrollOptions.idl \
@@ -1785,7 +1798,6 @@ JS_BINDING_IDLS := \
     $(WebCore)/svg/SVGViewElement.idl \
     $(WebCore)/svg/SVGViewSpec.idl \
     $(WebCore)/svg/SVGZoomAndPan.idl \
-    $(WebCore)/testing/GCObservation.idl \
     $(WebCore)/testing/InternalSettings.idl \
     $(WebCore)/testing/Internals.idl \
     $(WebCore)/testing/InternalsMapLike.idl \
@@ -2224,6 +2236,8 @@ USER_AGENT_STYLE_SHEETS = \
     $(WebCore)/css/mathmlLegacyFontSizeMath.css \
     $(WebCore)/css/popover.css \
     $(WebCore)/css/quirks.css \
+    $(WebCore)/css/selectMultipleAndListBox.css \
+    $(WebCore)/css/selectMultipleSelectedContent.css \
     $(WebCore)/css/svg.css \
     $(WebCore)/css/viewTransitions.css \
     $(WebCore)/html/shadow/mac/imageControlsMac.css \
@@ -2566,8 +2580,12 @@ $(NAMESPACE_GENERATED_PATTERNS) : $(DOM_NAME_ENUM_DEPS)
 
 # Internal Settings
 
+# Only the first match is used, since the file can be present both in the build output and in the SDK.
+WEB_PREFERENCES_ADDITIONS = $(firstword $(wildcard $(addsuffix /WebPreferencesAdditions.yaml, $(WEBKITADDITIONS_HEADER_SEARCH_PATHS))))
+
 WEB_PREFERENCES_INPUT_FILES = \
     ${WTF_BUILD_SCRIPTS_DIR}/Preferences/UnifiedWebPreferences.yaml \
+    $(WEB_PREFERENCES_ADDITIONS) \
     ${WebCore}/page/Settings.yaml \
 #
 
@@ -2583,6 +2601,35 @@ all : $(GENERATE_SETTINGS)
 
 $(GENERATE_SETTINGS) : % : $(WebCore)/Scripts/SettingsTemplates/%.erb $(WEB_PREFERENCES_INPUT_FILES) $(WebCore)/Scripts/GenerateSettings.rb
 	$(RUBY) $(WebCore)/Scripts/GenerateSettings.rb $(WEB_PREFERENCES_INPUT_FILES) --template $<
+
+# --------
+
+# Quirk behaviors
+
+QUIRK_BEHAVIORS_INPUT_FILES = \
+    $(WebCore)/page/QuirkBehaviors.yaml \
+#
+
+GENERATE_QUIRK_BEHAVIORS = \
+    QuirkBehaviorDefinitions.h \
+    QuirkBehaviorID.h \
+    QuirksAccessors.cpp \
+    QuirksAccessors.h \
+#
+
+GENERATE_QUIRK_BEHAVIORS_TEMPLATES = $(addprefix $(WebCore)/Scripts/QuirkBehaviorsTemplates/, $(addsuffix .erb, $(GENERATE_QUIRK_BEHAVIORS)))
+
+# The generator leaves unchanged outputs untouched, so track the last run with a stamp file
+# rather than the outputs' mtimes; otherwise make would rerun it on every build.
+QUIRK_BEHAVIORS_STAMP = .quirk-behaviors-stamp
+
+all : $(GENERATE_QUIRK_BEHAVIORS)
+
+$(QUIRK_BEHAVIORS_STAMP) : $(GENERATE_QUIRK_BEHAVIORS_TEMPLATES) $(QUIRK_BEHAVIORS_INPUT_FILES) $(WebCore)/Scripts/GenerateQuirkBehaviors.rb
+	$(RUBY) $(WebCore)/Scripts/GenerateQuirkBehaviors.rb $(QUIRK_BEHAVIORS_INPUT_FILES) $(addprefix --template , $(GENERATE_QUIRK_BEHAVIORS_TEMPLATES))
+	touch $(QUIRK_BEHAVIORS_STAMP)
+
+$(GENERATE_QUIRK_BEHAVIORS) : $(QUIRK_BEHAVIORS_STAMP)
 
 # --------
 

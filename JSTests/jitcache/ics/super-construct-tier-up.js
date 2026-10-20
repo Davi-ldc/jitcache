@@ -1,6 +1,6 @@
 // jitcache-runs: Off
 // jitcache-requires: twins
-// jitcache-pin: off its Off run calls jitcacheICsSnapshot, which only twins builds have, and E1 changes its baseline super_construct code
+// jitcache-pin: off its Off run calls jitcacheICsSnapshot, which only twins builds have, and the ICs lane's store of new.target's flag changes its baseline super_construct code
 
 // The second of the two super_construct scripts: a CodeBlock that tiers up from the LLInt keeps updating its
 // super_construct cache in baseline code. The LLInt stores new.target A; skip constructions, which return before super,

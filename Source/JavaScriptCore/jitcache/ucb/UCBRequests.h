@@ -34,7 +34,9 @@ namespace JSC::JITCache {
 // The request objects and hooks native call sites use. Native call sites create one request object per request and tell
 // it what happened; each member is a thin call into the engine of UCBImport.h. Every member is
 // a no-op unless the request is active (the VM had JITCache state that tracks keys when the request began) and not
-// settled. A request settles once it has recorded, imported, seeded or attached the UCB it asked for.
+// settled. A request settles once it has recorded, imported or attached the UCB it asked for. No hook runs where the
+// native path decodes a bytecode payload: what a native decode makes gets no record and no identity, so nothing in it
+// imports or is captured.
 //
 // The constructors of GlobalRequest and DirectEvalRequest run before any native step of their request and snapshot the
 // executable's lexicallyScopedFeatures() into RequestState::requestFeatures; keys and contexts read only that snapshot.
@@ -77,15 +79,16 @@ struct RequestState {
 
 // Program, module and indirect eval: SourceCodeType::ProgramType, ModuleType and EvalType map to Program, Module and
 // IndirectEval. The request takes its source digest and computes its key once, on first use, so a request that ends in a
-// map hit does neither unless an attach is about to follow.
+// map hit does neither.
 class GlobalRequest {
     WTF_MAKE_NONCOPYABLE(GlobalRequest);
 
 public:
     GlobalRequest(VM&, GlobalExecutable&, const SourceCode&, SourceCodeType, JSParserScriptMode, OptionSet<CodeGenerationMode>, EvalContextType);
     bool isActive() const { return m_state.active; }
-    void didServeLive(UnlinkedGlobalCodeBlock&); // a CodeCache map hit: attaches
-    void didDecode(UnlinkedGlobalCodeBlock&); // the provider's cached bytecode, before the map holds it: seeds
+    // A UCB the CodeCache returned: a map hit, or one it just decoded from the provider's cached bytecode, which has no
+    // record and so gets nothing.
+    void didServeLive(UnlinkedGlobalCodeBlock&);
     // The native path would generate. Returns an imported UCB with parse fields restored, feedback seeded and its record and
     // pending import in place, or null for a miss or after invalid material. Its class is the request's.
     UnlinkedGlobalCodeBlock* tryImport();
@@ -101,10 +104,7 @@ class FunctionBodyRequest { // the body of any UFE: child, Function constructor,
 public:
     FunctionBodyRequest(VM&, UnlinkedFunctionExecutable&, const SourceCode&, CodeSpecializationKind, OptionSet<CodeGenerationMode>);
     bool isActive() const { return m_state.active; }
-    // Inside decodeCachedCodeBlocks, after both cached slots are decoded and before m_isCached clears. Seeds the requested
-    // specialization's UCB and records the other one as Decoded without settling the request.
-    void didDecodeCachedSlots(UnlinkedFunctionCodeBlock* forCall, UnlinkedFunctionCodeBlock* forConstruct);
-    void didServeLive(UnlinkedFunctionCodeBlock&); // the requested slot was filled
+    void didServeLive(UnlinkedFunctionCodeBlock&); // the requested slot was filled, by an earlier request or by a native decode
     UnlinkedFunctionCodeBlock* tryImport(); // as GlobalRequest::tryImport; restores the UFE's parse fields
     void didGenerate(UnlinkedFunctionCodeBlock&);
 
@@ -130,7 +130,6 @@ private:
 // Root hooks, each before link reads the UFE and before any holder publishes it.
 void didCreateFunctionConstructorExecutable(VM&, UnlinkedFunctionExecutable&, const SourceCode&, LexicallyScopedFeatures, std::optional<int> parametersEndPosition);
 void didCreateBuiltinExecutable(VM&, UnlinkedFunctionExecutable&, const SourceCode&, const BuiltinSourceMetadata&);
-void didDecodeBuiltinExecutable(VM&, UnlinkedFunctionExecutable&, SourceProvider&);
 // Destructor hooks, first in ~UnlinkedCodeBlock and ~UnlinkedFunctionExecutable, on the sweeping thread.
 void unlinkedCodeBlockWillBeDestroyed(UnlinkedCodeBlock&);
 void unlinkedFunctionExecutableWillBeDestroyed(UnlinkedFunctionExecutable&);

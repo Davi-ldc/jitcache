@@ -37,7 +37,7 @@
 #import <sys/param.h>
 #import <unicode/uchar.h>
 
-NSString *WebKitLocalCacheDefaultsKey = @"WebKitLocalCache";
+NSString * const WebKitLocalCacheDefaultsKey = @"WebKitLocalCache";
 NSString *WebKitResourceLoadStatisticsDirectoryDefaultsKey = @"WebKitResourceLoadStatisticsDirectory";
 
 
@@ -77,6 +77,10 @@ static bool canUseFastRenderer(std::span<const UniChar> buffer)
 
         NSGraphicsContext *nsContext = [NSGraphicsContext currentContext];
         RetainPtr cgContext = [nsContext CGContext];
+        // FIXME: This should not be needed, but is added
+        // conservatively.
+        CGAffineTransform savedTextMatrix = CGContextGetTextMatrix(cgContext.get());
+
         WebCore::GraphicsContextCG graphicsContext { cgContext.get() };
 
         // WebCore requires a flipped graphics context.
@@ -89,6 +93,8 @@ static bool canUseFastRenderer(std::span<const UniChar> buffer)
 
         if (!flipped)
             CGContextScaleCTM(cgContext.get(), 1, -1);
+
+        CGContextSetTextMatrix(cgContext.get(), savedTextMatrix);
     } else {
         // The given point is on the baseline.
         if ([[NSView focusView] isFlipped])
@@ -119,15 +125,16 @@ static bool canUseFastRenderer(std::span<const UniChar> buffer)
 
 - (NSString *)_web_stringByAbbreviatingWithTildeInPath
 {
+    RetainPtr homeDirectory = NSHomeDirectory();
     // Handles home directories that have symlinks in their paths as well as what stringByAbbreviatingWithTildeInPath handles.
     // This works around Radar bug 2774250.
 
-    NSString *resolvedHomeDirectory = [NSHomeDirectory() stringByResolvingSymlinksInPath];
+    NSString *resolvedHomeDirectory = [homeDirectory stringByResolvingSymlinksInPath];
     NSString *path;
 
     if ([self hasPrefix:resolvedHomeDirectory]) {
         NSString *relativePath = [self substringFromIndex:[resolvedHomeDirectory length]];
-        path = [NSHomeDirectory() stringByAppendingPathComponent:relativePath];
+        path = [homeDirectory stringByAppendingPathComponent:relativePath];
     } else {
         path = self;
     }
@@ -168,7 +175,7 @@ static bool canUseFastRenderer(std::span<const UniChar> buffer)
 
     if (!cacheDirectory || ![cacheDirectory isKindOfClass:[NSString class]]) {
 #if PLATFORM(IOS_FAMILY)
-        cacheDirectory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"];
+        cacheDirectory = [protect(NSHomeDirectory()) stringByAppendingPathComponent:@"Library/Caches"];
 #endif
 #if PLATFORM(MAC)
         char buffer[MAXPATHLEN];

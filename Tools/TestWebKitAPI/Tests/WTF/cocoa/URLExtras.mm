@@ -74,6 +74,11 @@ static NSURL *literalURL(const char* literal)
     return WTF::URLWithData(literalAsData(literal), nil);
 }
 
+static NSURL *literalURL(const UTF8CString& string)
+{
+    return WTF::URLWithData(toNSData(byteCast<uint8_t>(string.span())).get(), nil);
+}
+
 TEST(URLExtras, URLExtras)
 {
     EXPECT_STREQ("http://site.com", originalDataAsString(literalURL("http://site.com")));
@@ -178,7 +183,7 @@ TEST(URLExtras, URLExtras_Spoof)
     };
     for (auto& host : punycodedSpoofHosts) {
         auto url = makeString("http://"_s, host, '/').utf8();
-        EXPECT_STREQ(url.data(), userVisibleString(literalURL(url.data())));
+        EXPECT_WK_STREQ(url, userVisibleString(literalURL(url)));
     }
 }
 
@@ -409,7 +414,7 @@ TEST(URLExtras, URLByRemovingUserInfo)
     URL url("https://apple.com%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40%40@foo.github.io/upload/test.zip"_s);
     RetainPtr cfUrl = WTF::URLByRemovingUserInfo(url.createNSURL().get());
     URL url2(cfUrl.get());
-    EXPECT_STREQ("https://foo.github.io/upload/test.zip", url2.string().utf8().data());
+    EXPECT_EQ("https://foo.github.io/upload/test.zip"_s, url2.string());
 }
 
 // isUserVisibleURL() is a fast-path guard that must return YES only when

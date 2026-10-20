@@ -39,52 +39,52 @@ ASCIILiteral description(ImageCheck check)
     switch (check) {
     case ImageCheck::None:
         return "none"_s;
-    case ImageCheck::V1:
-        return "v1"_s;
-    case ImageCheck::V2:
-        return "v2"_s;
-    case ImageCheck::V3:
-        return "v3"_s;
-    case ImageCheck::V4:
-        return "v4"_s;
-    case ImageCheck::V5:
-        return "v5"_s;
-    case ImageCheck::V6:
-        return "v6"_s;
-    case ImageCheck::V7:
-        return "v7"_s;
-    case ImageCheck::U1:
-        return "u1"_s;
-    case ImageCheck::U2:
-        return "u2"_s;
-    case ImageCheck::U3:
-        return "u3"_s;
-    case ImageCheck::U4:
-        return "u4"_s;
-    case ImageCheck::U5:
-        return "u5"_s;
-    case ImageCheck::U6:
-        return "u6"_s;
-    case ImageCheck::U7:
-        return "u7"_s;
-    case ImageCheck::W1:
-        return "w1"_s;
-    case ImageCheck::W2:
-        return "w2"_s;
-    case ImageCheck::W3:
-        return "w3"_s;
-    case ImageCheck::W4:
-        return "w4"_s;
-    case ImageCheck::S1:
-        return "s1"_s;
-    case ImageCheck::S2:
-        return "s2"_s;
-    case ImageCheck::S3:
-        return "s3"_s;
-    case ImageCheck::S4:
-        return "s4"_s;
-    case ImageCheck::S5:
-        return "s5"_s;
+    case ImageCheck::Header:
+        return "header"_s;
+    case ImageCheck::CodeBounds:
+        return "code-bounds"_s;
+    case ImageCheck::Fixups:
+        return "fixups"_s;
+    case ImageCheck::SideTables:
+        return "side-tables"_s;
+    case ImageCheck::MathICEntries:
+        return "mathic-entries"_s;
+    case ImageCheck::MathICAndSwitchTargets:
+        return "mathic-and-switch-targets"_s;
+    case ImageCheck::BakedFacts:
+        return "baked-facts"_s;
+    case ImageCheck::SimpleSwitchTables:
+        return "simple-switch-tables"_s;
+    case ImageCheck::StringSwitchTables:
+        return "string-switch-tables"_s;
+    case ImageCheck::UCBIndexes:
+        return "ucb-indexes"_s;
+    case ImageCheck::BytecodeIndexes:
+        return "bytecode-indexes"_s;
+    case ImageCheck::CodeMapCount:
+        return "code-map-count"_s;
+    case ImageCheck::SwitchRanks:
+        return "switch-ranks"_s;
+    case ImageCheck::ConstantTargets:
+        return "constant-targets"_s;
+    case ImageCheck::TwinsHeader:
+        return "twins-header"_s;
+    case ImageCheck::TwinInputs:
+        return "twin-inputs"_s;
+    case ImageCheck::TwinRegenerations:
+        return "twin-regenerations"_s;
+    case ImageCheck::TwinInputSites:
+        return "twin-input-sites"_s;
+    case ImageCheck::CodeFixupTargets:
+        return "code-fixup-targets"_s;
+    case ImageCheck::SnippetFixupTargets:
+        return "snippet-fixup-targets"_s;
+    case ImageCheck::MathICCount:
+        return "mathic-count"_s;
+    case ImageCheck::SideTablePointers:
+        return "side-table-pointers"_s;
+    case ImageCheck::PatchReadBack:
+        return "patch-read-back"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -189,7 +189,7 @@ enum class FixupPlace : bool { Image, Snippet };
 
 // The rules of each target kind that need no UCB and no other region: the form each kind allows, the fields it uses
 // (every other is zero), the range of the fields that name an enumeration and the validity of a CodeSymbol payload,
-// which ImageCheck::V3 applies.
+// which ImageCheck::Fixups applies.
 static bool isValidTargetForForm(const ImageTarget& target, FixupForm form, FixupPlace place)
 {
     bool usesA = false;
@@ -253,8 +253,8 @@ static bool isValidTargetForForm(const ImageTarget& target, FixupForm form, Fixu
     case TargetKind::UCBUnaryArithProfile:
     case TargetKind::MathIC:
     case TargetKind::SwitchTableBase:
-        // Their indexes are checked against the UCB (ImageCheck::U3 and U7) and against the section's other regions
-        // (ImageCheck::V6).
+        // Their indexes are checked against the UCB (ImageCheck::UCBIndexes and ConstantTargets) and against the
+        // section's other regions (ImageCheck::MathICAndSwitchTargets).
         formIsAllowed = form == FixupForm::Pointer;
         usesA = true;
         break;
@@ -284,7 +284,7 @@ static bool isValidTargetForForm(const ImageTarget& target, FixupForm form, Fixu
     return (usesA || !target.a) && (usesB || !target.b) && (usesPayload || !target.payload);
 }
 
-// ImageCheck::V3 on one list of fixups and the code it describes.
+// ImageCheck::Fixups on one list of fixups and the code it describes.
 static bool fixupsAreValid(const ImageFixupArray& fixups, std::span<const uint8_t> code, FixupPlace place)
 {
     size_t previousEnd = 0;
@@ -347,7 +347,7 @@ static void forEachFixupList(const ImageSectionsView& view, const Functor& funct
     });
 }
 
-static bool passesU1(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
+static bool passesSimpleSwitchTables(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
     if (view.header().simpleSwitchTableCount != unlinkedCodeBlock.numberOfUnlinkedSwitchJumpTables())
         return false;
@@ -361,7 +361,7 @@ static bool passesU1(const ImageSectionsView& view, const UnlinkedCodeBlock& unl
     return valid;
 }
 
-static bool passesU2(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
+static bool passesStringSwitchTables(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
     if (view.header().stringSwitchTableCount != unlinkedCodeBlock.numberOfUnlinkedStringSwitchJumpTables())
         return false;
@@ -379,7 +379,7 @@ static size_t constantCountOf(const UnlinkedCodeBlock& unlinkedCodeBlock)
     return const_cast<UnlinkedCodeBlock&>(unlinkedCodeBlock).constantRegisters().size();
 }
 
-static bool passesU3(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
+static bool passesUCBIndexes(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
     size_t constantCount = constantCountOf(unlinkedCodeBlock);
     bool valid = true;
@@ -418,7 +418,7 @@ static bool passesU3(const ImageSectionsView& view, const UnlinkedCodeBlock& unl
     return valid;
 }
 
-// The UCB's instruction starts, which ImageCheck::U4 and U5 read.
+// The UCB's instruction starts, which ImageCheck::BytecodeIndexes and CodeMapCount read.
 struct InstructionStarts {
     BitVector starts;
     unsigned count { 0 };
@@ -435,7 +435,7 @@ static InstructionStarts instructionStartsOf(const UnlinkedCodeBlock& unlinkedCo
     return result;
 }
 
-static bool passesU4(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock, const InstructionStarts& instructionStarts)
+static bool passesBytecodeIndexes(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock, const InstructionStarts& instructionStarts)
 {
     auto& instructions = unlinkedCodeBlock.instructions();
     auto isStart = [&](uint32_t offset) {
@@ -467,7 +467,7 @@ static bool passesU4(const ImageSectionsView& view, const UnlinkedCodeBlock& unl
     return true;
 }
 
-static bool passesU6(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
+static bool passesSwitchRanks(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
     struct RankCount {
         unsigned cases { 0 };
@@ -512,7 +512,7 @@ static bool passesU6(const ImageSectionsView& view, const UnlinkedCodeBlock& unl
     return true;
 }
 
-static bool passesU7(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
+static bool passesConstantTargets(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
     auto constantAt = [&](uint32_t index) {
         return unlinkedCodeBlock.getConstant(VirtualRegister(FirstConstantRegisterIndex + static_cast<int>(index)));
@@ -547,21 +547,21 @@ static bool passesU7(const ImageSectionsView& view, const UnlinkedCodeBlock& unl
 
 static std::optional<ImageCheck> firstFailureAgainst(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
-    if (!passesU1(view, unlinkedCodeBlock))
-        return ImageCheck::U1;
-    if (!passesU2(view, unlinkedCodeBlock))
-        return ImageCheck::U2;
-    if (!passesU3(view, unlinkedCodeBlock))
-        return ImageCheck::U3;
+    if (!passesSimpleSwitchTables(view, unlinkedCodeBlock))
+        return ImageCheck::SimpleSwitchTables;
+    if (!passesStringSwitchTables(view, unlinkedCodeBlock))
+        return ImageCheck::StringSwitchTables;
+    if (!passesUCBIndexes(view, unlinkedCodeBlock))
+        return ImageCheck::UCBIndexes;
     auto instructionStarts = instructionStartsOf(unlinkedCodeBlock);
-    if (!passesU4(view, unlinkedCodeBlock, instructionStarts))
-        return ImageCheck::U4;
+    if (!passesBytecodeIndexes(view, unlinkedCodeBlock, instructionStarts))
+        return ImageCheck::BytecodeIndexes;
     if (view.header().codeMapCount != instructionStarts.count)
-        return ImageCheck::U5;
-    if (!passesU6(view, unlinkedCodeBlock))
-        return ImageCheck::U6;
-    if (!passesU7(view, unlinkedCodeBlock))
-        return ImageCheck::U7;
+        return ImageCheck::CodeMapCount;
+    if (!passesSwitchRanks(view, unlinkedCodeBlock))
+        return ImageCheck::SwitchRanks;
+    if (!passesConstantTargets(view, unlinkedCodeBlock))
+        return ImageCheck::ConstantTargets;
 #if ENABLE(JITCACHE_TWINS)
     if (auto failure = firstTwinsFailureAgainst(view, unlinkedCodeBlock))
         return failure;
@@ -936,8 +936,8 @@ auto ImageSectionsView::locate(std::span<const uint8_t> image, const ImageSectio
     if (!advance(static_cast<uint64_t>(header.mathICCount) * imageMathICEntrySize))
         return std::nullopt;
 
-    // A snippet follows for each MathIC whose flags say it has one; ImageCheck::V5 checks the flags against the other
-    // fields.
+    // A snippet follows for each MathIC whose flags say it has one; ImageCheck::MathICEntries checks the flags against
+    // the other fields.
     layout.snippets = offset;
     for (uint32_t index = 0; index < header.mathICCount; ++index) {
         auto entry = image.subspan(layout.mathICs + static_cast<size_t>(index) * imageMathICEntrySize, imageMathICEntrySize);
@@ -954,22 +954,22 @@ auto ImageSectionsView::locate(std::span<const uint8_t> image, const ImageSectio
 
 std::optional<ImageCheck> ImageSectionsView::firstStructureFailure() const
 {
-    if (!passesV1())
-        return ImageCheck::V1;
-    if (!passesV2())
-        return ImageCheck::V2;
-    if (!passesV3())
-        return ImageCheck::V3;
-    if (!passesV4())
-        return ImageCheck::V4;
-    if (!passesV5())
-        return ImageCheck::V5;
-    if (!passesV6())
-        return ImageCheck::V6;
+    if (!passesHeader())
+        return ImageCheck::Header;
+    if (!passesCodeBounds())
+        return ImageCheck::CodeBounds;
+    if (!passesFixups())
+        return ImageCheck::Fixups;
+    if (!passesSideTables())
+        return ImageCheck::SideTables;
+    if (!passesMathICEntries())
+        return ImageCheck::MathICEntries;
+    if (!passesMathICAndSwitchTargets())
+        return ImageCheck::MathICAndSwitchTargets;
     return std::nullopt;
 }
 
-bool ImageSectionsView::passesV1() const
+bool ImageSectionsView::passesHeader() const
 {
     // Both coverage rates are the ratios CodeBlock::shouldOptimizeNowFromBaseline computes.
     auto isRate = [](double rate) {
@@ -1003,7 +1003,7 @@ bool ImageSectionsView::passesV1() const
     return true;
 }
 
-bool ImageSectionsView::passesV2() const
+bool ImageSectionsView::passesCodeBounds() const
 {
     if (!m_header.codeSize || m_header.arityEntryOffset >= m_header.codeSize)
         return false;
@@ -1052,7 +1052,7 @@ bool ImageSectionsView::passesV2() const
 #endif
 }
 
-bool ImageSectionsView::passesV3() const
+bool ImageSectionsView::passesFixups() const
 {
     using namespace ImageSectionInternal;
     if (!fixupsAreValid(fixups(), code(), FixupPlace::Image))
@@ -1064,7 +1064,7 @@ bool ImageSectionsView::passesV3() const
     return valid;
 }
 
-bool ImageSectionsView::passesV4() const
+bool ImageSectionsView::passesSideTables() const
 {
     using namespace ImageSectionInternal;
     // Code offsets lie within the code, its end included, as capture's own range check does.
@@ -1095,7 +1095,7 @@ bool ImageSectionsView::passesV4() const
                 return false;
             break;
         case static_cast<uint8_t>(MoldIdentifierKind::UCBIdentifier):
-            break; // ImageCheck::U3 bounds the index.
+            break; // ImageCheck::UCBIndexes bounds the index.
         case static_cast<uint8_t>(MoldIdentifierKind::ImmortalName):
             if (identifier < 1 || identifier > numberOfImmortalNames)
                 return false;
@@ -1135,7 +1135,7 @@ bool ImageSectionsView::passesV4() const
     return true;
 }
 
-bool ImageSectionsView::passesV5() const
+bool ImageSectionsView::passesMathICEntries() const
 {
     using namespace ImageSectionInternal;
     uint32_t codeSize = m_header.codeSize;
@@ -1213,7 +1213,7 @@ bool ImageSectionsView::passesV5() const
     return valid;
 }
 
-bool ImageSectionsView::passesV6() const
+bool ImageSectionsView::passesMathICAndSwitchTargets() const
 {
     // Only JIT::emitMathICSlow passes an IC's address, so a MathIC target names a MathIC with inline code; a switch table
     // base names a dense table.
@@ -1238,11 +1238,11 @@ bool ImageSectionsView::passesV6() const
 std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans& spans, bool strict)
 {
     if (spans.image.size() < imageSectionHeaderSize)
-        return std::unexpected(ImageCheck::V1);
+        return std::unexpected(ImageCheck::Header);
     auto header = ImageSectionInternal::decodeHeader(spans.image);
     auto layout = ImageSectionsView::locate(spans.image, header);
     if (!layout)
-        return std::unexpected(ImageCheck::V1);
+        return std::unexpected(ImageCheck::Header);
 
     ImageSectionsView view(spans.image, header, *layout);
     if (strict) {
@@ -1259,7 +1259,7 @@ std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSecti
     // A twins build always receives the section, so a body without it cannot be located and is invalid material there.
     auto twins = ImageTwinsView::locate(spans.twins);
     if (!twins)
-        return std::unexpected(ImageCheck::W1);
+        return std::unexpected(ImageCheck::TwinsHeader);
     view.m_twins = *twins;
     if (strict) {
         if (auto failure = firstTwinsStructureFailure(view))

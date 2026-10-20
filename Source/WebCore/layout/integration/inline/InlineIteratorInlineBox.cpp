@@ -28,7 +28,7 @@
 
 #include "LayoutIntegrationLineLayout.h"
 #include "RenderBlockFlowInlines.h"
-#include "RenderInline.h"
+#include "RenderSVGInline.h"
 #include "StyleComputedStyle+GettersInlines.h"
 
 namespace WebCore {
@@ -41,11 +41,16 @@ InlineBox::InlineBox(PathVariant&& path)
 
 RectEdges<bool> InlineBox::closedEdges() const
 {
-    // FIXME: Layout knows the answer to this question so we should consult it.
     RectEdges<bool> closedEdges { true };
     if (style()->boxDecorationBreak() == BoxDecorationBreak::Clone)
         return closedEdges;
     auto writingMode = style()->writingMode();
+    // Layout knows whether a fragment of an inline box has its start/end (the root inline box is not fragmented this way).
+    if (auto* displayBox = inlineBox(); displayBox && displayBox->isNonRootInlineBox()) {
+        closedEdges.setStart(displayBox->isFirstFragment(), writingMode);
+        closedEdges.setEnd(displayBox->isLastFragment(), writingMode);
+        return closedEdges;
+    }
     bool isFirst = !nextInlineBoxLineLeftward();
     bool isLast = !nextInlineBoxLineRightward();
     closedEdges.setStart(isFirst, writingMode);
@@ -121,11 +126,11 @@ InlineBoxIterator& InlineBoxIterator::traverseInlineBoxLineLeftward()
     return *this;
 }
 
-InlineBoxIterator lineLeftmostInlineBoxFor(const RenderInline& renderInline)
+InlineBoxIterator lineLeftmostInlineBoxFor(const RenderBoxModelObject& inlineBox)
 {
-    if (CheckedPtr lineLayout = LayoutIntegration::LineLayout::containing(renderInline))
-        return lineLayout->firstInlineBoxFor(renderInline);
-    return { BoxLegacyPath { renderInline.firstLegacyInlineBox() } };
+    if (CheckedPtr lineLayout = LayoutIntegration::LineLayout::containing(inlineBox))
+        return lineLayout->firstInlineBoxFor(inlineBox);
+    return { BoxLegacyPath { firstLegacyInlineBoxFor(inlineBox) } };
 }
 
 InlineBoxIterator firstRootInlineBoxFor(const RenderBlockFlow& block)

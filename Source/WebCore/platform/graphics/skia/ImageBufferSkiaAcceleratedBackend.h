@@ -46,14 +46,14 @@ class ImageBufferSkiaAcceleratedBackend final : public ImageBufferSkiaSurfaceBac
     WTF_MAKE_TZONE_ALLOCATED(ImageBufferSkiaAcceleratedBackend);
     WTF_MAKE_NONCOPYABLE(ImageBufferSkiaAcceleratedBackend);
 public:
-    static std::unique_ptr<ImageBufferSkiaAcceleratedBackend> create(const Parameters&, const ImageBufferCreationContext&);
-    static std::unique_ptr<ImageBufferSkiaAcceleratedBackend> create(const Parameters&, const ImageBufferCreationContext&, sk_sp<SkSurface>&&);
+    static std::unique_ptr<ImageBufferSkiaAcceleratedBackend> create(const ImageBufferParameters&, const ImageBufferCreationContext&);
+    static std::unique_ptr<ImageBufferSkiaAcceleratedBackend> create(const ImageBufferParameters&, const ImageBufferCreationContext&, sk_sp<SkSurface>&&);
     ~ImageBufferSkiaAcceleratedBackend();
 
-    static constexpr RenderingMode renderingMode = RenderingMode::Accelerated;
+    RenderingMode renderingMode() const final { return RenderingMode::Accelerated; }
 
 private:
-    ImageBufferSkiaAcceleratedBackend(const Parameters&, sk_sp<SkSurface>&&);
+    ImageBufferSkiaAcceleratedBackend(const ImageBufferParameters&, sk_sp<SkSurface>&&);
 
     GraphicsContext& context() final;
     void flushContext() final;
@@ -72,13 +72,13 @@ private:
 #if USE(COORDINATED_GRAPHICS)
     RefPtr<GraphicsLayerContentsDisplayDelegate> layerContentsDisplayDelegate() const final;
 
-    RefPtr<GraphicsLayerContentsDisplayDelegate> m_layerContentsDisplayDelegate;
+    const RefPtr<GraphicsLayerContentsDisplayDelegate> m_layerContentsDisplayDelegate;
 #endif
 
     bool m_hasActiveRecording : 1 { false };
     SkPictureRecorder m_pictureRecorder;
-    std::unique_ptr<SkiaSwitchableCanvas> m_switchableCanvas;
-    std::unique_ptr<GraphicsContextSkia> m_canvasRecordingContext;
+    const std::unique_ptr<SkiaSwitchableCanvas> m_switchableCanvas;
+    const std::unique_ptr<GraphicsContextSkia> m_canvasRecordingContext;
 };
 
 } // namespace WebCore

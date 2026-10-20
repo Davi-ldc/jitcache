@@ -32,6 +32,8 @@
 #include "config.h"
 #include "CurlFormDataStream.h"
 
+#include <wtf/text/TextStream.h>
+
 #if USE(CURL)
 
 #include "BlobRegistry.h"
@@ -47,10 +49,8 @@ CurlFormDataStream::CurlFormDataStream(const RefPtr<FormData>& formData)
     if (!formData || formData->isEmpty())
         return;
 
-    m_formData = formData->isolatedCopy();
-
     // Resolve the blob elements so the formData can correctly report it's size.
-    m_formData = m_formData->resolveBlobReferences(blobRegistry()->blobRegistryImpl());
+    lazyInitialize(m_formData, formData->isolatedCopy()->resolveBlobReferences(blobRegistry()->blobRegistryImpl()));
 }
 
 CurlFormDataStream::~CurlFormDataStream() = default;
@@ -138,13 +138,13 @@ std::optional<size_t> CurlFormDataStream::readFromFile(const FormDataElement::En
         m_fileHandle = FileSystem::openFile(fileData.filename, FileSystem::FileOpenMode::Read);
 
     if (!m_fileHandle) {
-        LOG(Network, "Curl - Failed while trying to open %s for upload\n", fileData.filename.utf8().data());
+        LOG_WITH_STREAM(Network, stream << "Curl - Failed while trying to open "_s << fileData.filename << " for upload"_s);
         return std::nullopt;
     }
 
     auto readBytes = m_fileHandle.read({ byteCast<uint8_t>(buffer), size });
     if (!readBytes) {
-        LOG(Network, "Curl - Failed while trying to read %s for upload\n", fileData.filename.utf8().data());
+        LOG_WITH_STREAM(Network, stream << "Curl - Failed while trying to read "_s << fileData.filename << " for upload"_s);
         m_fileHandle = { };
         return std::nullopt;
     }

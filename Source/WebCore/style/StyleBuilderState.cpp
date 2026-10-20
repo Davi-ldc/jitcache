@@ -185,9 +185,7 @@ void BuilderState::updateFont()
     if (!needsUpdate())
         return;
 
-#if ENABLE(TEXT_AUTOSIZING)
     updateFontForTextSizeAdjust();
-#endif
     updateFontForGenericFamilyChange();
     updateFontForZoomChange();
     updateFontForOrientationChange();
@@ -198,7 +196,6 @@ void BuilderState::updateFont()
     m_fontDirty = false;
 }
 
-#if ENABLE(TEXT_AUTOSIZING)
 void BuilderState::updateFontForTextSizeAdjust()
 {
     if (m_style.textSizeAdjust().isAuto()
@@ -221,14 +218,12 @@ void BuilderState::updateFontForTextSizeAdjust()
 
     m_style.setFontDescriptionWithoutUpdate(WTF::move(newFontDescription));
 }
-#endif
 
 void BuilderState::updateFontForZoomChange()
 {
     if (m_style.usedZoom() == parentStyle().usedZoom() && m_style.textZoom() == parentStyle().textZoom())
         return;
 
-#if ENABLE(TEXT_AUTOSIZING)
     // When text-size-adjust has an active percentage, updateFontForTextSizeAdjust() has already
     // computed the correct size (incorporating both the multiplier and the current zoom factor).
     // Skip recalculation here to avoid overwriting that result, which would lose the
@@ -239,7 +234,6 @@ void BuilderState::updateFontForZoomChange()
         && (!document().settings().textAutosizingUsesIdempotentMode()
             || document().settings().idempotentModeAutosizingOnlyHonorsPercentages()))
         return;
-#endif
 
     setFontDescriptionFontSize(m_style.fontDescription().computedSize());
 }
@@ -346,24 +340,36 @@ double BuilderState::lookupCSSRandomBaseValue(const CSSCalc::RandomCachingKey& k
 
 // MARK: - Tree Counting Functions
 
+static void NODELETE markTreeCountingFunctionUsed(const Element& element, ComputedStyle& style)
+{
+    style.setUsesTreeCountingFunctions();
+
+    auto* parent = element.parentElement();
+    if (!parent)
+        return;
+
+    // FIXME: This should mark through Style::Relations.
+    parent->setChildrenAffectedByBackwardPositionalRules();
+    parent->setChildrenAffectedByForwardPositionalRules();
+}
+
+// "Loosely-matched tree-scoped references" count as 0 for cross-tree styling.
+// https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-loosely-matched
+static bool isLooselyMatchedTreeScopedReference(const PropertyCascade::Property* property)
+{
+    return property && property->styleScopeOrdinal <= ScopeOrdinal::ContainingHost;
+}
+
 unsigned BuilderState::siblingCount()
 {
     // https://drafts.csswg.org/css-values-5/#funcdef-sibling-count
 
     ASSERT(element());
 
-    // https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-loosely-matched
-    // "loosely-matched tree-scoped references" return 0 for cross-tree styling.
-    if (m_currentProperty && m_currentProperty->styleScopeOrdinal <= ScopeOrdinal::ContainingHost)
+    if (isLooselyMatchedTreeScopedReference(m_currentProperty))
         return 0;
 
-    auto* parent = element()->parentElement();
-    if (!parent)
-        return 1;
-
-    m_style.setUsesTreeCountingFunctions();
-    parent->setChildrenAffectedByBackwardPositionalRules();
-    parent->setChildrenAffectedByForwardPositionalRules();
+    markTreeCountingFunctionUsed(*element(), m_style);
 
     unsigned count = 1;
     for (const auto* sibling = ElementTraversal::previousSibling(*element()); sibling; sibling = ElementTraversal::previousSibling(*sibling))
@@ -379,18 +385,10 @@ unsigned BuilderState::siblingIndex()
 
     ASSERT(element());
 
-    // https://drafts.csswg.org/css-shadow-1/#tree-scoped-name-loosely-matched
-    // "loosely-matched tree-scoped references" return 0 for cross-tree styling.
-    if (m_currentProperty && m_currentProperty->styleScopeOrdinal <= ScopeOrdinal::ContainingHost)
+    if (isLooselyMatchedTreeScopedReference(m_currentProperty))
         return 0;
 
-    auto* parent = element()->parentElement();
-    if (!parent)
-        return 1;
-
-    m_style.setUsesTreeCountingFunctions();
-    parent->setChildrenAffectedByBackwardPositionalRules();
-    parent->setChildrenAffectedByForwardPositionalRules();
+    markTreeCountingFunctionUsed(*element(), m_style);
 
     unsigned count = 1;
     for (const auto* sibling = ElementTraversal::previousSibling(*element()); sibling; sibling = ElementTraversal::previousSibling(*sibling))

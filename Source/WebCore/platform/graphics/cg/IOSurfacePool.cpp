@@ -30,13 +30,13 @@
 
 #include "ColorSpace.h"
 #include "GraphicsContextCG.h"
+#include "ImageBufferBackend.h"
 #include <CoreGraphics/CoreGraphics.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/TextStream.h>
 
-static const Seconds collectionInterval { 500_ms };
-static const Seconds surfaceAgeBeforeMarkingPurgeable { 2_s };
+static const Seconds inUseCollectionInterval { 100_ms };
 
 #define ENABLE_IOSURFACE_POOL_STATISTICS 0
 #if ENABLE_IOSURFACE_POOL_STATISTICS
@@ -92,10 +92,6 @@ static bool surfaceMatchesParameters(IOSurface& surface, IntSize requestedSize, 
 
 void IOSurfacePool::willAddSurface(IOSurface& surface, bool inUse)
 {
-    CachedSurfaceDetails& details = m_surfaceDetails.add(&surface, CachedSurfaceDetails()).iterator->value;
-    details.resetLastUseTime();
-    details.inCurrentlyUsedSurfaceCache = inUse;
-
     size_t surfaceBytes = surface.totalBytes();
 
     evict(surfaceBytes);
@@ -103,6 +99,8 @@ void IOSurfacePool::willAddSurface(IOSurface& surface, bool inUse)
     m_bytesCached += surfaceBytes;
     if (inUse)
         m_inUseBytesCached += surfaceBytes;
+    else
+        surface.setVolatile(true);
 }
 
 void IOSurfacePool::didRemoveSurface(IOSurface& surface, bool inUse)
@@ -111,8 +109,6 @@ void IOSurfacePool::didRemoveSurface(IOSurface& surface, bool inUse)
     m_bytesCached -= surfaceBytes;
     if (inUse)
         m_inUseBytesCached -= surfaceBytes;
-
-    m_surfaceDetails.remove(&surface);
 }
 
 void IOSurfacePool::didUseSurfaceOfSize(IntSize size)
@@ -124,33 +120,29 @@ void IOSurfacePool::didUseSurfaceOfSize(IntSize size)
 std::unique_ptr<IOSurface> IOSurfacePool::takeSurface(IntSize size, const ColorSpace& colorSpace, IOSurface::Format format, UseLosslessCompression useLosslessCompression)
 {
     Locker locker { m_lock };
-    CachedSurfaceMap::iterator mapIter = m_cachedSurfaces.find(size);
+    if (auto mapIter = m_cachedSurfaces.find(size); mapIter != m_cachedSurfaces.end()) {
+        for (auto surfaceIter = mapIter->value.begin(); surfaceIter != mapIter->value.end(); ++surfaceIter) {
+            if (!surfaceMatchesParameters(*surfaceIter->get(), size, colorSpace, format, useLosslessCompression))
+                continue;
 
-    if (mapIter == m_cachedSurfaces.end()) {
-        DUMP_POOL_STATISTICS(stream << "IOSurfacePool::takeSurface [" << m_poolIdentifier << "] - failed to find surface matching size " << size << " color space " << colorSpace << " format " << format << "\n" << poolStatistics());
-        return nullptr;
-    }
+            auto surface = WTF::move(*surfaceIter);
+            mapIter->value.remove(surfaceIter);
 
-    for (auto surfaceIter = mapIter->value.begin(); surfaceIter != mapIter->value.end(); ++surfaceIter) {
-        if (!surfaceMatchesParameters(*surfaceIter->get(), size, colorSpace, format, useLosslessCompression))
-            continue;
+            didUseSurfaceOfSize(size);
 
-        auto surface = WTF::move(*surfaceIter);
-        mapIter->value.remove(surfaceIter);
+            if (mapIter->value.isEmpty()) {
+                m_cachedSurfaces.remove(mapIter);
+                m_sizesInPruneOrder.removeLast();
+            }
 
-        didUseSurfaceOfSize(size);
+            didRemoveSurface(*surface, false);
 
-        if (mapIter->value.isEmpty()) {
-            m_cachedSurfaces.remove(mapIter);
-            m_sizesInPruneOrder.removeLast();
+            auto purgeableState = surface->setVolatile(false);
+
+            DUMP_POOL_STATISTICS(stream << "IOSurfacePool::takeSurface [" << m_poolIdentifier << "] - taking surface " << surface.get() << " with size " << size << " color space " << colorSpace << " format " << format << " purgeable state " << purgeableState << "\n" << poolStatistics());
+            (void)purgeableState;
+            return surface;
         }
-
-        didRemoveSurface(*surface, false);
-
-        surface->setVolatile(false);
-
-        DUMP_POOL_STATISTICS(stream << "IOSurfacePool::takeSurface [" << m_poolIdentifier << "] - taking surface " << surface.get() << " with size " << size << " color space " << colorSpace << " format " << format << "\n" << poolStatistics());
-        return surface;
     }
 
     // Some of the in-use surfaces may no longer actually be in-use, but we haven't moved them over yet.
@@ -216,8 +208,6 @@ void IOSurfacePool::insertSurfaceIntoPool(std::unique_ptr<IOSurface> surface)
     if (!insertedTuple.isNewEntry)
         m_sizesInPruneOrder.removeLast(surfaceSize);
     m_sizesInPruneOrder.append(surfaceSize);
-
-    scheduleCollectionTimer();
 }
 
 void IOSurfacePool::setPoolSize(size_t poolSizeInBytes)
@@ -300,49 +290,21 @@ void IOSurfacePool::collectInUseSurfaces()
             newInUseSurfaces.append(WTF::move(*surfaceIter));
             continue;
         }
-        if (auto it = m_surfaceDetails.find(surface); it != m_surfaceDetails.end())
-            it->value.inCurrentlyUsedSurfaceCache = false;
 
         m_inUseBytesCached -= surface->totalBytes();
+        surface->setVolatile(true);
         insertSurfaceIntoPool(WTF::move(*surfaceIter));
     }
 
     m_inUseSurfaces = WTF::move(newInUseSurfaces);
 }
 
-bool IOSurfacePool::markOlderSurfacesPurgeable()
-{
-    bool markedAllSurfaces = true;
-    auto markTime = MonotonicTime::now();
-
-    for (auto& surfaceAndDetails : m_surfaceDetails) {
-        if (surfaceAndDetails.value.hasMarkedPurgeable)
-            continue;
-
-        if (surfaceAndDetails.value.inCurrentlyUsedSurfaceCache) {
-            markedAllSurfaces = false;
-            continue;
-        }
-
-        if (markTime - surfaceAndDetails.value.lastUseTime < surfaceAgeBeforeMarkingPurgeable) {
-            markedAllSurfaces = false;
-            continue;
-        }
-
-        surfaceAndDetails.key->setVolatile(true);
-        surfaceAndDetails.value.hasMarkedPurgeable = true;
-    }
-
-    return markedAllSurfaces;
-}
-
 void IOSurfacePool::collectionTimerFired()
 {
     Locker locker { m_lock };
     collectInUseSurfaces();
-    bool markedAllSurfaces = markOlderSurfacesPurgeable();
 
-    if (!m_inUseSurfaces.size() && markedAllSurfaces)
+    if (!m_inUseSurfaces.size())
         m_collectionTimer.stop();
 
     platformGarbageCollectNow();
@@ -352,7 +314,7 @@ void IOSurfacePool::collectionTimerFired()
 void IOSurfacePool::scheduleCollectionTimer()
 {
     if (!m_collectionTimer.isActive())
-        m_collectionTimer.startRepeating(collectionInterval);
+        m_collectionTimer.startRepeating(inUseCollectionInterval);
 }
 
 void IOSurfacePool::stopCollectionTimer()
@@ -381,7 +343,6 @@ void IOSurfacePool::discardAllSurfacesInternal()
 {
     m_bytesCached = 0;
     m_inUseBytesCached = 0;
-    m_surfaceDetails.clear();
     m_cachedSurfaces.clear();
     m_inUseSurfaces.clear();
     m_sizesInPruneOrder.clear();

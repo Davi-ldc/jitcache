@@ -50,7 +50,7 @@ AuthenticatorPresenterCoordinator::AuthenticatorPresenterCoordinator(const Authe
     : m_manager(manager)
 {
 #if HAVE(ASC_AUTH_UI)
-    m_context = adoptNS([allocASCAuthorizationPresentationContextInstance() initWithRequestContext:nullptr appIdentifier:nullptr]);
+    lazyInitialize(m_context, adoptNS([allocASCAuthorizationPresentationContextInstance() initWithRequestContext:nullptr appIdentifier:nullptr]));
     if ([getASCAuthorizationPresentationContextClassSingleton() instancesRespondToSelector:@selector(setServiceName:)])
         [m_context setServiceName:rpId.createNSString().get()];
 
@@ -71,8 +71,8 @@ AuthenticatorPresenterCoordinator::AuthenticatorPresenterCoordinator(const Authe
         break;
     }
 
-    m_presenterDelegate = adoptNS([[WKASCAuthorizationPresenterDelegate alloc] initWithCoordinator:*this]);
-    m_presenter = adoptNS([allocASCAuthorizationPresenterInstance() init]);
+    lazyInitialize(m_presenterDelegate, adoptNS([[WKASCAuthorizationPresenterDelegate alloc] initWithCoordinator:*this]));
+    lazyInitialize(m_presenter, adoptNS([allocASCAuthorizationPresenterInstance() init]));
     [m_presenter setDelegate:m_presenterDelegate.get()];
 
     auto completionHandler = makeBlockPtr([manager = m_manager] (id<ASCCredentialProtocol> credential, NSError *error) mutable {
@@ -262,8 +262,8 @@ void AuthenticatorPresenterCoordinator::selectAssertionResponse(Vector<Ref<Authe
 
 void AuthenticatorPresenterCoordinator::requestLAContextForUserVerification(CompletionHandler<void(LAContext *)>&& completionHandler)
 {
-    if (m_laContext) {
-        completionHandler(m_laContext.get());
+    if (RetainPtr laContext = m_laContext) {
+        completionHandler(laContext.get());
         return;
     }
 

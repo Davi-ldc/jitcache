@@ -69,7 +69,7 @@
 #import <wtf/GetPtr.h>
 #import <wtf/URL.h>
 
-#define IMPL static_cast<WebCore::HTMLInputElement*>(reinterpret_cast<WebCore::Node*>(_internal))
+#define IMPL protect(downcast<WebCore::HTMLInputElement>(reinterpret_cast<WebCore::Node*>(_internal)))
 
 @implementation DOMHTMLInputElement
 
@@ -597,13 +597,14 @@
 - (NSString *)altDisplayString
 {
     WebCore::JSMainThreadNullState state;
-    return WebCore::displayString(IMPL->attributeWithoutSynchronization(WebCore::HTMLNames::altAttr), core(self)).createNSString().autorelease();
+    return WebCore::displayString(IMPL->attributeWithoutSynchronization(WebCore::HTMLNames::altAttr), protect(core(self))).createNSString().autorelease();
 }
 
 - (NSURL *)absoluteImageURL
 {
     WebCore::JSMainThreadNullState state;
-    if (!IMPL->renderer() || !IMPL->renderer()->isImage())
+    CheckedPtr renderer = IMPL->renderer();
+    if (!renderer || !renderer->isImage())
         return nil;
     return [self _getURLAttribute:@"src"];
 }
@@ -699,7 +700,7 @@
 - (void)insertTextSuggestion:(UITextAutofillSuggestion *)credentialSuggestion
 {
     WebCore::JSMainThreadNullState state;
-    if (is<WebCore::HTMLInputElement>(IMPL)) {
+    if (is<WebCore::HTMLInputElement>(IMPL.get())) {
         if (auto autofillElements = WebCore::AutofillElements::computeAutofillElements(*IMPL))
             autofillElements->autofill(credentialSuggestion.username, credentialSuggestion.password);
     }
@@ -725,7 +726,7 @@ WebCore::HTMLInputElement* core(DOMHTMLInputElement *wrapper)
     return wrapper ? reinterpret_cast<WebCore::HTMLInputElement*>(wrapper->_internal) : 0;
 }
 
-DOMHTMLInputElement *kit(WebCore::HTMLInputElement* value)
+SUPPRESS_NODELETE DOMHTMLInputElement *kit(WebCore::HTMLInputElement* value)
 {
     WebCoreThreadViolationCheckRoundOne();
     return static_cast<DOMHTMLInputElement*>(kit(static_cast<WebCore::Node*>(value)));

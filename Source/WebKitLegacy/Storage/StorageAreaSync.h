@@ -27,6 +27,7 @@
 
 #include <WebCore/SQLiteDatabase.h>
 #include <WebCore/Timer.h>
+#include <atomic>
 #include <wtf/Condition.h>
 #include <wtf/HashMap.h>
 #include <wtf/Lock.h>
@@ -65,7 +66,7 @@ private:
     bool m_finalSyncScheduled;
 
     RefPtr<StorageAreaImpl> m_storageArea;
-    RefPtr<WebCore::StorageSyncManager> m_syncManager;
+    const RefPtr<WebCore::StorageSyncManager> m_syncManager;
 
     // The database handle will only ever be opened and used on the background thread.
     const UniqueRef<WebCore::SQLiteDatabase> m_database;
@@ -90,13 +91,15 @@ private:
     const String m_databaseIdentifier;
 
     Lock m_syncLock;
-    HashMap<String, String> m_itemsPendingSync;
-    bool m_clearItemsWhileSyncing;
-    bool m_syncScheduled;
-    bool m_syncInProgress;
+    HashMap<String, String> m_itemsPendingSync WTF_GUARDED_BY_LOCK(m_syncLock);
+    bool m_clearItemsWhileSyncing WTF_GUARDED_BY_LOCK(m_syncLock);
+    bool m_syncScheduled WTF_GUARDED_BY_LOCK(m_syncLock);
+    bool m_syncInProgress WTF_GUARDED_BY_LOCK(m_syncLock);
     bool m_databaseOpenFailed;
 
-    bool m_syncCloseDatabase;
+    // Set on the main thread by scheduleCloseDatabase() and cleared on the sync thread by sync(),
+    // which runs without m_syncLock held.
+    std::atomic<bool> m_syncCloseDatabase;
 
     mutable Lock m_importLock;
     Condition m_importCondition;

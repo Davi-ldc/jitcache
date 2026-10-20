@@ -33,11 +33,27 @@
 #include <wtf/TZoneMalloc.h>
 #include <wtf/ThreadSafeRefCounted.h>
 #include <wtf/ThreadSafeWeakPtr.h>
-#include <wtf/text/CStringView.h>
+#include <wtf/glib/GLibExtras.h>
+#include <wtf/text/UTF8CStringView.h>
 
-#if USE(GSTREAMER_GL)
-#include "GraphicsTypesGL.h"
+// Same as gstinfo.h, but with the arguments converted by WTF_LOG_PRINTF_ARGS() so that call sites can pass a CString directly.
+#ifndef GST_DISABLE_GST_DEBUG
+#undef GST_CAT_LEVEL_LOG
+#define GST_CAT_LEVEL_LOG(cat, level, object, format, ...) G_STMT_START { \
+    if (G_UNLIKELY(((level) <= GST_LEVEL_MAX) && ((level) <= _gst_debug_min))) \
+        gst_debug_log((cat), (level), __FILE__, GST_FUNCTION, __LINE__, (GObject*)(object), format WTF_LOG_PRINTF_ARGS(__VA_ARGS__)); \
+} G_STMT_END
+
+#ifdef GST_CAT_LEVEL_LOG_ID
+#undef GST_CAT_LEVEL_LOG_ID
+#define GST_CAT_LEVEL_LOG_ID(cat, level, id, format, ...) G_STMT_START { \
+    if (G_UNLIKELY(((level) <= GST_LEVEL_MAX) && ((level) <= _gst_debug_min))) \
+        gst_debug_log_id((cat), (level), __FILE__, GST_FUNCTION, __LINE__, (id), format WTF_LOG_PRINTF_ARGS(__VA_ARGS__)); \
+} G_STMT_END
 #endif
+#endif
+
+typedef struct _GstGLMemory GstGLMemory;
 
 namespace WebCore {
 
@@ -79,7 +95,7 @@ inline bool gst_check_version(guint major, guint minor, guint micro)
 #define GST_AUDIO_CAPS_TYPE_PREFIX  "audio/"_s
 #define GST_TEXT_CAPS_TYPE_PREFIX   "text/"_s
 
-[[nodiscard]] GstPad* webkitGstGhostPadFromStaticTemplate(GstStaticPadTemplate*, CStringView name, GstPad* target);
+[[nodiscard]] GstPad* webkitGstGhostPadFromStaticTemplate(GstStaticPadTemplate*, UTF8CStringView name, GstPad* target);
 #if ENABLE(VIDEO)
 bool getVideoSizeAndFormatFromCaps(const GstCaps*, WebCore::IntSize&, GstVideoFormat&, int& pixelAspectRatioNumerator, int& pixelAspectRatioDenominator, int& stride, double& frameRate, PlatformVideoColorSpace&);
 std::optional<FloatSize> getVideoResolutionFromCaps(const GstCaps*);
@@ -87,7 +103,7 @@ bool getSampleVideoInfo(GstSample*, GstVideoInfo&);
 std::optional<WebCore::IntSize> getDisplaySize(WebCore::IntSize, int, int);
 bool isProtocolAllowed(const WTF::URL&);
 #endif
-CStringView capsMediaType(const GstCaps*);
+UTF8CStringView capsMediaType(const GstCaps*);
 std::optional<TrackID> getStreamIdFromPad(const GRefPtr<GstPad>&);
 std::optional<TrackID> getStreamIdFromStream(const GRefPtr<GstStream>&);
 std::optional<TrackID> parseStreamId(const String& stringId);
@@ -242,16 +258,27 @@ public:
     bool operator!() const { return !m_frame.buffer; }
 
 #if USE(GSTREAMER_GL)
-    GLuint textureID(int) const;
+    unsigned textureID(uint32_t) const;
+    IntSize textureSize(uint32_t) const;
+    unsigned textureFormat(uint32_t) const;
+    void setNeedsCPUSync(bool needsCPUSync) { m_needsCPUSync = needsCPUSync; }
+    void waitForCPUSyncIfNeeded() const;
 #endif
 
     unsigned componentPlane(int) const;
     unsigned componentPlaneOffset(int) const;
 
 private:
+#if USE(GSTREAMER_GL)
+    GstGLMemory* glMemory(uint32_t) const;
+#endif
+
     GstVideoFrame m_frame;
     GstVideoAlignment m_alignment;
     std::array<size_t, GST_VIDEO_MAX_PLANES> m_planeSizes { };
+#if USE(GSTREAMER_GL)
+    bool m_needsCPUSync { false };
+#endif
 };
 
 class GstMappedAudioBuffer {
@@ -286,29 +313,44 @@ bool gstElementFactoryEquals(GstElement*, ASCIILiteral name);
 GstElement* createAutoAudioSink(const String& role);
 GstElement* createPlatformAudioSink(const String& role, const String& deviceId = { }, const GRefPtr<GstDevice>& = { });
 
-bool webkitGstSetElementStateSynchronously(GstElement*, GstState, Function<bool(GstMessage*)>&& = [](GstMessage*) -> bool {
+bool webkitGstSetElementStateSynchronously(GstElement*, GstState, NOESCAPE const Function<bool(GstMessage*)>& = [](GstMessage*) -> bool {
     return true;
 });
 
 GstBuffer* gstBufferNewWrappedFast(void* data, size_t length);
 
 // These functions should be used for elements not provided by WebKit itself and not provided by GStreamer -core.
-GstElement* makeGStreamerElement(CStringView factoryName, const String& name = emptyString());
+GstElement* makeGStreamerElement(UTF8CStringView factoryName, const String& name = emptyString());
 
 template<typename T>
-std::optional<T> gstStructureGet(const GstStructure*, CStringView key);
+std::optional<T> gstStructureGet(const GstStructure*, UTF8CStringView key);
 
-CStringView gstStructureGetString(const GstStructure*, CStringView key);
+UTF8CStringView gstStructureGetString(const GstStructure*, UTF8CStringView key);
 
-CStringView gstStructureGetName(const GstStructure*);
-
-template<typename T>
-Vector<T> gstStructureGetArray(const GstStructure*, CStringView key);
+UTF8CStringView gstStructureGetName(const GstStructure*);
 
 template<typename T>
-Vector<T> gstStructureGetList(const GstStructure*, CStringView key);
+Vector<T> gstStructureGetArray(const GstStructure*, UTF8CStringView key);
+
+template<typename T>
+Vector<T> gstStructureGetList(const GstStructure*, UTF8CStringView key);
 
 String gstStructureToJSONString(const GstStructure*);
+
+// Converts each field name and value with glibVariadicType(), so typed strings can be passed as they are.
+// Supplies the terminating nullptr itself.
+template<typename... Arguments>
+void gstStructureSet(GstStructure* structure, Arguments&&... arguments)
+{
+    gst_structure_set(structure, WTF::glibVariadicType(std::forward<Arguments>(arguments))..., nullptr);
+}
+
+// Supplies the terminating nullptr itself.
+template<typename... Arguments>
+[[nodiscard]] GstStructure* gstStructureNew(const char* name, Arguments&&... arguments)
+{
+    return gst_structure_new(name, WTF::glibVariadicType(std::forward<Arguments>(arguments))..., nullptr);
+}
 
 GstClockTime webkitGstInitTime();
 
@@ -331,6 +373,7 @@ bool gstObjectHasProperty(GstPad*, ASCIILiteral name);
 bool gstElementMatchesFactoryAndHasProperty(GstElement*, ASCIILiteral factoryNamePattern, ASCIILiteral propertyName);
 
 GRefPtr<GstBuffer> wrapSpanData(const std::span<const uint8_t>&);
+GRefPtr<GstBuffer> wrapSharedBuffer(Ref<SharedBuffer>&&);
 
 std::optional<unsigned> gstGetAutoplugSelectResult(ASCIILiteral);
 
@@ -362,11 +405,11 @@ using GstId = const GstIdStr*;
 using GstId = GQuark;
 #endif
 
-bool gstStructureForeach(const GstStructure*, Function<bool(GstId, const GValue*)>&&);
+bool gstStructureForeach(const GstStructure*, NOESCAPE const Function<bool(GstId, const GValue*)>&);
 void gstStructureIdSetValue(GstStructure*, GstId, const GValue*);
-bool gstStructureMapInPlace(GstStructure*, Function<bool(GstId, GValue*)>&&);
+bool gstStructureMapInPlace(GstStructure*, NOESCAPE const Function<bool(GstId, GValue*)>&);
 String gstIdToString(GstId);
-void gstStructureFilterAndMapInPlace(GstStructure*, Function<bool(GstId, GValue*)>&&);
+void gstStructureFilterAndMapInPlace(GstStructure*, NOESCAPE const Function<bool(GstId, GValue*)>&);
 
 #if USE(GBM)
 [[nodiscard]] GRefPtr<GstCaps> buildDMABufCaps();

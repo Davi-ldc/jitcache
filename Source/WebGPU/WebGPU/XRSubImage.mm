@@ -34,7 +34,7 @@
 #import <wtf/CheckedArithmetic.h>
 #import <wtf/StdLibExtras.h>
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 XRSubImage::XRSubImage(bool, Device& device)
     : m_device(device)
@@ -87,7 +87,7 @@ void XRSubImage::update(const XRProjectionLayer& projectionLayer)
             colorTexture = [colorTexture newTextureViewWithPixelFormat:Texture::pixelFormat(colorFormat)];
 
         WGPUTextureDescriptor colorTextureDescriptor = {
-            .label = "color texture",
+            .label = toAPI("color texture"_s),
             .usage = WGPUTextureUsage_RenderAttachment,
             .dimension = WGPUTextureDimension_2D,
             .size = {
@@ -116,7 +116,7 @@ void XRSubImage::update(const XRProjectionLayer& projectionLayer)
         }
 
         WGPUTextureDescriptor depthTextureDescriptor = {
-            .label = "depth texture",
+            .label = toAPI("depth texture"_s),
             .usage = WGPUTextureUsage_RenderAttachment,
             .dimension = WGPUTextureDimension_2D,
             .size = {
@@ -149,26 +149,26 @@ RefPtr<XRSubImage> XRBinding::getViewSubImage(XRProjectionLayer& projectionLayer
     return device().getXRViewSubImage(projectionLayer);
 }
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuXRSubImageReference(WGPUXRSubImage subImage)
+void NODELETE wgpuXRSubImageAddRef(WGPUXRSubImage subImage)
 {
-    WebGPU::fromAPI(subImage).ref();
+    WebGPU::Metal::fromAPI(subImage).ref();
 }
 
 void wgpuXRSubImageRelease(WGPUXRSubImage subImage)
 {
-    WebGPU::fromAPI(subImage).deref();
+    WebGPU::Metal::fromAPI(subImage).deref();
 }
 
 WGPUTexture wgpuXRSubImageGetColorTexture(WGPUXRSubImage subImage)
 {
-    return protect(WebGPU::fromAPI(subImage))->colorTexture();
+    return protect(WebGPU::Metal::fromAPI(subImage))->colorTexture();
 }
 
 WGPUTexture wgpuXRSubImageGetDepthStencilTexture(WGPUXRSubImage subImage)
 {
-    return protect(WebGPU::fromAPI(subImage))->depthTexture();
+    return protect(WebGPU::Metal::fromAPI(subImage))->depthTexture();
 }

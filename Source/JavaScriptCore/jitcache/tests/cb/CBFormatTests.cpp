@@ -101,8 +101,7 @@ JITCACHE_TEST(cbFormatStructLayout, No)
     JITCACHE_CB_CHECK_EQUAL("StateHeader::counterTotalCount", offsetof(StateHeader, counterTotalCount), 24);
     JITCACHE_CB_CHECK_EQUAL("StateHeader::counterActiveThreshold", offsetof(StateHeader, counterActiveThreshold), 28);
     JITCACHE_CB_CHECK_EQUAL("StateHeader::familyEntryCount", offsetof(StateHeader, familyEntryCount), 32);
-    JITCACHE_CB_CHECK_EQUAL("sizeof(StateHeader::familyEntryCount)", sizeof(StateHeader::familyEntryCount), 31 * sizeof(uint32_t));
-    JITCACHE_CB_CHECK_EQUAL("StateHeader::reserved1", offsetof(StateHeader, reserved1), 156);
+    JITCACHE_CB_CHECK_EQUAL("sizeof(StateHeader::familyEntryCount)", sizeof(StateHeader::familyEntryCount), 32 * sizeof(uint32_t));
 
     JITCACHE_CB_CHECK_EQUAL("sizeof(ArrayProfileRecord)", sizeof(ArrayProfileRecord), 8);
     JITCACHE_CB_CHECK_EQUAL("ArrayProfileRecord::observedArrayModes", offsetof(ArrayProfileRecord, observedArrayModes), 0);
@@ -145,28 +144,36 @@ JITCACHE_TEST(cbFormatStateSectionSize, No)
     checkLayout<StateArray, CBFormat::numberOfStateArrays>(context, __FILE__, __LINE__, CBFormat::stateLayout(header), 160, { }, { });
     JITCACHE_CB_CHECK_EQUAL("stateSectionSize, no counts", CBFormat::stateSectionSize(header).value_or(0), 160);
 
-    // One or more records in every array, with the kinds' families spread over their ranges.
+    // One or more records in every array, with the kinds' families spread over their ranges, and call sites, which
+    // count as array positions and hold no record.
     header.numArguments = 2;
     header.numValueProfiles = 3;
     header.numLazyOperandProfiles = 1;
     header.familyEntryCount[CBFormat::firstArrayProfileFamily] = 1; // A0
+    header.familyEntryCount[11] = 4; // A11, op_call
     header.familyEntryCount[CBFormat::numberOfArrayProfileFamilies - 1] = 2; // A15
     header.familyEntryCount[CBFormat::firstAllocationHintFamily] = 1; // F16
     header.familyEntryCount[CBFormat::firstAllocationHintFamily + 3] = 2; // F19
     header.familyEntryCount[CBFormat::iteratorOpenIterationModesFamily] = 1; // F20
     header.familyEntryCount[CBFormat::asyncIteratorNextIterationModesFamily] = 1; // F23
-    header.familyEntryCount[CBFormat::firstEnumeratorModesFamily] = 1; // F24
-    header.familyEntryCount[CBFormat::firstEnumeratorModesFamily + 4] = 2; // F28
-    header.familyEntryCount[CBFormat::toThisStatusFamily] = 1; // F29
-    header.familyEntryCount[CBFormat::branchBitFamily] = 1; // F30
+    header.familyEntryCount[CBFormat::iteratorCloseCheckIterationModesFamily] = 1; // F24
+    header.familyEntryCount[CBFormat::firstEnumeratorModesFamily] = 1; // F25
+    header.familyEntryCount[CBFormat::firstEnumeratorModesFamily + 4] = 2; // F29
+    header.familyEntryCount[CBFormat::toThisStatusFamily] = 1; // F30
+    header.familyEntryCount[CBFormat::branchBitFamily] = 1; // F31
     checkLayout<StateArray, CBFormat::numberOfStateArrays>(context, __FILE__, __LINE__, CBFormat::stateLayout(header), 160,
-        { 2, 3, 3, 1, 3, 2, 3, 1, 1 },
-        { 16, 24, 24, 24, 6, 4, 3, 1, 1 });
-    JITCACHE_CB_CHECK_EQUAL("stateSectionSize, every array", CBFormat::stateSectionSize(header).value_or(0), 264);
+        { 2, 3, 3, 1, 3, 3, 3, 1, 1 },
+        { 16, 24, 24, 24, 6, 6, 3, 1, 1 });
+    JITCACHE_CB_CHECK_EQUAL("stateSectionSize, every array", CBFormat::stateSectionSize(header).value_or(0), 272);
     JITCACHE_CB_CHECK_EQUAL("first record of F19", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::firstAllocationHintFamily + 3), 1);
-    JITCACHE_CB_CHECK_EQUAL("first record of F28", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::firstEnumeratorModesFamily + 4), 1);
+    JITCACHE_CB_CHECK_EQUAL("first record of F24", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::iteratorCloseCheckIterationModesFamily), 2);
+    JITCACHE_CB_CHECK_EQUAL("first record of F29", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::firstEnumeratorModesFamily + 4), 1);
     JITCACHE_CB_CHECK_EQUAL("first record of A15", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::numberOfArrayProfileFamilies - 1), 1);
-    JITCACHE_CB_CHECK_EQUAL("first record of F29", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::toThisStatusFamily), 0);
+    JITCACHE_CB_CHECK_EQUAL("first record of F30", CBFormat::firstRecordOfFamily(header.familyEntryCount, CBFormat::toThisStatusFamily), 0);
+    JITCACHE_CB_CHECK_EQUAL("array records", CBFormat::recordCountOfKind(header.familyEntryCount, CBFormat::FamilyKind::ArrayProfile), 3);
+    JITCACHE_CB_CHECK_EQUAL("first array position of A11", CBFormat::firstArrayPositionOfFamily(header.familyEntryCount, 11), 1);
+    JITCACHE_CB_CHECK_EQUAL("first array position of A15", CBFormat::firstArrayPositionOfFamily(header.familyEntryCount, CBFormat::numberOfArrayProfileFamilies - 1), 5);
+    JITCACHE_CB_CHECK_EQUAL("array positions", CBFormat::arrayPositionCount(header.familyEntryCount), 7);
 
     // Padding: the byte arrays end the section, so their total decides it.
     for (uint32_t branchBits : { 7u, 8u, 9u }) {
@@ -178,7 +185,8 @@ JITCACHE_TEST(cbFormatStateSectionSize, No)
     }
 
     // Every count at its maximum. Every count is a uint32_t, so on the 64-bit targets JITCache supports the size stays below
-    // 2^40 and the overflow path cannot be reached; the computation must still give the exact value.
+    // 2^40 and the overflow path cannot be reached; the computation must still give the exact value. The array profiles
+    // hold the 13 families with records.
     static_assert(sizeof(size_t) == sizeof(uint64_t));
     auto maximal = CBFormatTestsInternal::emptyStateHeader();
     maximal.numArguments = largestCount;
@@ -186,9 +194,9 @@ JITCACHE_TEST(cbFormatStateSectionSize, No)
     maximal.numLazyOperandProfiles = largestCount;
     maximal.familyEntryCount.fill(largestCount);
     checkLayout<StateArray, CBFormat::numberOfStateArrays>(context, __FILE__, __LINE__, CBFormat::stateLayout(maximal), 160,
-        { maxCount, maxCount, 16 * maxCount, maxCount, 4 * maxCount, 4 * maxCount, 5 * maxCount, maxCount, maxCount },
-        { 8 * maxCount, 8 * maxCount, 16 * 8 * maxCount, 24 * maxCount, 4 * 2 * maxCount, 4 * 2 * maxCount, 5 * maxCount, maxCount, maxCount });
-    JITCACHE_CB_CHECK_EQUAL("stateSectionSize, maximal counts", CBFormat::stateSectionSize(maximal).value_or(0), CBFormatTestsInternal::paddedSize(160 + 191 * maxCount));
+        { maxCount, maxCount, 13 * maxCount, maxCount, 4 * maxCount, 5 * maxCount, 5 * maxCount, maxCount, maxCount },
+        { 8 * maxCount, 8 * maxCount, 13 * 8 * maxCount, 24 * maxCount, 4 * 2 * maxCount, 5 * 2 * maxCount, 5 * maxCount, maxCount, maxCount });
+    JITCACHE_CB_CHECK_EQUAL("stateSectionSize, maximal counts", CBFormat::stateSectionSize(maximal).value_or(0), CBFormatTestsInternal::paddedSize(160 + 169 * maxCount));
 }
 
 JITCACHE_TEST(cbFormatSummarySectionSize, No)
@@ -240,15 +248,15 @@ JITCACHE_TEST(cbFormatFamilyTable, No)
             return FamilyKind::ArrayProfile;
         if (family < 20)
             return FamilyKind::AllocationHint;
-        if (family < 24)
+        if (family < 25)
             return FamilyKind::IterationModes;
-        if (family < 29)
+        if (family < 30)
             return FamilyKind::EnumeratorModes;
-        if (family == 29)
+        if (family == 30)
             return FamilyKind::ToThisStatus;
         return FamilyKind::BranchBit;
     };
-    JITCACHE_CB_CHECK_EQUAL("numberOfFamilies", CBFormat::numberOfFamilies, 31);
+    JITCACHE_CB_CHECK_EQUAL("numberOfFamilies", CBFormat::numberOfFamilies, 32);
     JITCACHE_CB_CHECK_EQUAL("numberOfArrayProfileFamilies", CBFormat::numberOfArrayProfileFamilies, 16);
     unsigned visits = 0;
     CBFormat::forEachFamily([&](auto family) {
@@ -256,18 +264,25 @@ JITCACHE_TEST(cbFormatFamilyTable, No)
         JITCACHE_CB_CHECK_EQUAL("family visited out of order", FamilyType::index, visits);
         JITCACHE_CHECK(FamilyType::kind == expectedKind(FamilyType::index));
         JITCACHE_CHECK(CBFormat::familyKind(FamilyType::index) == expectedKind(FamilyType::index));
+        // A11..A13, the three call opcodes, have no field and no records; every other family has both.
+        bool isCallSite = FamilyType::index >= 11 && FamilyType::index <= 13;
+        JITCACHE_CHECK(FamilyType::hasField == !isCallSite);
+        JITCACHE_CHECK(CBFormat::familyHasRecords(FamilyType::index) == !isCallSite);
         ++visits;
     });
-    JITCACHE_CB_CHECK_EQUAL("families visited", visits, 31);
+    JITCACHE_CB_CHECK_EQUAL("families visited", visits, 32);
 
     unsigned families = 0;
     for (auto kind : { FamilyKind::ArrayProfile, FamilyKind::AllocationHint, FamilyKind::IterationModes, FamilyKind::EnumeratorModes, FamilyKind::ToThisStatus, FamilyKind::BranchBit }) {
         JITCACHE_CB_CHECK_EQUAL("first family of a kind", CBFormat::firstFamilyOf(kind), families);
         families += CBFormat::numberOfFamiliesOf(kind);
     }
-    JITCACHE_CB_CHECK_EQUAL("families of all kinds", families, 31);
+    JITCACHE_CB_CHECK_EQUAL("families of all kinds", families, 32);
 
     // The families whose position the format fixes by opcode.
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<11>::Op, OpCall>));
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<12>::Op, OpCallIgnoreResult>));
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<13>::Op, OpTailCall>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<15>::Op, OpIteratorNext>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<CBFormat::newArrayBufferFamily>::Op, OpNewArrayBuffer>));
     JITCACHE_CB_CHECK_EQUAL("newArrayBufferFamily", CBFormat::newArrayBufferFamily, 19);
@@ -275,12 +290,14 @@ JITCACHE_TEST(cbFormatFamilyTable, No)
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<21>::Op, OpIteratorNext>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<22>::Op, OpAsyncIteratorOpen>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<23>::Op, OpAsyncIteratorNext>));
-    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<24>::Op, OpEnumeratorNext>));
-    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<28>::Op, OpEnumeratorGetByVal>));
-    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<29>::Op, OpToThis>));
-    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<30>::Op, OpJneqPtr>));
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<24>::Op, OpIteratorCloseCheck>));
+    JITCACHE_CB_CHECK_EQUAL("iteratorCloseCheckIterationModesFamily", CBFormat::iteratorCloseCheckIterationModesFamily, 24);
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<25>::Op, OpEnumeratorNext>));
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<29>::Op, OpEnumeratorGetByVal>));
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<30>::Op, OpToThis>));
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<31>::Op, OpJneqPtr>));
 
-    // Element sizes and the array that holds each kind (sections 3.2 and 3.3).
+    // Element sizes of cb.state's and cb.summary's arrays, and the array that holds each kind.
     JITCACHE_CB_CHECK_EQUAL("argument predictions", CBFormat::elementSize(StateArray::ArgumentPredictions), 8);
     JITCACHE_CB_CHECK_EQUAL("value predictions", CBFormat::elementSize(StateArray::ValuePredictions), 8);
     JITCACHE_CB_CHECK_EQUAL("array profiles", CBFormat::elementSize(StateArray::ArrayProfiles), 8);
@@ -342,19 +359,28 @@ JITCACHE_TEST(cbFormatDomainPredicates, No)
     for (unsigned family = CBFormat::firstIterationModesFamily; family < CBFormat::firstIterationModesFamily + CBFormat::numberOfIterationModesFamilies; ++family)
         JITCACHE_CHECK(iterationModesFit(family, CBFormat::nativeIterationModes(family)));
     JITCACHE_CB_CHECK_EQUAL("iterator_open mask", CBFormat::nativeIterationModes(CBFormat::iteratorOpenIterationModesFamily), 0x1fff);
-    JITCACHE_CB_CHECK_EQUAL("iterator_next mask", CBFormat::nativeIterationModes(CBFormat::iteratorNextIterationModesFamily), 0x1ff1);
+    JITCACHE_CB_CHECK_EQUAL("iterator_next mask", CBFormat::nativeIterationModes(CBFormat::iteratorNextIterationModesFamily), 0x1ff3);
     JITCACHE_CB_CHECK_EQUAL("async_iterator_open mask", CBFormat::nativeIterationModes(CBFormat::asyncIteratorOpenIterationModesFamily), 0x6001);
     JITCACHE_CB_CHECK_EQUAL("async_iterator_next mask", CBFormat::nativeIterationModes(CBFormat::asyncIteratorNextIterationModesFamily), 0x2001);
+    JITCACHE_CB_CHECK_EQUAL("iterator_close_check mask", CBFormat::nativeIterationModes(CBFormat::iteratorCloseCheckIterationModesFamily), 0x12);
     JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorOpenIterationModesFamily, bit(IterationMode::FastAsyncGenerator)));
     JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorOpenIterationModesFamily, bit(IterationMode::AsyncFromSync)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastArray)));
+    JITCACHE_CHECK(iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastArray)));
     JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastMap)));
     JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastSet)));
     JITCACHE_CHECK(!iterationModesFit(CBFormat::asyncIteratorOpenIterationModesFamily, bit(IterationMode::FastArray)));
     JITCACHE_CHECK(!iterationModesFit(CBFormat::asyncIteratorNextIterationModesFamily, bit(IterationMode::AsyncFromSync)));
+    JITCACHE_CHECK(iterationModesFit(CBFormat::iteratorCloseCheckIterationModesFamily, static_cast<uint16_t>(bit(IterationMode::FastArray) | bit(IterationMode::FastString))));
+    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorCloseCheckIterationModesFamily, bit(IterationMode::Generic)));
+    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorCloseCheckIterationModesFamily, bit(IterationMode::FastMap)));
     JITCACHE_CHECK(!iterationModesFit(CBFormat::firstAllocationHintFamily, bit(IterationMode::Generic)));
 
-    // Enumerator modes, to_this statuses and branch bits.
+    // iterator_close_check's byte, widened to cb.state's record and narrowed back.
+    uint8_t closeCheckModes = 0;
+    CBFormat::setIterationModes(closeCheckModes, CBFormat::nativeIterationModes(CBFormat::iteratorCloseCheckIterationModesFamily));
+    JITCACHE_CB_CHECK_EQUAL("iterator_close_check modes", CBFormat::iterationModesOf(closeCheckModes), 0x12);
+
+    // Enumerator modes, to_this statuses and the jneq_ptr bit.
     JITCACHE_CHECK(CBFormat::enumeratorModesFit(0x0f) && !CBFormat::enumeratorModesFit(0x10));
     JITCACHE_CHECK(CBFormat::toThisStatusFits(ToThisOK) && CBFormat::toThisStatusFits(ToThisConflicted) && CBFormat::toThisStatusFits(ToThisClearedByGC));
     JITCACHE_CHECK(!CBFormat::toThisStatusFits(3));

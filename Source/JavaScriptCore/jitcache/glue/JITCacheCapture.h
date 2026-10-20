@@ -22,15 +22,16 @@ class VM;
 namespace JSC::JITCache {
 
 // The tiers a body's envelope names: a baseline capture is tier 1, and a capture without an image, which holds the UCB
-// lane's three sections alone, is tier 0, below every capture with one.
+// lane's sections alone, a module's analysis included, is tier 0, below every capture with one.
 constexpr uint8_t imagelessTier = 0;
 constexpr uint8_t baselineTier = 1;
 
 // Capture scores. A live candidate's score is tier 1, the UCB lane's liveRichness total plus the CB lane's scoreLive
 // richness units, the ICs lane's IC sites with cases, and scoreLive's counterWithheld and counter progress, with the ICs
 // lane called before the CB lane for the same CB in the same pause. A body that ran without an image scores tier 0, the
-// UCB lane's liveRichness with its UCB copies, and its carried LLInt progress. A score about to be committed comes from
-// what the builders returned for the bytes they wrote, so it describes exactly what the body file holds.
+// UCB lane's liveRichness, and its carried LLInt progress. A score about to be committed comes from what the builders
+// returned for the bytes they wrote, or, for a capture without an image, is the live score it was ranked with, which reads
+// state nothing changes during a capture, so it describes exactly what the body file holds.
 struct CaptureScore {
     uint8_t tier { 0 }; // imagelessTier or baselineTier
     uint64_t richness { 0 }; // the UCB lane's units plus the CB lane's units
@@ -50,10 +51,12 @@ bool beats(const CaptureScore& candidate, const CaptureScore& saved);
 
 // A saved body's score, read from its three summary sections by the lanes' readers with the session's strict flag.
 // With strict off no reader rejects. With it on, the rejection names the reader: part "ucb" at "saved-summary"
-// (savedRichness names no check), "cb" with description(check), or "ics" with the enumerator name of the ICs check.
+// (savedRichness names no check), "cb" with description(check) and detail faultDetail(check), or "ics" with
+// description(check). The detail is empty except for "cb".
 struct SummaryRejection {
     ASCIILiteral part;
     ASCIILiteral check;
+    ASCIILiteral detail;
 };
 std::expected<CaptureScore, SummaryRejection> scoreSections(uint8_t tier, std::span<const uint8_t> ucbFeedback,
     std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics, bool strict);

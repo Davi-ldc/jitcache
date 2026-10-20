@@ -31,6 +31,7 @@
 
 #include <type_traits>
 #include <wtf/ASCIICType.h>
+#include <wtf/text/CString.h>
 #include <wtf/text/WTFString.h>
 
 #if ASSERT_ENABLED
@@ -89,12 +90,17 @@ namespace WTF {
 
 inline std::ostream& operator<<(std::ostream& os, const String& string)
 {
-    return os << string.utf8().data();
+    return os << string.utf8().toStdString();
 }
 
 inline std::ostream& operator<<(std::ostream& os, const ASCIILiteral& string)
 {
     return os << string.characters();
+}
+
+inline std::ostream& operator<<(std::ostream& os, const UTF8CString& string)
+{
+    return os << string.toStdString();
 }
 
 }

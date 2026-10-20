@@ -60,15 +60,15 @@ Structure* WebAssemblyModuleRecord::createStructure(VM& vm, JSGlobalObject* glob
     return Structure::create(vm, globalObject, prototype, TypeInfo(ObjectType, StructureFlags), info());
 }
 
-WebAssemblyModuleRecord* WebAssemblyModuleRecord::create(JSGlobalObject* globalObject, VM& vm, Structure* structure, const Identifier& moduleKey, const Wasm::ModuleInformation& moduleInformation)
+WebAssemblyModuleRecord* WebAssemblyModuleRecord::create(JSGlobalObject* globalObject, VM& vm, Structure* structure, JSModuleLoader* moduleLoader, const Identifier& moduleKey, const Wasm::ModuleInformation& moduleInformation)
 {
-    WebAssemblyModuleRecord* instance = new (NotNull, allocateCell<WebAssemblyModuleRecord>(vm)) WebAssemblyModuleRecord(vm, structure, moduleKey);
+    WebAssemblyModuleRecord* instance = new (NotNull, allocateCell<WebAssemblyModuleRecord>(vm)) WebAssemblyModuleRecord(vm, structure, moduleLoader, moduleKey);
     instance->finishCreation(globalObject, vm, moduleInformation);
     return instance;
 }
 
-WebAssemblyModuleRecord::WebAssemblyModuleRecord(VM& vm, Structure* structure, const Identifier& moduleKey)
-    : Base(vm, structure, moduleKey, SourceProviderSourceType::WebAssembly)
+WebAssemblyModuleRecord::WebAssemblyModuleRecord(VM& vm, Structure* structure, JSModuleLoader* moduleLoader, const Identifier& moduleKey)
+    : Base(vm, structure, moduleLoader, moduleKey, SourceProviderSourceType::WebAssembly)
 {
 }
 
@@ -240,16 +240,20 @@ void WebAssemblyModuleRecord::initializeImports(JSGlobalObject* globalObject, JS
             // At that time, error occurs since |value| is an empty, and later |value| becomes an undefined.
             // https://github.com/WebAssembly/esm-integration/tree/master/proposals/esm-integration#js---wasm-cycle-where-js-is-higher-in-the-module-graph
             if (importedEnvironment) {
-                SymbolTable* symbolTable = importedEnvironment->symbolTable();
-                ConcurrentJSLocker locker(symbolTable->m_lock);
-                auto iter = symbolTable->find(locker, resolution.localName.impl());
-                ASSERT(iter != symbolTable->end(locker));
-                SymbolTableEntry& entry = iter->value;
-                ASSERT(!entry.isNull());
-                ASSERT(importedEnvironment->isValidScopeOffset(entry.scopeOffset()));
+                ScopeOffset scopeOffset;
+                {
+                    SymbolTable* symbolTable = importedEnvironment->symbolTable();
+                    ConcurrentJSLocker locker(symbolTable->m_lock);
+                    auto iter = symbolTable->find(locker, resolution.localName.impl());
+                    ASSERT(iter != symbolTable->end(locker));
+                    SymbolTableEntry& entry = iter->value;
+                    ASSERT(!entry.isNull());
+                    ASSERT(importedEnvironment->isValidScopeOffset(entry.scopeOffset()));
+                    scopeOffset = entry.scopeOffset();
+                }
 
                 // Snapshotting a value.
-                value = importedEnvironment->variableAt(entry.scopeOffset()).get();
+                value = importedEnvironment->readVariable(vm, scopeOffset);
             }
             if (!value) {
                 if (auto* wasmRecord = dynamicDowncast<WebAssemblyModuleRecord>(importedRecord)) {

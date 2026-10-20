@@ -37,6 +37,7 @@
 #include "KeyboardEvent.h"
 #include "RenderButton.h"
 #include "Settings.h"
+#include "StyleAppearance.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include <wtf/SetForScope.h>
 #include <wtf/StdLibExtras.h>
@@ -87,6 +88,11 @@ void HTMLButtonElement::removingSteps(RemovalType removalType, ContainerNode& ol
     computeType(attributeWithoutSynchronization(HTMLNames::typeAttr));
 }
 
+bool HTMLButtonElement::supportsBaseAppearance(StyleAppearance appearance) const
+{
+    return appearance == StyleAppearance::Base;
+}
+
 RenderPtr<RenderElement> HTMLButtonElement::createElementRenderer(Style::ComputedStyle&& style, const RenderTreePosition& position)
 {
     // https://html.spec.whatwg.org/multipage/rendering.html#button-layout
@@ -130,17 +136,22 @@ void HTMLButtonElement::attributeChanged(const QualifiedName& name, const AtomSt
 {
     if (name == typeAttr)
         computeType(newValue);
-    else if ((name == commandAttr || name == commandforAttr) && document().settings().commandAttributesEnabled())
+    else if (name == commandAttr || name == commandforAttr)
         computeType(attributeWithoutSynchronization(HTMLNames::typeAttr));
     else
         HTMLFormControlElement::attributeChanged(name, oldValue, newValue, attributeModificationReason);
 }
 
+void HTMLButtonElement::childrenChanged(const ChildChange& change)
+{
+    HTMLFormControlElement::childrenChanged(change);
+
+    if (RefPtr select = dynamicDowncast<HTMLSelectElement>(parentNode()); select && select->buttonElement() == this)
+        select->buttonElementChildrenChanged();
+}
+
 RefPtr<Element> HTMLButtonElement::commandForElement() const
 {
-    if (!document().settings().commandAttributesEnabled())
-        return nullptr;
-
     if (isDisabledFormControl())
         return nullptr;
 
@@ -412,7 +423,7 @@ void HTMLButtonElement::computeType(const AtomString& typeAttrValue)
         m_type = Type::Button;
     else if (equalLettersIgnoringASCIICase(typeAttrValue, "submit"_s))
         m_type = Type::Submit;
-    else if (document().settings().commandAttributesEnabled() && (hasAttributeWithoutSynchronization(HTMLNames::commandAttr) || hasAttributeWithoutSynchronization(HTMLNames::commandforAttr)))
+    else if (hasAttributeWithoutSynchronization(HTMLNames::commandAttr) || hasAttributeWithoutSynchronization(HTMLNames::commandforAttr))
         m_type = Type::Button;
     else if (document().settings().htmlEnhancedSelectEnabled() && is<HTMLSelectElement>(parentNode()))
         m_type = Type::Button;

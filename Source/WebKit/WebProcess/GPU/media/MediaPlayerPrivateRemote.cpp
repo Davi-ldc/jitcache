@@ -209,8 +209,8 @@ MediaPlayerPrivateRemote::~MediaPlayerPrivateRemote()
     manager()->deleteRemoteMediaPlayer(m_id);
 
 #if ENABLE(WEB_AUDIO) && PLATFORM(COCOA)
-    if (RefPtr audioSourceProvider = m_audioSourceProvider)
-        audioSourceProvider->close();
+    if (m_audioSourceProvider)
+        m_audioSourceProvider->close();
 #endif
 
     // Shutdown any stale MediaResources.
@@ -1169,7 +1169,7 @@ void MediaPlayerPrivateRemote::paintCurrentFrameInContext(GraphicsContext& conte
     RefPtr videoFrame = videoFrameForCurrentTime();
     if (!videoFrame)
         return;
-    context.drawVideoFrame(*videoFrame, rect, ImageOrientation::Orientation::None, false);
+    context.drawVideoFrame(*videoFrame, rect, ShouldDiscardAlpha::No);
 }
 
 RefPtr<WebCore::VideoFrame> MediaPlayerPrivateRemote::videoFrameForCurrentTime()
@@ -1338,7 +1338,7 @@ AudioSourceProvider* MediaPlayerPrivateRemote::audioSourceProvider()
 {
 #if PLATFORM(COCOA)
     if (!m_audioSourceProvider)
-        m_audioSourceProvider = RemoteAudioSourceProvider::create(m_id, *this);
+        lazyInitialize(m_audioSourceProvider, RemoteAudioSourceProvider::create(m_id, *this));
 
     return m_audioSourceProvider.get();
 #else

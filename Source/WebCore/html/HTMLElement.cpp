@@ -65,6 +65,7 @@
 #include "HTMLFieldSetElement.h"
 #include "HTMLFormElement.h"
 #include "HTMLHeadingElement.h"
+#include "HTMLImageElement.h"
 #include "HTMLInputElement.h"
 #include "HTMLMaybeFormAssociatedCustomElement.h"
 #include "HTMLNames.h"
@@ -90,6 +91,7 @@
 #include "RenderElement.h"
 #include "ScriptController.h"
 #include "ScriptDisallowedScope.h"
+#include "ScriptElement.h"
 #include "SelectionGeometry.h"
 #include "Settings.h"
 #include "ShadowRoot.h"
@@ -772,6 +774,28 @@ String HTMLElement::title() const
     return attributeWithoutSynchronization(titleAttr);
 }
 
+// https://html.spec.whatwg.org/multipage/form-elements.html#get-html-aware-text-content
+String HTMLElement::htmlAwareTextContent(const Element& element, IncludeAltText includeAltText)
+{
+    StringBuilder text;
+    for (RefPtr node = element.firstChild(); node;) {
+        if (isScriptElement(*node)) {
+            node = NodeTraversal::nextSkippingChildren(*node, &element);
+            continue;
+        }
+        if (RefPtr textNode = dynamicDowncast<Text>(*node))
+            text.append(textNode->data());
+        if (RefPtr image = dynamicDowncast<HTMLImageElement>(*node)) {
+            if (includeAltText == IncludeAltText::Yes)
+                text.append(image->attributeWithoutSynchronization(altAttr));
+            node = NodeTraversal::nextSkippingChildren(*node, &element);
+            continue;
+        }
+        node = NodeTraversal::next(*node, &element);
+    }
+    return text.toString().simplifyWhiteSpace(isASCIIWhitespace);
+}
+
 bool HTMLElement::translate() const
 {
     for (Ref element : lineageOfType<HTMLElement>(*this)) {
@@ -1284,8 +1308,8 @@ ExceptionOr<void> HTMLElement::showPopoverInternal(HTMLElement* source)
         popoverData->setPreviouslyFocusedElement(nullptr);
 
     Style::PseudoClassChangeInvalidation styleInvalidation(*this, CSSSelector::PseudoClass::PopoverOpen, true);
-    if (auto* popoverData = this->popoverData())
-        popoverData->setVisibilityState(PopoverVisibilityState::Showing);
+    if (popoverData())
+        setPopoverVisibilityState(PopoverVisibilityState::Showing);
 
     runPopoverFocusingSteps(*this);
 
@@ -1385,8 +1409,7 @@ ExceptionOr<void> HTMLElement::hidePopoverInternal(FocusPreviousElement focusPre
     std::optional<Style::PseudoClassChangeInvalidation> styleInvalidation;
     if (parentNode())
         styleInvalidation.emplace(*this, CSSSelector::PseudoClass::PopoverOpen, false);
-    popoverWasHidden();
-    popoverData()->setVisibilityState(PopoverVisibilityState::Hidden);
+    setPopoverVisibilityState(PopoverVisibilityState::Hidden);
     popoverData()->setShowingAsHint(false);
     popoverData()->setHintStackParent(nullptr);
 
@@ -1414,7 +1437,14 @@ ExceptionOr<void> HTMLElement::hidePopoverInternal(FocusPreviousElement focusPre
         }
     }
 
+    popoverWasHidden();
+
     return { };
+}
+
+void HTMLElement::setPopoverVisibilityState(PopoverVisibilityState visibilityState)
+{
+    popoverData()->setVisibilityState(visibilityState);
 }
 
 ExceptionOr<void> HTMLElement::hidePopover()

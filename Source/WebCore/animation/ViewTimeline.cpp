@@ -60,9 +60,8 @@ ExceptionOr<Ref<ViewTimeline>> ViewTimeline::create(Document& document, ViewTime
 
     auto viewTimeline = ViewTimeline::create({ nullAtom() }, options.axis, WTF::move(*insets), Style::ZoomFactor::none());
 
-    viewTimeline->setSubject(options.subject.get());
-    if (auto subject = options.subject)
-        protect(subject->document())->updateLayoutIgnorePendingStylesheets();
+    viewTimeline->setSubject(options.subject.ptr());
+    protect(options.subject->document())->updateLayoutIgnorePendingStylesheets();
     viewTimeline->cacheCurrentTime();
 
     return viewTimeline;
@@ -380,10 +379,9 @@ CheckedPtr<const RenderElement> ViewTimeline::stickyContainer() const
     CheckedPtr renderer = subject->renderer();
 
     CheckedPtr scrollerRenderer = sourceScrollerRenderer();
-    while (renderer && renderer.get() != scrollerRenderer) {
+    for (; renderer && renderer.get() != scrollerRenderer; renderer = renderer->parent()) {
         if (renderer->isStickilyPositioned())
             return renderer;
-        renderer = renderer->containingBlock();
     }
     return nullptr;
 }
@@ -469,7 +467,7 @@ std::pair<double, double> ViewTimeline::intervalForTimelineRangeName(const Scrol
     return { subjectRangeStart, subjectRangeEnd };
 }
 
-template<typename F> double ViewTimeline::mapOffsetToTimelineRange(const ScrollTimeline::Data& data, const Style::SingleAnimationRangeName name, F&& valueWithinSubjectRange) const
+template<typename F> double ViewTimeline::mapOffsetToTimelineRange(const ScrollTimeline::Data& data, const Style::SingleAnimationRangeName name, NOESCAPE const F& valueWithinSubjectRange) const
 {
     auto timelineRange = data.rangeEnd - data.rangeStart;
     ASSERT(timelineRange);

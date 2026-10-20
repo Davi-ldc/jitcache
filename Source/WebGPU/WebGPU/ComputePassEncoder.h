@@ -28,11 +28,11 @@
 #import "CommandEncoder.h"
 #import "CommandsMixin.h"
 #import <WebGPU/WebGPU.h>
+#import <WebGPU/WebGPUCpp.h>
 #import <WebGPU/WebGPUExt.h>
 #import <wtf/FastMalloc.h>
 #import <wtf/HashMap.h>
 #import <wtf/Ref.h>
-#import <wtf/RefCounted.h>
 #import <wtf/SwiftBridging.h>
 #import <wtf/TZoneMalloc.h>
 #import <wtf/Vector.h>
@@ -41,7 +41,7 @@
 struct WGPUComputePassEncoderImpl {
 };
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class BindGroup;
 class Buffer;
@@ -52,7 +52,7 @@ class QuerySet;
 struct BindableResources;
 
 // https://gpuweb.github.io/gpuweb/#gpucomputepassencoder
-class ComputePassEncoder : public WGPUComputePassEncoderImpl, public RefCounted<ComputePassEncoder>, public CommandsMixin {
+class ComputePassEncoder final : public WebGPU::ComputePassEncoder, public WGPUComputePassEncoderImpl, public CommandsMixin {
     WTF_MAKE_TZONE_ALLOCATED(ComputePassEncoder);
 public:
     static Ref<ComputePassEncoder> create(id<MTLComputeCommandEncoder> computeCommandEncoder, const WGPUComputePassDescriptor& descriptor, CommandEncoder& parentEncoder, Device& device)
@@ -62,6 +62,12 @@ public:
     static Ref<ComputePassEncoder> createInvalid(CommandEncoder& parentEncoder, Device& device, NSString* errorString)
     {
         return adoptRef(*new ComputePassEncoder(parentEncoder, device, errorString));
+    }
+    static Ref<ComputePassEncoder> createInvalidWithEncoderStateNotOpen(CommandEncoder& parentEncoder, Device& device, NSString* errorString)
+    {
+        Ref computePassEncoder = createInvalid(parentEncoder, device, errorString);
+        computePassEncoder->markEncoderStateWasNotOpen();
+        return computePassEncoder;
     }
 
     ~ComputePassEncoder();
@@ -75,12 +81,16 @@ public:
 
     void setBindGroup(uint32_t groupIndex, const BindGroup*, std::optional<Vector<uint32_t>>&& dynamicOffsets);
     void setPipeline(const ComputePipeline&);
-    void setLabel(String&&);
+    void setLabel(String&&) final;
 
     Device& device() const { return m_device; }
 
-    bool NODELETE isValid() const;
+    bool NODELETE isValid() const final;
     id<MTLComputeCommandEncoder> NODELETE computeCommandEncoder() const;
+
+    // A pass begun while its command encoder was not open never took the encoder over, so it can
+    // never be ended. https://gpuweb.github.io/gpuweb/#dom-gpucomputepassencoder-end
+    void markEncoderStateWasNotOpen() { m_encoderStateWasNotOpen = true; }
 
 private:
     ComputePassEncoder(id<MTLComputeCommandEncoder>, const WGPUComputePassDescriptor&, CommandEncoder&, Device&);
@@ -108,17 +118,20 @@ private:
     std::array<uint32_t, 32> m_maxDynamicOffsetAtIndex;
     NSString *m_lastErrorString { nil };
     bool m_passEnded { false };
-} SWIFT_SHARED_REFERENCE(refComputePassEncoder, derefComputePassEncoder) SWIFT_RETURNED_AS_UNRETAINED_BY_DEFAULT;
+    bool m_encoderStateWasNotOpen { false };
+} DERIVED_CLASS_SWIFT_SHARED_REFERENCE(refComputePassEncoder, derefComputePassEncoder);
 
 
-} // namespace WebGPU
+} // namespace WebGPU::Metal
 
-inline void refComputePassEncoder(WebGPU::ComputePassEncoder* obj)
+#if !ENABLE(SWIFT_BASE_CLASS_ANNOTATIONS)
+inline void refComputePassEncoder(WebGPU::Metal::ComputePassEncoder* obj)
 {
     obj->ref();
 }
 
-inline void derefComputePassEncoder(WebGPU::ComputePassEncoder* obj)
+inline void derefComputePassEncoder(WebGPU::Metal::ComputePassEncoder* obj)
 {
     obj->deref();
 }
+#endif

@@ -106,16 +106,23 @@ bool StringView::endsWithIgnoringASCIICase(StringView suffix) const
     return ::WTF::endsWithIgnoringASCIICase(*this, suffix);
 }
 
-std::expected<CString, UTF8ConversionError> StringView::tryGetUTF8(ConversionMode mode) const
+ASCIICString StringView::ascii() const
+{
+    if (is8Bit())
+        return StringImpl::asciiForCharacters(span8());
+    return StringImpl::asciiForCharacters(span16());
+}
+
+std::expected<UTF8CString, UTF8ConversionError> StringView::tryGetUTF8(ConversionMode mode) const
 {
     if (isNull())
-        return CString { ""_span };
+        return UTF8CString { u8""_span };
     if (is8Bit())
         return StringImpl::utf8ForCharacters(span8());
     return StringImpl::utf8ForCharacters(span16(), mode);
 }
 
-CString StringView::utf8(ConversionMode mode) const
+UTF8CString StringView::utf8(ConversionMode mode) const
 {
     auto expectedString = tryGetUTF8(mode);
     RELEASE_ASSERT(expectedString);

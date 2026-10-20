@@ -36,8 +36,8 @@ static constexpr bool verboseMarkingConstraint = false;
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(MarkingConstraint);
 
-MarkingConstraint::MarkingConstraint(CString abbreviatedName, CString name, ConstraintVolatility volatility, ConstraintConcurrency concurrency, ConstraintParallelism parallelism)
-    : m_abbreviatedName(abbreviatedName)
+MarkingConstraint::MarkingConstraint(ASCIICString abbreviatedName, ASCIICString name, ConstraintVolatility volatility, ConstraintConcurrency concurrency, ConstraintParallelism parallelism)
+    : m_abbreviatedName(WTF::move(abbreviatedName))
     , m_name(WTF::move(name))
     , m_volatility(volatility)
     , m_concurrency(concurrency)
@@ -54,7 +54,7 @@ void MarkingConstraint::resetStats()
 
 void MarkingConstraint::execute(SlotVisitor& visitor)
 {
-    ASSERT(!visitor.heap()->isMarkingForGCVerifier());
+    ASSERT(!visitor.collector().heap().isMarkingForGCVerifier());
     VisitCounter visitCounter(visitor);
     executeImpl(visitor);
     m_lastVisitCount += visitCounter.visitCount();
@@ -80,7 +80,7 @@ double MarkingConstraint::workEstimate(SlotVisitor& visitor)
 
 void MarkingConstraint::prepareToExecute(const AbstractLocker& constraintSolvingLocker, SlotVisitor& visitor)
 {
-    ASSERT(!visitor.heap()->isMarkingForGCVerifier());
+    ASSERT(!visitor.collector().heap().isMarkingForGCVerifier());
     dataLogIf(Options::logGC(), abbreviatedName());
     VisitCounter visitCounter(visitor);
     prepareToExecuteImpl(constraintSolvingLocker, visitor);
@@ -91,7 +91,7 @@ void MarkingConstraint::prepareToExecute(const AbstractLocker& constraintSolving
 
 void MarkingConstraint::doParallelWork(SlotVisitor& visitor, SharedTask<void(SlotVisitor&)>& task)
 {
-    ASSERT(!visitor.heap()->isMarkingForGCVerifier());
+    ASSERT(!visitor.collector().heap().isMarkingForGCVerifier());
     VisitCounter visitCounter(visitor);
     task.run(visitor);
     if (verboseMarkingConstraint && visitCounter.visitCount())

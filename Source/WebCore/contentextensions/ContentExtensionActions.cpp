@@ -30,7 +30,7 @@
 
 #include "ContentExtensionError.h"
 #include "ResourceRequest.h"
-#include <JavaScriptCore/JSRetainPtr.h>
+#include <JavaScriptCore/JSStringRefCPP.h>
 #include <JavaScriptCore/JavaScript.h>
 #include <wtf/CrossThreadCopier.h>
 #include <wtf/StdLibExtras.h>
@@ -48,7 +48,7 @@ static void append(Vector<uint8_t>& vector, size_t length)
     vector.append(asByteSpan(integer));
 }
 
-static void append(Vector<uint8_t>& vector, const CString& string)
+static void append(Vector<uint8_t>& vector, const CStringBase& string)
 {
     vector.append(string.span());
 }
@@ -416,16 +416,6 @@ auto RedirectAction::RegexSubstitutionAction::deserialize(std::span<const uint8_
     return { WTF::move(regexSubstitution), WTF::move(regexFilter) };
 }
 
-static JSRetainPtr<JSStringRef> makeJSString(ASCIILiteral literal)
-{
-    return adopt(JSStringCreateWithUTF8CString(literal));
-}
-
-static JSRetainPtr<JSStringRef> makeJSString(const String& string)
-{
-    return adopt(JSStringCreateWithUTF8CString(string.utf8().data()));
-}
-
 void RedirectAction::RegexSubstitutionAction::applyToURL(URL& url) const
 {
     static JSContextGroupRef contextGroup = nullptr;
@@ -439,25 +429,22 @@ void RedirectAction::RegexSubstitutionAction::applyToURL(URL& url) const
         return JSValueToObject(context, value, nullptr);
     };
     auto getProperty = [&] (JSValueRef value, ASCIILiteral name) {
-        return JSObjectGetProperty(context, toObject(value), makeJSString(name).get(), nullptr);
+        return JSObjectGetProperty(context, toObject(value), createJSString(name).get(), nullptr);
     };
     auto getArrayValue = [&] (JSValueRef value, size_t index) {
         return JSObjectGetPropertyAtIndex(context, toObject(value), index, nullptr);
     };
     auto valueToWTFString = [&] (JSValueRef value) {
-        auto string = adopt(JSValueToStringCopy(context, value, nullptr));
-        size_t bufferSize = JSStringGetMaximumUTF8CStringSize(string.get());
-        Vector<char> buffer(bufferSize);
-        JSStringGetUTF8CString(string.get(), buffer.mutableSpan().data(), buffer.size());
-        return String::fromUTF8(buffer.span().data());
+        RefPtr string = adoptRef(JSValueToStringCopy(context, value, nullptr));
+        return String { utf8CString(string.get()) };
     };
 
     // Effectively execute this JavaScript:
     // const regexp = new RegExp(regexFilter);
     // const result = url.match(regexp);
-    JSValueRef regexFilterValue = JSValueMakeString(context, makeJSString(regexFilter).get());
+    JSValueRef regexFilterValue = JSValueMakeString(context, createJSString(regexFilter).get());
     JSObjectRef regexp = JSObjectMakeRegExp(context, 1, &regexFilterValue, nullptr);
-    JSValueRef urlValue = JSValueMakeString(context, makeJSString(url.string()).get());
+    JSValueRef urlValue = JSValueMakeString(context, createJSString(url.string()).get());
     JSObjectRef matchFunction = JSValueToObject(context, getProperty(urlValue, "match"_s), nullptr);
     JSValueRef result = JSObjectCallAsFunction(context, matchFunction, toObject(urlValue), 1, &regexp, nullptr);
     if (!JSValueIsArray(context, result))
@@ -541,7 +528,7 @@ void RedirectAction::URLTransformAction::serialize(Vector<uint8_t>& vector) cons
     uint8_t hasScheme = !!scheme;
     uint8_t hasUsername = !!username;
     auto* queryString = std::get_if<String>(&queryTransform);
-    auto queryStringUTF8 = queryString ? queryString->utf8() : CString();
+    auto queryStringUTF8 = queryString ? queryString->utf8() : UTF8CString();
     uint8_t hasQuery = !queryString || !!*queryString;
 
     auto fragmentUTF8 = fragment.utf8();
@@ -573,7 +560,7 @@ void RedirectAction::URLTransformAction::serialize(Vector<uint8_t>& vector) cons
         | hasUsername << 1
         | hasQuery << 0
     );
-    auto appendLengthAndString = [&] (const CString& string) {
+    auto appendLengthAndString = [&] (const CStringBase& string) {
         append(vector, string.length());
         append(vector, string);
     };

@@ -83,6 +83,7 @@
 #include <wtf/JSONValues.h>
 #include <wtf/Scope.h>
 #include <wtf/UUID.h>
+#include <wtf/text/TextStream.h>
 
 namespace WebCore {
 
@@ -236,7 +237,7 @@ MediaControlTextTrackContainerElement* MediaControlsHost::ensureTextTrackContain
 {
     if (!m_textTrackContainer) {
         Ref mediaElement = m_mediaElement.get();
-        m_textTrackContainer = MediaControlTextTrackContainerElement::create(protect(mediaElement->document()).get(), mediaElement);
+        lazyInitialize(m_textTrackContainer, MediaControlTextTrackContainerElement::create(protect(mediaElement->document()).get(), mediaElement));
     }
 
     return m_textTrackContainer.get();
@@ -403,6 +404,12 @@ std::optional<int32_t> MediaControlsHost::spatialVideoHorizontalFieldOfView() co
     return metadata->horizontalFieldOfView;
 }
 
+void MediaControlsHost::spatialCameraDidMove(double yaw, double pitch, double fieldOfView)
+{
+    if (RefPtr videoElement = dynamicDowncast<HTMLVideoElement>(m_mediaElement.get()))
+        videoElement->spatialCameraDidMove(yaw, pitch, fieldOfView);
+}
+
 bool MediaControlsHost::isAVExperienceControllerFullscreenEnabled() const
 {
 #if HAVE(AVEXPERIENCECONTROLLER)
@@ -422,7 +429,7 @@ String MediaControlsHost::externalDeviceDisplayName() const
     }
 
     String name = player->wirelessPlaybackTargetName();
-    LOG(Media, "MediaControlsHost::externalDeviceDisplayName - returning \"%s\"", name.utf8().data());
+    LOG_WITH_STREAM(Media, stream << "MediaControlsHost::externalDeviceDisplayName - returning \""_s << name << "\""_s);
     return name;
 #else
     return emptyString();
@@ -434,7 +441,7 @@ String MediaControlsHost::externalDeviceRouteName() const
 #if ENABLE(WIRELESS_PLAYBACK_TARGET)
     if (RefPtr player = m_mediaElement->player()) {
         String name = player->wirelessPlaybackRouteName();
-        LOG(Media, "MediaControlsHost::externalDeviceRouteName - returning \"%s\"", name.utf8().data());
+        LOG_WITH_STREAM(Media, stream << "MediaControlsHost::externalDeviceRouteName - returning \""_s << name << "\""_s);
         return name;
     }
 

@@ -47,11 +47,7 @@ ContextMenuContextData::ContextMenuContextData()
 }
 
 ContextMenuContextData::ContextMenuContextData(const IntPoint& menuLocation, const Vector<WebKit::WebContextMenuItemData>& menuItems, const ContextMenuContext& context)
-#if ENABLE(SERVICE_CONTROLS)
-    : m_type(context.controlledImage() ? Type::ServicesMenu : context.type())
-#else
     : m_type(context.type())
-#endif
     , m_menuLocation(menuLocation)
     , m_menuItems(menuItems)
     , m_webHitTestResultData({ context.hitTestResult(), true })
@@ -63,10 +59,6 @@ ContextMenuContextData::ContextMenuContextData(const IntPoint& menuLocation, con
     , m_selectionIsEditable(false)
 #endif
 {
-#if ENABLE(SERVICE_CONTROLS)
-    if (RefPtr image = context.controlledImage())
-        setImage(*image);
-#endif
 #if ENABLE(CONTEXT_MENU_QR_CODE_DETECTION)
     if (RefPtr image = context.potentialQRCodeNodeSnapshotImage())
         setPotentialQRCodeNodeSnapshotImage(*image);
@@ -108,7 +100,7 @@ void ContextMenuContextData::setImage(WebCore::Image& image)
     RefPtr controlledImage = ShareableBitmap::create({ IntSize(image.size()) });
     m_controlledImage = controlledImage;
     if (auto graphicsContext = controlledImage->createGraphicsContext())
-        graphicsContext->drawImage(image, IntPoint());
+        graphicsContext->drawImage(image, ConcreteObjectSize::fixed(image.size()), IntPoint());
 }
 
 std::optional<ShareableBitmap::Handle> ContextMenuContextData::createControlledImageReadOnlyHandle() const
@@ -121,20 +113,20 @@ std::optional<ShareableBitmap::Handle> ContextMenuContextData::createControlledI
 
 #if ENABLE(CONTEXT_MENU_QR_CODE_DETECTION)
 
-void ContextMenuContextData::setPotentialQRCodeNodeSnapshotImage(WebCore::Image& image)
+void ContextMenuContextData::setPotentialQRCodeNodeSnapshotImage(WebCore::BitmapImage& image)
 {
     RefPtr potentialQRCodeNodeSnapshotImage = ShareableBitmap::create({ IntSize(image.size()) });
     m_potentialQRCodeNodeSnapshotImage = potentialQRCodeNodeSnapshotImage;
     if (auto graphicsContext = potentialQRCodeNodeSnapshotImage->createGraphicsContext())
-        graphicsContext->drawImage(image, IntPoint());
+        graphicsContext->drawBitmapImage(image, IntPoint());
 }
 
-void ContextMenuContextData::setPotentialQRCodeViewportSnapshotImage(WebCore::Image& image)
+void ContextMenuContextData::setPotentialQRCodeViewportSnapshotImage(WebCore::BitmapImage& image)
 {
     RefPtr potentialQRCodeViewportSnapshotImage = ShareableBitmap::create({ IntSize(image.size()) });
     m_potentialQRCodeViewportSnapshotImage = potentialQRCodeViewportSnapshotImage;
     if (auto graphicsContext = potentialQRCodeViewportSnapshotImage->createGraphicsContext())
-        graphicsContext->drawImage(image, IntPoint());
+        graphicsContext->drawBitmapImage(image, IntPoint());
 }
 
 std::optional<ShareableBitmap::Handle> ContextMenuContextData::createPotentialQRCodeNodeSnapshotImageReadOnlyHandle() const

@@ -48,6 +48,7 @@
 #import <limits.h>
 #import <pal/spi/cf/CFNetworkSPI.h>
 #import <pal/spi/cocoa/ContactsSPI.h>
+#import <pal/spi/cocoa/WebFilterEvaluatorSPI.h>
 #import <wtf/RetainPtr.h>
 #import <wtf/cocoa/TypeCastsCocoa.h>
 #import <wtf/spi/cocoa/SecuritySPI.h>
@@ -57,6 +58,7 @@
 #import <pal/cocoa/ContactsSoftLink.h>
 #import <pal/cocoa/DataDetectorsCoreSoftLink.h>
 #import <pal/cocoa/PassKitSoftLink.h>
+#import <pal/cocoa/WebContentAnalysisSoftLink.h>
 #import <pal/ios/UIKitSoftLink.h>
 #import <pal/mac/DataDetectorsSoftLink.h>
 
@@ -491,6 +493,9 @@ struct ObjCHolderForTesting {
         RetainPtr<PKPayment>,
         RetainPtr<PKPaymentSetupFeature>,
 #endif
+#if !HAVE(WEBCONTENTRESTRICTIONS) && HAVE(PARENTAL_CONTROLS_WITH_UNBLOCK_HANDLER)
+        RetainPtr<WebFilterEvaluator>,
+#endif
         RetainPtr<NSShadow>,
         RetainPtr<NSValue>
     > ValueType;
@@ -641,7 +646,7 @@ static bool NSURLCredentialTesting_isEqual(NSURLCredential *a, NSURLCredential *
     return true;
 }
 
-#if USE(PASSKIT)
+#if USE(PASSKIT) || (!HAVE(WEBCONTENTRESTRICTIONS) && HAVE(PARENTAL_CONTROLS_WITH_UNBLOCK_HANDLER))
 static BOOL wkSecureCoding_isEqual(id a, SEL, id b)
 {
     RetainPtr<WKKeyedCoder> aCoder = adoptNS([WKKeyedCoder new]);
@@ -652,7 +657,7 @@ static BOOL wkSecureCoding_isEqual(id a, SEL, id b)
 
     return [[aCoder accumulatedDictionary] isEqual:[bCoder accumulatedDictionary]];
 }
-#endif // USE(PASSKIT)
+#endif // USE(PASSKIT) || (!HAVE(WEBCONTENTRESTRICTIONS) && HAVE(PARENTAL_CONTROLS_WITH_UNBLOCK_HANDLER))
 
 inline bool operator==(const ObjCHolderForTesting& a, const ObjCHolderForTesting& b)
 {
@@ -677,6 +682,9 @@ inline bool operator==(const ObjCHolderForTesting& a, const ObjCHolderForTesting
 #endif
 #if ENABLE(DATA_DETECTION) && PLATFORM(MAC)
         class_addMethod(PAL::getWKDDActionContextClassSingleton(), @selector(isEqual:), (IMP)wkDDActionContext_isEqual, "v@:@");
+#endif
+#if !HAVE(WEBCONTENTRESTRICTIONS) && HAVE(PARENTAL_CONTROLS_WITH_UNBLOCK_HANDLER)
+        class_addMethod(PAL::getWebFilterEvaluatorClassSingleton(), @selector(isEqual:), (IMP)wkSecureCoding_isEqual, "v@:@");
 #endif
     });
 
@@ -1345,6 +1353,41 @@ TEST(IPCSerialization, Basic)
     runTestNS({ [NSURLCredential credentialWithUser:@"user" password:@"password" persistence:NSURLCredentialPersistenceSynchronizable] });
 }
 
+TEST(IPCSerialization, NSErrorNetworkResolutionReport)
+{
+    NSDictionary *resolutionReport = @{
+        @"provider" : @"Cloudflare DNS",
+        @"dnsFailureReason" : @"censored",
+        @"extendedDNSErrorExtraText" : @"some extra text",
+        @"interfaces" : @[
+            @{ @"type" : @"wifi", @"name" : @"en0" },
+            @{ @"type" : @"wired", @"name" : @"en1" },
+        ],
+    };
+    NSError *originalError = [NSError errorWithDomain:NSURLErrorDomain code:NSURLErrorCannotFindHost userInfo:@{
+        NSLocalizedDescriptionKey : @"A server with the specified hostname could not be found.",
+        @"networkResolutionReport" : resolutionReport,
+    }];
+
+    WebKit::CoreIPCError ipcError = WebKit::CoreIPCError(originalError);
+    RetainPtr<id> roundTripped = ipcError.toID();
+    NSDictionary *roundTrippedReport = [[roundTripped userInfo] objectForKey:@"networkResolutionReport"];
+    ASSERT_TRUE([roundTrippedReport isKindOfClass:NSDictionary.class]);
+    EXPECT_TRUE([[roundTrippedReport objectForKey:@"dnsFailureReason"] isEqual:@"censored"]);
+    EXPECT_TRUE([[roundTrippedReport objectForKey:@"provider"] isEqual:@"Cloudflare DNS"]);
+    EXPECT_TRUE([[roundTrippedReport objectForKey:@"extendedDNSErrorExtraText"] isEqual:@"some extra text"]);
+
+    NSArray *roundTrippedInterfaces = [roundTrippedReport objectForKey:@"interfaces"];
+    ASSERT_TRUE([roundTrippedInterfaces isKindOfClass:NSArray.class]);
+    ASSERT_EQ([roundTrippedInterfaces count], (NSUInteger)2);
+    EXPECT_TRUE([[[roundTrippedInterfaces objectAtIndex:0] objectForKey:@"type"] isEqual:@"wifi"]);
+    EXPECT_TRUE([[[roundTrippedInterfaces objectAtIndex:0] objectForKey:@"name"] isEqual:@"en0"]);
+    EXPECT_TRUE([[[roundTrippedInterfaces objectAtIndex:1] objectForKey:@"type"] isEqual:@"wired"]);
+    EXPECT_TRUE([[[roundTrippedInterfaces objectAtIndex:1] objectForKey:@"name"] isEqual:@"en1"]);
+
+    runTestNS({ (NSError *)roundTripped.get() });
+}
+
 #if HAVE(WK_SECURE_CODING_SECTRUST)
 String cert1(""
     "MIIHezCCBmOgAwIBAgIQfrZYqgaHdOKdEb5ZVqa0LTANBgkqhkiG9w0BAQsFADBRMQswCQYDVQQGEw"
@@ -1724,7 +1767,7 @@ TEST(IPCSerialization, NSURLRequest)
     runTestNS({ urlRequest });
 }
 
-#if PLATFORM(COCOA) && HAVE(WK_SECURE_CODING_NSURLREQUEST)
+#if PLATFORM(COCOA)
 
 @interface NSURLRequest (WKSecureCoding)
 - (NSDictionary *)_webKitPropertyListData;
@@ -1913,7 +1956,7 @@ TEST(IPCSerialization, NSURLRequestAttribution)
     EXPECT_EQ([reconstructed attribution], NSURLRequestAttributionUser);
 }
 
-#endif // PLATFORM(COCOA) && HAVE(WK_SECURE_CODING_NSURLREQUEST)
+#endif // PLATFORM(COCOA)
 
 #if USE(AVFOUNDATION) && PLATFORM(MAC)
 TEST(IPCSerialization, AVOutputContext)
@@ -1998,6 +2041,30 @@ TEST(IPCSerialization, PKPayment)
     EXPECT_TRUE(nilPayment.get() == nil);
 }
 #endif
+
+#if !HAVE(WEBCONTENTRESTRICTIONS) && HAVE(PARENTAL_CONTROLS_WITH_UNBLOCK_HANDLER)
+
+@interface WebFilterEvaluator (IPCSerializationTesting)
+- (instancetype)initWithCoder:(NSCoder *)coder;
+@end
+
+TEST(IPCSerialization, WebFilterEvaluator)
+{
+    // WebFilterEvaluator does not implement -_initWithWebKitPropertyListData:, so both ends of the
+    // IPC need to go through WKKeyedCoder instead of a WebKit secure coding property list.
+    RetainPtr coder = adoptNS([[WKKeyedCoder alloc] initWithDictionary:@{
+        @"WebContentFilterStateKey": @(kWFEStateBlocked),
+        @"WebContentFilterURLKey": [NSURL URLWithString:@"https://webkit.org/"],
+        @"WebContentFilterPageTitleKey": @"WebKit"
+    }]);
+
+    RetainPtr<WebFilterEvaluator> evaluator = adoptNS([PAL::allocWebFilterEvaluatorInstance() initWithCoder:coder.get()]);
+    EXPECT_NOT_NULL(evaluator.get());
+
+    runTestNS({ evaluator.get() });
+}
+
+#endif // !HAVE(WEBCONTENTRESTRICTIONS) && HAVE(PARENTAL_CONTROLS_WITH_UNBLOCK_HANDLER)
 
 #if PLATFORM(MAC)
 

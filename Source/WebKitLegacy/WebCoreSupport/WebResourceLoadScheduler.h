@@ -40,7 +40,7 @@
 
 class WebResourceLoadScheduler;
 
-WebResourceLoadScheduler& webResourceLoadScheduler();
+CheckedRef<WebResourceLoadScheduler> webResourceLoadScheduler();
 
 class WebResourceLoadScheduler final : public WebCore::LoaderStrategy {
     WTF_MAKE_TZONE_ALLOCATED(WebResourceLoadScheduler);
@@ -62,7 +62,7 @@ public:
     void suspendPendingRequests() final;
     void resumePendingRequests() final;
 
-    void startPingLoad(WebCore::LocalFrame&, WebCore::ResourceRequest&, const WebCore::HTTPHeaderMap&, const WebCore::FetchOptions&, WebCore::ContentSecurityPolicyImposition, PingLoadCompletionHandler&&) final;
+    bool startKeepAliveLoadForWebKitLegacy(WebCore::FrameLoader&, const WebCore::ResourceRequest&, const WebCore::ResourceLoaderOptions&, CompletionHandler<void(const WebCore::ResourceError&, const WebCore::ResourceResponse&)>&&) final;
 
     void preconnectTo(WebCore::FrameLoader&, WebCore::ResourceRequest&&, WebCore::StoredCredentialsPolicy, ShouldPreconnectAsFirstParty, PreconnectCompletionHandler&&) final;
 
@@ -150,3 +150,7 @@ private:
     unsigned m_suspendPendingRequestsCount;
     bool m_isSerialLoadingEnabled;
 };
+
+SPECIALIZE_TYPE_TRAITS_BEGIN(WebResourceLoadScheduler)
+    static bool isType(const WebCore::LoaderStrategy&) { return true; }
+SPECIALIZE_TYPE_TRAITS_END()

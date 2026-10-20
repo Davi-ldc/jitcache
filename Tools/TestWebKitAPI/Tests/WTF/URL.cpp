@@ -551,10 +551,10 @@ TEST_F(WTF_URL, URLRemoveQueryParameters)
         WTFLogAlways("Test failed at %s:%d", __FILE__, lineNumber);
         WTFLogAlways("- Got %zu parameter(s)", removedParameters.size());
         for (auto& parameter : removedParameters)
-            WTFLogAlways("    %s", parameter.utf8().data());
+            SAFE_WTFLOGALWAYS("    %s", parameter.utf8());
         WTFLogAlways("- Expected %zu parameter(s)", expectedParameters.size());
         for (auto& parameter : expectedParameters)
-            WTFLogAlways("    %s", parameter.utf8().data());
+            SAFE_WTFLOGALWAYS("    %s", parameter.utf8());
     };
 
     auto removedParameters1 = removeQueryParameters(url1, keyRemovalSet2);
@@ -668,6 +668,13 @@ TEST_F(WTF_URL, MoveInvalidatesURL)
 
     url3 = { };
     EXPECT_FALSE(url3.isValid());
+
+    URL url4 { "http://www.webkit.org"_str };
+    static_assert(std::is_same_v<decltype(url4.string()), const String&>);
+    static_assert(std::is_same_v<decltype(WTF::move(url4).string()), String>);
+    EXPECT_TRUE(url4.isValid());
+    String string4 = WTF::move(url4).string();
+    SUPPRESS_USE_AFTER_MOVE EXPECT_FALSE(url4.isValid());
 }
 
 TEST_F(WTF_URL, ProtocolIsSecure)

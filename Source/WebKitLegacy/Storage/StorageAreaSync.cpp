@@ -256,7 +256,7 @@ void StorageAreaSync::openDatabase(OpenDatabaseParamType openingStrategy)
     StorageTracker::tracker().cancelDeletingOrigin(m_databaseIdentifier);
 
     if (!m_database->open(databaseFilename)) {
-        LOG_ERROR("Failed to open database file %s for local storage", databaseFilename.utf8().data());
+        LOG_ERROR("Failed to open database file %s for local storage", databaseFilename.utf8());
         markImported();
         m_databaseOpenFailed = true;
         return;
@@ -349,7 +349,7 @@ void StorageAreaSync::performImport()
         return;
     }
 
-    m_storageArea->importItems(WTF::move(itemMap));
+    protect(m_storageArea)->importItems(WTF::move(itemMap));
 
     markImported();
 }
@@ -527,7 +527,7 @@ void StorageAreaSync::deleteEmptyDatabase()
     } else {
         String databaseFilename = m_syncManager->fullDatabaseFilename(m_databaseIdentifier);
         if (!FileSystem::deleteFile(databaseFilename))
-            LOG_ERROR("Failed to delete database file %s\n", databaseFilename.utf8().data());
+            LOG_ERROR("Failed to delete database file %s\n", databaseFilename.utf8());
     }
 }
 

@@ -208,7 +208,7 @@ static inline JSC::EncodedJSValue jsExposedStarPrototypeFunction_operationForAll
 
 JSC_DEFINE_HOST_FUNCTION(jsExposedStarPrototypeFunction_operationForAllContexts, (JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame))
 {
-    return IDLOperation<JSExposedStar>::call<jsExposedStarPrototypeFunction_operationForAllContextsBody>(*lexicalGlobalObject, *callFrame, "operationForAllContexts");
+    return IDLOperation<JSExposedStar>::call<jsExposedStarPrototypeFunction_operationForAllContextsBody>(*lexicalGlobalObject, *callFrame, "operationForAllContexts"_s);
 }
 
 static inline JSC::EncodedJSValue jsExposedStarPrototypeFunction_operationJustForWindowContextsBody(JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame, typename IDLOperation<JSExposedStar>::ClassParameter castedThis)
@@ -223,7 +223,7 @@ static inline JSC::EncodedJSValue jsExposedStarPrototypeFunction_operationJustFo
 
 JSC_DEFINE_HOST_FUNCTION(jsExposedStarPrototypeFunction_operationJustForWindowContexts, (JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame))
 {
-    return IDLOperation<JSExposedStar>::call<jsExposedStarPrototypeFunction_operationJustForWindowContextsBody>(*lexicalGlobalObject, *callFrame, "operationJustForWindowContexts");
+    return IDLOperation<JSExposedStar>::call<jsExposedStarPrototypeFunction_operationJustForWindowContextsBody>(*lexicalGlobalObject, *callFrame, "operationJustForWindowContexts"_s);
 }
 
 static inline JSC::EncodedJSValue jsExposedStarPrototypeFunction_operationJustForWorkerContextsBody(JSC::JSGlobalObject* lexicalGlobalObject, JSC::CallFrame* callFrame, typename IDLOperation<JSExposedStar>::ClassParameter castedThis)
@@ -238,7 +238,7 @@ static inline JSC::EncodedJSValue jsExposedStarPrototypeFunction_operationJustFo
 
 JSC_DEFINE_HOST_FUNCTION(jsExposedStarPrototypeFunction_operationJustForWorkerContexts, (JSGlobalObject* lexicalGlobalObject, CallFrame* callFrame))
 {
-    return IDLOperation<JSExposedStar>::call<jsExposedStarPrototypeFunction_operationJustForWorkerContextsBody>(*lexicalGlobalObject, *callFrame, "operationJustForWorkerContexts");
+    return IDLOperation<JSExposedStar>::call<jsExposedStarPrototypeFunction_operationJustForWorkerContextsBody>(*lexicalGlobalObject, *callFrame, "operationJustForWorkerContexts"_s);
 }
 
 JSC::GCClient::IsoSubspace* JSExposedStar::subspaceForImpl(JSC::VM& vm)
@@ -283,7 +283,7 @@ static inline void verifyVTable(ExposedStar* ptr)
         // ExposedStar has subclasses. If ExposedStar has subclasses that get passed
         // to toJS() we currently require ExposedStar you to opt out of binding hardening
         // by adding the SkipVTableValidation attribute to the interface IDL definition
-        RELEASE_ASSERT(actualVTablePointer == expectedVTablePointer);
+        RELEASE_ASSERT_WITH_UNQUALIFIED_FUNCTION_NAME(actualVTablePointer == expectedVTablePointer);
     }
 }
 #endif

@@ -174,10 +174,22 @@ inline bool ComputedStyleBase::insideSubmitButton() const
     return m_inheritedRareData->insideSubmitButton;
 }
 
+inline bool ComputedStyleBase::inBaseAppearanceSubtree() const
+{
+    return m_inheritedRareData->inBaseAppearanceSubtree;
+}
+
 inline bool ComputedStyleBase::isInSubtreeWithBlendMode() const
 {
     return m_inheritedRareData->isInSubtreeWithBlendMode;
 }
+
+#if ENABLE(SMART_IMAGE_RESIZER)
+inline bool ComputedStyleBase::isAffectedBySmartImageResizer() const
+{
+    return m_inheritedRareData->isAffectedBySmartImageResizer;
+}
+#endif
 
 inline bool ComputedStyleBase::isForceHidden() const
 {
@@ -278,6 +290,11 @@ inline std::optional<PseudoElementType> ComputedStyleBase::pseudoElementType() c
     return m_nonInheritedFlags.pseudoElementType ? std::make_optional(static_cast<PseudoElementType>(m_nonInheritedFlags.pseudoElementType - 1)) : std::nullopt;
 }
 
+inline bool ComputedStyleBase::isListMarkerStyle() const
+{
+    return pseudoElementType() == PseudoElementType::Marker;
+}
+
 inline std::optional<PseudoElementType> pseudoElementType(const ComputedStyleBase& style)
 {
     return style.pseudoElementType();
@@ -296,6 +313,11 @@ inline EnumSet<PseudoElementType> ComputedStyleBase::highlightPseudoElementTypes
 inline bool ComputedStyleBase::hasPseudoStyle(PseudoElementType pseudo) const
 {
     return m_nonInheritedFlags.hasPseudoStyle(pseudo);
+}
+
+inline PseudoElementBoxGeneration ComputedStyleBase::pseudoElementBoxGeneration() const
+{
+    return static_cast<PseudoElementBoxGeneration>(m_nonInheritedFlags.pseudoElementBoxGeneration);
 }
 
 inline bool ComputedStyleBase::hasAnyPublicPseudoStyles() const
@@ -351,9 +373,9 @@ inline const FontCascade& ComputedStyleBase::fontCascade() const
     return m_inheritedData->fontData->fontCascade;
 }
 
-inline WebkitLocale ComputedStyleBase::computedLocale() const
+inline WebkitLocale ComputedStyleBase::usedLocale() const
 {
-    return fontDescription().computedLocale();
+    return fontDescription().usedLocale();
 }
 
 inline float ComputedStyleBase::usedLetterSpacing() const
@@ -486,6 +508,11 @@ inline const BorderValue& ComputedStyleBase::borderTop() const
 inline const BorderValue& ComputedStyleBase::columnRule() const
 {
     return m_nonInheritedData->miscData->multiCol->columnRule;
+}
+
+inline bool ComputedStyleBase::hasLegacyLineClamp() const
+{
+    return static_cast<OverflowContinue>(m_nonInheritedData->rareData->overflowContinue) == OverflowContinue::WebkitLegacy && !m_nonInheritedData->rareData->maxLines.isAuto();
 }
 
 // MARK: - Properties/descriptors that are not yet generated

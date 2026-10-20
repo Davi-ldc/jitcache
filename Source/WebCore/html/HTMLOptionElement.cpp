@@ -44,13 +44,10 @@
 #include "MouseEvent.h"
 #include "NodeName.h"
 #include "NodeRenderStyle.h"
-#include "NodeTraversal.h"
 #include "PseudoClassChangeInvalidation.h"
-#include "RenderTheme.h"
 #include "ScriptDisallowedScope.h"
-#include "ScriptElement.h"
 #include "SelectPopoverElement.h"
-#include "StyleComputedStyle+GettersInlines.h"
+#include "Settings.h"
 #include "StyleResolver.h"
 #include "Text.h"
 #include <wtf/Ref.h>
@@ -174,7 +171,7 @@ auto HTMLOptionElement::insertionSteps(InsertionType insertionType, ContainerNod
             // instead of selected() which triggers O(n) recalcListItems().
             // Only do this during parsing — for API insertions, the existing
             // childrenChanged → optionToSelectFromChildChangeScope path handles it.
-            if (!select->isFinishedParsingChildren() && !selectedWithoutUpdate() && !m_disabled)
+            if (!select->isFinishedParsingChildren() && !selectedWithoutUpdate() && !isDisabledFormControl())
                 select->selectDefaultOptionIfNeeded(*this);
         }
     }
@@ -184,9 +181,29 @@ auto HTMLOptionElement::insertionSteps(InsertionType insertionType, ContainerNod
             select->invalidateButtonText();
         if (m_shadowTreeNeedsUpdate)
             protect(document())->addElementWithPendingUserAgentShadowTreeUpdate(*this);
+        if (m_ownerSelect)
+            result = NeedsPostConnectionSteps::Yes;
     }
 
     return result;
+}
+
+void HTMLOptionElement::postConnectionSteps()
+{
+    RefPtr select = m_ownerSelect;
+    if (!select || !select->hasSelectedContentDescendants())
+        return;
+
+    if (select->multiple()) {
+        // The select clones its options once it finishes parsing them.
+        if (select->isFinishedParsingChildren())
+            select->queueSelectedContentUpdate();
+        return;
+    }
+
+    bool isSelected = select->isFinishedParsingChildren() ? selected() : selectedWithoutUpdate();
+    if (isSelected)
+        select->updateSelectedContent(this);
 }
 
 void HTMLOptionElement::removingSteps(RemovalType removalType, ContainerNode& oldParentOfRemovedTree)
@@ -207,16 +224,15 @@ void HTMLOptionElement::removingSteps(RemovalType removalType, ContainerNode& ol
     if (RefPtr select = std::exchange(m_ownerSelect, nullptr).get()) {
         select->setRecalcListItems();
         select->invalidateButtonText();
+        if (m_isSelected || select->multiple())
+            select->queueSelectedContentUpdate();
         invalidateShadowTree();
     }
 }
 
-void HTMLOptionElement::movingSteps(IsSubtreeRoot isSubtreeRoot, ContainerNode& oldParent)
+void HTMLOptionElement::movingSteps(MovingType movingType, ContainerNode& oldParent)
 {
-    HTMLElement::movingSteps(isSubtreeRoot, oldParent);
-
-    if (isSubtreeRoot == IsSubtreeRoot::No)
-        return;
+    HTMLElement::movingSteps(movingType, oldParent);
 
     if (!document().settings().htmlEnhancedSelectParsingEnabled())
         return;
@@ -227,6 +243,8 @@ void HTMLOptionElement::movingSteps(IsSubtreeRoot isSubtreeRoot, ContainerNode& 
         if (newSelect) {
             newSelect->setRecalcListItems();
             newSelect->invalidateButtonText();
+            if (newSelect->multiple() && oldParent.isInclusiveDescendantOf(*newSelect))
+                newSelect->queueSelectedContentUpdate();
         }
         return;
     }
@@ -236,11 +254,15 @@ void HTMLOptionElement::movingSteps(IsSubtreeRoot isSubtreeRoot, ContainerNode& 
     if (oldSelect) {
         oldSelect->setRecalcListItems();
         oldSelect->invalidateButtonText();
+        if (m_isSelected || oldSelect->multiple())
+            oldSelect->queueSelectedContentUpdate();
     }
 
     if (newSelect) {
         newSelect->setRecalcListItems();
         newSelect->invalidateButtonText();
+        if (m_isSelected || newSelect->multiple())
+            newSelect->queueSelectedContentUpdate();
     }
 
     invalidateShadowTree();
@@ -260,7 +282,7 @@ void HTMLOptionElement::finishParsingChildren()
         return;
 
     RefPtr select = m_ownerSelect;
-    if (!select)
+    if (!select || select->multiple())
         return;
 
     // When the owning <select> is still being parsed, use selectedWithoutUpdate()
@@ -279,24 +301,22 @@ void HTMLOptionElement::finishParsingChildren()
 
 bool HTMLOptionElement::supportsFocus() const
 {
-    return HTMLElement::supportsFocus() || belongsToBaseAppearancePicker();
+    return HTMLElement::supportsFocus() || isRenderedWithBaseAppearance();
 }
 
 bool HTMLOptionElement::isFocusable() const
 {
     RefPtr select = ownerSelectElement();
-    if (select && select->usesMenuList() && !select->usesBaseAppearancePicker())
+    if (select && select->isDropdownBox() && !select->usesBaseAppearancePicker())
         return false;
     return HTMLElement::isFocusable();
 }
 
 String HTMLOptionElement::text() const
 {
-    String text = collectOptionInnerText();
-
     // FIXME: Is displayStringModifiedByEncoding helpful here?
     // If it's correct here, then isn't it needed in the value and label functions too?
-    return protect(document())->displayStringModifiedByEncoding(text).trim(isASCIIWhitespace).simplifyWhiteSpace(isASCIIWhitespace);
+    return protect(document())->displayStringModifiedByEncoding(htmlAwareTextContent(*this, IncludeAltText::No));
 }
 
 void HTMLOptionElement::setText(String&& text)
@@ -304,15 +324,15 @@ void HTMLOptionElement::setText(String&& text)
     Ref protectedThis { *this };
 
     // Changing the text causes a recalc of a select's items, which will reset the selected
-    // index to the first item if the select is single selection with a menu list. We attempt to
+    // index to the first item if the select is a single select dropdown box. We attempt to
     // preserve the selected item.
     RefPtr select = ownerSelectElement();
-    bool selectIsMenuList = select && select->usesMenuListDeprecated();
-    int oldSelectedIndex = selectIsMenuList ? select->selectedIndex() : -1;
+    bool isSingleSelectDropdownBox = select && select->isSingleSelectDropdownBox();
+    int oldSelectedIndex = isSingleSelectDropdownBox ? select->selectedIndex() : -1;
 
     setTextContent(WTF::move(text));
-    
-    if (selectIsMenuList && select->selectedIndex() != oldSelectedIndex)
+
+    if (isSingleSelectDropdownBox && select->selectedIndex() != oldSelectedIndex)
         select->setSelectedIndex(oldSelectedIndex);
 }
 
@@ -322,10 +342,12 @@ bool HTMLOptionElement::accessKeyAction(bool)
     if (!select)
         return false;
 
-    if (select->usesBaseAppearancePicker()) {
-        select->optionSelectedByUser(index(), true);
-        select->hidePickerPopoverElement();
-    } else
+    if (isActuallyDisabled())
+        return false;
+
+    if (select->usesBaseAppearancePicker())
+        select->pickOrToggleOption(*this);
+    else
         select->accessKeySetSelectedIndex(index());
     return true;
 }
@@ -336,7 +358,7 @@ void HTMLOptionElement::defaultEventHandler(Event& event)
         return HTMLElement::defaultEventHandler(event);
 
     RefPtr select = ownerSelectElement();
-    if (!select || !select->document().settings().htmlEnhancedSelectEnabled() || !select->usesBaseAppearancePicker())
+    if (!select || !select->document().settings().htmlEnhancedSelectEnabled() || !select->optionsAreRenderedWithBaseAppearance())
         return HTMLElement::defaultEventHandler(event);
 
     auto& eventNames = WebCore::eventNames();
@@ -350,22 +372,20 @@ void HTMLOptionElement::defaultEventHandler(Event& event)
 
         // [Shift+]Tab closes the picker; fall through to move focus.
         if (keyIdentifier == "U+0009"_s) {
-            select->hidePickerPopoverElement();
+            if (select->usesBaseAppearancePicker())
+                select->hidePickerPopoverElement();
             return HTMLElement::defaultEventHandler(event);
         }
 
-        int currentIndex = select->optionToListIndex(index());
-        int listIndex = select->computeNavigationIndex(keyIdentifier, currentIndex, select->pickerNavigationKeyIdentifiers());
-        if (listIndex >= 0) {
-            auto scrollMode = HTMLSelectElement::PickerScrollMode::Nearest;
-            if (keyIdentifier == "PageDown"_s)
-                scrollMode = HTMLSelectElement::PickerScrollMode::AlignBottom;
-            else if (keyIdentifier == "PageUp"_s)
-                scrollMode = HTMLSelectElement::PickerScrollMode::AlignTop;
-            select->focusOptionAtIndex(listIndex, std::nullopt, scrollMode);
+        int keyCode = keyboardEvent->keyCode();
+        if ((keyCode == '\r' || keyCode == ' ') && !keyboardEvent->ctrlKey() && !keyboardEvent->altKey() && !keyboardEvent->metaKey()) {
+            select->pickOrToggleOption(*this);
             keyboardEvent->setDefaultHandled();
             return;
         }
+
+        if (select->handleNavigationKeydown(*keyboardEvent, select->optionToListIndex(index())))
+            return;
     }
 
     if (event.type() == eventNames.keypressEvent) {
@@ -373,28 +393,21 @@ void HTMLOptionElement::defaultEventHandler(Event& event)
         if (!keyboardEvent)
             return HTMLElement::defaultEventHandler(event);
 
-        int keyCode = keyboardEvent->keyCode();
-        if (keyCode == '\r' || keyCode == ' ') {
-            select->optionSelectedByUser(index(), true);
-            select->hidePickerPopoverElement();
-            keyboardEvent->setDefaultHandled();
+        if (select->handleTypeAheadKeypress(*keyboardEvent))
             return;
-        }
-
-        if (!keyboardEvent->ctrlKey() && !keyboardEvent->altKey() && !keyboardEvent->metaKey() && u_isprint(keyboardEvent->charCode())) {
-            int listIndex = select->typeAheadMatchIndex(*keyboardEvent);
-            if (listIndex >= 0)
-                select->focusOptionAtIndex(listIndex);
-            keyboardEvent->setDefaultHandled();
-            return;
-        }
     }
 
-    if (RefPtr mouseEvent = dynamicDowncast<MouseEvent>(event); mouseEvent && event.type() == eventNames.mousedownEvent && mouseEvent->button() == MouseButton::Left) {
-        select->optionSelectedByUser(index(), true);
-        select->hidePickerPopoverElement();
-        event.setDefaultHandled();
-        return;
+    if (RefPtr mouseEvent = dynamicDowncast<MouseEvent>(event); mouseEvent && mouseEvent->button() == MouseButton::Left) {
+        if (event.type() == eventNames.mousedownEvent) {
+            select->clearPickerOpeningMouseLocation();
+            event.setDefaultHandled();
+            return;
+        }
+        if (event.type() == eventNames.mouseupEvent && !select->consumePickerOpeningPress(*mouseEvent)) {
+            select->pickOrToggleOption(*this);
+            event.setDefaultHandled();
+            return;
+        }
     }
 
     HTMLElement::defaultEventHandler(event);
@@ -437,16 +450,9 @@ int HTMLOptionElement::index() const
 void HTMLOptionElement::attributeChanged(const QualifiedName& name, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason attributeModificationReason)
 {
     switch (name.nodeName()) {
-    case AttributeNames::disabledAttr: {
-        bool newDisabled = !newValue.isNull();
-        if (m_disabled != newDisabled) {
-            Style::PseudoClassChangeInvalidation disabledInvalidation(*this, { { CSSSelector::PseudoClass::Disabled, newDisabled },  { CSSSelector::PseudoClass::Enabled, !newDisabled } });
-            m_disabled = newDisabled;
-            if (CheckedPtr renderer = this->renderer(); renderer && renderer->style().hasUsedAppearance())
-                renderer->repaint();
-        }
+    case AttributeNames::disabledAttr:
+        parseDisabledAttribute(newValue);
         break;
-    }
     case AttributeNames::selectedAttr: {
         // FIXME: Use PseudoClassChangeInvalidation in other elements that implement matchesDefaultPseudoClass().
         Style::PseudoClassChangeInvalidation defaultInvalidation(*this, CSSSelector::PseudoClass::Default, !newValue.isNull());
@@ -473,12 +479,29 @@ void HTMLOptionElement::attributeChanged(const QualifiedName& name, const AtomSt
     }
 }
 
+void HTMLOptionElement::parseDisabledAttribute(const AtomString& value)
+{
+    bool newDisabled = !value.isNull();
+    if (m_disabled == newDisabled)
+        return;
+
+    RefPtr select = ownerSelectElement();
+    RefPtr oldSelectedOption = select ? select->selectedOptionForSelectedContent() : nullptr;
+    {
+        Style::PseudoClassChangeInvalidation disabledInvalidation(*this, { { CSSSelector::PseudoClass::Disabled, newDisabled }, { CSSSelector::PseudoClass::Enabled, !newDisabled } });
+        m_disabled = newDisabled;
+    }
+
+    if (select)
+        select->resetSelectedness(oldSelectedOption.get());
+}
+
 String HTMLOptionElement::value() const
 {
     const AtomString& value = attributeWithoutSynchronization(valueAttr);
     if (!value.isNull())
         return value;
-    return collectOptionInnerTextCollapsingWhitespace();
+    return htmlAwareTextContent(*this, IncludeAltText::No);
 }
 
 bool HTMLOptionElement::selected(AllowStyleInvalidation allowStyleInvalidation) const
@@ -570,10 +593,19 @@ HTMLSelectElement* HTMLOptionElement::ownerSelectElement() const
     return nullptr;
 }
 
-bool HTMLOptionElement::belongsToBaseAppearancePicker() const
+// https://html.spec.whatwg.org/#option-base-appearance
+bool HTMLOptionElement::isRenderedWithBaseAppearance() const
 {
     RefPtr select = ownerSelectElement();
-    return select && select->usesBaseAppearancePicker();
+    return select && select->optionsAreRenderedWithBaseAppearance();
+}
+
+bool HTMLOptionElement::isKeyboardFocusable(const FocusEventData& focusEventData) const
+{
+    // For a base list box the select is the tab stop and the arrow keys reach its options.
+    if (RefPtr select = ownerSelectElement(); select && select->isBaseListBox() && !tabIndexSetExplicitly())
+        return false;
+    return HTMLElement::isKeyboardFocusable(focusEventData);
 }
 
 String HTMLOptionElement::label() const
@@ -581,14 +613,14 @@ String HTMLOptionElement::label() const
     String label = attributeWithoutSynchronization(labelAttr);
     if (!label.isNull())
         return label;
-    return collectOptionInnerTextCollapsingWhitespace();
+    return htmlAwareTextContent(*this, IncludeAltText::No);
 }
 
 String HTMLOptionElement::displayLabel() const
 {
     String label = attributeWithoutSynchronization(labelAttr);
     if (label.isEmpty())
-        return collectOptionInnerTextCollapsingWhitespace();
+        return htmlAwareTextContent(*this, IncludeAltText::Yes);
     return label;
 }
 
@@ -637,22 +669,6 @@ bool HTMLOptionElement::isActuallyDisabled() const
     return select && select->isDisabledFormControl();
 }
 
-String HTMLOptionElement::collectOptionInnerText() const
-{
-    StringBuilder text;
-    // Text nodes inside script elements are not part of the option text.
-    for (RefPtr node = firstChild(); node; node = isScriptElement(*node) ? NodeTraversal::nextSkippingChildren(*node, this) : NodeTraversal::next(*node, this)) {
-        if (auto* textNode = dynamicDowncast<Text>(*node))
-            text.append(textNode->data());
-    }
-    return text.toString();
-}
-
-String HTMLOptionElement::collectOptionInnerTextCollapsingWhitespace() const
-{
-    return collectOptionInnerText().trim(isASCIIWhitespace).simplifyWhiteSpace(isASCIIWhitespace);
-}
-
 void HTMLOptionElement::cloneIntoSelectedContent(HTMLSelectedContentElement& selectedContent)
 {
     ASSERT(document().settings().htmlEnhancedSelectParsingEnabled());
@@ -661,8 +677,18 @@ void HTMLOptionElement::cloneIntoSelectedContent(HTMLSelectedContentElement& sel
 
     NodeVector newChildren;
     for (RefPtr child = firstChild(); child; child = child->nextSibling())
-        newChildren.append(child->cloneNode(true));
+        newChildren.append(child->cloneNode(CloneSubtree::Yes));
     selectedContent.replaceChildrenWithoutValidityCheck(WTF::move(newChildren));
+}
+
+Ref<HTMLOptionElement> HTMLOptionElement::cloneForSelectedContent()
+{
+    ASSERT(document().settings().htmlEnhancedSelectMultipleSelectedContentEnabled());
+
+    Ref clone = downcast<HTMLOptionElement>(cloneNode(CloneSubtree::Yes));
+    clone->m_selectedContentSource = *this;
+    clone->m_isSelected = selected();
+    return clone;
 }
 
 } // namespace

@@ -173,7 +173,7 @@ ValueOrException ScriptController::evaluateInWorld(const ScriptSourceCode& sourc
     SetForScope sourceURLScope(m_sourceURL, &sourceURL);
 
     if (RefPtr document = m_frame->document()) {
-        if (auto script = document->quirks().scriptToEvaluateBeforeRunningScriptFromURL(sourceURL); !script.isEmpty())
+        for (auto& script : document->quirks().scriptsToEvaluateBeforeRunningScriptFromURL(sourceURL))
             evaluateIgnoringException({ WTF::move(script), JSC::SourceTaintedOrigin::Untainted });
     }
 
@@ -306,7 +306,10 @@ JSC::JSValue ScriptController::evaluateModule(const URL& sourceURL, AbstractModu
     else {
         auto* jsModuleRecord = uncheckedDowncast<JSModuleRecord>(&moduleRecord);
         const auto& jsSourceCode = jsModuleRecord->sourceCode();
-        InspectorInstrumentation::willEvaluateScript(protect(m_frame), sourceURL.string(), jsSourceCode.firstLine().oneBasedInt(), jsSourceCode.startColumn().oneBasedInt());
+        // A module's SourceCode spans its whole provider, so this is the same position the provider
+        // holds. Asking the SourceCode to derive it would build the line-start table on every module.
+        auto startPosition = jsSourceCode.provider()->startPosition();
+        InspectorInstrumentation::willEvaluateScript(protect(m_frame), sourceURL.string(), startPosition.m_line.oneBasedInt(), startPosition.m_column.oneBasedInt());
     }
     auto returnValue = moduleRecord.evaluate(&lexicalGlobalObject, awaitedValue, resumeMode);
     InspectorInstrumentation::didEvaluateScript(protect(m_frame));
@@ -346,7 +349,7 @@ void ScriptController::initScriptForWindowProxy(JSWindowProxy& windowProxy)
     }
 
     if (RefPtr page = m_frame->page()) {
-        windowProxy.attachDebugger(page->debugger());
+        windowProxy.attachDebugger(m_frame->debugger());
         windowProxy.window()->setProfileGroup(page->group().identifier());
     }
 

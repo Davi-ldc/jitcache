@@ -57,6 +57,12 @@ struct FlexTrack {
 
 enum class ExtraSpaceDistributionTarget : bool { BaseSizes, GrowthLimits };
 
+// https://drafts.csswg.org/css-grid-1/#extra-space
+// 2.2: Distribute space up to limits: UpToGrowthLimit
+// 2.3: Distribute space to non-affected tracks: UpToGrowthLimit
+// 2.4: Distribute space beyond limits: BeyondGrowthLimit
+enum class SpaceDistributionLimit : bool { UpToGrowthLimit, BeyondGrowthLimit };
+
 // Content and flexible tracks are resolved in separate phases.
 enum class ResolveIntrinsicTrackSizesPhase : bool { ContentSizedTracks, FlexibleTracks };
 
@@ -74,9 +80,12 @@ struct UnsizedTrack {
     LayoutUnit baseSize;
     LayoutUnit growthLimit;
     const TrackSizingFunctions trackSizingFunction;
+    // https://drafts.csswg.org/css-grid-1/#extra-space
+    // trackSizingFunction's fit-content() argument, resolved against the available grid space by
+    // TrackSizingFunctions::fitContentLimit() in initializeTrackSizes(). nullopt for a track without
+    // a fit-content() maximum.
+    const std::optional<LayoutUnit> fitContentLimit;
     // https://drafts.csswg.org/css-grid-1/#infinitely-growable
-    // FIXME: Add a RAII helper to set this flag when a track's growth limit is changed from infinite to finite
-    // while resolving intrinsic maximums.
     bool infinitelyGrowable { false };
 
     // https://drafts.csswg.org/css-grid-1/#extra-space
@@ -92,18 +101,43 @@ struct UnsizedTrack {
     }
 
     // https://drafts.csswg.org/css-grid-1/#extra-space
-    // The limit at which this track's item-incurred increase freezes. For base sizes, that's the
-    // growth limit. For growth limits, it's the growth limit if finite and not infinitely growable,
-    // otherwise infinity.
-    // FIXME: handle fit-content() argument if it has one.
-    LayoutUnit freezeLimit(ExtraSpaceDistributionTarget spaceDistributionTarget) const
+    // The limit at which this track's item-incurred increase freezes.
+    LayoutUnit freezeLimit(ExtraSpaceDistributionTarget spaceDistributionTarget, SpaceDistributionLimit spaceDistributionLimit) const
     {
-        if (spaceDistributionTarget == ExtraSpaceDistributionTarget::BaseSizes)
-            return growthLimit;
-        // Growth limits: an infinitely-growable track has no ceiling; otherwise its growth limit.
-        return infinitelyGrowable ? LayoutUnit::max() : growthLimit;
+        switch (spaceDistributionLimit) {
+        case SpaceDistributionLimit::UpToGrowthLimit: {
+            // 11.5.1.2 Distribute space up to limits
+            // "For base sizes, the limit is its growth limit, capped by its fit-content() argument
+            // if any."
+            if (spaceDistributionTarget == ExtraSpaceDistributionTarget::BaseSizes) {
+                if (fitContentLimit)
+                    return std::min(growthLimit, *fitContentLimit);
+                return growthLimit;
+            }
+
+            // "For growth limits, the limit is the growth limit if the growth limit is finite and
+            // the track is not infinitely growable,"
+            if (growthLimit != LayoutUnit::max() && !infinitelyGrowable)
+                return growthLimit;
+
+            // "...otherwise its fit-content() argument if it has a fit-content() track sizing
+            // function, and infinity otherwise."
+            return fitContentLimit.value_or(LayoutUnit::max());
+        }
+        case SpaceDistributionLimit::BeyondGrowthLimit: {
+            // 11.5.1.4 Distribute space Beyond limits
+            // "For this purpose, the max track sizing function of a fit-content() track is treated
+            // as max-content until the track reaches the limit specified as the fit-content()
+            // argument, after which its max track sizing function is treated as being a fixed
+            // sizing function of that argument"
+            return fitContentLimit.value_or(LayoutUnit::max());
+        }
+        }
+        ASSERT_NOT_REACHED();
+        return LayoutUnit::max();
     }
 
+    // https://drafts.csswg.org/css-grid-1/#algo-init
     // https://drafts.csswg.org/css-grid-1/#algo-single-span-items
     // "In all cases, if a track's growth limit is now less than its base size,
     // increase the growth limit to match the base size."
@@ -236,17 +270,42 @@ static GridItemIndexes itemsSpanningFlexibleTracks(const UnsizedTracks& unsizedT
     return spanningItems;
 }
 
+// https://drafts.csswg.org/css-grid-1/#algo-spanning-items
+// "Next, consider the items with a span of 2 that do not span a track with a flexible sizing function."
+static Vector<GridItemIndexes> spanGroupsNotCrossingFlexibleTracks(const UnsizedTracks& unsizedTracks, const PlacedGridItemSpanList& gridItemSpanList)
+{
+    GridItemIndexes itemsSortedByIncreasingSpan;
+    for (auto [gridItemIndex, gridItemSpan] : WTF::indexedRange(gridItemSpanList)) {
+        if (gridItemSpan.distance() > 1 && !itemCrossesFlexibleTrack(unsizedTracks, gridItemSpan))
+            itemsSortedByIncreasingSpan.append(gridItemIndex);
+    }
+    std::ranges::stable_sort(itemsSortedByIncreasingSpan, { }, [&](size_t gridItemIndex) {
+        return gridItemSpanList[gridItemIndex].distance();
+    });
+
+    // "Repeat incrementally for items with greater spans until all items have been considered."
+    Vector<GridItemIndexes> spanGroups;
+    size_t previousSpanSize = 0;
+    for (auto gridItemIndex : itemsSortedByIncreasingSpan) {
+        auto spanSize = gridItemSpanList[gridItemIndex].distance();
+        if (spanSize != previousSpanSize)
+            spanGroups.append({ });
+        spanGroups.last().append(gridItemIndex);
+        previousSpanSize = spanSize;
+    }
+    return spanGroups;
+}
+
 // https://drafts.csswg.org/css-grid-1/#algo-content
-static GridItemIndexes itemsToAccommodate(const UnsizedTracks& unsizedTracks, const PlacedGridItemSpanList& gridItemSpanList, ResolveIntrinsicTrackSizesPhase phase)
+static Vector<GridItemIndexes> itemsToAccommodate(const UnsizedTracks& unsizedTracks, const PlacedGridItemSpanList& gridItemSpanList, ResolveIntrinsicTrackSizesPhase phase)
 {
     if (phase == ResolveIntrinsicTrackSizesPhase::ContentSizedTracks) {
         // https://drafts.csswg.org/css-grid-1/#algo-spanning-items
-        notImplemented();
-        return { };
+        return spanGroupsNotCrossingFlexibleTracks(unsizedTracks, gridItemSpanList);
     }
 
     // https://drafts.csswg.org/css-grid-1/#algo-spanning-flex-items
-    return itemsSpanningFlexibleTracks(unsizedTracks, gridItemSpanList);
+    return { itemsSpanningFlexibleTracks(unsizedTracks, gridItemSpanList) };
 }
 
 using TrackIndexes = Vector<size_t>;
@@ -269,8 +328,7 @@ static TrackIndexes tracksWithAutoMaxTrackSizingFunction(const UnsizedTracks& un
 {
     TrackIndexes trackIndexes;
     for (auto [trackIndex, track] : WTF::indexedRange(unsizedTracks)) {
-        auto& maxTrackSizingFunction = track.trackSizingFunction.max;
-        if (maxTrackSizingFunction.isAuto())
+        if (track.trackSizingFunction.max.isAuto())
             trackIndexes.append(trackIndex);
     }
     return trackIndexes;
@@ -280,7 +338,7 @@ static Vector<LayoutUnit> minContentContributions(const TrackSizingItemList& tra
     const GridItemSizingFunctions& gridItemSizingFunctions)
 {
     return gridItemIndexes.map([&](size_t gridItemIndex) {
-        return gridItemSizingFunctions.minContentContribution(trackSizingItems[gridItemIndex].gridItem, trackSizingItems[gridItemIndex].oppositeAxisConstraint);
+        return gridItemSizingFunctions.minContentContribution(trackSizingItems[gridItemIndex].gridItem, trackSizingItems[gridItemIndex].oppositeAxisConstraint).value;
     });
 }
 
@@ -288,7 +346,7 @@ static Vector<LayoutUnit> maxContentContributions(const TrackSizingItemList& tra
     const GridItemSizingFunctions& gridItemSizingFunctions)
 {
     return gridItemIndexes.map([&](size_t gridItemIndex) {
-        return gridItemSizingFunctions.maxContentContribution(trackSizingItems[gridItemIndex].gridItem, trackSizingItems[gridItemIndex].oppositeAxisConstraint);
+        return gridItemSizingFunctions.maxContentContribution(trackSizingItems[gridItemIndex].gridItem, trackSizingItems[gridItemIndex].oppositeAxisConstraint).value;
     });
 }
 
@@ -299,20 +357,22 @@ static Vector<LayoutUnit> maxContentContributions(const TrackSizingItemList& tra
 // item's used minimum size as its preferred size; else the item's minimum contribution is its
 // min-content contribution.
 static LayoutUnit minimumContribution(const TrackSizingItemList& trackSizingItems, size_t gridItemIndex,
-    const GridItemSizingFunctions& gridItemSizingFunctions, const TrackSizingFunctionsList& trackSizingFunctions)
+    const GridItemSizingFunctions& gridItemSizingFunctions, const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit gapSize,
+    const AxisConstraint& axisConstraint)
 {
     auto& trackSizingItem = trackSizingItems[gridItemIndex];
     auto& preferredSize = trackSizingItem.computedSizes.preferredSize;
     if (GridLayoutUtils::preferredSizeBehavesAsAuto(preferredSize) || GridLayoutUtils::sizeDependsOnContainingBlockSize(preferredSize))
-        return gridItemSizingFunctions.usedMinimumSize(trackSizingItem.gridItem, trackSizingFunctions, trackSizingItem.borderAndPadding, trackSizingItem.oppositeAxisConstraint);
-    return gridItemSizingFunctions.minContentContribution(trackSizingItem.gridItem, trackSizingItem.oppositeAxisConstraint);
+        return gridItemSizingFunctions.usedMinimumSize(trackSizingItem.gridItem, trackSizingFunctions, trackSizingItem.borderAndPadding, trackSizingItem.oppositeAxisConstraint, gapSize, axisConstraint).value;
+    return gridItemSizingFunctions.minContentContribution(trackSizingItem.gridItem, trackSizingItem.oppositeAxisConstraint).value;
 }
 
 static Vector<LayoutUnit> minimumContributions(const TrackSizingItemList& trackSizingItems,
-    const GridItemIndexes& gridItemIndexes, const GridItemSizingFunctions& gridItemSizingFunctions, const TrackSizingFunctionsList& trackSizingFunctions)
+    const GridItemIndexes& gridItemIndexes, const GridItemSizingFunctions& gridItemSizingFunctions, const TrackSizingFunctionsList& trackSizingFunctions, LayoutUnit gapSize,
+    const AxisConstraint& axisConstraint)
 {
     return gridItemIndexes.map([&](size_t gridItemIndex) {
-        return minimumContribution(trackSizingItems, gridItemIndex, gridItemSizingFunctions, trackSizingFunctions);
+        return minimumContribution(trackSizingItems, gridItemIndex, gridItemSizingFunctions, trackSizingFunctions, gapSize, axisConstraint);
     });
 }
 
@@ -324,13 +384,19 @@ static std::optional<LayoutUnit> fixedMaxTrackSizingFunctionSum(const WTF::Range
     LayoutUnit sum;
     for (size_t trackIndex = itemSpan.begin(); trackIndex < itemSpan.end(); ++trackIndex) {
         auto& trackSizingFunction = unsizedTracks[trackIndex].trackSizingFunction;
-        auto& maxTrackSizingFunction = trackSizingFunction.max;
-        if (!maxTrackSizingFunction.isLength())
+        auto fixedMaximum = WTF::switchOn(trackSizingFunction.max,
+            [](const Style::GridTrackBreadth& breadth) -> std::optional<Style::GridTrackBreadthLength::Fixed> {
+                if (!breadth.isLength())
+                    return { };
+                return breadth.length().tryFixed();
+            },
+            // The limit "could be the argument to a fit-content() track sizing function".
+            [](const Style::GridTrackSize::FitContent& fitContent) -> std::optional<Style::GridTrackBreadthLength::Fixed> {
+                return fitContent->value.tryFixed();
+            });
+        if (!fixedMaximum)
             return { };
-        auto fixedValue = maxTrackSizingFunction.length().tryFixed();
-        if (!fixedValue)
-            return { };
-        sum += Style::evaluate<LayoutUnit>(*fixedValue, trackSizingFunction.zoom);
+        sum += Style::evaluate<LayoutUnit>(*fixedMaximum, trackSizingFunction.zoom);
     }
     return sum;
 }
@@ -398,14 +464,14 @@ static void sizeTracksToFitNonSpanningItems(const ResolveIntrinsicTrackSizesCont
                     });
 
                     // and ultimately floored by its minimum contribution.
-                    auto itemMinimumContributions = minimumContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions, resolveIntrinsicTrackSizesContext.trackSizingFunctionsList);
+                    auto itemMinimumContributions = minimumContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions, resolveIntrinsicTrackSizesContext.trackSizingFunctionsList, resolveIntrinsicTrackSizesContext.gapSize, resolveIntrinsicTrackSizesContext.axisConstraint);
 
                     auto limitedContributions = limitedContentContributions(minContentSizeContributions, fixedMaxTrackSizingFunctionSums, itemMinimumContributions);
                     return std::max({ }, std::ranges::max(limitedContributions));
                 }
                 // Otherwise, set the track’s base size to the maximum of its items’ minimum
                 // contributions, floored at zero.
-                auto contributions = minimumContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions, resolveIntrinsicTrackSizesContext.trackSizingFunctionsList);
+                auto contributions = minimumContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions, resolveIntrinsicTrackSizesContext.trackSizingFunctionsList, resolveIntrinsicTrackSizesContext.gapSize, resolveIntrinsicTrackSizesContext.axisConstraint);
                 return std::max({ }, std::ranges::max(contributions));
             },
             // A <length-percentage> min track sizing function was already resolved to an absolute
@@ -425,42 +491,52 @@ static void sizeTracksToFitNonSpanningItems(const ResolveIntrinsicTrackSizesCont
             }
         );
 
-        auto& maximumTrackSizingFunction = track.trackSizingFunction.max;
-        track.growthLimit = WTF::switchOn(maximumTrackSizingFunction,
-            [&](const CSS::Keyword::MinContent&) -> LayoutUnit {
-                // If the track has a min-content max track sizing function, set its growth
-                // limit to the maximum of the items’ min-content contributions.
-                auto itemContributions = minContentContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions);
-                ASSERT(itemContributions.size() == singleSpanningItemsIndexes.size());
-                return std::ranges::max(itemContributions);
+        track.growthLimit = WTF::switchOn(track.trackSizingFunction.max,
+            [&](const Style::GridTrackBreadth& maximumTrackSizingFunction) -> LayoutUnit {
+                return WTF::switchOn(maximumTrackSizingFunction,
+                    [&](const CSS::Keyword::MinContent&) -> LayoutUnit {
+                        // If the track has a min-content max track sizing function, set its growth
+                        // limit to the maximum of the items’ min-content contributions.
+                        auto itemContributions = minContentContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions);
+                        ASSERT(itemContributions.size() == singleSpanningItemsIndexes.size());
+                        return std::ranges::max(itemContributions);
+                    },
+                    [&](const CSS::Keyword::MaxContent&) -> LayoutUnit {
+                        // If the track has a max-content max track sizing function, set its growth
+                        // limit to the maximum of the items’ max-content contributions.
+                        auto itemContributions = maxContentContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions);
+                        return std::ranges::max(itemContributions);
+                    },
+                    [&](const CSS::Keyword::Auto&) -> LayoutUnit {
+                        // Since it is not explicitly stated otherwise in the spec, auto is treated as max-content:
+                        // If the track has a max-content max track sizing function, set its growth
+                        // limit to the maximum of the items’ max-content contributions.
+                        auto itemContributions = maxContentContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions);
+                        return std::ranges::max(itemContributions);
+                    },
+                    // A <length-percentage> max track sizing function was already resolved to an absolute
+                    // length by Initialize Track Sizes.
+                    [&](const Style::GridTrackBreadth::Fixed&) -> LayoutUnit {
+                        return track.growthLimit;
+                    },
+                    [&](const Style::GridTrackBreadth::Percentage&) -> LayoutUnit {
+                        return track.growthLimit;
+                    },
+                    [&](const Style::GridTrackBreadth::Calc&) -> LayoutUnit {
+                        return track.growthLimit;
+                    },
+                    [&](const auto&) -> LayoutUnit {
+                        ASSERT_NOT_REACHED();
+                        return { };
+                    }
+                );
             },
-            [&](const CSS::Keyword::MaxContent&) -> LayoutUnit {
-                // If the track has a max-content max track sizing function, set its growth
-                // limit to the maximum of the items’ max-content contributions.
+            // For fit-content() maximums, furthermore clamp this growth limit by the fit-content()
+            // argument.
+            [&](const Style::GridTrackSize::FitContent&) -> LayoutUnit {
                 auto itemContributions = maxContentContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions);
-                return std::ranges::max(itemContributions);
-            },
-            [&](const CSS::Keyword::Auto&) -> LayoutUnit {
-                // Since it is not explicitly stated otherwise in the spec, auto is treated as max-content:
-                // If the track has a max-content max track sizing function, set its growth
-                // limit to the maximum of the items’ max-content contributions.
-                auto itemContributions = maxContentContributions(trackSizingItems, singleSpanningItemsIndexes, gridItemSizingFunctions);
-                return std::ranges::max(itemContributions);
-            },
-            // A <length-percentage> max track sizing function was already resolved to an absolute
-            // length by Initialize Track Sizes.
-            [&](const Style::GridTrackBreadth::Fixed&) -> LayoutUnit {
-                return track.growthLimit;
-            },
-            [&](const Style::GridTrackBreadth::Percentage&) -> LayoutUnit {
-                return track.growthLimit;
-            },
-            [&](const Style::GridTrackBreadth::Calc&) -> LayoutUnit {
-                return track.growthLimit;
-            },
-            [&](const auto&) -> LayoutUnit {
-                ASSERT_NOT_REACHED();
-                return { };
+                ASSERT(track.fitContentLimit);
+                return std::min(std::ranges::max(itemContributions), *track.fitContentLimit);
             }
         );
 
@@ -470,21 +546,14 @@ static void sizeTracksToFitNonSpanningItems(const ResolveIntrinsicTrackSizesCont
     }
 }
 
-// https://drafts.csswg.org/css-grid-1/#extra-space
-// 2.2: Distribute space up to limits: UpToGrowthLimit
-// 2.3: Distribute space to non-affected tracks: UpToGrowthLimit
-// 2.4: Distribute space beyond limits: BeyondGrowthLimit
-enum class SpaceDistributionLimit : bool { UpToGrowthLimit, BeyondGrowthLimit };
-
 // Used for space distribution.
 static Vector<size_t> indexesForUnfrozenAffectedTracks(const Vector<size_t>& spannedAffectedTracks,
     const UnsizedTracks& unsizedTracks, const Vector<LayoutUnit>& itemIncurredIncreases, ExtraSpaceDistributionTarget target, SpaceDistributionLimit limit)
 {
-    if (limit == SpaceDistributionLimit::BeyondGrowthLimit)
-        return spannedAffectedTracks;
     Vector<size_t> indexes;
     for (auto trackIndex : spannedAffectedTracks) {
-        if (unsizedTracks[trackIndex].affectedSize(target) + itemIncurredIncreases[trackIndex] < unsizedTracks[trackIndex].freezeLimit(target))
+        auto& track = unsizedTracks[trackIndex];
+        if (track.affectedSize(target) + itemIncurredIncreases[trackIndex] < track.freezeLimit(target, limit))
             indexes.append(trackIndex);
     }
     return indexes;
@@ -492,8 +561,6 @@ static Vector<size_t> indexesForUnfrozenAffectedTracks(const Vector<size_t>& spa
 
 // Distributes space equally among trackIndexes in successive rounds, freezing tracks (per
 // spaceDistributedToTrack, below) as needed, until space is exhausted or no tracks remain unfrozen.
-// FIXME: https://drafts.csswg.org/css-grid-1/#algo-spanning-flex-items update to handle flex tracks
-// which do not distribute space equally, but according to their flex factor.
 static void distributeSpaceEquallyAmongTracks(LayoutUnit& space, const Vector<size_t>& trackIndexes,
     const UnsizedTracks& unsizedTracks, Vector<LayoutUnit>& itemIncurredIncreases, ExtraSpaceDistributionTarget target, SpaceDistributionLimit limit)
 {
@@ -511,10 +578,8 @@ static void distributeSpaceEquallyAmongTracks(LayoutUnit& space, const Vector<si
         // increase of…"
         auto spaceDistributedToTrack = [&](size_t trackIndex) {
             auto spaceDistributed = space / tracksRemainingForDistributionCount;
-            if (limit == SpaceDistributionLimit::BeyondGrowthLimit)
-                return spaceDistributed;
             auto& track = unsizedTracks[trackIndex];
-            auto spaceRemainingUntilLimit = track.freezeLimit(target) - (track.affectedSize(target) + itemIncurredIncreases[trackIndex]);
+            auto spaceRemainingUntilLimit = track.freezeLimit(target, limit) - (track.affectedSize(target) + itemIncurredIncreases[trackIndex]);
             return std::min(spaceDistributed, spaceRemainingUntilLimit);
         };
 
@@ -525,13 +590,62 @@ static void distributeSpaceEquallyAmongTracks(LayoutUnit& space, const Vector<si
             --tracksRemainingForDistributionCount;
         }
 
-        // BeyondGrowthLimit distributes without a per-track cap, so all space should be distributed.
-        if (limit == SpaceDistributionLimit::BeyondGrowthLimit) {
-            ASSERT(!space);
-            break;
-        }
         unfrozenTrackIndexes = indexesForUnfrozenAffectedTracks(trackIndexes, unsizedTracks, itemIncurredIncreases, target, limit);
     }
+}
+
+// https://drafts.csswg.org/css-grid-1/#algo-spanning-flex-items
+static void distributeSpaceAmongFlexibleTracks(LayoutUnit& spaceToDistribute, const TrackIndexes& spannedAffectedTracks,
+    const UnsizedTracks& unsizedTracks, Vector<LayoutUnit>& itemIncurredIncreases)
+{
+    if (spannedAffectedTracks.isEmpty())
+        return;
+
+    auto flexFactor = [&](size_t trackIndex) {
+        // Only flexible tracks are affected in this phase, per isTrackAffectedForSpaceDistributionInPhase.
+        ASSERT(unsizedTracks[trackIndex].trackSizingFunction.max.isFlex());
+        return unsizedTracks[trackIndex].trackSizingFunction.max.flex().value;
+    };
+
+    double flexFactorSum = 0;
+    for (auto trackIndex : spannedAffectedTracks)
+        flexFactorSum += flexFactor(trackIndex);
+
+    // Track the difference between the ideal share (double, the track's fraction of the flex factor
+    // sum) and the snapped share (LayoutUnit, rounding down from the ideal share).
+    double lastTrackRoundingError = 0;
+    auto distributeToTrack = [&](size_t trackIndex, double share) {
+        // Carry the fraction lost when snapping the previous track so flooring errors don't accumulate.
+        share += lastTrackRoundingError;
+
+        LayoutUnit spaceDistributed { share };
+        lastTrackRoundingError = share - spaceDistributed.toDouble();
+        ASSERT(lastTrackRoundingError >= 0);
+
+        itemIncurredIncreases[trackIndex] += spaceDistributed;
+        spaceToDistribute -= spaceDistributed;
+    };
+
+    // "if the sum of the flexible sizing functions of all flexible tracks spanned by the item is
+    // greater than or equal to one, distributing space to such tracks according to the ratios of
+    // their flexible sizing functions rather than distributing space equally; and if the sum is less
+    // than one, distributing that proportion of space according to the ratios of their flexible
+    // sizing functions..."
+    // A span of 0fr tracks has no ratios to distribute by, so all of its space is distributed equally below.
+    if (flexFactorSum) {
+        auto spaceDistributedByRatio = std::min(flexFactorSum, 1.0) * spaceToDistribute.toDouble();
+        for (auto trackIndex : spannedAffectedTracks)
+            distributeToTrack(trackIndex, spaceDistributedByRatio * flexFactor(trackIndex) / flexFactorSum);
+    }
+
+    // "...and the rest equally"
+    if (flexFactorSum < 1) {
+        auto equalShare = spaceToDistribute.toDouble() / spannedAffectedTracks.size();
+        for (auto trackIndex : spannedAffectedTracks)
+            distributeToTrack(trackIndex, equalShare);
+    }
+    // All space should be distributed to flexible tracks as they do not have growth limits.
+    ASSERT(spaceToDistribute < LayoutUnit::epsilon());
 }
 
 // https://drafts.csswg.org/css-grid-1/#algo-spanning-items
@@ -554,8 +668,9 @@ static bool hasAffectedTrackSizingFunction(const UnsizedTrack& track, AffectedTr
         // https://drafts.csswg.org/css-grid-1/#track-sizing
         // As a maximum, auto "represents the largest max-content contribution of the grid items
         // occupying the grid track", so it is accommodated together with max-content here.
-        return maxTrackSizingFunction.isAuto()
-            || (maxTrackSizingFunction.isLength() && maxTrackSizingFunction.length().isMaxContent());
+        if (auto breadth = maxTrackSizingFunction.tryBreadth())
+            return breadth->isAuto() || (breadth->isLength() && breadth->length().isMaxContent());
+        return true;
     }
     ASSERT_NOT_REACHED();
     return false;
@@ -576,8 +691,9 @@ static bool shouldTrackGrowBeyondGrowthLimits(const UnsizedTrack& track, Affecte
     // to also have a max-content max track sizing function..."
     case AffectedTrackSizingFunction::AutoOrMaxContentMinimum:
     case AffectedTrackSizingFunction::MaxContentMinimum:
-        return maxTrackSizingFunction.isAuto()
-            || (maxTrackSizingFunction.isLength() && maxTrackSizingFunction.length().isMaxContent());
+        if (auto breadth = maxTrackSizingFunction.tryBreadth())
+            return breadth->isAuto() || (breadth->isLength() && breadth->length().isMaxContent());
+        return true;
     // "...when accommodating any contribution into growth limits: any affected track that has an
     // intrinsic max track sizing function."
     case AffectedTrackSizingFunction::IntrinsicMaximum:
@@ -623,15 +739,20 @@ static bool isTrackAffectedForSpaceDistributionInPhase(const UnsizedTrack& track
 }
 
 // https://drafts.csswg.org/css-grid-1/#extra-space
-static void distributeExtraSpace(ExtraSpaceDistributionTarget spaceDistributionTarget, AffectedTrackSizingFunction affectedTrackSizingFunction,
+// Some tracks may need their growth limit changed from infinite to finite while distributing to
+// intrinsic maximums.
+static TrackIndexes distributeExtraSpace(ExtraSpaceDistributionTarget spaceDistributionTarget, AffectedTrackSizingFunction affectedTrackSizingFunction,
     const TrackIndexes& affectedTracksIndexes, const Vector<LayoutUnit>& sizeContributions, const GridItemIndexes& accommodatedItemsIndexes,
-    const PlacedGridItemSpanList& gridItemSpanList, UnsizedTracks& unsizedTracks, LayoutUnit gapSize)
+    const PlacedGridItemSpanList& gridItemSpanList, UnsizedTracks& unsizedTracks, LayoutUnit gapSize, ResolveIntrinsicTrackSizesPhase phase)
 {
     ASSERT(accommodatedItemsIndexes.size() == sizeContributions.size());
 
     // 1. Maintain separately for each affected track a planned increase, initially set to 0. The
-    // vector is keyed by track index.
+    // vector is keyed by track index. Non-affected tracks that receive space in 2.3 also get a
+    // planned increase, per https://github.com/w3c/csswg-drafts/issues/3648.
     Vector<LayoutUnit> plannedIncreases(unsizedTracks.size());
+
+    TrackIndexes nonAffectedTracksIndexes;
 
     // 2. For each accommodated item...
     for (auto [contributionIndex, gridItemIndex] : WTF::indexedRange(accommodatedItemsIndexes)) {
@@ -639,7 +760,7 @@ static void distributeExtraSpace(ExtraSpaceDistributionTarget spaceDistributionT
         auto itemSpan = gridItemSpanList[gridItemIndex];
 
         // Partition the spanned tracks into the affected tracks, which receive space in 2.2, and
-        // the non-affected tracks, which never receive space but reduce spaceToDistribute in 2.3.
+        // the non-affected tracks, which can only receive space in 2.3.
         Vector<size_t> spannedAffectedTracks;
         Vector<size_t> spannedNonAffectedTracks;
         for (size_t trackIndex = itemSpan.begin(); trackIndex < itemSpan.end(); ++trackIndex) {
@@ -668,19 +789,22 @@ static void distributeExtraSpace(ExtraSpaceDistributionTarget spaceDistributionT
 
         // 2.2. Distribute space up to limits:
         Vector<LayoutUnit> itemIncurredIncreases(unsizedTracks.size());
-        distributeSpaceEquallyAmongTracks(spaceToDistribute, spannedAffectedTracks, unsizedTracks, itemIncurredIncreases, spaceDistributionTarget, SpaceDistributionLimit::UpToGrowthLimit);
+        if (phase == ResolveIntrinsicTrackSizesPhase::FlexibleTracks)
+            distributeSpaceAmongFlexibleTracks(spaceToDistribute, spannedAffectedTracks, unsizedTracks, itemIncurredIncreases);
+        else
+            distributeSpaceEquallyAmongTracks(spaceToDistribute, spannedAffectedTracks, unsizedTracks, itemIncurredIncreases, spaceDistributionTarget, SpaceDistributionLimit::UpToGrowthLimit);
 
         // https://drafts.csswg.org/css-grid-1/#extra-space
         // 2.3. "Distribute space to non-affected tracks: If extra space remains at this point, and
         // the item spans both affected tracks and non-affected tracks, distribute space as for the
         // previous step, but into the non-affected tracks instead."
         if (spaceToDistribute > 0 && !spannedAffectedTracks.isEmpty() && !spannedNonAffectedTracks.isEmpty()) {
-            // These tracks are not affected, so we don't need to track their item-incurred increases for later.
-            // The purpose of this step is to reduce spaceToDistribute, so we can just use a throwaway vector.
-            Vector<LayoutUnit> unappliedIncreases(unsizedTracks.size());
-            // In step 2.1. we subtracted the size of non-affected tracks from the item's size contribution.
-            // In this step, we are subtracting extra space up to the growth limit of the non-affected tracks.
-            distributeSpaceEquallyAmongTracks(spaceToDistribute, spannedNonAffectedTracks, unsizedTracks, unappliedIncreases, spaceDistributionTarget, SpaceDistributionLimit::UpToGrowthLimit);
+            distributeSpaceEquallyAmongTracks(spaceToDistribute, spannedNonAffectedTracks, unsizedTracks, itemIncurredIncreases, spaceDistributionTarget, SpaceDistributionLimit::UpToGrowthLimit);
+            // Several items can span the same non-affected track, so only record it once.
+            for (auto trackIndex : spannedNonAffectedTracks) {
+                if (itemIncurredIncreases[trackIndex])
+                    nonAffectedTracksIndexes.appendIfNotContains(trackIndex);
+            }
         }
 
         // 2.4. Distribute space beyond limits: if extra space still remains, unfreeze and continue
@@ -689,8 +813,9 @@ static void distributeExtraSpace(ExtraSpaceDistributionTarget spaceDistributionT
             distributeSpaceEquallyAmongTracks(spaceToDistribute, tracksToGrowBeyondGrowthLimits(spannedAffectedTracks, unsizedTracks, affectedTrackSizingFunction, spaceDistributionTarget), unsizedTracks, itemIncurredIncreases, spaceDistributionTarget, SpaceDistributionLimit::BeyondGrowthLimit);
 
         // 2.5. For each affected track, if its item-incurred increase is larger than its planned
-        // increase, set the planned increase to that value.
-        for (auto trackIndex : spannedAffectedTracks)
+        // increase, set the planned increase to that value. This covers every spanned track, since
+        // non-affected tracks can also have received space in 2.3.
+        for (size_t trackIndex = itemSpan.begin(); trackIndex < itemSpan.end(); ++trackIndex)
             plannedIncreases[trackIndex] = std::max(plannedIncreases[trackIndex], itemIncurredIncreases[trackIndex]);
     }
 
@@ -699,15 +824,31 @@ static void distributeExtraSpace(ExtraSpaceDistributionTarget spaceDistributionT
     if (spaceDistributionTarget == ExtraSpaceDistributionTarget::BaseSizes) {
         for (auto trackIndex : affectedTracksIndexes)
             unsizedTracks[trackIndex].baseSize += plannedIncreases[trackIndex];
+        for (auto trackIndex : nonAffectedTracksIndexes)
+            unsizedTracks[trackIndex].baseSize += plannedIncreases[trackIndex];
+        return { };
     } else {
-        for (auto trackIndex : affectedTracksIndexes) {
+        ASSERT(spaceDistributionTarget == ExtraSpaceDistributionTarget::GrowthLimits);
+        TrackIndexes tracksWhoseGrowthLimitBecameFinite;
+        auto updateGrowthLimit = [&](size_t trackIndex) {
             auto& track = unsizedTracks[trackIndex];
             auto plannedIncrease = plannedIncreases[trackIndex];
             if (track.growthLimit != LayoutUnit::max())
                 track.growthLimit += plannedIncrease;
-            else
+            else {
+                ASSERT(track.growthLimit == LayoutUnit::max());
                 track.growthLimit = track.baseSize + plannedIncrease;
-        }
+                if (affectedTrackSizingFunction == AffectedTrackSizingFunction::IntrinsicMaximum)
+                    tracksWhoseGrowthLimitBecameFinite.append(trackIndex);
+            }
+        };
+        for (auto trackIndex : affectedTracksIndexes)
+            updateGrowthLimit(trackIndex);
+        for (auto trackIndex : nonAffectedTracksIndexes)
+            updateGrowthLimit(trackIndex);
+        if (affectedTrackSizingFunction != AffectedTrackSizingFunction::IntrinsicMaximum)
+            ASSERT(tracksWhoseGrowthLimitBecameFinite.isEmpty());
+        return tracksWhoseGrowthLimitBecameFinite;
     }
 }
 
@@ -722,19 +863,35 @@ static TrackIndexes affectedTracks(const UnsizedTracks& unsizedTracks, AffectedT
     return trackIndexes;
 }
 
+// https://drafts.csswg.org/css-grid-1/#infinitely-growable
+// The marking is for item 6 of https://drafts.csswg.org/css-grid-1/#algo-spanning-items, so it is
+// undone when this scope ends.
+class ScopedInfinitelyGrowableTracks {
+public:
+    ScopedInfinitelyGrowableTracks(UnsizedTracks& unsizedTracks, const TrackIndexes& tracksWhoseGrowthLimitBecameFinite)
+        : m_unsizedTracks(unsizedTracks)
+        , m_markedTracks(tracksWhoseGrowthLimitBecameFinite)
+    {
+        for (auto trackIndex : m_markedTracks)
+            m_unsizedTracks[trackIndex].infinitelyGrowable = true;
+    }
+
+    ~ScopedInfinitelyGrowableTracks()
+    {
+        for (auto trackIndex : m_markedTracks)
+            m_unsizedTracks[trackIndex].infinitelyGrowable = false;
+    }
+
+private:
+    UnsizedTracks& m_unsizedTracks;
+    TrackIndexes m_markedTracks;
+};
+
 // https://drafts.csswg.org/css-grid-1/#algo-spanning-items
 // https://drafts.csswg.org/css-grid-1/#algo-spanning-flex-items
-// The flexible phase is specified as repeating the content sized phase's steps, differing only in the
-// items it accommodates, the tracks it distributes space to, and in items 4-6 being vacuous for it.
 static void resolveIntrinsicTrackSizesWithSpanningItems(const ResolveIntrinsicTrackSizesContext& resolveIntrinsicTrackSizesContext,
-    UnsizedTracks& unsizedTracks, ResolveIntrinsicTrackSizesPhase phase)
+    UnsizedTracks& unsizedTracks, ResolveIntrinsicTrackSizesPhase phase, const GridItemIndexes& spanningItems, const PlacedGridItemSpanList& gridItemSpanList)
 {
-    auto gridItemSpanList = spannedLinesList(resolveIntrinsicTrackSizesContext.trackSizingItems);
-
-    auto spanningItems = itemsToAccommodate(unsizedTracks, gridItemSpanList, phase);
-    if (spanningItems.isEmpty())
-        return;
-
     auto scenario = resolveIntrinsicTrackSizesContext.axisConstraint.scenario();
 
     auto& trackSizingItems = resolveIntrinsicTrackSizesContext.trackSizingItems;
@@ -742,7 +899,7 @@ static void resolveIntrinsicTrackSizesWithSpanningItems(const ResolveIntrinsicTr
     auto& trackSizingFunctions = resolveIntrinsicTrackSizesContext.trackSizingFunctionsList;
     auto gapSize = resolveIntrinsicTrackSizesContext.gapSize;
 
-    auto minimumContributionsList = minimumContributions(trackSizingItems, spanningItems, gridItemSizingFunctions, trackSizingFunctions);
+    auto minimumContributionsList = minimumContributions(trackSizingItems, spanningItems, gridItemSizingFunctions, trackSizingFunctions, gapSize, resolveIntrinsicTrackSizesContext.axisConstraint);
     Vector<std::optional<LayoutUnit>> fixedMaxTrackSizingFunctionSums;
     if (isSizedUnderMinOrMaxContentConstraint(resolveIntrinsicTrackSizesContext.axisConstraint)) {
         fixedMaxTrackSizingFunctionSums = spanningItems.map([&](size_t gridItemIndex) {
@@ -758,14 +915,14 @@ static void resolveIntrinsicTrackSizesWithSpanningItems(const ResolveIntrinsicTr
     auto minimumSizeContributions = isSizedUnderMinOrMaxContentConstraint(resolveIntrinsicTrackSizesContext.axisConstraint)
         ? limitedContentContributions(minContentContributions(trackSizingItems, spanningItems, gridItemSizingFunctions), fixedMaxTrackSizingFunctionSums, minimumContributionsList)
         : minimumContributionsList;
-    distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::IntrinsicMinimum, tracksWithIntrinsicMinimums, minimumSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize);
+    distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::IntrinsicMinimum, tracksWithIntrinsicMinimums, minimumSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize, phase);
 
     // 2. For content-based minimums: continue to distribute extra space to the base sizes of tracks with
     // a min track sizing function of min-content or max-content, to accommodate the items' min-content
     // contributions.
     auto minContentSizeContributions = minContentContributions(trackSizingItems, spanningItems, gridItemSizingFunctions);
     auto tracksWithContentBasedMinimums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::ContentBasedMinimum, phase);
-    distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::ContentBasedMinimum, tracksWithContentBasedMinimums, minContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize);
+    distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::ContentBasedMinimum, tracksWithContentBasedMinimums, minContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize, phase);
 
     // 3. For max-content minimums: if the grid container is being sized under a max-content constraint
     if (scenario == AxisConstraint::FreeSpaceScenario::MaxContent) {
@@ -773,36 +930,34 @@ static void resolveIntrinsicTrackSizesWithSpanningItems(const ResolveIntrinsicTr
         // of auto or max-content, to accommodate the items' limited max-content contributions...
         auto tracksWithAutoOrMaxContentMinimums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::AutoOrMaxContentMinimum, phase);
         auto limitedMaxContentSizeContributions = limitedContentContributions(maxContentContributions(trackSizingItems, spanningItems, gridItemSizingFunctions), fixedMaxTrackSizingFunctionSums, minimumContributionsList);
-        distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::AutoOrMaxContentMinimum, tracksWithAutoOrMaxContentMinimums, limitedMaxContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize);
+        distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::AutoOrMaxContentMinimum, tracksWithAutoOrMaxContentMinimums, limitedMaxContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize, phase);
     }
     // ...In all cases, distribute to tracks with a max-content min track sizing function
     // to accommodate the items' max-content contributions.
     auto tracksWithMaxContentMinimums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::MaxContentMinimum, phase);
     auto maxContentSizeContributions = maxContentContributions(trackSizingItems, spanningItems, gridItemSizingFunctions);
-    distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::MaxContentMinimum, tracksWithMaxContentMinimums, maxContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize);
+    distributeExtraSpace(ExtraSpaceDistributionTarget::BaseSizes, AffectedTrackSizingFunction::MaxContentMinimum, tracksWithMaxContentMinimums, maxContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize, phase);
 
     // 4. If at this point any track's growth limit is now less than its base size, increase its
     //    growth limit to match its base size.
-    //    Not applicable: a flexible track's growth limit is still infinite here (initialized from its
-    //    <flex> max and untouched by the base-size passes above), so it can never be less than the
-    //    base size. It is set to the base size later by the finite-growth-limit step below.
-    ASSERT(std::ranges::all_of(unsizedTracks, [](const auto& track) {
-        return !track.trackSizingFunction.max.isFlex() || track.baseSize <= track.growthLimit;
-    }));
+    for (auto& track : unsizedTracks)
+        track.ensureGrowthLimitIsBiggerThanBaseSize();
 
-    // 5. For intrinsic maximums: distribute extra space to the growth limits of tracks with an
-    //    intrinsic max track sizing function, to accommodate these items' min-content contributions.
-    //    Not applicable: a flexible track's max track sizing function is <flex>, which is not an
-    //    intrinsic max track sizing function, so no flexible track is affected.
-    auto tracksWithIntrinsicMaximums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::IntrinsicMaximum, phase);
-    UNUSED_VARIABLE(tracksWithIntrinsicMaximums);
+    // Scope tracksWhoseGrowthLimitBecameFinite to this block, since it is only used for the next step.
+    {
+        // 5. For intrinsic maximums: distribute extra space to the growth limits of tracks with an
+        //    intrinsic max track sizing function, to accommodate these items' min-content contributions.
+        auto tracksWithIntrinsicMaximums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::IntrinsicMaximum, phase);
+        auto tracksWhoseGrowthLimitBecameFinite = distributeExtraSpace(ExtraSpaceDistributionTarget::GrowthLimits, AffectedTrackSizingFunction::IntrinsicMaximum, tracksWithIntrinsicMaximums, minContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize, phase);
+        // "Mark any tracks whose growth limit changed from infinite to finite in this step as
+        // infinitely growable for the next step."
+        auto infinitelyGrowableTracks = ScopedInfinitelyGrowableTracks { unsizedTracks, tracksWhoseGrowthLimitBecameFinite };
 
-    // 6. For max-content maximums: distribute extra space to the growth limits of tracks with a
-    //    max-content max track sizing function, to accommodate these items' max-content contributions.
-    //    Not applicable: a flexible track's max track sizing function is <flex>, not max-content, so no
-    //    flexible track is affected.
-    auto tracksWithMaxContentMaximums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::MaxContentMaximum, phase);
-    UNUSED_VARIABLE(tracksWithMaxContentMaximums);
+        // 6. For max-content maximums: distribute extra space to the growth limits of tracks with a
+        //    max-content max track sizing function, to accommodate these items' max-content contributions.
+        auto tracksWithMaxContentMaximums = affectedTracks(unsizedTracks, AffectedTrackSizingFunction::MaxContentMaximum, phase);
+        distributeExtraSpace(ExtraSpaceDistributionTarget::GrowthLimits, AffectedTrackSizingFunction::MaxContentMaximum, tracksWithMaxContentMaximums, maxContentSizeContributions, spanningItems, gridItemSpanList, unsizedTracks, gapSize, phase);
+    }
 }
 
 // https://drafts.csswg.org/css-grid-1/#algo-content
@@ -819,13 +974,17 @@ static void resolveIntrinsicTrackSizes(const ResolveIntrinsicTrackSizesContext& 
     // 2. Size tracks to fit non-spanning items.
     sizeTracksToFitNonSpanningItems(resolveIntrinsicTrackSizesContext, unsizedTracks);
 
+    auto gridItemSpanList = spannedLinesList(resolveIntrinsicTrackSizesContext.trackSizingItems);
+
     // 3. Increase sizes to accommodate spanning items crossing content-sized tracks:
     // Next, consider the items with a span of 2 that do not span a track with a flexible
     // sizing function.
-    resolveIntrinsicTrackSizesWithSpanningItems(resolveIntrinsicTrackSizesContext, unsizedTracks, ResolveIntrinsicTrackSizesPhase::ContentSizedTracks);
+    for (auto& spanningItems : itemsToAccommodate(unsizedTracks, gridItemSpanList, ResolveIntrinsicTrackSizesPhase::ContentSizedTracks))
+        resolveIntrinsicTrackSizesWithSpanningItems(resolveIntrinsicTrackSizesContext, unsizedTracks, ResolveIntrinsicTrackSizesPhase::ContentSizedTracks, spanningItems, gridItemSpanList);
 
     // 4. Increase sizes to accommodate spanning items crossing flexible tracks:
-    resolveIntrinsicTrackSizesWithSpanningItems(resolveIntrinsicTrackSizesContext, unsizedTracks, ResolveIntrinsicTrackSizesPhase::FlexibleTracks);
+    for (auto& spanningItems : itemsToAccommodate(unsizedTracks, gridItemSpanList, ResolveIntrinsicTrackSizesPhase::FlexibleTracks))
+        resolveIntrinsicTrackSizesWithSpanningItems(resolveIntrinsicTrackSizesContext, unsizedTracks, ResolveIntrinsicTrackSizesPhase::FlexibleTracks, spanningItems, gridItemSpanList);
 
     // 5. If any track still has an infinite growth limit, set its growth limit to its base size.
     for (auto& unsizedTrack : unsizedTracks) {
@@ -962,8 +1121,8 @@ static UnsizedTracks initializeTrackSizes(const TrackSizingFunctionsList& trackS
 
             // A fixed sizing function
             // Resolve to an absolute length and use that size as the track’s initial growth limit.
-            if (maxTrackSizingFunction.isLength()) {
-                auto trackBreadthLength = maxTrackSizingFunction.length();
+            if (auto breadth = maxTrackSizingFunction.tryBreadth(); breadth && breadth->isLength()) {
+                auto trackBreadthLength = breadth->length();
                 if (auto fixedValue = trackBreadthLength.tryFixed())
                     return Style::evaluate<LayoutUnit>(*fixedValue, trackSizingFunctions.zoom);
                 if (trackBreadthLength.isPercentOrCalculated())
@@ -980,7 +1139,12 @@ static UnsizedTracks initializeTrackSizes(const TrackSizingFunctionsList& trackS
             return { };
         };
 
-        return { baseSize(), growthLimit(), trackSizingFunctions };
+        auto unsizedTrack = UnsizedTrack { baseSize(), growthLimit(), trackSizingFunctions, trackSizingFunctions.fitContentLimit(availableGridSpace) };
+
+        // In all cases, if the growth limit is less than the base size, increase the growth limit to
+        // match the base size.
+        unsizedTrack.ensureGrowthLimitIsBiggerThanBaseSize();
+        return unsizedTrack;
     });
 }
 
@@ -989,10 +1153,8 @@ static FlexTracks collectFlexTracks(const UnsizedTracks& unsizedTracks)
     FlexTracks flexTracks;
 
     for (auto [trackIndex, track] : indexedRange(unsizedTracks)) {
-        const auto& maxTrackSizingFunction = track.trackSizingFunction.max;
-
-        if (maxTrackSizingFunction.isFlex()) {
-            auto flexFactor = maxTrackSizingFunction.flex();
+        if (track.trackSizingFunction.max.isFlex()) {
+            auto flexFactor = track.trackSizingFunction.max.flex();
             flexTracks.append(FlexTrack(trackIndex, flexFactor, track.baseSize, track.growthLimit));
         }
     }
@@ -1129,7 +1291,7 @@ static double usedFlexFractionForMaxContent(const UnsizedTracks& unsizedTracks, 
         if (!itemCrossesFlexibleTrack(unsizedTracks, gridItemSpan))
             continue;
 
-        auto maxContentContribution = gridItemSizingFunctions.maxContentContribution(trackSizingItems[gridItemIndex].gridItem, trackSizingItems[gridItemIndex].oppositeAxisConstraint);
+        auto maxContentContribution = gridItemSizingFunctions.maxContentContribution(trackSizingItems[gridItemIndex].gridItem, trackSizingItems[gridItemIndex].oppositeAxisConstraint).value;
         auto itemTracks = unsizedTracks.subspan(gridItemSpan.begin(), gridItemSpan.distance());
         double candidateFlexFraction = findSizeOfFr(itemTracks, maxContentContribution, gapSize);
 

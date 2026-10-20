@@ -34,6 +34,7 @@
 #include "RemoteGraphicsContextMessages.h"
 #include "RemoteImageBuffer.h"
 #include "RemoteSharedResourceCache.h"
+#include "SharedFont.h"
 #include "SharedPreferencesForWebProcess.h"
 #include "SharedVideoFrame.h"
 #include <WebCore/BitmapImage.h>
@@ -68,7 +69,7 @@ RemoteGraphicsContext::~RemoteGraphicsContext() = default;
 Ref<ControlFactory> RemoteGraphicsContext::controlFactory()
 {
     if (!m_controlFactory)
-        m_controlFactory = ControlFactory::create();
+        lazyInitialize(m_controlFactory, ControlFactory::create());
     return *m_controlFactory;
 }
 
@@ -274,11 +275,6 @@ void RemoteGraphicsContext::setShadowsIgnoreTransforms(bool value)
     context().setShadowsIgnoreTransforms(value);
 }
 
-void RemoteGraphicsContext::setDrawLuminanceMask(bool value)
-{
-    context().setDrawLuminanceMask(value);
-}
-
 void RemoteGraphicsContext::setLineCap(LineCap lineCap)
 {
     context().setLineCap(lineCap);
@@ -413,7 +409,7 @@ void RemoteGraphicsContext::drawGlyphs(RenderingResourceIdentifier fontIdentifie
     MESSAGE_CHECK(font);
     Vector<GlyphBufferGlyph, 128> glyphs { glyphsAdvances.span<0>() };
     Vector<GlyphBufferAdvance, 128> advances { glyphsAdvances.span<1>() };
-    context().drawGlyphs(*font, glyphs.span(), advances.span(), localAnchor, fontSmoothingMode);
+    context().drawGlyphsImmediate(*font, glyphs.span(), advances.span(), localAnchor, fontSmoothingMode);
 }
 
 void RemoteGraphicsContext::drawImageBuffer(RenderingResourceIdentifier imageBufferIdentifier, const FloatRect& destinationRect, const FloatRect& srcRect, ImagePaintingOptions options)
@@ -610,15 +606,15 @@ SharedVideoFrameReader& RemoteGraphicsContext::sharedVideoFrameReader()
 {
     if (!m_sharedVideoFrameReader) {
         Ref gpuConnectionToWebProcess = m_renderingBackend->gpuConnectionToWebProcess();
-        m_sharedVideoFrameReader = makeUnique<SharedVideoFrameReader>(Ref { gpuConnectionToWebProcess->videoFrameObjectHeap() }, gpuConnectionToWebProcess->webProcessIdentity());
+        lazyInitialize(m_sharedVideoFrameReader, makeUnique<SharedVideoFrameReader>(Ref { gpuConnectionToWebProcess->videoFrameObjectHeap() }, gpuConnectionToWebProcess->webProcessIdentity()));
     }
     return *m_sharedVideoFrameReader;
 }
 
-void RemoteGraphicsContext::drawVideoFrame(SharedVideoFrame&& frame, const FloatRect& destination, ImageOrientation orientation, bool shouldDiscardAlpha)
+void RemoteGraphicsContext::drawVideoFrame(SharedVideoFrame&& frame, const FloatRect& destination, ShouldDiscardAlpha shouldDiscardAlpha, ImagePaintingOptions options)
 {
     if (auto videoFrame = sharedVideoFrameReader().read(WTF::move(frame)))
-        context().drawVideoFrame(*videoFrame, destination, orientation, shouldDiscardAlpha);
+        context().drawVideoFrame(*videoFrame, destination, shouldDiscardAlpha, options);
 }
 
 void RemoteGraphicsContext::setSharedVideoFrameSemaphore(IPC::Semaphore&& semaphore)

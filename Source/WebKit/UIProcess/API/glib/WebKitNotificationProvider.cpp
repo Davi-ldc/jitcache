@@ -112,13 +112,13 @@ void WebKitNotificationProvider::closeAPINotification(WebNotificationIdentifier 
         webkit_notification_close(notification.get());
 }
 
-void WebKitNotificationProvider::withdrawAnyPreviousAPINotificationMatchingTag(const CString& tag)
+void WebKitNotificationProvider::withdrawAnyPreviousAPINotificationMatchingTag(const UTF8CString& tag)
 {
     if (!tag.length())
         return;
 
     for (auto& notification : m_apiNotifications.values()) {
-        if (tag == webkit_notification_get_tag(notification.get())) {
+        if (tag == UTF8CString::unsafeFromUTF8(webkit_notification_get_tag(notification.get()))) {
             closeAPINotification(WebNotificationIdentifier { webkit_notification_get_id(notification.get()) });
             break;
         }
@@ -126,7 +126,7 @@ void WebKitNotificationProvider::withdrawAnyPreviousAPINotificationMatchingTag(c
 
 #if ASSERT_ENABLED
     for (auto& notification : m_apiNotifications.values())
-        ASSERT(tag != webkit_notification_get_tag(notification.get()));
+        ASSERT(tag != UTF8CString::unsafeFromUTF8(webkit_notification_get_tag(notification.get())));
 #endif
 }
 

@@ -132,4 +132,120 @@ TEST(AttributedStringFontCache, PostScriptFontsDifferingInBaselineAdjustDoNotCol
     EXPECT_DOUBLE_EQ(7, *baselineAdjustB);
 }
 
+static RetainPtr<NSData> roundTripFileWrapperAttachmentContents(NSData *contents, NSString *preferredFilename)
+{
+    RetainPtr<NSData> result;
+    @autoreleasepool {
+        RetainPtr fileWrapper = adoptNS([[NSFileWrapper alloc] initRegularFileWithContents:contents]);
+        [fileWrapper setPreferredFilename:preferredFilename];
+        RetainPtr attachment = adoptNS([[NSTextAttachment alloc] initWithData:nil ofType:nil]);
+        [attachment setFileWrapper:fileWrapper.get()];
+        RetainPtr input = adoptNS([[NSMutableAttributedString alloc] initWithAttributedString:[NSAttributedString attributedStringWithAttachment:attachment.get()]]);
+
+        auto webCoreString = WebCore::AttributedString::fromNSAttributedString(WTF::move(input));
+        RetainPtr roundTripped = webCoreString.nsAttributedString();
+
+        NSTextAttachment *outputAttachment = [roundTripped attribute:NSAttachmentAttributeName atIndex:0 effectiveRange:nullptr];
+        EXPECT_NOT_NULL(outputAttachment);
+        result = retainPtr([[outputAttachment fileWrapper] regularFileContents]);
+    }
+    return result;
+}
+
+TEST(AttributedStringImageAttachment, PreservesWebSafeImageData)
+{
+    static constexpr uint8_t pngBytes[] = {
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2,
+        0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 218, 99, 248, 207, 192, 0, 0,
+        3, 1, 1, 0, 247, 3, 65, 67, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130
+    };
+    RetainPtr png = adoptNS([[NSData alloc] initWithBytes:pngBytes length:sizeof(pngBytes)]);
+    RetainPtr result = roundTripFileWrapperAttachmentContents(png.get(), @"image.png");
+    EXPECT_NOT_NULL(result.get());
+    EXPECT_TRUE([result isEqualToData:png.get()]);
+}
+
+TEST(AttributedStringImageAttachment, DropsUnsupportedImageData)
+{
+    static constexpr uint8_t photoshopBytes[] = {
+        '8', 'B', 'P', 'S', 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00
+    };
+    RetainPtr photoshop = adoptNS([[NSData alloc] initWithBytes:photoshopBytes length:sizeof(photoshopBytes)]);
+    RetainPtr result = roundTripFileWrapperAttachmentContents(photoshop.get(), @"image.psd");
+    EXPECT_FALSE([result isEqualToData:photoshop.get()]);
+}
+
+TEST(AttributedStringImageAttachment, PreservesNonImageData)
+{
+    RetainPtr text = retainPtr([@"this is not an image" dataUsingEncoding:NSUTF8StringEncoding]);
+    RetainPtr textResult = roundTripFileWrapperAttachmentContents(text.get(), @"note.txt");
+    EXPECT_NOT_NULL(textResult.get());
+    EXPECT_TRUE([textResult isEqualToData:text.get()]);
+
+    static constexpr uint8_t emptyZipBytes[] = {
+        0x50, 0x4B, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    RetainPtr zip = adoptNS([[NSData alloc] initWithBytes:emptyZipBytes length:sizeof(emptyZipBytes)]);
+    RetainPtr zipResult = roundTripFileWrapperAttachmentContents(zip.get(), @"archive.zip");
+    EXPECT_NOT_NULL(zipResult.get());
+    EXPECT_TRUE([zipResult isEqualToData:zip.get()]);
+}
+
+using AttributeRuns = Vector<std::pair<WebCore::AttributedString::Range, HashMap<String, WebCore::AttributedString::AttributeValue>>>;
+
+static WebCore::AttributedString::AttributeValue testAttributeValue(double value)
+{
+    return { { value } };
+}
+
+TEST(AttributedStringTruncate, ClipsStraddlingRunsAndDropsLaterOnes)
+{
+    AttributeRuns runs;
+    runs.append({ { 0, 4 }, { { "before"_s, testAttributeValue(1) } } });
+    runs.append({ { 4, 6 }, { { "straddling"_s, testAttributeValue(2) } } });
+    runs.append({ { 10, 2 }, { { "after"_s, testAttributeValue(3) } } });
+
+    WebCore::AttributedString string { "0123456789AB"_s, WTF::move(runs), std::nullopt };
+    string.truncate(8);
+
+    EXPECT_TRUE(string.string == "01234567"_s);
+    ASSERT_EQ(string.attributes.size(), 2U);
+    EXPECT_EQ(string.attributes[0].first.location, 0U);
+    EXPECT_EQ(string.attributes[0].first.length, 4U);
+    EXPECT_EQ(string.attributes[1].first.location, 4U);
+    EXPECT_EQ(string.attributes[1].first.length, 4U);
+    EXPECT_TRUE(WebCore::AttributedString::rangesAreSafe(string.string, string.attributes));
+}
+
+TEST(AttributedStringTruncate, LeavesShorterStringUntouched)
+{
+    AttributeRuns runs;
+    runs.append({ { 0, 3 }, { { "all"_s, testAttributeValue(1) } } });
+
+    WebCore::AttributedString string { "abc"_s, WTF::move(runs), std::nullopt };
+    string.truncate(8);
+
+    EXPECT_TRUE(string.string == "abc"_s);
+    ASSERT_EQ(string.attributes.size(), 1U);
+    EXPECT_EQ(string.attributes[0].first.location, 0U);
+    EXPECT_EQ(string.attributes[0].first.length, 3U);
+}
+
+TEST(AttributedStringTruncate, DropsEveryRunWhenTruncatedToNothing)
+{
+    AttributeRuns runs;
+    runs.append({ { 0, 2 }, { { "first"_s, testAttributeValue(1) } } });
+    runs.append({ { 2, 2 }, { { "second"_s, testAttributeValue(2) } } });
+
+    WebCore::AttributedString string { "abcd"_s, WTF::move(runs), std::nullopt };
+    string.truncate(0);
+
+    EXPECT_TRUE(string.string.isEmpty());
+    EXPECT_TRUE(string.attributes.isEmpty());
+    EXPECT_TRUE(WebCore::AttributedString::rangesAreSafe(string.string, string.attributes));
+}
+
 } // namespace TestWebKitAPI

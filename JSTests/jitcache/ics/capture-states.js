@@ -1,11 +1,12 @@
 // jitcache-runs: Producer --useConcurrentGC=false; Consumer
 // jitcache-requires: twins
 
-// The producer drives property ICs and call-link sites into every state the capture tells apart, checks the states it
-// reached, saves each body's snapshot and passes every body to delta(). Each body's first property IC lists a case when
-// delta() runs and anchors it. The consumer creates each body's CodeBlock with one skip call and checks that its snapshot
-// is what restoration derives from the saved one, which resources/ics.js spells out; beside it, the twin check of every
-// import covers the seeded call links, the attached IC state and their round trip.
+// The producer drives property ICs and call-link sites into every state the capture tells apart, call sites in each state
+// of their call data and with their this profiles included, checks the states it reached, saves each body's snapshot
+// and passes every body to delta(). Each body's first property IC lists a case when delta() runs and anchors it. The
+// consumer creates each body's CodeBlock with one skip call and checks that its snapshot is what restoration derives
+// from the saved one, which resources/ics.js spells out; beside it, the twin check of every import covers the seeded
+// call links, the attached IC state and their round trip.
 load("./resources/ics.js", "caller relative");
 
 (function main(role) {
@@ -82,7 +83,8 @@ load("./resources/ics.js", "caller relative");
         return "inTable" in o;
     }
 
-    // Call-link sites: six op_call sites, a construct and a varargs call. Case n + 1 holds op_call site n.
+    // Call-link sites: six op_call sites whose this is not a cell, a construct, a varargs call and a varargs call never
+    // made. Case n + 1 holds op_call site n.
     function calls(skip, op, o, f, args) {
         if (skip)
             return;
@@ -105,31 +107,59 @@ load("./resources/ics.js", "caller relative");
             return new f();
         case 8:
             return f(...args);
+        case 9:
+            return f(...args);
         }
     }
     const callSiteOf = { never: 0, once: 1, monomorphic: 2, polymorphic: 3, closures: 4, collected: 5 };
     const constructOp = 7;
     const varargsOp = 8;
 
-    // In strict code the call in return position is a tail call.
-    function tailCalls(skip, o, f) {
+    // An op_call and an op_call_ignore_result site whose this is an array. The second call of each gives the site call
+    // data of its own and notes the array's structure in its this profile, which a full collection folds.
+    function thisCalls(skip, op, o, a) {
+        if (skip)
+            return;
+        switch (op) {
+        case 0:
+            return o.anchor;
+        case 1:
+            return a.push(op);
+        case 2:
+            a.push(op);
+            return;
+        }
+    }
+    const thisCallsOp = { anchor: 0, call: 1, ignoreResult: 2 };
+
+    // In strict code a call in return position is a tail call: one that runs once and one that never runs.
+    function tailCalls(skip, op, o, f) {
         "use strict";
         if (skip)
             return;
-        if (f === undefined)
+        switch (op) {
+        case 0:
             return o.anchor;
-        return f(o);
+        case 1:
+            return f(o);
+        case 2:
+            return f(o);
+        }
     }
+    const tailCallsOp = { anchor: 0, once: 1, never: 2 };
+    const tailCallSiteOf = { once: 0, never: 1 };
 
-    function evalCaller(skip, o, code) {
+    // A direct eval whose callee is not eval: the parameter named eval holds an ordinary function, which the baseline
+    // code calls virtually through call data it gives the site.
+    function evalCaller(skip, o, eval) {
         if (skip)
             return;
-        if (code === undefined)
+        if (eval === undefined)
             return o.anchor;
-        return eval(code);
+        return eval("0");
     }
 
-    const bodies = { gets, others, noTable, calls, tailCalls, evalCaller };
+    const bodies = { gets, others, noTable, calls, thisCalls, tailCalls, evalCaller };
 
     function first() {
         return 1;
@@ -151,6 +181,9 @@ load("./resources/ics.js", "caller relative");
     }
     function tailTarget(o) {
         return o.anchor;
+    }
+    function notEval() {
+        return 0;
     }
     function Instance() {
     }
@@ -184,8 +217,15 @@ load("./resources/ics.js", "caller relative");
             toBaseline(body);
 
         const anchor = { anchor: 1 };
-        const alive = [anchor, first, second, Built, Other, spreadTarget, tailTarget, Instance];
+        const alive = [anchor, first, second, Built, Other, spreadTarget, tailTarget, notEval, Instance];
         const icOf = (body, index) => snapshot(body).propertyICs[index];
+
+        // The two this sites, called twice each with an array, before the collections, which fold the structure their
+        // second call noted. Their push loads list the array's structure, which the array keeps alive.
+        const pushed = [];
+        alive.push(pushed);
+        for (const op of [thisCallsOp.call, thisCallsOp.call, thisCallsOp.ignoreResult, thisCallsOp.ignoreResult])
+            thisCalls(false, op, anchor, pushed);
 
         // The collections first, while no other site holds a case that one could reset.
         cacheVictim();
@@ -198,12 +238,10 @@ load("./resources/ics.js", "caller relative");
             return icOf(gets, getsSite.reset).resetByGC && unlinked;
         });
 
-        for (const body of [gets, others, calls]) {
+        for (const body of [gets, others, calls, thisCalls, tailCalls]) {
             body(false, 0, anchor);
             body(false, 0, anchor);
         }
-        tailCalls(false, anchor);
-        tailCalls(false, anchor);
         evalCaller(false, anchor);
         evalCaller(false, anchor);
 
@@ -263,7 +301,7 @@ load("./resources/ics.js", "caller relative");
         for (const o of [inTable[0], inTable[0], inTable[1], inTable[2]])
             noTable(false, o);
 
-        // calls. The never-called site stays as linking left it.
+        // calls. The never-called sites stay as linking left them.
         const callTo = (site, f) => calls(false, callSiteOf[site] + 1, anchor, f);
         callTo("once", first);
         callTo("monomorphic", first);
@@ -282,9 +320,8 @@ load("./resources/ics.js", "caller relative");
         for (const args of [[1], [1, 2, 3], [1, 2, 3, 4, 5]])
             calls(false, varargsOp, anchor, spreadTarget, args);
 
-        tailCalls(false, anchor, tailTarget);
-        tailCalls(false, anchor, tailTarget);
-        evalCaller(false, anchor, "0");
+        tailCalls(false, tailCallsOp.once, anchor, tailTarget);
+        evalCaller(false, anchor, notEval);
 
         // Every body's snapshot, read with no body run in between, its checks, then the save and delta.
         const saved = {};
@@ -320,23 +357,39 @@ load("./resources/ics.js", "caller relative");
 
         expectLayout("calls", saved.calls, ["GetById"]);
         expectFields("calls anchor", saved.calls.propertyICs[0], { caseCount: 1 });
-        checkSame(saved.calls.callLinks.map(site => site.opcode).join(", "), [...Array(6).fill("op_call"), "op_construct", "op_call_varargs"].join(", "), "calls' call-link sites");
+        checkSame(saved.calls.callLinks.map(site => site.opcode).join(", "), [...Array(6).fill("op_call"), "op_construct", "op_call_varargs", "op_call_varargs"].join(", "), "calls' call-link sites");
         const callIn = site => callSite("calls", saved.calls, "op_call", callSiteOf[site]);
-        expectFields("calls never", callIn("never"), { mode: "Init", seenOnce: false });
-        expectFields("calls once", callIn("once"), { mode: "Init", seenOnce: true });
-        expectFields("calls monomorphic", callIn("monomorphic"), { mode: "Monomorphic" });
-        expectFields("calls polymorphic", callIn("polymorphic"), { mode: "Polymorphic", hasSeenClosure: false });
-        expectFields("calls closures", callIn("closures"), { mode: "Polymorphic", hasSeenClosure: true });
+        // A site called once points at the VM's executed-once data; its second call gave it call data of its own.
+        expectFields("calls never", callIn("never"), { data: "NotExecuted", mode: "Init", seenOnce: false });
+        expectFields("calls once", callIn("once"), { data: "ExecutedOnce", mode: "Init", seenOnce: true });
+        // Its this is not a cell, so the data it owns holds nothing but the link, and the site comes back executed once.
+        expectFields("calls monomorphic", callIn("monomorphic"), { data: "Own", mode: "Monomorphic", thisArrayModes: 0, thisArrayProfileFlags: 0 });
+        expectFields("calls polymorphic", callIn("polymorphic"), { data: "Own", mode: "Polymorphic", hasSeenClosure: false });
+        expectFields("calls closures", callIn("closures"), { data: "Own", mode: "Polymorphic", hasSeenClosure: true });
         // A collected closure whose executable outlived it would give hasSeenClosure here and leave setClearedByGC, which
         // JITCache adds to CallLinkInfo, unexercised.
-        expectFields("calls collected", callIn("collected"), { mode: "Init", seenOnce: false, clearedByGC: true, hasSeenClosure: false });
-        expectFields("calls construct", callSite("calls", saved.calls, "op_construct", 0), { mode: "Virtual", clearedByVirtual: true });
-        expectFields("calls varargs", callSite("calls", saved.calls, "op_call_varargs", 0), { mode: "Monomorphic", maxArgumentCountIncludingThisForVarargs: 6 });
+        expectFields("calls collected", callIn("collected"), { data: "Own", mode: "Init", seenOnce: false, clearedByGC: true, hasSeenClosure: false });
+        expectFields("calls construct", callSite("calls", saved.calls, "op_construct", 0), { data: "Own", mode: "Virtual", clearedByVirtual: true });
+        expectFields("calls varargs", callSite("calls", saved.calls, "op_call_varargs", 0), { data: "Inline", mode: "Monomorphic", maxArgumentCountIncludingThisForVarargs: 6 });
+        expectFields("calls varargs never called", callSite("calls", saved.calls, "op_call_varargs", 1), { data: "Inline", mode: "Init", seenOnce: false, maxArgumentCountIncludingThisForVarargs: 0 });
+
+        // The collections folded the structure the second call of each this site noted, so a site with no drain before
+        // the snapshot fails here.
+        expectLayout("thisCalls", saved.thisCalls, ["GetById", "GetById", "GetById"]);
+        expectFields("thisCalls anchor", saved.thisCalls.propertyICs[0], { caseCount: 1 });
+        for (const [label, opcode] of [["thisCalls call", "op_call"], ["thisCalls call_ignore_result", "op_call_ignore_result"]]) {
+            const site = callSite("thisCalls", saved.thisCalls, opcode, 0);
+            expectFields(label, site, { data: "Own", mode: "Monomorphic", seenOnce: true, hasSeenClosure: false, clearedByGC: false, clearedByVirtual: false });
+            check(site.thisArrayModes !== 0, `${label} holds no this modes`);
+        }
 
         expectLayout("tailCalls", saved.tailCalls, ["GetById"]);
-        expectFields("tailCalls tail call", callSite("tailCalls", saved.tailCalls, "op_tail_call", 0), { mode: "Monomorphic" });
+        // A tail call gets call data of its own before its first call, unseen, and that call sets the seen bit.
+        expectFields("tailCalls once", callSite("tailCalls", saved.tailCalls, "op_tail_call", tailCallSiteOf.once), { data: "Own", mode: "Init", seenOnce: true });
+        expectFields("tailCalls never", callSite("tailCalls", saved.tailCalls, "op_tail_call", tailCallSiteOf.never), { data: "NotExecuted", mode: "Init", seenOnce: false });
         expectLayout("evalCaller", saved.evalCaller, ["GetById"]);
-        callSite("evalCaller", saved.evalCaller, "op_call_direct_eval", 0);
+        // Baseline code gave the site call data of its own for its virtual call, which changes nothing in it.
+        expectFields("evalCaller direct eval", callSite("evalCaller", saved.evalCaller, "op_call_direct_eval", 0), { data: "Own", mode: "Init", seenOnce: false });
 
         // holdsGaveUp marks exactly the sites driven onto their *GaveUp operation, which checks the give-up operation
         // JITCache maps each of those access types to against the engine.

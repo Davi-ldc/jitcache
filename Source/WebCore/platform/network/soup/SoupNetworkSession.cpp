@@ -40,6 +40,7 @@
 #include <wtf/HashSet.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/glib/GLibExtras.h>
 #include <wtf/glib/GSpanExtras.h>
 #include <wtf/text/Base64.h>
 #include <wtf/text/CString.h>
@@ -48,9 +49,9 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SoupNetworkSession);
 
-static CString& initialAcceptLanguages()
+static UTF8CString& initialAcceptLanguages()
 {
-    static NeverDestroyed<CString> storage;
+    static NeverDestroyed<UTF8CString> storage;
     return storage.get();
 }
 
@@ -182,13 +183,13 @@ void SoupNetworkSession::setHSTSPersistentStorage(const String& directory)
         return;
 
     if (!FileSystem::makeAllDirectories(directory)) {
-        RELEASE_LOG_ERROR(Network, "Unable to create the HSTS storage directory \"%s\". Using a memory enforcer instead.", directory.utf8().data());
+        RELEASE_LOG_ERROR(Network, "Unable to create the HSTS storage directory \"%s\". Using a memory enforcer instead.", directory.utf8());
         return;
     }
 
-    CString storagePath = FileSystem::fileSystemRepresentation(directory);
-    GUniquePtr<char> dbFilename(g_build_filename(storagePath.data(), "hsts-storage.sqlite", nullptr));
-    GRefPtr<SoupHSTSEnforcer> enforcer = adoptGRef(soup_hsts_enforcer_db_new(dbFilename.get()));
+    auto storagePath = FileSystem::fileSystemRepresentation(directory);
+    auto dbFilename = gBuildFilename(storagePath, "hsts-storage.sqlite");
+    GRefPtr<SoupHSTSEnforcer> enforcer = adoptGRef(soup_hsts_enforcer_db_new(dbFilename.utf8()));
     soup_session_remove_feature_by_type(m_soupSession.get(), SOUP_TYPE_HSTS_ENFORCER);
     soup_session_add_feature(m_soupSession.get(), SOUP_SESSION_FEATURE(enforcer.get()));
 }
@@ -211,7 +212,7 @@ void SoupNetworkSession::deleteHSTSCacheForHostNames(const Vector<String>& hostN
     ASSERT(enforcer);
 
     for (const auto& hostName : hostNames) {
-        GUniquePtr<SoupHSTSPolicy> policy(soup_hsts_policy_new(hostName.utf8().data(), SOUP_HSTS_POLICY_MAX_AGE_PAST, FALSE));
+        GUniquePtr<SoupHSTSPolicy> policy(soup_hsts_policy_new(hostName.utf8().legacyCStringPointer(), SOUP_HSTS_POLICY_MAX_AGE_PAST, FALSE));
         soup_hsts_enforcer_set_policy(enforcer, policy.get());
     }
 }
@@ -242,12 +243,12 @@ static inline bool stringIsNumeric(const std::string_view& str)
 // Old versions of WebKit created this cache.
 void SoupNetworkSession::clearOldSoupCache(const String& cacheDirectory)
 {
-    CString cachePath = FileSystem::fileSystemRepresentation(cacheDirectory);
-    GUniquePtr<char> cacheFile(g_build_filename(cachePath.data(), "soup.cache2", nullptr));
-    if (!g_file_test(cacheFile.get(), G_FILE_TEST_IS_REGULAR))
+    auto cachePath = FileSystem::fileSystemRepresentation(cacheDirectory);
+    auto cacheFile = gBuildFilename(cachePath, "soup.cache2");
+    if (!g_file_test(cacheFile.utf8(), G_FILE_TEST_IS_REGULAR))
         return;
 
-    GUniquePtr<GDir> dir(g_dir_open(cachePath.data(), 0, nullptr));
+    GUniquePtr<GDir> dir(g_dir_open(cachePath.legacyCStringPointer(), 0, nullptr));
     if (!dir)
         return;
 
@@ -256,9 +257,9 @@ void SoupNetworkSession::clearOldSoupCache(const String& cacheDirectory)
         if (!nameView.starts_with("soup.cache") && !stringIsNumeric(nameView))
             continue;
 
-        GUniquePtr<gchar> filename(g_build_filename(cachePath.data(), name, nullptr));
-        if (g_file_test(filename.get(), G_FILE_TEST_IS_REGULAR))
-            g_unlink(filename.get());
+        auto filename = gBuildFilename(cachePath, name);
+        if (g_file_test(filename.utf8(), G_FILE_TEST_IS_REGULAR))
+            g_unlink(filename.utf8());
     }
 }
 
@@ -281,16 +282,16 @@ void SoupNetworkSession::setProxySettings(const SoupNetworkProxySettings& settin
     case SoupNetworkProxySettings::Mode::Custom:
         resolver = adoptGRef(g_simple_proxy_resolver_new(nullptr, nullptr));
         if (!m_proxySettings.defaultProxyURL.isNull())
-            g_simple_proxy_resolver_set_default_proxy(G_SIMPLE_PROXY_RESOLVER(resolver.get()), m_proxySettings.defaultProxyURL.data());
+            g_simple_proxy_resolver_set_default_proxy(G_SIMPLE_PROXY_RESOLVER(resolver.get()), m_proxySettings.defaultProxyURL.legacyCStringPointer());
         if (!m_proxySettings.ignoreHosts.isEmpty()) {
-            auto ignoreHosts = m_proxySettings.ignoreHosts.map([](const CString& host) {
-                return const_cast<char*>(host.data());
+            auto ignoreHosts = m_proxySettings.ignoreHosts.map([](const UTF8CString& host) {
+                return const_cast<char*>(host.legacyCStringPointer());
             });
             ignoreHosts.append(nullptr);
             g_simple_proxy_resolver_set_ignore_hosts(G_SIMPLE_PROXY_RESOLVER(resolver.get()), ignoreHosts.mutableSpan().data());
         }
         for (const auto& iter : m_proxySettings.proxyMap)
-            g_simple_proxy_resolver_set_uri_proxy(G_SIMPLE_PROXY_RESOLVER(resolver.get()), iter.key.data(), iter.value.data());
+            g_simple_proxy_resolver_set_uri_proxy(G_SIMPLE_PROXY_RESOLVER(resolver.get()), iter.key.legacyCStringPointer(), iter.value.legacyCStringPointer());
         break;
     case SoupNetworkProxySettings::Mode::Auto:
         resolver = webkitAutoconfigProxyResolverNew(m_proxySettings.defaultProxyURL);
@@ -301,14 +302,14 @@ void SoupNetworkSession::setProxySettings(const SoupNetworkProxySettings& settin
     soup_session_abort(m_soupSession.get());
 }
 
-void SoupNetworkSession::setInitialAcceptLanguages(const CString& languages)
+void SoupNetworkSession::setInitialAcceptLanguages(const UTF8CString& languages)
 {
     initialAcceptLanguages() = languages;
 }
 
-void SoupNetworkSession::setAcceptLanguages(const CString& languages)
+void SoupNetworkSession::setAcceptLanguages(const UTF8CString& languages)
 {
-    soup_session_set_accept_language(m_soupSession.get(), languages.data());
+    soup_session_set_accept_language(m_soupSession.get(), languages.legacyCStringPointer());
 }
 
 void SoupNetworkSession::setIgnoreTLSErrors(bool ignoreTLSErrors)

@@ -48,7 +48,8 @@ const void* vmAddress(VM&, VMAddress);
 std::optional<VMAddress> vmAddressFor(VM&, const void* address); // nullopt for an address no VMAddress names
 JSCell* vmCell(VM&, VMCell);
 
-// The ranges of the target fields that name an enumeration, which strict checks (ImageCheck::V3) before any resolution.
+// The ranges of the target fields that name an enumeration, which strict checks (ImageCheck::Fixups) before any
+// resolution.
 bool isValidCommonThunk(uint32_t);
 bool isValidBaselineThunk(uint32_t); // ConsistencyCheck only in ASSERT_ENABLED builds, the only ones with its generator
 bool isValidAccessType(uint32_t);

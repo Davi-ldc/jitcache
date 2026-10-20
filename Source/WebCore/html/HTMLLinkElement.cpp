@@ -26,6 +26,7 @@
 #include "HTMLLinkElement.h"
 
 #include "Attribute.h"
+#include "CSSParserContext.h"
 #include "CachedCSSStyleSheet.h"
 #include "CachedResource.h"
 #include "CachedResourceRequest.h"
@@ -58,7 +59,6 @@
 #include "Logging.h"
 #include "MediaQueryEvaluator.h"
 #include "MediaQueryParser.h"
-#include "MediaQueryParserContext.h"
 #include "MouseEvent.h"
 #include "NodeName.h"
 #include "Page.h"
@@ -105,7 +105,7 @@ private:
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ExpectIdTargetObserver);
 
 ExpectIdTargetObserver::ExpectIdTargetObserver(const AtomString& id, HTMLLinkElement& element)
-    : IdTargetObserver(protect(element)->treeScope().idTargetObserverRegistry(), id)
+    : IdTargetObserver(protect(element.treeScope())->idTargetObserverRegistry(), id)
     , m_element(element)
 {
 }
@@ -198,7 +198,7 @@ void HTMLLinkElement::attributeChanged(const QualifiedName& name, const AtomStri
     switch (name.nodeName()) {
     case AttributeNames::relAttr: {
         if (equalLettersIgnoringASCIICase(newValue, "spatial-backdrop"_s))
-            document().addConsoleMessage(MessageSource::Other, MessageLevel::Error, "The \"spatial-backdrop\" link rel value is no longer supported and was ignored. Use the <model> immersive API instead."_s);
+            protect(document())->addConsoleMessage(MessageSource::Other, MessageLevel::Error, "The \"spatial-backdrop\" link rel value is no longer supported and was ignored. Use the <model> immersive API instead."_s);
         auto parsedRel = LinkRelAttribute(document(), newValue);
         auto didMutateRel = parsedRel != m_relAttribute;
         m_relAttribute = WTF::move(parsedRel);
@@ -243,7 +243,7 @@ void HTMLLinkElement::attributeChanged(const QualifiedName& name, const AtomStri
         m_media = WTF::move(media);
         process();
         if (m_sheet && !isDisabled())
-            m_styleScope->didChangeActiveStyleSheetCandidates();
+            protect(m_styleScope)->didChangeActiveStyleSheetCandidates();
         break;
     }
     case AttributeNames::crossoriginAttr:
@@ -480,7 +480,7 @@ void HTMLLinkElement::processInternalResourceLink(Element* element)
     if (document->readyState() == Document::ReadyState::Loading && isConnected() && mediaAttributeMatches() && !indicatedElement) {
         potentiallyBlockRendering();
         if (!m_expectIdTargetObserver)
-            m_expectIdTargetObserver = makeUnique<ExpectIdTargetObserver>(makeAtomString(m_url.fragmentIdentifier()), *this);
+            lazyInitialize(m_expectIdTargetObserver, makeUnique<ExpectIdTargetObserver>(makeAtomString(m_url.fragmentIdentifier()), *this));
     } else
         unblockRendering();
 }
@@ -558,7 +558,7 @@ void HTMLLinkElement::finishParsingChildren()
     HTMLElement::finishParsingChildren();
 }
 
-void HTMLLinkElement::initializeStyleSheet(Ref<StyleSheetContents>&& styleSheet, const CachedCSSStyleSheet& cachedStyleSheet, MediaQueryParserContext context)
+void HTMLLinkElement::initializeStyleSheet(Ref<StyleSheetContents>&& styleSheet, const CachedCSSStyleSheet& cachedStyleSheet, const CSSParserContext& context)
 {
     if (m_sheet) {
         ASSERT(m_sheet->ownerNode() == this);
@@ -566,18 +566,20 @@ void HTMLLinkElement::initializeStyleSheet(Ref<StyleSheetContents>&& styleSheet,
     }
 
     m_sheet = CSSStyleSheet::create(WTF::move(styleSheet), *this, cachedStyleSheet.isCORSSameOrigin());
-    protect(m_sheet)->setMediaQueries(MQ::MediaQueryParser::parse(m_media, context.context));
+    protect(m_sheet)->setMediaQueries(MQ::MediaQueryParser::parse(m_media, context));
     if (!isInShadowTree())
         protect(m_sheet)->setTitle(title());
 
     if (CheckedPtr styleScope = m_styleScope)
         styleScope->establishPreferredStylesheetSetName(*this, protect(*m_sheet));
 
-    if (!protect(m_sheet)->canAccessRules())
+    if (!protect(m_sheet)->canAccessRules()) {
+        ASSERT(m_sheet->contents().loadedFromOpaqueSource() == LoadedFromOpaqueSource::Yes);
         m_sheet->contents().setAsLoadedFromOpaqueSource();
+    }
 }
 
-void HTMLLinkElement::setCSSStyleSheet(const String& href, const URL& baseURL, ASCIILiteral charset, const CachedCSSStyleSheet* cachedStyleSheet)
+void HTMLLinkElement::setCSSStyleSheet(const String& href, const URL& baseURL, ASCIILiteral charset, const CachedCSSStyleSheet& cachedStyleSheet)
 {
     unblockRendering();
     if (!isConnected()) {
@@ -592,8 +594,8 @@ void HTMLLinkElement::setCSSStyleSheet(const String& href, const URL& baseURL, A
     // Completing the sheet load may cause scripts to execute.
     Ref<HTMLLinkElement> protectedThis(*this);
 
-    if (!cachedStyleSheet->errorOccurred() && !matchIntegrityMetadata(*cachedStyleSheet, m_integrityMetadataForPendingSheetRequest)) {
-        document->addConsoleMessage(MessageSource::Security, MessageLevel::Error, makeString("Cannot load stylesheet "_s, integrityMismatchDescription(*cachedStyleSheet, m_integrityMetadataForPendingSheetRequest)));
+    if (!cachedStyleSheet.errorOccurred() && !matchIntegrityMetadata(cachedStyleSheet, m_integrityMetadataForPendingSheetRequest)) {
+        document->addConsoleMessage(MessageSource::Security, MessageLevel::Error, makeString("Cannot load stylesheet "_s, integrityMismatchDescription(cachedStyleSheet, m_integrityMetadataForPendingSheetRequest)));
 
         m_loading = false;
         sheetLoaded();
@@ -602,12 +604,14 @@ void HTMLLinkElement::setCSSStyleSheet(const String& href, const URL& baseURL, A
     }
 
     CSSParserContext parserContext(document.get(), baseURL, charset);
+    if (!cachedStyleSheet.isCORSSameOrigin())
+        parserContext.loadedFromOpaqueSource = LoadedFromOpaqueSource::Yes;
     auto cachePolicy = frame->loader().subresourceCachePolicy(baseURL);
 
-    if (auto restoredSheet = const_cast<CachedCSSStyleSheet*>(cachedStyleSheet)->restoreParsedStyleSheet(parserContext, cachePolicy, frame->loader())) {
+    if (auto restoredSheet = const_cast<CachedCSSStyleSheet&>(cachedStyleSheet).restoreParsedStyleSheet(parserContext, cachePolicy, frame->loader())) {
         ASSERT(restoredSheet->isCacheable());
         ASSERT(!restoredSheet->isLoading());
-        initializeStyleSheet(restoredSheet.releaseNonNull(), *cachedStyleSheet, MediaQueryParserContext(parserContext));
+        initializeStyleSheet(restoredSheet.releaseNonNull(), cachedStyleSheet, parserContext);
 
         m_loading = false;
         sheetLoaded();
@@ -616,7 +620,7 @@ void HTMLLinkElement::setCSSStyleSheet(const String& href, const URL& baseURL, A
     }
 
     auto styleSheet = StyleSheetContents::create(href, parserContext);
-    initializeStyleSheet(styleSheet.copyRef(), *cachedStyleSheet, MediaQueryParserContext(parserContext));
+    initializeStyleSheet(styleSheet.copyRef(), cachedStyleSheet, parserContext);
 
     // FIXME: Set the visibility option based on m_sheet being clean or not.
     // Best approach might be to set it on the style sheet content itself or its context parser otherwise.
@@ -628,11 +632,11 @@ void HTMLLinkElement::setCSSStyleSheet(const String& href, const URL& baseURL, A
     }
 
     m_loading = false;
-    styleSheet.get().notifyLoadedSheet(cachedStyleSheet);
+    styleSheet.get().notifyLoadedSheet(&cachedStyleSheet);
     styleSheet.get().checkLoaded();
 
     if (styleSheet.get().isCacheable())
-        const_cast<CachedCSSStyleSheet*>(cachedStyleSheet)->saveParsedStyleSheet(WTF::move(styleSheet));
+        const_cast<CachedCSSStyleSheet&>(cachedStyleSheet).saveParsedStyleSheet(WTF::move(styleSheet));
 }
 
 bool HTMLLinkElement::styleSheetIsLoading() const
@@ -660,7 +664,7 @@ bool HTMLLinkElement::mediaAttributeMatches() const
     auto mediaQueryList = MQ::MediaQueryParser::parse(m_media, document->cssParserContext());
     LOG(MediaQueries, "HTMLLinkElement::mediaAttributeMatches");
 
-    MQ::MediaQueryEvaluator evaluator(protect(document->frame())->view()->mediaType(), document.get());
+    MQ::MediaQueryEvaluator evaluator(protect(document->view())->mediaType(), document.get());
     return evaluator.evaluate(mediaQueryList);
 }
 

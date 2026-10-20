@@ -144,9 +144,19 @@ struct StateRecords {
     const std::span<const uint8_t> branchBits;
 };
 
-// Argument and value profiles: every prediction is its record, and no bucket holds a sample.
+// Argument and value profiles: every prediction is its record, and no bucket holds a sample. The table has predictions
+// only when a record gave one, as the first merge of something other than SpecNone allocates them, or when its
+// constructor allocated them at once, which it does only with useLazyValueProfilePredictions off.
 static void checkValueProfiles(CodeBlock& codeBlock, const CBFormat::StateHeader& header, const StateRecords& records, Reporter& reporter)
 {
+    if (MetadataTable* metadataTable = codeBlock.metadataTable(); metadataTable && metadataTable->valueProfilePredictions() && Options::useLazyValueProfilePredictions()) {
+        bool anyPrediction = std::ranges::any_of(records.valuePredictions, [](uint64_t prediction) {
+            return prediction != SpecNone;
+        });
+        if (!anyPrediction)
+            reporter.difference("value-predictions-array"_s, "the metadata table has predictions, and every value record is SpecNone");
+    }
+
     std::span<const ArgumentValueProfile> argumentProfiles = codeBlock.argumentValueProfiles().span();
     if (argumentProfiles.size() != header.numArguments)
         reporter.difference("argument-count"_s, "the CB has ", argumentProfiles.size(), " argument profiles, its record ", header.numArguments);
@@ -161,13 +171,14 @@ static void checkValueProfiles(CodeBlock& codeBlock, const CBFormat::StateHeader
     }
 
     uint32_t visited = 0;
-    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, ValueProfile& profile) {
+    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned offset, const ValueProfileRef& profile) {
         ++visited;
         if (offset > records.valuePredictions.size())
             return;
         auto expected = static_cast<SpeculatedType>(records.valuePredictions[offset - 1]);
-        if (profile.m_prediction != expected)
-            reporter.difference("value-prediction"_s, "the value profile at offset ", offset, " predicts ", SpeculationDump { profile.m_prediction }, ", its record ", SpeculationDump { expected });
+        SpeculatedType prediction = profile.prediction();
+        if (prediction != expected)
+            reporter.difference("value-prediction"_s, "the value profile at offset ", offset, " predicts ", SpeculationDump { prediction }, ", its record ", SpeculationDump { expected });
         if (unsigned samples = profile.numberOfSamples())
             reporter.difference("value-samples"_s, "the value profile at offset ", offset, " holds ", samples, " pending samples");
     });
@@ -317,8 +328,9 @@ static void checkFamilyField(Reporter& reporter, unsigned family, uint32_t entry
         } else if (!allocationProfileHoldsNoLastArray(field, indexingType, vectorLength))
             reporter.difference("allocation-last-array"_s, "family ", family, " entry ", entry, " holds a last array");
     } else if constexpr (kind == FamilyKind::IterationModes) {
-        if (field.seenModes != record)
-            reporter.difference("iteration-modes"_s, "family ", family, " entry ", entry, " has modes ", RawHex(field.seenModes), ", its record ", RawHex(record));
+        uint16_t modes = CBFormat::iterationModesOf(field);
+        if (modes != record)
+            reporter.difference("iteration-modes"_s, "family ", family, " entry ", entry, " has modes ", RawHex(modes), ", its record ", RawHex(record));
     } else if constexpr (kind == FamilyKind::EnumeratorModes) {
         if (static_cast<uint8_t>(field) != record)
             reporter.difference("enumerator-modes"_s, "family ", family, " entry ", entry, " has modes ", RawHex(static_cast<uint8_t>(field)), ", its record ", RawHex(record));
@@ -332,22 +344,25 @@ static void checkFamilyField(Reporter& reporter, unsigned family, uint32_t entry
     }
 }
 
-// The families: each family's entries in metadata-ID order, in step with its records, as seedLinkedState wrote them.
+// The families: each family's entries in metadata-ID order, in step with its records, as seedLinkedState wrote them. A
+// family without a field holds call sites, whose this profile is the ICs lane's to restore and check.
 static void checkFamilies(CodeBlock& codeBlock, const CBFormat::StateHeader& header, const StateRecords& records, Reporter& reporter)
 {
     CBFormat::forEachFamily([&](auto family) {
         using FamilyType = decltype(family);
-        auto familyRecords = records.familyRecords<FamilyType::kind>();
-        size_t firstRecord = CBFormat::firstRecordOfFamily(header.familyEntryCount, FamilyType::index);
-        uint32_t recordedEntries = header.familyEntryCount[FamilyType::index];
-        uint32_t entry = 0;
-        CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
-            if (entry < recordedEntries && firstRecord + entry < familyRecords.size())
-                checkFamilyField<FamilyType::kind>(reporter, FamilyType::index, entry, field, familyRecords[firstRecord + entry]);
-            ++entry;
-        });
-        if (entry != recordedEntries)
-            reporter.difference("family-count"_s, "family ", FamilyType::index, " has ", entry, " entries, its record ", recordedEntries);
+        if constexpr (FamilyType::hasField) {
+            auto familyRecords = records.familyRecords<FamilyType::kind>();
+            size_t firstRecord = CBFormat::firstRecordOfFamily(header.familyEntryCount, FamilyType::index);
+            uint32_t recordedEntries = header.familyEntryCount[FamilyType::index];
+            uint32_t entry = 0;
+            CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
+                if (entry < recordedEntries && firstRecord + entry < familyRecords.size())
+                    checkFamilyField<FamilyType::kind>(reporter, FamilyType::index, entry, field, familyRecords[firstRecord + entry]);
+                ++entry;
+            });
+            if (entry != recordedEntries)
+                reporter.difference("family-count"_s, "family ", FamilyType::index, " has ", entry, " entries, its record ", recordedEntries);
+        }
     });
 }
 
@@ -367,7 +382,8 @@ struct CounterDump {
     void dump(PrintStream& out) const
     {
         out.print(" (counter ", counter.m_counter, ", total ", counter.m_totalCount, ", threshold ", counter.m_activeThreshold,
-            "; restore carried ", restore.carried, ", crossed ", restore.crossed, ", nativeSlice ", restore.nativeSlice, ", slice ", restore.slice, ")");
+            "; restore carried ", restore.carried, ", crossed ", restore.crossed, ", nativeSlice ", restore.nativeSlice, ", slice ", restore.slice,
+            ", startupDeferralScale ", restore.startupDeferralScale, ")");
     }
 
     const BaselineExecutionCounter& counter;
@@ -383,18 +399,22 @@ static int64_t entrySliceFloor()
 // A carried counter. The counter holds the captured threshold and the slice finishCounter reports, at least the floor
 // short of crossing, with the captured progress as the float total keeps it, and aging samples that count. The slice
 // itself is checked against what no pool can move: an infinite threshold keeps the captured slice, and a finite one lies
-// in the envelope that a memory multiplier of at least 1 leaves, whose bounds come from the progress, the threshold and
-// the slice ceiling alone. The ceiling reads only options and the CB's size and code type, so nothing here depends on
-// the executable pool.
+// in the envelope that a memory multiplier of at least 1 leaves, whose bounds come from the progress, the threshold, the
+// slice ceiling and the startup deferral scale finishCounter used, which is the VM's. The ceiling bounds the slice only
+// at a scale of 1, since a scaled slice may run to one unscaled period, which the pool sets. The ceiling reads only
+// options and the CB's size and code type, so nothing here depends on the executable pool.
 static void checkCarriedCounter(CodeBlock& codeBlock, const CBFormat::StateHeader& header, const BaselineExecutionCounter& counter, const CBCounterRestore& restore, Reporter& reporter)
 {
     CounterDump state { counter, restore };
     double progress = static_cast<double>(header.counterTotalCount) + header.counterValue;
     int32_t threshold = header.counterActiveThreshold;
     int64_t floorSlice = entrySliceFloor();
+    double scale = restore.startupDeferralScale;
 
     if (!restore.carried)
         reporter.difference("counter-mode"_s, "the section carries the counter, finishCounter's result says it does not", state);
+    if (scale != codeBlock.vm().startupJITDeferralScale() || !(scale >= 1))
+        reporter.difference("counter-scale"_s, "the scale is not the VM's startup deferral scale ", codeBlock.vm().startupJITDeferralScale(), state);
     if (counter.m_activeThreshold != threshold)
         reporter.difference("counter-threshold"_s, "the active threshold is not the record's ", threshold, state);
     if (restore.slice != std::max(restore.nativeSlice, floorSlice))
@@ -415,12 +435,13 @@ static void checkCarriedCounter(CodeBlock& codeBlock, const CBFormat::StateHeade
     }
 
     int64_t ceiling = maximumExecutionCountsBetweenCheckpoints(CountingForBaseline, &codeBlock);
-    bool sliceInRange = restore.crossed ? !restore.nativeSlice : restore.nativeSlice >= 0 && restore.nativeSlice <= ceiling;
+    bool sliceInRange = restore.crossed ? !restore.nativeSlice : restore.nativeSlice >= 0 && (scale != 1 || restore.nativeSlice <= ceiling);
     if (!sliceInRange)
-        reporter.difference("counter-slice-range"_s, "the native slice is not 0 after a crossing or lies outside [0, ", ceiling, "]", state);
-    double earlyBound = threshold - static_cast<double>(std::min<int64_t>(threshold, ceiling)) / 2;
+        reporter.difference("counter-slice-range"_s, "the native slice is not 0 after a crossing, is negative, or passes the ceiling ", ceiling, " at a scale of 1", state);
+    double scaledThreshold = scale * threshold;
+    double earlyBound = scaledThreshold - static_cast<double>(std::min<int64_t>(threshold, ceiling)) / 2;
     if (progress < earlyBound) {
-        auto shortestSlice = static_cast<int64_t>(std::trunc(std::min(threshold - progress, static_cast<double>(ceiling))));
+        auto shortestSlice = static_cast<int64_t>(std::trunc(std::min(scaledThreshold - progress, static_cast<double>(ceiling))));
         if (restore.crossed || restore.nativeSlice < shortestSlice)
             reporter.difference("counter-early-crossing"_s, "progress ", progress, " below ", earlyBound, " crossed or armed less than ", shortestSlice, state);
     }
@@ -435,6 +456,8 @@ static void checkSetupArming(CodeBlock& codeBlock, const BaselineExecutionCounte
     CounterDump state { counter, restore };
     if (restore.carried || restore.crossed)
         reporter.difference("counter-mode"_s, "the section does not carry the counter, finishCounter's result says it was carried or crossed", state);
+    if (restore.startupDeferralScale != 1)
+        reporter.difference("counter-scale"_s, "a counter that did not travel reports a scale other than 1", state);
     if (restore.nativeSlice != -static_cast<int64_t>(counter.m_counter) || restore.slice != restore.nativeSlice)
         reporter.difference("counter-slice"_s, "the result does not report the slice setup armed", state);
 
@@ -502,8 +525,8 @@ static bool llintCacheIsAtLinkState(const GetByIdModeMetadata& cache)
 }
 
 // In the metadata entries that hold this lane's fields beside native ones, the native LLInt caches and the to_this cached
-// structure still hold what linking gave them, so the lane wrote nothing beside its own fields. The DataOnlyCallLinkInfo
-// fields are the ICs lane's seeds and stay outside this check.
+// structure still hold what linking gave them, so the lane wrote nothing beside its own fields. The call links are the
+// ICs lane's seeds and stay outside this check.
 static void checkNativeEntries(CodeBlock& codeBlock, Reporter& reporter)
 {
     auto checkLLIntCache = [&](const GetByIdModeMetadata& cache, const char* opcode, const char* field, unsigned entry) {

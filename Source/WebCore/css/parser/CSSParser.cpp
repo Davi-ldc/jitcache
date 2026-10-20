@@ -35,6 +35,7 @@
 #include "CSSCounterStyleRule.h"
 #include "CSSCustomPropertySyntax.h"
 #include "CSSCustomPropertyValue.h"
+#include "CSSEnvironmentMapRule.h"
 #include "CSSFontFamilyNameValue.h"
 #include "CSSFontFeatureValuesRule.h"
 #include "CSSKeywordValueInlines.h"
@@ -72,7 +73,6 @@
 #include "FontPaletteValues.h"
 #include "MediaList.h"
 #include "MediaQueryParser.h"
-#include "MediaQueryParserContext.h"
 #include "MutableCSSSelector.h"
 #include "NestingLevelIncrementer.h"
 #include "NodeDocument.h"
@@ -87,6 +87,7 @@
 #include <bitset>
 #include <memory>
 #include <optional>
+#include <wtf/SetForScope.h>
 #include <wtf/StdLibExtras.h>
 
 namespace WebCore {
@@ -310,6 +311,10 @@ bool CSSParser::supportsDeclaration(CSSParserTokenRange& range)
     // We create a new nesting context to isolate the parsing of the @supports(...) prelude from declarations before or after.
     // This only concerns the prelude,
     // (the content of the block will also be in its own nesting context but it's not done here (cf consumeRegularRuleList))
+    // Suppress the observer during condition evaluation because this is a speculative parse to test declaration validity,
+    // not an actual property declaration in the stylesheet. This prevents the declaration from erroneously showing up as a
+    // member of an @supports rule with a CSSNestedDeclaration in Web Inspector.
+    SetForScope suppressObserver(m_observerWrapper, decltype(m_observerWrapper) { nullptr });
     runInNewNestingContext([&] {
         ASSERT(topContext().m_parsedProperties.isEmpty());
         result = consumeDeclaration(range, StyleRuleType::Style);
@@ -499,6 +504,10 @@ RefPtr<StyleRuleBase> CSSParser::consumeAtRule(CSSParserTokenRange& range, Allow
         return consumePositionTryRule(prelude, block);
     case CSSAtRuleFunction:
         return consumeFunctionRule(prelude, block);
+#if ENABLE(SPATIAL_PORTAL)
+    case CSSAtRuleEnvironmentMap:
+        return consumeEnvironmentMapRule(prelude, block);
+#endif
     default:
         return nullptr; // Parse error, unrecognised at-rule with block
     }
@@ -685,9 +694,9 @@ RefPtr<StyleRuleNamespace> CSSParser::consumeNamespaceRule(CSSParserTokenRange p
     return StyleRuleNamespace::create(namespacePrefix, uri);
 }
 
-void CSSParser::runInNewNestingContext(auto&& run)
+void CSSParser::runInNewNestingContext(NOESCAPE const auto& run)
 {
-    m_nestingContextStack.append(NestingContext { });
+    m_nestingContextStack.constructAndAppend();
     run();
     m_nestingContextStack.removeLast();
 }
@@ -1097,6 +1106,30 @@ RefPtr<StyleRuleViewTransition> CSSParser::consumeViewTransitionRule(CSSParserTo
     auto declarations = consumeDeclarationListInNewNestingContext(block, StyleRuleType::ViewTransition);
     return StyleRuleViewTransition::create(createStyleProperties(declarations, m_context.mode));
 }
+
+#if ENABLE(SPATIAL_PORTAL)
+
+RefPtr<StyleRuleEnvironmentMap> CSSParser::consumeEnvironmentMapRule(CSSParserTokenRange prelude, CSSParserTokenRange block)
+{
+    if (!m_context.propertySettings.spatialPortalEnabled)
+        return nullptr;
+
+    if (!prelude.atEnd())
+        return nullptr;
+
+    if (RefPtr observerWrapper = m_observerWrapper.get()) {
+        unsigned endOffset = observerWrapper->endOffset(prelude);
+        observerWrapper->observer().startRuleHeader(StyleRuleType::EnvironmentMap, observerWrapper->startOffset(prelude));
+        observerWrapper->observer().endRuleHeader(endOffset);
+        observerWrapper->observer().startRuleBody(endOffset);
+        observerWrapper->observer().endRuleBody(endOffset);
+    }
+
+    auto declarations = consumeDeclarationListInNewNestingContext(block, StyleRuleType::EnvironmentMap);
+    return StyleRuleEnvironmentMap::create(createStyleProperties(declarations, m_context.mode));
+}
+
+#endif // ENABLE(SPATIAL_PORTAL)
 
 RefPtr<StyleRulePositionTry> CSSParser::consumePositionTryRule(CSSParserTokenRange prelude, CSSParserTokenRange block)
 {
@@ -1524,7 +1557,7 @@ static void validateUserAgentSheetSelector(const CSSSelectorList& selectorList)
         }
         // Don't use subject position :is(foo, bar) and similar on UA sheet before we have good optimizations for them.
         // Selectors like this should be expanded manually.
-        ASSERT_WITH_MESSAGE(hasBucketedSelector || !hasLogicalCombination, "Subject position selector list in '%s' not allowed in user-agent stylesheet", complexSelector.selectorText().utf8().data());
+        ASSERT_WITH_MESSAGE(hasBucketedSelector || !hasLogicalCombination, "Subject position selector list in '%s' not allowed in user-agent stylesheet", complexSelector.selectorText().utf8());
     };
 
     for (auto& complexSelector : selectorList)
@@ -1787,6 +1820,7 @@ static bool NODELETE ruleDoesNotAllowImportant(StyleRuleType type)
         || type == StyleRuleType::Keyframe
         || type == StyleRuleType::PositionTry
         || type == StyleRuleType::ViewTransition
+        || type == StyleRuleType::EnvironmentMap
         || type == StyleRuleType::Function;
 }
 

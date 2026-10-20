@@ -26,7 +26,9 @@
 #pragma once
 
 #include "JSCJSValue.h"
+#include "JSStringInlines.h"
 #include "Lexer.h"
+#include "SourceCharacters.h"
 #include <wtf/dtoa.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -100,8 +102,8 @@ ALWAYS_INLINE static bool isStrWhiteSpace(CharacterType c)
 {
     // https://tc39.github.io/ecma262/#sec-tonumber-applied-to-the-string-type
     if constexpr (sizeof(c) == 1)
-        return Lexer<Latin1Character>::isWhiteSpace(c) || Lexer<Latin1Character>::isLineTerminator(c);
-    return Lexer<char16_t>::isWhiteSpace(c) || Lexer<char16_t>::isLineTerminator(c);
+        return isWhiteSpace<Latin1Character>(c) || isLineTerminator<Latin1Character>(c);
+    return isWhiteSpace<char16_t>(c) || isLineTerminator<char16_t>(c);
 }
 
 inline static std::optional<double> parseIntDouble(double n)
@@ -272,6 +274,32 @@ static ALWAYS_INLINE typename std::invoke_result<CallbackWhenNoException, String
 
 // Mapping from integers 0..35 to digit identifying this value, for radix 2..36.
 inline constexpr char radixDigits[37] = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+ALWAYS_INLINE static double parseIntString(JSGlobalObject* globalObject, JSString* string, int32_t radix)
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    // A short rope is copied out rather than flattened in place: the number token being parsed is rarely
+    // used again, so allocating a StringImpl for it would only add work for the allocator and the sweeper.
+    constexpr unsigned maxLengthForStackCopy = 64;
+    if (string->isNonSubstringRope() && string->length() <= maxLengthForStackCopy) {
+        if (string->is8Bit()) {
+            std::array<Latin1Character, maxLengthForStackCopy> buffer;
+            auto characters = std::span { buffer }.first(string->length());
+            string->resolveToBuffer(characters);
+            return parseInt(StringView { characters }, radix);
+        }
+        std::array<char16_t, maxLengthForStackCopy> buffer;
+        auto characters = std::span { buffer }.first(string->length());
+        string->resolveToBuffer(characters);
+        return parseInt(StringView { characters }, radix);
+    }
+
+    auto view = string->view(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    return parseInt(view, radix);
+}
 
 } // namespace JSC
 

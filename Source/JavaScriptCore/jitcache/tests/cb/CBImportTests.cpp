@@ -103,11 +103,11 @@ static unsigned familyOf()
     return result;
 }
 
-static bool hasEntries(TestContext& context, const StateImage& image, unsigned family, uint32_t minimum, ASCIILiteral what)
+static bool hasEntries(TestContext& context, const StateImage& image, unsigned family, uint32_t minimum, CBCheck check)
 {
     if (image.header.familyEntryCount[family] >= minimum)
         return true;
-    JITCACHE_FAIL(makeString("the subject has "_s, image.header.familyEntryCount[family], " entries in family "_s, family, ", fewer than the "_s, minimum, " "_s, what, " needs"_s));
+    JITCACHE_FAIL(makeString("the subject has "_s, image.header.familyEntryCount[family], " entries in family "_s, family, ", fewer than the "_s, minimum, " the "_s, description(check), " cases need"_s));
     return false;
 }
 
@@ -199,8 +199,9 @@ static void expectMutation(TestContext& context, const Subject& subject, const S
 
 // The body of the validation test's subject, which has an entry in every family a rule below changes. It is sloppy,
 // so `this` gives a to_this; Array(n) gives a jneq_ptr and a new_array_with_size; the nested literals give two
-// new_array and three new_array_buffer of each copy-on-write type; for-of gives iterator_open and iterator_next; for-in
-// gives the enumerator opcodes, and hasOwnProperty inside it a second jneq_ptr.
+// new_array and three new_array_buffer of each copy-on-write type; for-of gives iterator_open, iterator_next and the
+// iterator_close_check that closes the loop on an abrupt exit; for-in gives the enumerator opcodes, and hasOwnProperty
+// inside it a second jneq_ptr.
 #define CB_IMPORT_TESTS_SUBJECT_BODY \
     "(array, object, n) {\n" \
     "    var sum = 0;\n" \
@@ -251,71 +252,73 @@ static constexpr auto iterateSource = "function iterate(iterable) { var sum = 0;
     "function iterateTwin(iterable) { var sum = 0; for (var x of iterable) sum += x; return sum; }\n"
     "var array = [1, 2, 3];\n"_s;
 
-// StateHeader: the span's size, the layout version, the tier, the counter mode and reserved1.
+// A body whose only value-profiled instructions, the two property reads, run only when flag is set.
+static constexpr auto coldSource = "function cold(object, flag) { if (flag) return object.a + object.b; return 0; }\n"
+    "function coldTwin(object, flag) { if (flag) return object.a + object.b; return 0; }\n"
+    "var object = { a: 1, b: 2 };\n"_s;
+
+// StateHeader: the span's size, the layout version, the tier and the counter mode.
 static void expectHeaderRules(TestContext& context, const Subject& subject)
 {
-    expectOutcome(context, "V1: an empty span"_s, subject.section().first(0), subject, CBCheck::StateHeader);
-    expectOutcome(context, "V1: a span one byte short of a header"_s, subject.section().first(sizeof(CBFormat::StateHeader) - 1), subject, CBCheck::StateHeader);
-    expectMutation(context, subject, "V1: layout version 0"_s, CBCheck::StateHeader, [](StateImage& image) {
+    expectOutcome(context, "state-header: an empty span"_s, subject.section().first(0), subject, CBCheck::StateHeader);
+    expectOutcome(context, "state-header: a span one byte short of a header"_s, subject.section().first(sizeof(CBFormat::StateHeader) - 1), subject, CBCheck::StateHeader);
+    expectMutation(context, subject, "state-header: layout version 0"_s, CBCheck::StateHeader, [](StateImage& image) {
         image.header.layoutVersion = 0;
     });
-    expectMutation(context, subject, "V1: layout version 2"_s, CBCheck::StateHeader, [](StateImage& image) {
+    expectMutation(context, subject, "state-header: layout version 2"_s, CBCheck::StateHeader, [](StateImage& image) {
         image.header.layoutVersion = 2;
     });
-    expectMutation(context, subject, "V1: tier 0"_s, CBCheck::StateHeader, [](StateImage& image) {
+    expectMutation(context, subject, "state-header: tier 0"_s, CBCheck::StateHeader, [](StateImage& image) {
         image.header.tier = 0;
     });
-    expectMutation(context, subject, "V1: tier 2"_s, CBCheck::StateHeader, [](StateImage& image) {
+    expectMutation(context, subject, "state-header: tier 2"_s, CBCheck::StateHeader, [](StateImage& image) {
         image.header.tier = 2;
     });
-    expectMutation(context, subject, "V1: counter mode 2"_s, CBCheck::StateHeader, [](StateImage& image) {
+    expectMutation(context, subject, "state-header: counter mode 2"_s, CBCheck::StateHeader, [](StateImage& image) {
         image.header.counterMode = 2;
     });
-    expectMutation(context, subject, "V1: counter mode NotCarried with zero counter fields"_s, std::nullopt, [](StateImage& image) {
+    expectMutation(context, subject, "state-header: counter mode NotCarried with zero counter fields"_s, std::nullopt, [](StateImage& image) {
         setCounter(image, CBFormat::CounterMode::NotCarried, { });
-    });
-    expectMutation(context, subject, "V1: reserved1 1"_s, CBCheck::StateHeader, [](StateImage& image) {
-        image.header.reserved1 = 1;
     });
 }
 
 // ArgumentCount, ValueProfileCount, FamilyCount and StateLength.
 static void expectCountAndLengthRules(TestContext& context, const Subject& subject, const Subject& asyncSubject)
 {
-    expectMutation(context, subject, "V2: one argument more"_s, CBCheck::ArgumentCount, [](StateImage& image) {
+    expectMutation(context, subject, "state-argument-count: one argument more"_s, CBCheck::ArgumentCount, [](StateImage& image) {
         ++image.header.numArguments;
         image.argumentPredictions.append(SpecNone);
     });
-    expectMutation(context, subject, "V2: one argument fewer"_s, CBCheck::ArgumentCount, [](StateImage& image) {
+    expectMutation(context, subject, "state-argument-count: one argument fewer"_s, CBCheck::ArgumentCount, [](StateImage& image) {
         --image.header.numArguments;
         image.argumentPredictions.removeLast();
     });
 
     if (subject.image.header.numValueProfiles) {
-        expectMutation(context, subject, "V3: one value profile more"_s, CBCheck::ValueProfileCount, [](StateImage& image) {
+        expectMutation(context, subject, "state-value-profile-count: one value profile more"_s, CBCheck::ValueProfileCount, [](StateImage& image) {
             ++image.header.numValueProfiles;
             image.valuePredictions.append(SpecNone);
         });
-        expectMutation(context, subject, "V3: one value profile fewer"_s, CBCheck::ValueProfileCount, [](StateImage& image) {
+        expectMutation(context, subject, "state-value-profile-count: one value profile fewer"_s, CBCheck::ValueProfileCount, [](StateImage& image) {
             --image.header.numValueProfiles;
             image.valuePredictions.removeLast();
         });
     } else
-        JITCACHE_FAIL("the subject has no value profile for V3"_s);
+        JITCACHE_FAIL("the subject has no value profile for the state-value-profile-count cases"_s);
 
     unsigned getByVal = familyOf<CBFormat::FamilyKind::ArrayProfile, OpGetByVal>();
-    if (hasEntries(context, subject.image, getByVal, 1, "V4"_s)) {
-        expectMutation(context, subject, "V4: one get_by_val entry more"_s, CBCheck::FamilyCount, [&](StateImage& image) {
+    if (hasEntries(context, subject.image, getByVal, 1, CBCheck::FamilyCount)) {
+        expectMutation(context, subject, "state-family-count: one get_by_val entry more"_s, CBCheck::FamilyCount, [&](StateImage& image) {
             appendFamilyRecord(image, image.arrayProfiles, getByVal, CBFormat::ArrayProfileRecord { });
         });
-        expectMutation(context, subject, "V4: one get_by_val entry fewer"_s, CBCheck::FamilyCount, [&](StateImage& image) {
+        expectMutation(context, subject, "state-family-count: one get_by_val entry fewer"_s, CBCheck::FamilyCount, [&](StateImage& image) {
             removeLastFamilyRecord(image, image.arrayProfiles, getByVal);
         });
     }
     // Only builtins emit new_array_with_species, so the subject has no entry of that family.
     unsigned species = familyOf<CBFormat::FamilyKind::ArrayProfile, OpNewArrayWithSpecies>();
     if (!subject.image.header.familyEntryCount[species]) {
-        expectMutation(context, subject, "V4: an entry in a family the body lacks"_s, CBCheck::FamilyCount, [&](StateImage& image) {
+        expectMutation(context, subject, "state-family-count: an entry in a family the body lacks"_s, CBCheck::FamilyCount, [&](StateImage& image) {
             appendFamilyRecord(image, image.arrayProfiles, species, CBFormat::ArrayProfileRecord { });
         });
     } else
@@ -323,8 +326,8 @@ static void expectCountAndLengthRules(TestContext& context, const Subject& subje
 
     Vector<uint64_t> longer = subject.words;
     longer.append(0);
-    expectOutcome(context, "V5: eight bytes past the section"_s, bytesOf(longer), subject, CBCheck::StateLength);
-    expectOutcome(context, "V5: eight bytes short of the section"_s, subject.section().first(subject.section().size() - sizeof(uint64_t)), subject, CBCheck::StateLength);
+    expectOutcome(context, "state-length: eight bytes past the section"_s, bytesOf(longer), subject, CBCheck::StateLength);
+    expectOutcome(context, "state-length: eight bytes short of the section"_s, subject.section().first(subject.section().size() - sizeof(uint64_t)), subject, CBCheck::StateLength);
 
     // The padding rule needs a section whose byte-sized arrays end short of an 8-byte boundary.
     bool checkedPadding = false;
@@ -334,46 +337,46 @@ static void expectCountAndLengthRules(TestContext& context, const Subject& subje
             continue;
         Vector<uint64_t> padded = candidate->words;
         asMutableByteSpan(padded.mutableSpan())[layout->size - 1] = 1;
-        expectOutcome(context, "V5: a nonzero padding byte"_s, bytesOf(padded), *candidate, CBCheck::StateLength);
+        expectOutcome(context, "state-length: a nonzero padding byte"_s, bytesOf(padded), *candidate, CBCheck::StateLength);
         checkedPadding = true;
         break;
     }
     if (!checkedPadding)
-        JITCACHE_FAIL("neither subject's section has a padding byte for V5"_s);
+        JITCACHE_FAIL("neither subject's section has a padding byte for the state-length cases"_s);
 }
 
 // ValuePrediction and ArrayProfile.
 static void expectPredictionAndArrayProfileRules(TestContext& context, const Subject& subject)
 {
-    expectMutation(context, subject, "V6: argument 0 at SpecBytecodeTop"_s, std::nullopt, [](StateImage& image) {
+    expectMutation(context, subject, "state-value-prediction: argument 0 at SpecBytecodeTop"_s, std::nullopt, [](StateImage& image) {
         image.argumentPredictions[0] = SpecBytecodeTop;
     });
-    expectMutation(context, subject, "V6: argument 0 past SpecBytecodeTop"_s, CBCheck::ValuePrediction, [](StateImage& image) {
+    expectMutation(context, subject, "state-value-prediction: argument 0 past SpecBytecodeTop"_s, CBCheck::ValuePrediction, [](StateImage& image) {
         image.argumentPredictions[0] = SpecBytecodeTop | predictionOutsideBytecodeTop;
     });
     if (!subject.image.valuePredictions.isEmpty()) {
-        expectMutation(context, subject, "V6: value profile 1 at SpecBytecodeTop"_s, std::nullopt, [](StateImage& image) {
+        expectMutation(context, subject, "state-value-prediction: value profile 1 at SpecBytecodeTop"_s, std::nullopt, [](StateImage& image) {
             image.valuePredictions[0] = SpecBytecodeTop;
         });
-        expectMutation(context, subject, "V6: value profile 1 past SpecBytecodeTop"_s, CBCheck::ValuePrediction, [](StateImage& image) {
+        expectMutation(context, subject, "state-value-prediction: value profile 1 past SpecBytecodeTop"_s, CBCheck::ValuePrediction, [](StateImage& image) {
             image.valuePredictions[0] = SpecBytecodeTop | predictionOutsideBytecodeTop;
         });
     }
 
     if (subject.image.arrayProfiles.isEmpty()) {
-        JITCACHE_FAIL("the subject has no array profile for V7"_s);
+        JITCACHE_FAIL("the subject has no array profile for the state-array-profile cases"_s);
         return;
     }
-    expectMutation(context, subject, "V7: every array mode"_s, std::nullopt, [](StateImage& image) {
+    expectMutation(context, subject, "state-array-profile: every array mode"_s, std::nullopt, [](StateImage& image) {
         image.arrayProfiles[0].observedArrayModes = ALL_ARRAY_MODES;
     });
-    expectMutation(context, subject, "V7: an array mode past ALL_ARRAY_MODES"_s, CBCheck::ArrayProfile, [](StateImage& image) {
+    expectMutation(context, subject, "state-array-profile: an array mode past ALL_ARRAY_MODES"_s, CBCheck::ArrayProfile, [](StateImage& image) {
         image.arrayProfiles[0].observedArrayModes = ALL_ARRAY_MODES | arrayModeOutsideAllModes;
     });
-    expectMutation(context, subject, "V7: all eight flags"_s, std::nullopt, [](StateImage& image) {
+    expectMutation(context, subject, "state-array-profile: all eight flags"_s, std::nullopt, [](StateImage& image) {
         image.arrayProfiles[0].flags = 0xff;
     });
-    expectMutation(context, subject, "V7: a ninth flag"_s, CBCheck::ArrayProfile, [](StateImage& image) {
+    expectMutation(context, subject, "state-array-profile: a ninth flag"_s, CBCheck::ArrayProfile, [](StateImage& image) {
         image.arrayProfiles[0].flags = 0x100;
     });
 }
@@ -382,9 +385,9 @@ static void expectPredictionAndArrayProfileRules(TestContext& context, const Sub
 static void expectAllocationHintRules(TestContext& context, const Subject& subject)
 {
     unsigned newArray = familyOf<CBFormat::FamilyKind::AllocationHint, OpNewArray>();
-    if (hasEntries(context, subject.image, newArray, 1, "V8"_s)) {
+    if (hasEntries(context, subject.image, newArray, 1, CBCheck::AllocationHint)) {
         auto expectNewArrayHint = [&](ASCIILiteral what, IndexingType indexingType, unsigned vectorLength, std::optional<CBCheck> expected) {
-            expectMutation(context, subject, makeString("V8: new_array hint "_s, what), expected, [&](StateImage& image) {
+            expectMutation(context, subject, makeString("state-allocation-hint: new_array hint "_s, what), expected, [&](StateImage& image) {
                 image.allocationHints[recordIndex(image, newArray, 0)] = CBFormat::encodeAllocationHint(indexingType, vectorLength);
             });
         };
@@ -410,12 +413,12 @@ static void expectAllocationHintRules(TestContext& context, const Subject& subje
         else if (recommendedIndexingType == CopyOnWriteArrayWithContiguous)
             literals[2].append(metadataID);
     });
-    if (literals[0].size() != 3 || literals[1].size() != 3 || literals[2].size() != 3 || !hasEntries(context, subject.image, CBFormat::newArrayBufferFamily, 9, "V8"_s)) {
+    if (literals[0].size() != 3 || literals[1].size() != 3 || literals[2].size() != 3 || !hasEntries(context, subject.image, CBFormat::newArrayBufferFamily, 9, CBCheck::AllocationHint)) {
         JITCACHE_FAIL(makeString("the subject's literals are "_s, literals[0].size(), " Int32, "_s, literals[1].size(), " Double and "_s, literals[2].size(), " Contiguous instead of three of each"_s));
         return;
     }
     auto expectLiteralHint = [&](ASCIILiteral what, unsigned metadataID, IndexingType indexingType, std::optional<CBCheck> expected) {
-        expectMutation(context, subject, makeString("V8: "_s, what, " (entry "_s, metadataID, ')'), expected, [&](StateImage& image) {
+        expectMutation(context, subject, makeString("state-allocation-hint: "_s, what, " (entry "_s, metadataID, ')'), expected, [&](StateImage& image) {
             uint16_t& hint = image.allocationHints[recordIndex(image, CBFormat::newArrayBufferFamily, metadataID)];
             hint = CBFormat::encodeAllocationHint(indexingType, CBFormat::allocationHintVectorLength(hint));
         });
@@ -439,30 +442,37 @@ static void expectAllocationHintRules(TestContext& context, const Subject& subje
 static void expectIterationModeRules(TestContext& context, const Subject& subject, const Subject& asyncSubject)
 {
     auto expectModes = [&](const Subject& owner, unsigned family, ASCIILiteral what, uint16_t modes, std::optional<CBCheck> expected) {
-        expectMutation(context, owner, makeString("V9: "_s, what), expected, [&](StateImage& image) {
+        expectMutation(context, owner, makeString("state-iteration-modes: "_s, what), expected, [&](StateImage& image) {
             image.iterationModes[recordIndex(image, family, 0)] = modes;
         });
     };
 
-    if (hasEntries(context, subject.image, CBFormat::iteratorOpenIterationModesFamily, 1, "V9"_s)) {
+    if (hasEntries(context, subject.image, CBFormat::iteratorOpenIterationModesFamily, 1, CBCheck::IterationModes)) {
         unsigned family = CBFormat::iteratorOpenIterationModesFamily;
         expectModes(subject, family, "iterator_open's full mask"_s, 0x1fff, std::nullopt);
         expectModes(subject, family, "FastAsyncGenerator at iterator_open"_s, iterationModeBit(IterationMode::FastAsyncGenerator), CBCheck::IterationModes);
         expectModes(subject, family, "AsyncFromSync at iterator_open"_s, iterationModeBit(IterationMode::AsyncFromSync), CBCheck::IterationModes);
     }
-    if (hasEntries(context, subject.image, CBFormat::iteratorNextIterationModesFamily, 1, "V9"_s)) {
+    if (hasEntries(context, subject.image, CBFormat::iteratorNextIterationModesFamily, 1, CBCheck::IterationModes)) {
         unsigned family = CBFormat::iteratorNextIterationModesFamily;
-        expectModes(subject, family, "iterator_next's full mask"_s, 0x1ff1, std::nullopt);
-        expectModes(subject, family, "FastArray at iterator_next"_s, iterationModeBit(IterationMode::FastArray), CBCheck::IterationModes);
+        expectModes(subject, family, "iterator_next's full mask"_s, 0x1ff3, std::nullopt);
+        expectModes(subject, family, "FastArray at iterator_next"_s, iterationModeBit(IterationMode::FastArray), std::nullopt);
         expectModes(subject, family, "FastMap at iterator_next"_s, iterationModeBit(IterationMode::FastMap), CBCheck::IterationModes);
         expectModes(subject, family, "FastSet at iterator_next"_s, iterationModeBit(IterationMode::FastSet), CBCheck::IterationModes);
     }
-    if (hasEntries(context, asyncSubject.image, CBFormat::asyncIteratorOpenIterationModesFamily, 1, "V9"_s)) {
+    // The for-of's iterator_close_check, which keeps its modes in a byte.
+    if (hasEntries(context, subject.image, CBFormat::iteratorCloseCheckIterationModesFamily, 1, CBCheck::IterationModes)) {
+        unsigned family = CBFormat::iteratorCloseCheckIterationModesFamily;
+        expectModes(subject, family, "iterator_close_check's full mask"_s, 0x12, std::nullopt);
+        expectModes(subject, family, "Generic at iterator_close_check"_s, iterationModeBit(IterationMode::Generic), CBCheck::IterationModes);
+        expectModes(subject, family, "FastMap at iterator_close_check"_s, iterationModeBit(IterationMode::FastMap), CBCheck::IterationModes);
+    }
+    if (hasEntries(context, asyncSubject.image, CBFormat::asyncIteratorOpenIterationModesFamily, 1, CBCheck::IterationModes)) {
         unsigned family = CBFormat::asyncIteratorOpenIterationModesFamily;
         expectModes(asyncSubject, family, "async_iterator_open's full mask"_s, 0x6001, std::nullopt);
         expectModes(asyncSubject, family, "FastArray at async_iterator_open"_s, iterationModeBit(IterationMode::FastArray), CBCheck::IterationModes);
     }
-    if (hasEntries(context, asyncSubject.image, CBFormat::asyncIteratorNextIterationModesFamily, 1, "V9"_s)) {
+    if (hasEntries(context, asyncSubject.image, CBFormat::asyncIteratorNextIterationModesFamily, 1, CBCheck::IterationModes)) {
         unsigned family = CBFormat::asyncIteratorNextIterationModesFamily;
         expectModes(asyncSubject, family, "async_iterator_next's full mask"_s, 0x2001, std::nullopt);
         expectModes(asyncSubject, family, "AsyncFromSync at async_iterator_next"_s, iterationModeBit(IterationMode::AsyncFromSync), CBCheck::IterationModes);
@@ -473,28 +483,28 @@ static void expectIterationModeRules(TestContext& context, const Subject& subjec
 static void expectByteRules(TestContext& context, const Subject& subject)
 {
     unsigned enumeratorNext = familyOf<CBFormat::FamilyKind::EnumeratorModes, OpEnumeratorNext>();
-    if (hasEntries(context, subject.image, enumeratorNext, 1, "V10"_s)) {
-        expectMutation(context, subject, "V10: every enumerator flag"_s, std::nullopt, [&](StateImage& image) {
+    if (hasEntries(context, subject.image, enumeratorNext, 1, CBCheck::EnumeratorModes)) {
+        expectMutation(context, subject, "state-enumerator-modes: every enumerator flag"_s, std::nullopt, [&](StateImage& image) {
             image.enumeratorModes[recordIndex(image, enumeratorNext, 0)] = static_cast<uint8_t>(JSPropertyNameEnumerator::IndexedMode | JSPropertyNameEnumerator::OwnStructureMode
                 | JSPropertyNameEnumerator::GenericMode | JSPropertyNameEnumerator::HasSeenOwnStructureModeStructureMismatch);
         });
-        expectMutation(context, subject, "V10: a fifth enumerator flag"_s, CBCheck::EnumeratorModes, [&](StateImage& image) {
+        expectMutation(context, subject, "state-enumerator-modes: a fifth enumerator flag"_s, CBCheck::EnumeratorModes, [&](StateImage& image) {
             image.enumeratorModes[recordIndex(image, enumeratorNext, 0)] = 0x10;
         });
     }
-    if (hasEntries(context, subject.image, CBFormat::toThisStatusFamily, 1, "V11"_s)) {
-        expectMutation(context, subject, "V11: ToThisClearedByGC"_s, std::nullopt, [](StateImage& image) {
+    if (hasEntries(context, subject.image, CBFormat::toThisStatusFamily, 1, CBCheck::ToThisStatus)) {
+        expectMutation(context, subject, "state-to-this-status: ToThisClearedByGC"_s, std::nullopt, [](StateImage& image) {
             image.toThisStatuses[recordIndex(image, CBFormat::toThisStatusFamily, 0)] = static_cast<uint8_t>(ToThisClearedByGC);
         });
-        expectMutation(context, subject, "V11: a status past ToThisClearedByGC"_s, CBCheck::ToThisStatus, [](StateImage& image) {
+        expectMutation(context, subject, "state-to-this-status: a status past ToThisClearedByGC"_s, CBCheck::ToThisStatus, [](StateImage& image) {
             image.toThisStatuses[recordIndex(image, CBFormat::toThisStatusFamily, 0)] = static_cast<uint8_t>(ToThisClearedByGC + 1);
         });
     }
-    if (hasEntries(context, subject.image, CBFormat::branchBitFamily, 1, "V12"_s)) {
-        expectMutation(context, subject, "V12: a branch bit of 1"_s, std::nullopt, [](StateImage& image) {
+    if (hasEntries(context, subject.image, CBFormat::branchBitFamily, 1, CBCheck::BranchBit)) {
+        expectMutation(context, subject, "state-branch-bit: a branch bit of 1"_s, std::nullopt, [](StateImage& image) {
             image.branchBits[recordIndex(image, CBFormat::branchBitFamily, 0)] = 1;
         });
-        expectMutation(context, subject, "V12: a branch bit of 2"_s, CBCheck::BranchBit, [](StateImage& image) {
+        expectMutation(context, subject, "state-branch-bit: a branch bit of 2"_s, CBCheck::BranchBit, [](StateImage& image) {
             image.branchBits[recordIndex(image, CBFormat::branchBitFamily, 0)] = 2;
         });
     }
@@ -509,7 +519,7 @@ static void expectLazyOperandRules(TestContext& context, const Subject& subject)
     int32_t firstLocal = virtualRegisterForLocal(0).offset();
     auto expectRecords = [&](ASCIILiteral what, std::optional<CBCheck> expected, std::initializer_list<CBFormat::LazyOperandRecord> records) {
         Vector<CBFormat::LazyOperandRecord> list(records);
-        expectMutation(context, subject, makeString("V13: "_s, what), expected, [&](StateImage& image) {
+        expectMutation(context, subject, makeString("state-lazy-operand: "_s, what), expected, [&](StateImage& image) {
             setLazyOperands(image, list);
         });
     };
@@ -545,21 +555,21 @@ static void expectTierUpAndCounterRules(TestContext& context, const Subject& sub
 {
     uint16_t maximumDelay = static_cast<uint16_t>(Options::maximumOptimizationDelay());
     uint16_t maximumReoptimizations = static_cast<uint16_t>(Options::reoptimizationRetryCounterMax());
-    expectMutation(context, subject, "V14: the most profile deferrals"_s, std::nullopt, [&](StateImage& image) {
+    expectMutation(context, subject, "state-tier-up-history: the most profile deferrals"_s, std::nullopt, [&](StateImage& image) {
         image.header.optimizationDelayCounter = maximumDelay;
     });
-    expectMutation(context, subject, "V14: one profile deferral past the most"_s, CBCheck::TierUpHistory, [&](StateImage& image) {
+    expectMutation(context, subject, "state-tier-up-history: one profile deferral past the most"_s, CBCheck::TierUpHistory, [&](StateImage& image) {
         image.header.optimizationDelayCounter = maximumDelay + 1;
     });
-    expectMutation(context, subject, "V14: the most reoptimizations"_s, std::nullopt, [&](StateImage& image) {
+    expectMutation(context, subject, "state-tier-up-history: the most reoptimizations"_s, std::nullopt, [&](StateImage& image) {
         image.header.reoptimizationRetryCounter = maximumReoptimizations;
     });
-    expectMutation(context, subject, "V14: one reoptimization past the most"_s, CBCheck::TierUpHistory, [&](StateImage& image) {
+    expectMutation(context, subject, "state-tier-up-history: one reoptimization past the most"_s, CBCheck::TierUpHistory, [&](StateImage& image) {
         image.header.reoptimizationRetryCounter = maximumReoptimizations + 1;
     });
 
     auto expectCounter = [&](ASCIILiteral what, CBFormat::CounterMode mode, CounterTriple triple, std::optional<CBCheck> expected) {
-        expectMutation(context, subject, makeString("V15: "_s, what), expected, [&](StateImage& image) {
+        expectMutation(context, subject, makeString("state-counter: "_s, what), expected, [&](StateImage& image) {
             setCounter(image, mode, triple);
         });
     };
@@ -601,13 +611,14 @@ static void restoreOnNewborn(TestContext& context, JSFunction* function, std::sp
 static String describeRestore(const CounterTriple& counter, const CBCounterRestore& restore)
 {
     return makeString(" (counter "_s, counter.value, ", total "_s, counter.totalCount, ", threshold "_s, counter.activeThreshold, "; carried "_s, static_cast<unsigned>(restore.carried),
-        ", crossed "_s, static_cast<unsigned>(restore.crossed), ", nativeSlice "_s, restore.nativeSlice, ", slice "_s, restore.slice, ')');
+        ", crossed "_s, static_cast<unsigned>(restore.crossed), ", nativeSlice "_s, restore.nativeSlice, ", slice "_s, restore.slice, ", startupDeferralScale "_s, restore.startupDeferralScale, ')');
 }
 
-// The counter finishCounter restores from a carried record, and, for a finite threshold, the native reference: a stack
-// counter given the same triple and checked on the same CB right after finishCounter, which no pool change can separate
-// from finishCounter's own check in a VM with useConcurrentJIT off that is alone in its process.
-static void checkCarriedRestore(TestContext& context, ASCIILiteral what, CodeBlock& codeBlock, const CounterTriple& record, const CBCounterRestore& restore)
+// The counter finishCounter restores from a carried record under the VM's startup deferral scale, and, for a finite
+// threshold, the native reference: a stack counter given the same triple and checked on the same CB with the same scale
+// right after finishCounter, which no pool change can separate from finishCounter's own check in a VM with
+// useConcurrentJIT off that is alone in its process.
+static void checkCarriedRestore(TestContext& context, const String& what, CodeBlock& codeBlock, const CounterTriple& record, const CBCounterRestore& restore, double scale)
 {
     CounterTriple live = liveCounter(codeBlock);
     auto fail = [&](ASCIILiteral rule) {
@@ -619,6 +630,8 @@ static void checkCarriedRestore(TestContext& context, ASCIILiteral what, CodeBlo
 
     if (!restore.carried)
         fail("the restore does not say the counter was carried"_s);
+    if (restore.startupDeferralScale != scale)
+        fail("the restore does not report the VM's startup deferral scale"_s);
     if (live.activeThreshold != record.activeThreshold)
         fail("the active threshold is not the captured one"_s);
     if (restore.slice != std::max(restore.nativeSlice, sliceFloor))
@@ -637,29 +650,32 @@ static void checkCarriedRestore(TestContext& context, ASCIILiteral what, CodeBlo
         return;
     }
 
-    // The envelope M >= 1 leaves to any pool.
+    // The envelope M >= 1 and s >= 1 leave to any pool. The ceiling C bounds the slice only at a scale of 1, since a
+    // scaled slice may run to one unscaled period, M * T.
     int64_t ceiling = maximumExecutionCountsBetweenCheckpoints(CountingForBaseline, &codeBlock);
-    bool sliceInEnvelope = restore.crossed ? !restore.nativeSlice : restore.nativeSlice >= 0 && restore.nativeSlice <= ceiling;
+    bool sliceInEnvelope = restore.crossed ? !restore.nativeSlice : restore.nativeSlice >= 0 && (scale != 1 || restore.nativeSlice <= ceiling);
     if (!sliceInEnvelope)
-        fail("the native slice lies outside [0, C], or is not 0 after a crossing"_s);
+        fail("the native slice is negative, passes C at a scale of 1, or is not 0 after a crossing"_s);
     double threshold = record.activeThreshold;
-    if (progress < threshold - std::min(threshold, static_cast<double>(ceiling)) / 2) {
-        if (restore.crossed || restore.nativeSlice < static_cast<int64_t>(std::trunc(std::min(threshold - progress, static_cast<double>(ceiling)))))
-            fail("a progress short of the threshold crossed or armed less than T - P"_s);
+    double scaledThreshold = scale * threshold;
+    if (progress < scaledThreshold - std::min(threshold, static_cast<double>(ceiling)) / 2) {
+        if (restore.crossed || restore.nativeSlice < static_cast<int64_t>(std::trunc(std::min(scaledThreshold - progress, static_cast<double>(ceiling)))))
+            fail("a progress short of the scaled threshold crossed or armed less than s * T - P"_s);
     }
 
     BaselineExecutionCounter reference;
     reference.m_activeThreshold = record.activeThreshold;
     reference.m_totalCount = record.totalCount;
     reference.m_counter = record.value;
-    bool crossed = reference.checkIfThresholdCrossedAndSet(&codeBlock);
+    bool crossed = reference.checkIfThresholdCrossedAndSet(&codeBlock, scale);
     int64_t nativeSlice = crossed ? 0 : -static_cast<int64_t>(reference.m_counter);
     if (restore.crossed != crossed || restore.nativeSlice != nativeSlice)
-        fail("the restore differs from the native check of the same triple"_s);
+        fail("the restore differs from the native check of the same triple and scale"_s);
 }
 
 // The counter after finishCounter when it does not travel: finishCounter left setup's arming, which follows the seeded
-// reoptimization count and the UCB's quick DFG bit, and setup's aging sample of the fresh counter.
+// reoptimization count and the UCB's quick DFG bit and never the startup deferral scale, and setup's aging sample of the
+// fresh counter.
 static void checkSetupArming(TestContext& context, const String& what, CodeBlock& codeBlock, const CounterTriple& armed, const CBCounterRestore& restore, bool quickDFGTierUp)
 {
     CounterTriple live = liveCounter(codeBlock);
@@ -668,6 +684,8 @@ static void checkSetupArming(TestContext& context, const String& what, CodeBlock
     };
     if (restore.carried || restore.crossed)
         fail("the restore says a counter that did not travel was carried or crossed"_s);
+    if (restore.startupDeferralScale != 1)
+        fail("the restore of a counter that did not travel reports a scale other than 1"_s);
     if (live != armed)
         fail("finishCounter changed the counter setup armed"_s);
     if (restore.nativeSlice != -static_cast<int64_t>(live.value) || restore.slice != restore.nativeSlice)
@@ -767,8 +785,8 @@ JITCACHE_TEST(cbImportValidationGivesExactlyTheExpectedCheck, Yes)
 
 // A CB that already ran fails StrictNewborn, and a newborn CB that seedLinkedState already wrote fails StrictLinkState,
 // so seeding, which the glue calls only after prepare succeeds for that CB, never reaches either; StrictCounter rejects
-// negative progress under a finite threshold and accepts it under INT32_MAX; and lazy-operand keys outside the CB's own
-// frame, as an inlined CB holds, pass prepare.
+// negative progress under a finite threshold when no float rounding of the total explains it, and accepts it under
+// INT32_MAX; and lazy-operand keys outside the CB's own frame, as an inlined CB holds, pass prepare.
 JITCACHE_TEST(cbImportStrictRejectsAStaleCodeBlockOrCounter, Yes)
 {
     VM& vm = *context.vm();
@@ -852,9 +870,10 @@ JITCACHE_TEST(cbImportStrictRejectsAStaleCodeBlockOrCounter, Yes)
 }
 
 // finishCounter on a CB after setup restores each carried record's counter as checkCarriedRestore requires, and for a
-// finite threshold equals the native reference; two splits of the same P under the same finite T restore identical
+// finite threshold equals the native reference, with the VM's startup deferral scale at 1 and at 4, where a progress P
+// between T and 4 * T - min(T, C) / 2 does not cross; two splits of the same P under the same finite T restore identical
 // counters; and a counter that did not travel stays as setup armed it, for reoptimization counts of 0 and 3 with the
-// quick DFG bit set and clear.
+// quick DFG bit set and clear, and reports a scale of 1 at either scale.
 JITCACHE_TEST_WITH_OPTIONS(cbImportFinishCounterRestoresTheCapturedCounter, Yes, "--useConcurrentJIT=false")
 {
     VM& vm = *context.vm();
@@ -883,17 +902,28 @@ JITCACHE_TEST_WITH_OPTIONS(cbImportFinishCounterRestoresTheCapturedCounter, Yes,
         { "a finite counter already past the floor"_s, { -5, 700, 1000 } },
         { "an infinite counter already past the floor"_s, { -5, 1005, infinite } },
         { "an infinite counter already crossed"_s, { 10, 990, infinite } },
+        { "P = 2 * T"_s, { -1000, 3000, 1000 } },
     };
-    for (const auto& carriedCase : carriedCases) {
-        StateImage carried = *image;
-        setCounter(carried, CBFormat::CounterMode::Carried, carriedCase.record);
-        auto words = encodeState(context, carried);
-        if (!words)
-            return;
-        restoreOnNewborn(context, realm->twin, bytesOf(*words), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CounterTriple&, const CBCounterRestore& restore) {
-            checkCarriedRestore(context, carriedCase.name, codeBlock, carriedCase.record, restore);
-        });
+    constexpr double scaled = 4;
+    for (double scale : { 1.0, scaled }) {
+        vm.setStartupJITDeferralScale(scale);
+        for (const auto& carriedCase : carriedCases) {
+            StateImage carried = *image;
+            setCounter(carried, CBFormat::CounterMode::Carried, carriedCase.record);
+            auto words = encodeState(context, carried);
+            if (!words)
+                return;
+            String what = makeString(carriedCase.name, " at a startup deferral scale of "_s, scale);
+            restoreOnNewborn(context, realm->twin, bytesOf(*words), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CounterTriple&, const CBCounterRestore& restore) {
+                checkCarriedRestore(context, what, codeBlock, carriedCase.record, restore, scale);
+                // P = 2 * T lies between T and 4 * T - min(T, C) / 2 whatever the ceiling: only the scale keeps it from
+                // crossing.
+                if (scale == scaled && carriedCase.record == CounterTriple { -1000, 3000, 1000 } && restore.crossed)
+                    JITCACHE_FAIL(makeString(what, ": crossed"_s));
+            });
+        }
     }
+    vm.setStartupJITDeferralScale(1);
 
     // The producer's split between m_counter and m_totalCount stays local.
     std::optional<CounterTriple> firstCounter;
@@ -905,7 +935,7 @@ JITCACHE_TEST_WITH_OPTIONS(cbImportFinishCounterRestoresTheCapturedCounter, Yes,
         if (!words)
             return;
         restoreOnNewborn(context, realm->twin, bytesOf(*words), code.get(), nothingBeforeSetup, [&](CodeBlock& codeBlock, const CounterTriple&, const CBCounterRestore& restore) {
-            checkCarriedRestore(context, "a split of P = 500.5"_s, codeBlock, split, restore);
+            checkCarriedRestore(context, "a split of P = 500.5"_s, codeBlock, split, restore, 1);
             CounterTriple live = liveCounter(codeBlock);
             if (!firstCounter) {
                 firstCounter = live;
@@ -920,23 +950,99 @@ JITCACHE_TEST_WITH_OPTIONS(cbImportFinishCounterRestoresTheCapturedCounter, Yes,
     }
     JITCACHE_CHECK(firstCounter && firstRestore);
 
-    for (uint16_t reoptimizations : { 0, 3 }) {
-        for (bool quickDFGTierUp : { false, true }) {
-            StateImage notCarried = *image;
-            setCounter(notCarried, CBFormat::CounterMode::NotCarried, { });
-            notCarried.header.reoptimizationRetryCounter = reoptimizations;
-            auto words = encodeState(context, notCarried);
-            if (!words)
-                return;
-            String what = makeString("NotCarried with "_s, reoptimizations, " reoptimizations and the quick DFG bit "_s, quickDFGTierUp ? "set"_s : "clear"_s);
-            restoreOnNewborn(context, realm->twin, bytesOf(*words), code.get(), [&](CodeBlock& codeBlock) {
-                codeBlock.unlinkedCodeBlock()->setQuickDFGTierUp(quickDFGTierUp ? TriState::True : TriState::False);
-            }, [&](CodeBlock& codeBlock, const CounterTriple& armed, const CBCounterRestore& restore) {
-                JITCACHE_CHECK(codeBlock.reoptimizationRetryCounter() == reoptimizations);
-                checkSetupArming(context, what, codeBlock, armed, restore, quickDFGTierUp);
-            });
+    for (double scale : { 1.0, scaled }) {
+        vm.setStartupJITDeferralScale(scale);
+        for (uint16_t reoptimizations : { 0, 3 }) {
+            for (bool quickDFGTierUp : { false, true }) {
+                StateImage notCarried = *image;
+                setCounter(notCarried, CBFormat::CounterMode::NotCarried, { });
+                notCarried.header.reoptimizationRetryCounter = reoptimizations;
+                auto words = encodeState(context, notCarried);
+                if (!words)
+                    return;
+                String what = makeString("NotCarried with "_s, reoptimizations, " reoptimizations and the quick DFG bit "_s, quickDFGTierUp ? "set"_s : "clear"_s, " at a startup deferral scale of "_s, scale);
+                restoreOnNewborn(context, realm->twin, bytesOf(*words), code.get(), [&](CodeBlock& codeBlock) {
+                    codeBlock.unlinkedCodeBlock()->setQuickDFGTierUp(quickDFGTierUp ? TriState::True : TriState::False);
+                }, [&](CodeBlock& codeBlock, const CounterTriple& armed, const CBCounterRestore& restore) {
+                    JITCACHE_CHECK(codeBlock.reoptimizationRetryCounter() == reoptimizations);
+                    checkSetupArming(context, what, codeBlock, armed, restore, quickDFGTierUp);
+                });
+            }
         }
     }
+    vm.setStartupJITDeferralScale(1);
+}
+
+// A slice that the startup deferral scale lets past 2^24 can leave the float total below trunc(slice), so count() is
+// slightly negative under a finite threshold. With the slice ceiling at 2^25 + 1, a threshold of 10^7 and a scale of 4,
+// finishCounter re-slices a fresh arming's progress of 0.25 to exactly that ceiling for any pool multiplier below 3.3,
+// and the float nearest 33554433.25 is 33554432, so count() is -1. A strict capture of that CB, as a delta takes of an
+// imported body that has not run since, succeeds, and a strict prepare of what it captured accepts the counter. A total
+// below the float nearest -counterValue, which no native counter holds, still fails StrictCounter.
+JITCACHE_TEST_WITH_OPTIONS(cbImportStrictAcceptsAScaledCounterRoundedBelowItsSlice, Yes, "--useConcurrentJIT=false --maximumExecutionCountsBetweenCheckpointsForBaseline=33554433")
+{
+    VM& vm = *context.vm();
+    auto realm = createElementRealm(context, vm);
+    if (!realm)
+        return;
+    auto image = captureState(context, *realm->producer);
+    if (!image)
+        return;
+    Ref<BaselineJITCode> code = baselineCodeOf(*realm->producer);
+
+    constexpr int64_t ceiling = 33554433;
+    constexpr int32_t threshold = 10000000;
+    constexpr double scale = 4;
+    const CounterTriple record { -1000, 1000.25f, threshold };
+    StateImage carried = *image;
+    setCounter(carried, CBFormat::CounterMode::Carried, record);
+    auto words = encodeState(context, carried);
+    if (!words)
+        return;
+
+    std::optional<StateImage> recaptured;
+    vm.setStartupJITDeferralScale(scale);
+    restoreOnNewborn(context, realm->twin, bytesOf(*words), code.get(), [](CodeBlock&) { }, [&](CodeBlock& codeBlock, const CounterTriple&, const CBCounterRestore& restore) {
+        checkCarriedRestore(context, "a scaled slice past 2^24"_s, codeBlock, record, restore, scale);
+        if (restore.crossed || restore.nativeSlice != ceiling || codeBlock.baselineJITData()->executeCounter().count() >= 0) {
+            JITCACHE_FAIL(makeString("the restore does not leave a total rounded below its slice"_s, describeRestore(liveCounter(codeBlock), restore)));
+            return;
+        }
+        Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
+        auto captured = CBStateCapture::capture(codeBlock, budget.get(), true, false);
+        if (!captured) {
+            failWith(context, "the strict capture of the restored CB"_s, captured.error());
+            return;
+        }
+        recaptured = decodeState(context, captured->stateSection());
+    });
+    vm.setStartupJITDeferralScale(1);
+    if (!recaptured)
+        return;
+
+    JITCACHE_CHECK(recaptured->header.counterValue == -ceiling);
+    JITCACHE_CHECK(recaptured->header.counterTotalCount == 33554432.0f);
+    JITCACHE_CHECK(counterObeysNativeInvariant(recaptured->header));
+
+    // count() is -3, below the -2 that half the float spacing of 2^25 allows.
+    StateImage beyond = *image;
+    setCounter(beyond, CBFormat::CounterMode::Carried, { -33554435, 33554432.0f, threshold });
+    JITCACHE_CHECK(!counterObeysNativeInvariant(beyond.header));
+
+    auto recapturedWords = encodeState(context, *recaptured);
+    auto beyondWords = encodeState(context, beyond);
+    if (!recapturedWords || !beyondWords)
+        return;
+    DeferGCForAWhile deferGC(vm);
+    CodeBlock* newborn = createNewbornCodeBlock(context, realm->twin);
+    if (!newborn)
+        return;
+    auto prepared = CBStateImport::prepare(bytesOf(*recapturedWords), *newborn, true);
+    if (!prepared)
+        failWith(context, "prepare of the recaptured counter"_s, prepared.error());
+    auto rejected = CBStateImport::prepare(bytesOf(*beyondWords), *newborn, true);
+    if (rejected || rejected.error().kind != CBFaultKind::InvalidMaterial || rejected.error().check != CBCheck::StrictCounter)
+        JITCACHE_FAIL("prepare of a total below the float nearest -counterValue does not fail StrictCounter"_s);
 }
 
 // In a fresh realm that has created no Map and no Set, seedLinkedState with an iterator_open record holding FastMap
@@ -960,7 +1066,7 @@ JITCACHE_TEST(cbImportRealmStepMaterializesTheIteratorFunction, Yes)
     if (!producer)
         return;
     auto captured = captureState(context, *producer);
-    if (!captured || !hasEntries(context, *captured, CBFormat::iteratorOpenIterationModesFamily, 1, "the realm step"_s))
+    if (!captured || !hasEntries(context, *captured, CBFormat::iteratorOpenIterationModesFamily, 1, CBCheck::IterationModes))
         return;
     size_t modesIndex = recordIndex(*captured, CBFormat::iteratorOpenIterationModesFamily, 0);
     uint16_t mapAndSet = iterationModeBit(IterationMode::FastMap) | iterationModeBit(IterationMode::FastSet);
@@ -1033,6 +1139,89 @@ JITCACHE_TEST(cbImportRealmStepMaterializesTheIteratorFunction, Yes)
             continue;
         }
         JITCACHE_CHECK(installed == JSValue(seededFunction));
+    }
+}
+
+// A metadata table gets its predictions only when a seeded value record is not SpecNone, as natively only a prediction
+// allocates them: seedLinkedState of a section whose value records are all SpecNone leaves the newborn CB's table
+// without predictions, and the same section with the record at offset 1 set allocates them, with that offset reading
+// the record and every other offset SpecNone. A strict capture of a baseline CB whose table has no predictions, since
+// none of its value-profiled instructions ran, writes SpecNone at every offset and allocates none.
+JITCACHE_TEST(cbImportAllocatesValuePredictionsOnlyForARecord, Yes)
+{
+    VM& vm = *context.vm();
+    if (!Options::useLazyValueProfilePredictions()) {
+        JITCACHE_FAIL("useLazyValueProfilePredictions is off, so every metadata table allocates its predictions when it is linked"_s);
+        return;
+    }
+    JSGlobalObject* globalObject = createRealm(context, vm, coldSource);
+    if (!globalObject)
+        return;
+    JSFunction* cold = globalFunction(context, globalObject, "cold"_s);
+    JSFunction* twin = globalFunction(context, globalObject, "coldTwin"_s);
+    auto object = globalObjectValue(context, globalObject, "object"_s);
+    if (!cold || !twin || !object)
+        return;
+    CodeBlock* producer = bringToBaseline(context, globalObject, cold, { *object, jsBoolean(false) });
+    if (!producer)
+        return;
+    MetadataTable* producerTable = producer->metadataTable();
+    if (!producerTable || !producer->unlinkedCodeBlock()->metadata().numValueProfiles()) {
+        JITCACHE_FAIL("cold's baseline CB has no metadata value profile"_s);
+        return;
+    }
+    if (producerTable->valueProfilePredictions()) {
+        JITCACHE_FAIL("cold's metadata table has predictions, though none of its value-profiled instructions ran"_s);
+        return;
+    }
+
+    auto image = captureState(context, *producer);
+    if (!image)
+        return;
+    JITCACHE_CHECK(!producerTable->valueProfilePredictions());
+    JITCACHE_CHECK(image->header.numValueProfiles == producer->unlinkedCodeBlock()->metadata().numValueProfiles());
+    JITCACHE_CHECK(std::ranges::all_of(image->valuePredictions, [](uint64_t prediction) {
+        return prediction == SpecNone;
+    }));
+
+    for (bool withRecord : { false, true }) {
+        StateImage seeded = *image;
+        if (withRecord)
+            seeded.valuePredictions[0] = SpecInt32Only;
+        auto words = encodeState(context, seeded);
+        if (!words)
+            return;
+        DeferGCForAWhile deferGC(vm);
+        CodeBlock* newborn = createNewbornCodeBlock(context, twin);
+        if (!newborn)
+            return;
+        MetadataTable* table = newborn->metadataTable();
+        if (!table || table->valueProfilePredictions()) {
+            JITCACHE_FAIL("the newborn CB has no metadata table, or a table that already has predictions"_s);
+            return;
+        }
+        auto prepared = CBStateImport::prepare(bytesOf(*words), *newborn, true);
+        if (!prepared) {
+            failWith(context, "prepare"_s, prepared.error());
+            return;
+        }
+        prepared->seedLinkedState(*newborn);
+        if (!withRecord) {
+            JITCACHE_CHECK(!table->valueProfilePredictions());
+            continue;
+        }
+        if (!table->valueProfilePredictions()) {
+            JITCACHE_FAIL("seeding a value record other than SpecNone allocated no predictions"_s);
+            continue;
+        }
+        unsigned visited = 0;
+        CBFormat::forEachMetadataValueProfile(*newborn, [&](unsigned offset, const ValueProfileRef& profile) {
+            ++visited;
+            SpeculatedType expected = offset == 1 ? SpecInt32Only : SpecNone;
+            if (profile.prediction() != expected)
+                JITCACHE_FAIL(makeString("the value profile at offset "_s, offset, " predicts "_s, profile.prediction(), " instead of "_s, expected));
+        });
+        JITCACHE_CHECK(visited == seeded.header.numValueProfiles);
     }
 }
 

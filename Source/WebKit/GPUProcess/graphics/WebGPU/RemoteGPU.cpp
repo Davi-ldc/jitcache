@@ -42,6 +42,7 @@
 #include "StreamServerConnection.h"
 #include "WebGPUObjectHeap.h"
 #include <WebCore/GraphicsContext.h>
+#include <WebCore/ImageBuffer.h>
 #include <WebCore/NativeImage.h>
 #include <WebCore/RenderingResourceIdentifier.h>
 #include <WebCore/WebGPU.h>
@@ -84,7 +85,7 @@ RemoteGPU::~RemoteGPU() = default;
 void RemoteGPU::initialize()
 {
     assertIsMainRunLoop();
-    protect(m_workQueue)->dispatch([protectedThis = protect(*this)]() mutable {
+    m_workQueue->dispatch([protectedThis = protect(*this)]() mutable {
         protectedThis->workQueueInitialize();
     });
 }
@@ -92,11 +93,10 @@ void RemoteGPU::initialize()
 void RemoteGPU::stopListeningForIPC()
 {
     assertIsMainRunLoop();
-    Ref workQueue = m_workQueue;
-    workQueue->dispatch([protectedThis = protect(*this)]() {
+    m_workQueue->dispatch([protectedThis = protect(*this)]() {
         protectedThis->workQueueUninitialize();
     });
-    workQueue->stopAndWaitForCompletion();
+    m_workQueue->stopAndWaitForCompletion();
 }
 
 void RemoteGPU::workQueueInitialize()
@@ -115,7 +115,7 @@ void RemoteGPU::workQueueInitialize()
     // The retain cycle is broken in workQueueUninitialize().
     auto gpuProcessConnection = m_gpuConnectionToWebProcess.get();
     auto backing = WebCore::WebGPU::create([protectedThis = protect(*this)](WebCore::WebGPU::WorkItem&& workItem) {
-        protect(protectedThis->m_workQueue)->dispatch(WTF::move(workItem));
+        protectedThis->m_workQueue->dispatch(WTF::move(workItem));
     }, gpuProcessConnection ? &gpuProcessConnection->webProcessIdentity() : nullptr);
 #else
     RefPtr<WebCore::WebGPU::GPU> backing;
@@ -134,8 +134,8 @@ void RemoteGPU::workQueueUninitialize()
     streamConnection->stopReceivingMessages(Messages::RemoteGPU::messageReceiverName(), m_identifier.toUInt64());
     streamConnection->invalidate();
     m_streamConnection = nullptr;
-    protect(m_objectHeap)->clear();
-    protect(m_modelObjectHeap)->clear();
+    m_objectHeap->clear();
+    m_modelObjectHeap->clear();
     m_backing = nullptr;
 }
 
@@ -270,6 +270,25 @@ void RemoteGPU::paintNativeImageToImageBuffer(WebCore::NativeImage& nativeImage,
     semaphore.wait();
 }
 
+RefPtr<WebCore::ImageBuffer> RemoteGPU::imageBuffer(WebCore::RenderingResourceIdentifier imageBufferIdentifier)
+{
+    assertIsCurrent(workQueue());
+    BinarySemaphore semaphore;
+
+    RefPtr<WebCore::ImageBuffer> result;
+    Ref renderingBackend = m_renderingBackend;
+    renderingBackend->dispatch([&]() mutable {
+        if (RefPtr imageBuffer = renderingBackend->imageBuffer(imageBufferIdentifier)) {
+            imageBuffer->flushDrawingContext();
+            result = WTF::move(imageBuffer);
+        }
+        semaphore.signal();
+    });
+    semaphore.wait();
+
+    return result;
+}
+
 
 #if ENABLE(GPU_PROCESS_MODEL)
 Vector<UniqueRef<WebCore::IOSurface>> RemoteGPU::createRenderBuffers(unsigned width, unsigned height, const WebCore::ProcessIdentity& processIdentity, bool standardDynamicRange)
@@ -324,8 +343,7 @@ void RemoteGPU::createModelBacking(unsigned width, unsigned height, WebModel::Im
 #if ENABLE(GPU_PROCESS_MODEL)
     assertIsCurrent(workQueue());
 
-    constexpr auto max2dTextureSize = 16384;
-    MESSAGE_CHECK(width <= max2dTextureSize && height <= max2dTextureSize);
+    MESSAGE_CHECK(width <= WKBridgeMaximumTextureDimension && height <= WKBridgeMaximumTextureDimension);
     auto& inputSpecularTexture = specularTexture;
     auto& inputDiffuseTexture = diffuseTexture;
     {
@@ -375,7 +393,7 @@ void RemoteGPU::isValid(WebGPUIdentifier identifier, CompletionHandler<void(bool
         return;
     }
 
-    auto result = protect(m_objectHeap)->objectExistsAndValid(*gpu, identifier);
+    auto result = m_objectHeap->objectExistsAndValid(*gpu, identifier);
     completionHandler(result.valid, result.exists);
 }
 

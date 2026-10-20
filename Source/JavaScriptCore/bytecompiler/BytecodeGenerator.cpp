@@ -36,6 +36,7 @@
 #include "BuiltinNames.h"
 #include "BytecodeGeneratorBaseInlines.h"
 #include "BytecodeGeneratorification.h"
+#include "BytecodeOptimizer.h"
 #include "BytecodeUseDef.h"
 #include "DefinePropertyAttributes.h"
 #include "Interpreter.h"
@@ -145,6 +146,7 @@ void GenericLabel<JSGeneratorTraits>::setLocation(BytecodeGenerator& generator, 
         CASE(OpJngreatereq)
         CASE(OpJbelow)
         CASE(OpJbeloweq)
+        CASE(OpIteratorCloseCheck)
         default:
             ASSERT_NOT_REACHED();
         }
@@ -176,7 +178,7 @@ FinallyContext::FinallyContext(BytecodeGenerator& generator, Label& finallyLabel
 }
 
 template<typename EmitBytecodeFunctor>
-void BytecodeGenerator::asyncFuncParametersTryCatchWrap(const EmitBytecodeFunctor& emitBytecode)
+void BytecodeGenerator::asyncFuncParametersTryCatchWrap(NOESCAPE const EmitBytecodeFunctor& emitBytecode)
 {
     TryData* tryData = nullptr;
     if (m_asyncFuncParametersTryCatchInfo) {
@@ -306,7 +308,7 @@ ParserError BytecodeGenerator::generate(unsigned& size)
         AsyncFuncParametersTryCatchInfo& info = m_asyncFuncParametersTryCatchInfo.value();
         ASSERT(info.catchStartLabel && info.thrownValue);
         emitLabel(*info.catchStartLabel.get());
-        JSTextPosition divot(m_scopeNode->firstLine(), m_scopeNode->startOffset(), m_scopeNode->lineStartOffset());
+        JSTextPosition divot(m_scopeNode->startOffset());
         if (promiseRegister()) {
             RefPtr<RegisterID> rejectPromise = moveLinkTimeConstant(nullptr, LinkTimeConstant::rejectPromiseWithFirstResolvingFunctionCallCheck);
             CallArguments args(*this, nullptr, 2);
@@ -364,6 +366,9 @@ ParserError BytecodeGenerator::generate(unsigned& size)
     }
     
 
+    if (shouldRunBytecodeOptimizer()) [[unlikely]]
+        BytecodeOptimizer::run(*this);
+
     if (m_needsGeneratorification)
         performGeneratorification(*this, m_codeBlock.get(), m_writer, m_generatorFrameSymbolTable.get(), m_generatorFrameSymbolTableIndex);
 
@@ -382,9 +387,11 @@ ParserError BytecodeGenerator::generate(unsigned& size)
     return ParserError(ParserError::ErrorNone);
 }
 
-BytecodeGenerator::BytecodeGenerator(VM& vm, ProgramNode* programNode, UnlinkedProgramCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>*, const PrivateNameEnvironment*)
+BytecodeGenerator::BytecodeGenerator(VM& vm, ProgramNode* programNode, UnlinkedProgramCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>*, const PrivateNameEnvironment*, OptimizeBytecode optimize, RefPtr<DeclaredNamesLink>&& parentDeclaredNames)
     : BytecodeGeneratorBase(makeUnique<UnlinkedCodeBlockGenerator>(vm, codeBlock), CodeBlock::llintBaselineCalleeSaveSpaceAsVirtualRegisters())
     , m_codeGenerationMode(codeGenerationMode)
+    , m_optimizeBytecode(optimize == OptimizeBytecode::Yes || Options::useBytecodeOptimizer())
+    , m_parentDeclaredNames(WTF::move(parentDeclaredNames))
     , m_scopeNode(programNode)
     , m_thisRegister(CallFrame::thisArgumentOffset())
     , m_codeType(GlobalCode)
@@ -428,9 +435,11 @@ BytecodeGenerator::BytecodeGenerator(VM& vm, ProgramNode* programNode, UnlinkedP
     }
 }
 
-BytecodeGenerator::BytecodeGenerator(VM& vm, FunctionNode* functionNode, UnlinkedFunctionCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>* generatorOrAsyncWrapperFunctionParameterNames, const PrivateNameEnvironment* parentPrivateNameEnvironment)
+BytecodeGenerator::BytecodeGenerator(VM& vm, FunctionNode* functionNode, UnlinkedFunctionCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>* generatorOrAsyncWrapperFunctionParameterNames, const PrivateNameEnvironment* parentPrivateNameEnvironment, OptimizeBytecode optimize, RefPtr<DeclaredNamesLink>&& parentDeclaredNames)
     : BytecodeGeneratorBase(makeUnique<UnlinkedCodeBlockGenerator>(vm, codeBlock), CodeBlock::llintBaselineCalleeSaveSpaceAsVirtualRegisters())
     , m_codeGenerationMode(codeGenerationMode)
+    , m_optimizeBytecode(optimize == OptimizeBytecode::Yes || Options::useBytecodeOptimizer())
+    , m_parentDeclaredNames(WTF::move(parentDeclaredNames))
     , m_scopeNode(functionNode)
     , m_codeType(FunctionCode)
     , m_vm(vm)
@@ -448,7 +457,11 @@ BytecodeGenerator::BytecodeGenerator(VM& vm, FunctionNode* functionNode, Unlinke
     // https://bugs.webkit.org/show_bug.cgi?id=148819
     //
     // Note that we intentionally enable tail call for naked constructors since it does not have special code for "return".
-    , m_allowTailCallOptimization(Options::useTailCalls() && !isConstructor() && constructorKind() == ConstructorKind::None && functionNode->isStrictMode())
+    //
+    // Generator, async function, and async generator bodies hold no tail positions at all
+    // (IsInTailPosition steps 4 to 7): their "return" is not a plain return. An async generator
+    // awaits the returned value, and a tail call would jump over that await.
+    , m_allowTailCallOptimization(Options::useTailCalls() && !isConstructor() && constructorKind() == ConstructorKind::None && functionNode->isStrictMode() && !isGeneratorOrAsyncFunctionBodyParseMode(parseMode()))
     , m_allowCallIgnoreResultOptimization(m_defaultAllowCallIgnoreResultOptimization)
     , m_needsToUpdateArrowFunctionContext(functionNode->usesArrowFunction() || functionNode->usesEval())
     , m_ecmaMode(ECMAMode::fromBool(functionNode->isStrictMode()))
@@ -902,7 +915,11 @@ IGNORE_GCC_WARNINGS_END
                 if (privateBrandRequirement() == PrivateBrandRequirement::Needed)
                     emitInstallPrivateBrand(&m_thisRegister);
 
-                emitInstanceFieldInitializationIfNeeded(&m_thisRegister, &m_calleeRegister, m_scopeNode->position(), m_scopeNode->position(), m_scopeNode->position());
+                {
+                    // The fields are initialized where the constructor starts. position() is where it ends.
+                    JSTextPosition constructorStart(m_scopeNode->startStartOffset());
+                    emitInstanceFieldInitializationIfNeeded(&m_thisRegister, &m_calleeRegister, constructorStart, constructorStart, constructorStart);
+                }
                 break;
             case ConstructorKind::Extends:
                 moveEmptyValue(&m_thisRegister);
@@ -991,9 +1008,11 @@ IGNORE_GCC_WARNINGS_END
     pushLexicalScope(m_scopeNode, ScopeType::LetConstScope, TDZCheckOptimization::Optimize, NestedScopeType::IsNotNested, nullptr, shouldInitializeBlockScopedFunctions);
 }
 
-BytecodeGenerator::BytecodeGenerator(VM& vm, EvalNode* evalNode, UnlinkedEvalCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>*, const PrivateNameEnvironment* parentPrivateNameEnvironment)
+BytecodeGenerator::BytecodeGenerator(VM& vm, EvalNode* evalNode, UnlinkedEvalCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>*, const PrivateNameEnvironment* parentPrivateNameEnvironment, OptimizeBytecode optimize, RefPtr<DeclaredNamesLink>&& parentDeclaredNames)
     : BytecodeGeneratorBase(makeUnique<UnlinkedCodeBlockGenerator>(vm, codeBlock), CodeBlock::llintBaselineCalleeSaveSpaceAsVirtualRegisters())
     , m_codeGenerationMode(codeGenerationMode)
+    , m_optimizeBytecode(optimize == OptimizeBytecode::Yes || Options::useBytecodeOptimizer())
+    , m_parentDeclaredNames(WTF::move(parentDeclaredNames))
     , m_scopeNode(evalNode)
     , m_thisRegister(CallFrame::thisArgumentOffset())
     , m_codeType(EvalCode)
@@ -1057,9 +1076,11 @@ BytecodeGenerator::BytecodeGenerator(VM& vm, EvalNode* evalNode, UnlinkedEvalCod
     pushLexicalScope(m_scopeNode, ScopeType::LetConstScope, TDZCheckOptimization::Optimize, NestedScopeType::IsNotNested, nullptr, shouldInitializeBlockScopedFunctions);
 }
 
-BytecodeGenerator::BytecodeGenerator(VM& vm, ModuleProgramNode* moduleProgramNode, UnlinkedModuleProgramCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>*, const PrivateNameEnvironment*)
+BytecodeGenerator::BytecodeGenerator(VM& vm, ModuleProgramNode* moduleProgramNode, UnlinkedModuleProgramCodeBlock* codeBlock, OptionSet<CodeGenerationMode> codeGenerationMode, const RefPtr<TDZEnvironmentLink>& parentScopeTDZVariables, const FixedVector<Identifier>*, const PrivateNameEnvironment*, OptimizeBytecode optimize, RefPtr<DeclaredNamesLink>&& parentDeclaredNames)
     : BytecodeGeneratorBase(makeUnique<UnlinkedCodeBlockGenerator>(vm, codeBlock), CodeBlock::llintBaselineCalleeSaveSpaceAsVirtualRegisters())
     , m_codeGenerationMode(codeGenerationMode)
+    , m_optimizeBytecode(optimize == OptimizeBytecode::Yes || Options::useBytecodeOptimizer())
+    , m_parentDeclaredNames(WTF::move(parentDeclaredNames))
     , m_scopeNode(moduleProgramNode)
     , m_thisRegister(CallFrame::thisArgumentOffset())
     , m_codeType(ModuleCode)
@@ -1124,6 +1145,7 @@ BytecodeGenerator::BytecodeGenerator(VM& vm, ModuleProgramNode* moduleProgramNod
     // Now declare all variables.
 
     createVariable(m_vm.propertyNames->starNamespacePrivateName, VarKind::Scope, moduleEnvironmentSymbolTable, VerifyExisting);
+    createVariable(m_vm.propertyNames->builtinNames().moduleLoaderPrivateName(), VarKind::Scope, moduleEnvironmentSymbolTable, VerifyExisting);
     if (moduleProgramNode->features() & ImportMetaFeature)
         createVariable(m_vm.propertyNames->builtinNames().metaPrivateName(), VarKind::Scope, moduleEnvironmentSymbolTable, VerifyExisting);
 
@@ -1159,11 +1181,13 @@ BytecodeGenerator::BytecodeGenerator(VM& vm, ModuleProgramNode* moduleProgramNod
     bool isWithScope = false;
 
     m_lexicalScopeStack.append({ moduleEnvironmentSymbolTable, m_topLevelScopeRegister, isWithScope, constantSymbolTable->index() });
+    declaredNamesScopesChanged();
     emitPrefillStackTDZVariables(lexicalVariables, moduleEnvironmentSymbolTable);
 
     // makeFunction assumes that there's correct TDZ stack entries.
     // So it should be called after putting our lexical environment to the TDZ stack correctly.
 
+    Vector<std::pair<uint32_t, FunctionMetadataNode*>> heapAllocatedFunctions;
     for (FunctionMetadataNode* function : moduleProgramNode->functionStack()) {
         const auto& iterator = moduleProgramNode->lexicalVariables().find(function->ident().impl());
         RELEASE_ASSERT(iterator != moduleProgramNode->lexicalVariables().end());
@@ -1171,50 +1195,67 @@ BytecodeGenerator::BytecodeGenerator(VM& vm, ModuleProgramNode* moduleProgramNod
 
         VarKind varKind = lookUpVarKind(iterator->key.get(), iterator->value);
         if (varKind == VarKind::Scope) {
-            // http://www.ecma-international.org/ecma-262/6.0/#sec-moduledeclarationinstantiation
-            // Section 15.2.1.16.4, step 16-a-iv-1.
-            // All heap allocated function declarations should be instantiated when the module environment
-            // is created. They include the exported function declarations and not-exported-but-heap-allocated
-            // function declarations. This is required because exported function should be instantiated before
-            // executing the any module in the dependency graph. This enables the modules to link the imported
-            // bindings before executing the any module code.
-            //
-            // And since function declarations are instantiated before executing the module body code, the spec
-            // allows the functions inside the module to be executed before its module body is executed under
-            // the circular dependencies. The following is the example.
-            //
-            // Module A (executed first):
-            //    import { b } from "B";
-            //    // Here, the module "B" is not executed yet, but the function declaration is already instantiated.
-            //    // So we can call the function exported from "B".
-            //    b();
-            //
-            //    export function a() {
-            //    }
-            //
-            // Module B (executed second):
-            //    import { a } from "A";
-            //
-            //    export function b() {
-            //        c();
-            //    }
-            //
-            //    // c is not exported, but since it is referenced from the b, we should instantiate it before
-            //    // executing the "B" module code.
-            //    function c() {
-            //        a();
-            //    }
-            //
-            // Module Entrypoint (executed last):
-            //    import "B";
-            //    import "A";
-            //
-            m_codeBlock->addFunctionDecl(makeFunction(function));
+            SymbolTableEntry::Fast entry = moduleEnvironmentSymbolTable->get(NoLockingNecessary, function->ident().impl());
+            RELEASE_ASSERT(!entry.isNull() && entry.varOffset().isScope());
+            heapAllocatedFunctions.append({ entry.scopeOffset().offset(), function });
         } else {
             // Stack allocated functions can be allocated when executing the module's body.
             m_functionsToInitialize.append(std::make_pair(function, NormalFunctionVariable));
         }
     }
+
+    // http://www.ecma-international.org/ecma-262/6.0/#sec-moduledeclarationinstantiation
+    // Section 15.2.1.16.4, step 16-a-iv-1.
+    // All heap allocated function declarations should be instantiated when the module environment
+    // is created. They include the exported function declarations and not-exported-but-heap-allocated
+    // function declarations. This is required because exported function should be instantiated before
+    // executing the any module in the dependency graph. This enables the modules to link the imported
+    // bindings before executing the any module code.
+    //
+    // And since function declarations are instantiated before executing the module body code, the spec
+    // allows the functions inside the module to be executed before its module body is executed under
+    // the circular dependencies. The following is the example.
+    //
+    // Module A (executed first):
+    //    import { b } from "B";
+    //    // Here, the module "B" is not executed yet, but the function declaration is already instantiated.
+    //    // So we can call the function exported from "B".
+    //    b();
+    //
+    //    export function a() {
+    //    }
+    //
+    // Module B (executed second):
+    //    import { a } from "A";
+    //
+    //    export function b() {
+    //        c();
+    //    }
+    //
+    //    // c is not exported, but since it is referenced from the b, we should instantiate it before
+    //    // executing the "B" module code.
+    //    function c() {
+    //        a();
+    //    }
+    //
+    // Module Entrypoint (executed last):
+    //    import "B";
+    //    import "A";
+    //
+    // They come first among the function declarations, in module environment slot order: see
+    // ModuleFunctionDeclarationSlots.
+    std::ranges::sort(heapAllocatedFunctions, { }, [](const auto& pair) { return pair.first; });
+    m_moduleEnvironmentSymbolTableConstantIndex = constantSymbolTable->index();
+    for (auto& pair : heapAllocatedFunctions)
+        m_lazyModuleFunctionDeclarations.add(pair.second->ident().impl());
+    FixedVector<uint32_t> heapAllocatedFunctionDeclScopeOffsets(heapAllocatedFunctions.size());
+    for (unsigned i = 0; i < heapAllocatedFunctions.size(); ++i) {
+        unsigned index = m_codeBlock->addFunctionDecl(makeFunction(heapAllocatedFunctions[i].second));
+        RELEASE_ASSERT(index == i);
+        heapAllocatedFunctionDeclScopeOffsets[i] = heapAllocatedFunctions[i].first;
+    }
+    codeBlock->setNumberOfHeapAllocatedFunctionDecls(heapAllocatedFunctions.size());
+    codeBlock->setHeapAllocatedFunctionDeclSlots(ModuleFunctionDeclarationSlots::create(WTF::move(heapAllocatedFunctionDeclScopeOffsets)));
 
     // Remember the constant register offset to the top-most symbol table. This symbol table will be
     // cloned in the code block linking. After that, to create the module environment, we retrieve
@@ -1226,7 +1267,7 @@ BytecodeGenerator::~BytecodeGenerator() = default;
 
 void BytecodeGenerator::initializeDefaultParameterValuesAndSetupFunctionScopeStack(
     FunctionParameters& parameters, bool isSimpleParameterList, FunctionNode* functionNode, SymbolTable* functionSymbolTable, 
-    int symbolTableConstantIndex, const ScopedLambda<bool (UniquedStringImpl*)>& captures, bool shouldCreateArgumentsVariableInParameterScope)
+    int symbolTableConstantIndex, NOESCAPE const ScopedLambda<bool(UniquedStringImpl*)>& captures, bool shouldCreateArgumentsVariableInParameterScope)
 {
     Vector<std::pair<Identifier, RefPtr<RegisterID>>> valuesToMoveIntoVars;
     ASSERT(!(isSimpleParameterList && shouldCreateArgumentsVariableInParameterScope));
@@ -1426,6 +1467,7 @@ void BytecodeGenerator::initializeVarLexicalEnvironment(int symbolTableConstantI
     }
     bool isWithScope = false;
     m_lexicalScopeStack.append({ functionSymbolTable, m_lexicalEnvironmentRegister, isWithScope, symbolTableConstantIndex });
+    declaredNamesScopesChanged();
     m_varScopeLexicalScopeStackIndex = m_lexicalScopeStack.size() - 1;
 }
 
@@ -1628,6 +1670,11 @@ void BytecodeGenerator::emitJumpIfNotFunctionCall(RegisterID* cond, Label& targe
 void BytecodeGenerator::emitJumpIfNotFunctionApply(RegisterID* cond, Label& target)
 {
     OpJneqPtr::emit(this, cond, moveLinkTimeConstant(nullptr, LinkTimeConstant::applyFunction), target.bind(this));
+}
+
+void BytecodeGenerator::emitJumpIfNotReflectConstruct(RegisterID* cond, Label& target)
+{
+    OpJneqPtr::emit(this, cond, moveLinkTimeConstant(nullptr, LinkTimeConstant::reflectConstructFunction), target.bind(this));
 }
 
 void BytecodeGenerator::emitJumpIfNotEvalFunction(RegisterID* cond, Label& target)
@@ -2292,6 +2339,7 @@ void BytecodeGenerator::pushLexicalScopeInternal(VariableEnvironment& environmen
 
     bool isWithScope = false;
     m_lexicalScopeStack.append({ symbolTable, newScope, isWithScope, symbolTableConstantIndex });
+    declaredNamesScopesChanged();
     pushTDZVariables(environment, tdzCheckOptimization, tdzRequirement);
 
     if (tdzRequirement == TDZRequirement::UnderTDZ)
@@ -2438,6 +2486,7 @@ void BytecodeGenerator::popLexicalScopeInternal(VariableEnvironment& environment
         environment.markAllVariablesAsCaptured();
 
     auto stackEntry = m_lexicalScopeStack.takeLast();
+    declaredNamesScopesChanged();
     SymbolTable* symbolTable = stackEntry.m_symbolTable;
     bool hasCapturedVariables = false;
     for (auto& entry : environment) {
@@ -2727,6 +2776,15 @@ RegisterID* BytecodeGenerator::emitResolveScope(RegisterID* dst, const Variable&
     return nullptr;
 }
 
+bool BytecodeGenerator::isLazyModuleFunctionDeclaration(const Variable& variable) const
+{
+    return m_moduleEnvironmentSymbolTableConstantIndex
+        && variable.offset().isScope()
+        && !variable.isSpecial()
+        && variable.symbolTableConstantIndex() == *m_moduleEnvironmentSymbolTableConstantIndex
+        && m_lazyModuleFunctionDeclarations.contains(variable.ident().impl());
+}
+
 RegisterID* BytecodeGenerator::emitGetFromScope(RegisterID* dst, RegisterID* scope, const Variable& variable, ResolveMode resolveMode)
 {
     switch (variable.offset().kind()) {
@@ -2745,7 +2803,7 @@ RegisterID* BytecodeGenerator::emitGetFromScope(RegisterID* dst, RegisterID* sco
             kill(dst),
             scope,
             addConstant(variable.ident()),
-            GetPutInfo(resolveMode, variable.offset().isScope() ? ResolvedClosureVar : resolveType(), InitializationMode::NotInitialization, ecmaMode()),
+            GetPutInfo(resolveMode, variable.offset().isScope() ? (isLazyModuleFunctionDeclaration(variable) ? ResolvedLazyClosureVar : ResolvedClosureVar) : resolveType(), InitializationMode::NotInitialization, ecmaMode()),
             localScopeDepth(),
             variable.offset().isScope() ? variable.offset().scopeOffset().offset() : 0,
             nextValueProfileIndex());
@@ -3363,6 +3421,64 @@ std::optional<PrivateNameEnvironment> BytecodeGenerator::getAvailablePrivateAcce
     return result;
 }
 
+RefPtr<DeclaredNamesLink> BytecodeGenerator::currentDeclaredNames()
+{
+    // A name a nested function can refer to is captured, so it has a slot in one of the Frames below; the only
+    // stable bindings without a slot are a module's imports.
+    if (!m_functionDeclaredNames && m_codeType == ModuleCode) {
+        IdentifierSet names;
+        for (auto& entry : m_scopeNode->lexicalVariables()) {
+            if (entry.value.isImported())
+                names.add(entry.key);
+        }
+        m_functionDeclaredNames = DeclaredNamesLink::Names::create(WTF::move(names));
+    }
+    RefPtr<DeclaredNamesLink::Names> names = m_functionDeclaredNames;
+
+    // The environment records that exist right now. Only scopes that allocated an environment (m_scope) are on the
+    // chain at run time; a `with` scope hides everything below it.
+    m_framesForLexicalScopeStack.grow(m_lexicalScopeStack.size());
+    m_frameSymbolTableSizes.grow(m_lexicalScopeStack.size());
+    RefPtr<DeclaredNamesLink::Frame> frames;
+    for (unsigned i = 0; i < m_lexicalScopeStack.size(); ++i) {
+        auto& entry = m_lexicalScopeStack[i];
+        auto& node = m_framesForLexicalScopeStack[i];
+        if (entry.m_isWithScope) {
+            if (!node || !node->isBarrier || node->next != frames)
+                node = DeclaredNamesLink::Frame::create(true, { }, frames);
+            frames = node;
+            continue;
+        }
+        if (!entry.m_scope || !entry.m_symbolTable)
+            continue;
+        ConcurrentJSLocker locker(entry.m_symbolTable->m_lock);
+        unsigned size = entry.m_symbolTable->size(locker);
+        if (!node || node->isBarrier || node->next != frames || m_frameSymbolTableSizes[i] != size) {
+            DeclaredNamesLink::Frame::Slots slots;
+            for (auto it = entry.m_symbolTable->begin(locker), end = entry.m_symbolTable->end(locker); it != end; ++it) {
+                VarOffset offset = it->value.varOffset();
+                if (offset.isScope()) {
+                    bool isLazyFunctionSlot = m_moduleEnvironmentSymbolTableConstantIndex && entry.m_symbolTableConstantIndex == *m_moduleEnvironmentSymbolTableConstantIndex && m_lazyModuleFunctionDeclarations.contains(it->key.get());
+                    slots.add(it->key, offset.scopeOffset().offset() | (isLazyFunctionSlot ? DeclaredNamesLink::Frame::lazyFunctionSlotFlag : 0));
+                }
+            }
+            node = DeclaredNamesLink::Frame::create(false, WTF::move(slots), frames);
+            m_frameSymbolTableSizes[i] = size;
+        }
+        frames = node;
+    }
+    // Not m_ecmaMode: class bodies temporarily force it strict while their members' executables are created.
+    bool hasSloppyEval = m_codeType == EvalCode || (m_scopeNode->usesEval() && !m_scopeNode->isStrictMode());
+    if (hasSloppyEval)
+        frames = DeclaredNamesLink::Frame::create(true, { }, WTF::move(frames)); // eval can add vars to the innermost var scope
+    bool isDynamicBarrier = hasSloppyEval || (m_scopeNode->features() & WithFeature);
+
+    // Functions created back to back in the same scope (the common case) share one link.
+    if (!m_cachedDeclaredNames || m_cachedDeclaredNames->names() != names.get() || m_cachedDeclaredNames->frames() != frames.get())
+        m_cachedDeclaredNames = DeclaredNamesLink::create(WTF::move(names), WTF::move(frames), isDynamicBarrier, m_parentDeclaredNames);
+    return m_cachedDeclaredNames;
+}
+
 RefPtr<TDZEnvironmentLink> BytecodeGenerator::getVariablesUnderTDZ()
 {
     RefPtr<TDZEnvironmentLink> parent = m_cachedParentTDZ;
@@ -3481,6 +3597,21 @@ RegisterID* BytecodeGenerator::emitNewArray(RegisterID* dst, ElementNode* elemen
     return dst;
 }
 
+RegisterID* BytecodeGenerator::emitNewArrayByReversingArguments(RegisterID* dst, CallArguments& callArguments)
+{
+    unsigned length = callArguments.argumentCountIncludingThis() - 1;
+    RefPtr<RegisterID> temporary = newTemporary();
+    for (unsigned index = 0; index < length / 2; ++index) {
+        RegisterID* low = callArguments.argumentRegister(index);
+        RegisterID* high = callArguments.argumentRegister(length - 1 - index);
+        move(temporary.get(), low);
+        move(low, high);
+        move(high, temporary.get());
+    }
+    OpNewArray::emit(this, dst, length ? callArguments.argumentRegister(length - 1) : VirtualRegister { 0 }, length, ArrayWithUndecided);
+    return dst;
+}
+
 RegisterID* BytecodeGenerator::emitNewArrayWithSpread(RegisterID* dst, ElementNode* elements)
 {
     BitVector bitVector;
@@ -3528,6 +3659,12 @@ RegisterID* BytecodeGenerator::emitNewArrayWithSize(RegisterID* dst, RegisterID*
 RegisterID* BytecodeGenerator::emitNewArrayWithSpecies(RegisterID* dst, RegisterID* length, RegisterID* array)
 {
     OpNewArrayWithSpecies::emit(this, dst, length, array, nextValueProfileIndex());
+    return dst;
+}
+
+RegisterID* BytecodeGenerator::emitNewRegExpForReceiver(RegisterID* dst, RegExp* regExp, bool forTest)
+{
+    OpNewRegExpShared::emit(this, dst, addConstantValue(regExp), forTest);
     return dst;
 }
 
@@ -3611,7 +3748,7 @@ RegisterID* BytecodeGenerator::emitNewClassFieldInitializerFunction(RegisterID* 
     SourceParseMode parseMode = SourceParseMode::ClassFieldInitializerMode;
     ConstructAbility constructAbility = ConstructAbility::CannotConstruct;
 
-    FunctionMetadataNode metadata(parserArena(), JSTokenLocation(), JSTokenLocation(), 0, 0, 0, 0, 0, ImplementationVisibility::Private, StrictModeLexicallyScopedFeature, ConstructorKind::None, superBinding, 0, parseMode, false);
+    FunctionMetadataNode metadata(parserArena(), JSTokenLocation(), JSTokenLocation(), 0, 0, 0, ImplementationVisibility::Private, StrictModeLexicallyScopedFeature, ConstructorKind::None, superBinding, 0, parseMode, false);
     metadata.finishParsing(m_scopeNode->source(), Identifier(), FunctionMode::MethodDefinition);
     auto initializer = UnlinkedFunctionExecutable::create(m_vm, m_scopeNode->source(), &metadata, isBuiltinFunction() ? UnlinkedBuiltinFunction : UnlinkedNormalFunction, constructAbility, InlineAttribute::Always, scriptMode(), WTF::move(variablesUnderTDZ), { }, WTF::move(parentPrivateNameEnvironment), newDerivedContextType, EvalContextType::InstanceFieldEvalContext, NeedsClassFieldInitializer::No, PrivateBrandRequirement::None);
     initializer->setClassElementDefinitions(WTF::move(classElementDefinitions));
@@ -4134,6 +4271,7 @@ RegisterID* BytecodeGenerator::emitPushWithScope(RegisterID* objectScope)
 
     move(scopeRegister(), newScope);
     m_lexicalScopeStack.append({ nullptr, newScope, true, 0 });
+    declaredNamesScopesChanged();
 
     return newScope;
 }
@@ -4149,6 +4287,7 @@ void BytecodeGenerator::emitPopWithScope()
     emitGetParentScope(scopeRegister(), scopeRegister());
     popLocalControlFlowScope();
     auto stackEntry = m_lexicalScopeStack.takeLast();
+    declaredNamesScopesChanged();
     stackEntry.m_scope->deref();
     RELEASE_ASSERT(stackEntry.m_isWithScope);
 }
@@ -4187,7 +4326,7 @@ void BytecodeGenerator::emitDebugHook(ExpressionNode* expr, RegisterID* data)
 
 void BytecodeGenerator::emitWillLeaveCallFrameDebugHook()
 {
-    emitDebugHook(WillLeaveCallFrame, JSTextPosition(m_scopeNode->lastLine(), m_scopeNode->startOffset(), m_scopeNode->lineStartOffset()));
+    emitDebugHook(WillLeaveCallFrame, m_scopeNode->position());
 }
 
 void BytecodeGenerator::pushFinallyControlFlowScope(FinallyContext& finallyContext)
@@ -4667,7 +4806,7 @@ bool BytecodeGenerator::emitReadOnlyExceptionIfNeeded(const Variable& variable)
     return false;
 }
 
-void BytecodeGenerator::emitTryWithFinallyThatDoesNotShadowException(const ScopedLambda<void(BytecodeGenerator&)>& emitTry, const ScopedLambda<void(BytecodeGenerator&)>& emitFinally)
+void BytecodeGenerator::emitTryWithFinallyThatDoesNotShadowException(NOESCAPE const ScopedLambda<void(BytecodeGenerator&)>& emitTry, NOESCAPE const ScopedLambda<void(BytecodeGenerator&)>& emitFinally)
 {
     Ref<Label> finallyLabel = newLabel();
     FinallyContext finallyContext(*this, finallyLabel.get());
@@ -4676,7 +4815,7 @@ void BytecodeGenerator::emitTryWithFinallyThatDoesNotShadowException(const Scope
     popFinallyControlFlowScope();
 }
 
-void BytecodeGenerator::emitTryWithFinallyThatDoesNotShadowException(FinallyContext& finallyContext, const ScopedLambda<void(BytecodeGenerator&)>& emitTry, const ScopedLambda<void(BytecodeGenerator&)>& emitFinally)
+void BytecodeGenerator::emitTryWithFinallyThatDoesNotShadowException(FinallyContext& finallyContext, NOESCAPE const ScopedLambda<void(BytecodeGenerator&)>& emitTry, NOESCAPE const ScopedLambda<void(BytecodeGenerator&)>& emitFinally)
 {
     Ref<Label> tryStartLabel = newEmittedLabel();
     TryData* tryData = pushTry(tryStartLabel.get(), *finallyContext.finallyLabel(), HandlerType::SynthesizedFinally);
@@ -4742,7 +4881,7 @@ void BytecodeGenerator::emitPrepareDisposable(RegisterID* value, const JSTextPos
     }
 }
 
-void BytecodeGenerator::emitUsingBodyScope(unsigned usingCount, bool hasAwaitUsing, const ScopedLambda<void(BytecodeGenerator&)>& emitBody)
+void BytecodeGenerator::emitUsingBodyScope(unsigned usingCount, bool hasAwaitUsing, NOESCAPE const ScopedLambda<void(BytecodeGenerator&)>& emitBody)
 {
     ASSERT(!hasAwaitUsing || isAsyncFunctionParseMode(parseMode()) || isModuleParseMode(parseMode()));
 
@@ -4801,7 +4940,7 @@ void BytecodeGenerator::emitUsingBodyScope(unsigned usingCount, bool hasAwaitUsi
             emitLabel(afterInit.get());
         }
 
-        JSTextPosition divot(m_scopeNode->firstLine(), m_scopeNode->startOffset(), m_scopeNode->lineStartOffset());
+        JSTextPosition divot(m_scopeNode->startOffset());
 
         // Async disposal state (per DisposeResources spec): needsAwait / hasAwaited.
         // Only allocated when this scope contains at least one await using declaration.
@@ -4887,9 +5026,9 @@ void BytecodeGenerator::emitUsingBodyScope(unsigned usingCount, bool hasAwaitUsi
                 emitLoad(hasAwaited.get(), jsBoolean(true));
                 emitAwait(result.get(), result.get(), divot);
 
+                emitJump(skipSlot.get());
                 Ref<Label> trySlotEnd = newEmittedLabel();
                 popTry(trySlotData, trySlotEnd.get());
-                emitJump(skipSlot.get());
 
                 emitSuppressedErrorCatch(trySlotData, catchLabel.get());
             } else {
@@ -4915,9 +5054,9 @@ void BytecodeGenerator::emitUsingBodyScope(unsigned usingCount, bool hasAwaitUsi
                 move(disposeArgs.thisRegister(), slot.value.get());
                 emitCallIgnoreResult(newTemporary(), slot.method.get(), NoExpectedFunction, disposeArgs, divot, divot, divot, DebuggableCall::No);
 
+                emitJump(skipSlot.get());
                 Ref<Label> trySlotEnd = newEmittedLabel();
                 popTry(trySlotData, trySlotEnd.get());
-                emitJump(skipSlot.get());
 
                 emitSuppressedErrorCatch(trySlotData, catchLabel.get());
             }
@@ -4953,7 +5092,7 @@ void BytecodeGenerator::emitUsingBodyScope(unsigned usingCount, bool hasAwaitUsi
     m_usingScopeStack.removeLast();
 }
 
-void BytecodeGenerator::emitBodyWithUsingIfNeeded(unsigned usingCount, bool hasAwaitUsing, const ScopedLambda<void(BytecodeGenerator&)>& emitBody)
+void BytecodeGenerator::emitBodyWithUsingIfNeeded(unsigned usingCount, bool hasAwaitUsing, NOESCAPE const ScopedLambda<void(BytecodeGenerator&)>& emitBody)
 {
     if (usingCount)
         emitUsingBodyScope(usingCount, hasAwaitUsing, emitBody);
@@ -4961,7 +5100,7 @@ void BytecodeGenerator::emitBodyWithUsingIfNeeded(unsigned usingCount, bool hasA
         emitBody(*this);
 }
 
-void BytecodeGenerator::emitEnumeration(ThrowableExpressionData* node, ExpressionNode* subjectNode, const ScopedLambda<void(BytecodeGenerator&, RegisterID*)>& callBack, ForOfNode* forLoopNode, RegisterID* forLoopSymbolTable)
+void BytecodeGenerator::emitEnumeration(ThrowableExpressionData* node, ExpressionNode* subjectNode, NOESCAPE const ScopedLambda<void(BytecodeGenerator&, RegisterID*)>& callBack, ForOfNode* forLoopNode, RegisterID* forLoopSymbolTable)
 {
     if (forLoopNode && forLoopNode->isForAwait()) {
         ASSERT(isAsyncFunctionParseMode(parseMode()) || isModuleParseMode(parseMode()));
@@ -5079,7 +5218,7 @@ void BytecodeGenerator::emitEnumeration(ThrowableExpressionData* node, Expressio
             callBack(generator, value.get());
             generator.emitJump(loopStart.get());
         }, [&](BytecodeGenerator& generator) {
-            generator.emitIteratorGenericClose(iterator.get(), node);
+            generator.emitIteratorClose(iterator.get(), nextOrIndex.get(), iterable.get(), node);
         });
 
         bool breakLabelIsBound = scope->breakTargetMayBeBound();
@@ -5088,7 +5227,7 @@ void BytecodeGenerator::emitEnumeration(ThrowableExpressionData* node, Expressio
         popFinallyControlFlowScope();
         if (breakLabelIsBound) {
             // IteratorClose sequence for break-ed control flow.
-            emitIteratorGenericClose(iterator.get(), node, EmitAwait::No);
+            emitIteratorClose(iterator.get(), nextOrIndex.get(), iterable.get(), node);
         }
     }
     emitLabel(loopDone.get());
@@ -5457,6 +5596,7 @@ void BytecodeGenerator::emitIteratorNext(RegisterID* done, RegisterID* value, Re
         emitDebugHook(WillExecuteExpression, node->divotStart());
 
     emitExpressionInfo(node->divot(), node->divotStart(), node->divotEnd());
+    ASSERT(iterable->isTemporary() && nextOrIndex->isTemporary());
     unsigned nextResultValueProfile = nextValueProfileIndex();
     unsigned doneValueProfile = nextValueProfileIndex();
     unsigned valueValueProfile = nextValueProfileIndex();
@@ -5522,6 +5662,14 @@ void BytecodeGenerator::emitIteratorGenericClose(RegisterID* iterator, const Thr
     emitLabel(done.get());
 }
 
+
+void BytecodeGenerator::emitIteratorClose(RegisterID* iterator, RegisterID* nextOrIndex, RegisterID* iterable, const ThrowableExpressionData* node)
+{
+    Ref<Label> done = newLabel();
+    OpIteratorCloseCheck::emit(this, iterator, nextOrIndex, iterable, done->bind(this));
+    emitIteratorGenericClose(iterator, node);
+    emitLabel(done.get());
+}
 
 RegisterID* BytecodeGenerator::emitDelegateYield(RegisterID* argument, ThrowableExpressionData* node)
 {

@@ -56,7 +56,8 @@
 
 - (void)dealloc
 {
-    [_private release];
+    // Retaining the member just to release it would be pointless.
+    SUPPRESS_UNRETAINED_ARG [_private release];
     [super dealloc];
 }
 
@@ -70,7 +71,7 @@
     if (!range)
         return self;
 
-    _private->_textIterator = makeUnique<WebCore::TextIterator>(makeSimpleRange(*core(range)));
+    _private->_textIterator = makeUnique<WebCore::TextIterator>(makeSimpleRange(protect(*core(range))));
     return self;
 }
 

@@ -10,8 +10,6 @@
 #include "ImageSection.h"
 #include "JSCInlines.h"
 #include "JSPropertyNameEnumerator.h"
-#include "JSTemplateObjectDescriptor.h"
-#include "SymbolTable.h"
 #include "UnlinkedCodeBlock.h"
 #include <array>
 #include <mutex>
@@ -39,12 +37,15 @@ static constexpr size_t producerValueCountOffset = 28;
 static constexpr size_t tokenOffset = 32;
 static_assert(tokenOffset + captureProcessTokenSize == imageTwinsHeaderSize);
 
-// Compile input entry: u32 bytecode offset, u8 kind, u8 value, u16 reserved, u32 local scope depth.
+// Compile input entry: u32 bytecode offset, u8 kind, u8 value, u16 reserved, u32 local scope depth, u32 module import
+// slot.
 static constexpr size_t inputBytecodeOffsetOffset = 0;
 static constexpr size_t inputKindOffset = 4;
 static constexpr size_t inputValueOffset = 5;
 static constexpr size_t inputReservedOffset = 6;
 static constexpr size_t inputDepthOffset = 8;
+static constexpr size_t inputImportSlotOffset = 12;
+static_assert(inputImportSlotOffset + sizeof(uint32_t) == imageTwinsCompileInputEntrySize);
 
 // Regeneration entry: u32 MathIC index, u16 profile bits at entry, u8 attach count, u8 seed mask, i64 replacement, then
 // one u32 seed per attach, padded to 8.
@@ -100,6 +101,7 @@ static std::array<uint8_t, imageTwinsCompileInputEntrySize> encodeCompileInput(c
     bytes[inputKindOffset] = static_cast<uint8_t>(input.kind);
     bytes[inputValueOffset] = input.value;
     writeField<uint32_t>(bytes, inputDepthOffset, input.localScopeDepth);
+    writeField<uint32_t>(bytes, inputImportSlotOffset, input.moduleImportSlot);
     return bytes;
 }
 
@@ -116,99 +118,30 @@ static bool isValidInputValue(CompileInputKind kind, uint8_t value)
     switch (kind) {
     case CompileInputKind::ResolveScopeType:
     case CompileInputKind::GetFromScopeType:
-    case CompileInputKind::PutToScopeType:
         return value <= static_cast<uint8_t>(Dynamic);
+    case CompileInputKind::PutToScopeType:
+        // Linking never gives a put_to_scope a lazy closure type, and the baseline JIT aborts on one.
+        return value <= static_cast<uint8_t>(Dynamic) && value != static_cast<uint8_t>(LazyClosureVar) && value != static_cast<uint8_t>(ResolvedLazyClosureVar);
     case CompileInputKind::GetByIdMode:
     case CompileInputKind::IteratorOpenMode:
     case CompileInputKind::AsyncIteratorOpenMode:
         return value <= static_cast<uint8_t>(GetByIdMode::ArrayLength);
     case CompileInputKind::EnumeratorMetadata:
         return !(value & ~enumeratorFlagBits);
-    case CompileInputKind::StrictEqualityAtomOperand:
-        return value <= static_cast<uint8_t>(StrictEqualityAtomOperand::Rhs);
     }
     return false;
 }
 
-// CodeBlock::isConstantOwnedByUnlinkedCodeBlock, which reads only the UCB, so the compile input check can ask it before
-// any CB exists.
-static bool isConstantOwnedByUnlinkedCodeBlock(const UnlinkedCodeBlock& unlinkedCodeBlock, VirtualRegister reg)
+// The resolve_scope types whose code bakes a depth or an import slot: one of a closure variable walks its depth, and one
+// of a module variable walks its depth and then loads its import slot.
+static bool mayHaveDepth(const CompileInput& input)
 {
-    switch (unlinkedCodeBlock.constantSourceCodeRepresentation(reg)) {
-    case SourceCodeRepresentation::Integer:
-    case SourceCodeRepresentation::Double:
-        return true;
-    case SourceCodeRepresentation::Other: {
-        JSValue value = unlinkedCodeBlock.getConstant(reg);
-        if (!value || !value.isCell())
-            return true;
-        JSCell* cell = value.asCell();
-        return !cell->inherits<SymbolTable>() && !cell->inherits<JSTemplateObjectDescriptor>();
-    }
-    case SourceCodeRepresentation::LinkTimeConstant:
-        return false;
-    }
-    return false;
+    return input.kind == CompileInputKind::ResolveScopeType && (input.value == static_cast<uint8_t>(ClosureVar) || input.value == static_cast<uint8_t>(ModuleVar));
 }
 
-// The strict-equality templates' tryGetBitwiseComparableConstant: an operand that answers before the atom test, so the
-// template never reaches it.
-static bool isBitwiseComparableConstant(const UnlinkedCodeBlock& unlinkedCodeBlock, VirtualRegister reg)
+static bool mayHaveImportSlot(const CompileInput& input)
 {
-    if (!reg.isConstant() || !isConstantOwnedByUnlinkedCodeBlock(unlinkedCodeBlock, reg))
-        return false;
-    JSValue value = unlinkedCodeBlock.getConstant(reg);
-    return value.isUndefinedOrNull() || value.isBoolean();
-}
-
-// Their tryGetAtomStringConstant: an operand the fast path compares by its atom's address.
-static bool isAtomStringConstant(const UnlinkedCodeBlock& unlinkedCodeBlock, VirtualRegister reg)
-{
-    if (!reg.isConstant() || !isConstantOwnedByUnlinkedCodeBlock(unlinkedCodeBlock, reg))
-        return false;
-    JSValue value = unlinkedCodeBlock.getConstant(reg);
-    if (!value.isString())
-        return false;
-    auto* impl = asString(value)->tryGetValueImpl();
-    return impl && impl->isAtom();
-}
-
-template<typename Op>
-static std::pair<VirtualRegister, VirtualRegister> operandsOf(const JSInstruction* instruction)
-{
-    auto bytecode = instruction->as<Op>();
-    return { bytecode.m_lhs, bytecode.m_rhs };
-}
-
-// The left and right operands of stricteq, nstricteq, jstricteq and jnstricteq; nullopt for any other opcode.
-static std::optional<std::pair<VirtualRegister, VirtualRegister>> strictEqualityOperands(const JSInstruction* instruction)
-{
-    switch (instruction->opcodeID()) {
-    case op_stricteq:
-        return operandsOf<OpStricteq>(instruction);
-    case op_nstricteq:
-        return operandsOf<OpNstricteq>(instruction);
-    case op_jstricteq:
-        return operandsOf<OpJstricteq>(instruction);
-    case op_jnstricteq:
-        return operandsOf<OpJnstricteq>(instruction);
-    default:
-        return std::nullopt;
-    }
-}
-
-// The kind of the one input the compile input check requires at an instruction, or nullopt where it allows none: the
-// snapshot's kinds, and StrictEqualityAtomOperand at every strict equality whose template reaches its atom test.
-static std::optional<CompileInputKind> expectedInputKind(const UnlinkedCodeBlock& unlinkedCodeBlock, const JSInstruction* instruction)
-{
-    if (auto kind = snapshotKindOf(instruction->opcodeID()))
-        return kind;
-    auto operands = strictEqualityOperands(instruction);
-    if (!operands)
-        return std::nullopt;
-    if (isBitwiseComparableConstant(unlinkedCodeBlock, operands->first) || isBitwiseComparableConstant(unlinkedCodeBlock, operands->second))
-        return std::nullopt;
-    return CompileInputKind::StrictEqualityAtomOperand;
+    return input.kind == CompileInputKind::ResolveScopeType && input.value == static_cast<uint8_t>(ModuleVar);
 }
 
 } // namespace ImageTwinsSectionInternal
@@ -285,12 +218,15 @@ TwinCompileInputs snapshotCompileInputs(CodeBlock& codeBlock)
         CompileInput input { .bytecodeOffset = instruction.offset(), .kind = *kind };
         switch (*kind) {
         case CompileInputKind::ResolveScopeType: {
-            // JIT::emit_op_resolve_scope and emitSlow_op_resolve_scope read the type, and the depth of a ClosureVar.
+            // JIT::emit_op_resolve_scope and emitSlow_op_resolve_scope read the type, the depth of a ClosureVar or a
+            // ModuleVar, and the import slot of a ModuleVar.
             auto& metadata = instruction->as<OpResolveScope>().metadata(&codeBlock);
             ResolveType type = metadata.m_resolveType;
             input.value = static_cast<uint8_t>(type);
-            if (type == ClosureVar)
+            if (type == ClosureVar || type == ModuleVar)
                 input.localScopeDepth = metadata.m_localScopeDepth;
+            if (type == ModuleVar)
+                input.moduleImportSlot = metadata.m_moduleImportSlot;
             break;
         }
         case CompileInputKind::GetFromScopeType:
@@ -311,8 +247,6 @@ TwinCompileInputs snapshotCompileInputs(CodeBlock& codeBlock)
         case CompileInputKind::EnumeratorMetadata:
             input.value = instruction->as<OpEnumeratorNext>().metadata(&codeBlock).m_enumeratorMetadata;
             break;
-        case CompileInputKind::StrictEqualityAtomOperand:
-            RELEASE_ASSERT_NOT_REACHED();
         }
         result.inputs.append(input);
     }
@@ -379,7 +313,7 @@ std::optional<ImageTwinsView> ImageTwinsView::locate(std::span<const uint8_t> by
     if (!pad())
         return std::nullopt;
 
-    // Each regeneration entry's size follows from its attach count, which ImageCheck::W3 bounds.
+    // Each regeneration entry's size follows from its attach count, which ImageCheck::TwinRegenerations bounds.
     layout.regenerations = offset;
     for (uint32_t index = 0; index < header.regenerationCount; ++index) {
         if (offset + imageTwinsRegenerationFixedSize > size)
@@ -411,6 +345,7 @@ CompileInput ImageTwinsView::compileInput(unsigned index) const
         .kind = static_cast<CompileInputKind>(entry[inputKindOffset]),
         .value = entry[inputValueOffset],
         .localScopeDepth = readField<uint32_t>(entry, inputDepthOffset),
+        .moduleImportSlot = readField<uint32_t>(entry, inputImportSlotOffset),
     };
 }
 
@@ -508,7 +443,7 @@ bool operator==(const ImageTwinsView& a, const ImageTwinsView& b)
 
 // Known flags, zero reserved bytes and padding, a token that is not all zero, and a section that ends where the
 // header's counts say.
-bool ImageTwinsView::passesW1() const
+bool ImageTwinsView::passesTwinsHeader() const
 {
     using namespace ImageTwinsSectionInternal;
     if (m_header.flags & ~ImageTwinsFlags::compiledHoldingAPILock)
@@ -546,21 +481,22 @@ bool ImageTwinsView::passesW1() const
 }
 
 // Compile inputs of known kinds and values, in strictly increasing bytecode order, with a scope depth only on a
-// ClosureVar resolve_scope.
-bool ImageTwinsView::passesW2() const
+// ClosureVar or ModuleVar resolve_scope and an import slot only on a ModuleVar one.
+bool ImageTwinsView::passesTwinInputs() const
 {
     using namespace ImageTwinsSectionInternal;
     for (unsigned index = 0; index < m_header.inputCount; ++index) {
         auto input = compileInput(index);
         auto kindByte = static_cast<uint8_t>(input.kind);
-        if (kindByte < static_cast<uint8_t>(CompileInputKind::ResolveScopeType) || kindByte > static_cast<uint8_t>(CompileInputKind::StrictEqualityAtomOperand))
+        if (kindByte < static_cast<uint8_t>(CompileInputKind::ResolveScopeType) || kindByte > static_cast<uint8_t>(CompileInputKind::EnumeratorMetadata))
             return false;
         if (index && input.bytecodeOffset <= compileInput(index - 1).bytecodeOffset)
             return false;
         if (!isValidInputValue(input.kind, input.value))
             return false;
-        bool mayHaveDepth = input.kind == CompileInputKind::ResolveScopeType && input.value == static_cast<uint8_t>(ClosureVar);
-        if (input.localScopeDepth && !mayHaveDepth)
+        if (input.localScopeDepth && !mayHaveDepth(input))
+            return false;
+        if (input.moduleImportSlot && !mayHaveImportSlot(input))
             return false;
     }
     return true;
@@ -568,7 +504,7 @@ bool ImageTwinsView::passesW2() const
 
 // Agreement with the image section: one producer value per fixup, and each regeneration naming a MathIC with inline
 // code, with one or two attaches, seeds only where its mask says the assembler drew, and a valid replacement.
-bool ImageTwinsView::passesW3(const ImageSectionsView& view) const
+bool ImageTwinsView::passesTwinRegenerations(const ImageSectionsView& view) const
 {
     using namespace ImageTwinsSectionInternal;
     auto& image = view.header();
@@ -606,51 +542,41 @@ bool ImageTwinsView::passesW3(const ImageSectionsView& view) const
 std::optional<ImageCheck> firstTwinsStructureFailure(const ImageSectionsView& view)
 {
     auto& twins = view.twins();
-    if (!twins.passesW1())
-        return ImageCheck::W1;
-    if (!twins.passesW2())
-        return ImageCheck::W2;
-    if (!twins.passesW3(view))
-        return ImageCheck::W3;
+    if (!twins.passesTwinsHeader())
+        return ImageCheck::TwinsHeader;
+    if (!twins.passesTwinInputs())
+        return ImageCheck::TwinInputs;
+    if (!twins.passesTwinRegenerations(view))
+        return ImageCheck::TwinRegenerations;
     return std::nullopt;
 }
 
 std::optional<ImageCheck> firstTwinsFailureAgainst(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
 {
-    using namespace ImageTwinsSectionInternal;
     auto& twins = view.twins();
     if (twins.header().binaryArithProfileCount != unlinkedCodeBlock.numberOfBinaryArithProfiles() || twins.header().unaryArithProfileCount != unlinkedCodeBlock.numberOfUnaryArithProfiles())
-        return ImageCheck::W4;
+        return ImageCheck::TwinInputSites;
 
-    // Inputs and instructions are both in bytecode order, which ImageCheck::W2 checked, so one walk pairs them: every
-    // instruction that asks has exactly one input of its kind, and every input sits at an instruction start that asks.
+    // Inputs and instructions are both in bytecode order, which ImageCheck::TwinInputs checked, so one walk pairs them:
+    // every instruction the snapshot reads has exactly one input of its kind, and every input sits at such an
+    // instruction's start.
     unsigned next = 0;
     unsigned inputCount = twins.header().inputCount;
     for (const auto& instruction : unlinkedCodeBlock.instructions()) {
         uint32_t offset = instruction.offset();
         if (next < inputCount && twins.compileInput(next).bytecodeOffset < offset)
-            return ImageCheck::W4;
+            return ImageCheck::TwinInputSites;
         bool hasInput = next < inputCount && twins.compileInput(next).bytecodeOffset == offset;
-        auto expected = expectedInputKind(unlinkedCodeBlock, instruction.ptr());
+        auto expected = snapshotKindOf(instruction->opcodeID());
         if (expected.has_value() != hasInput)
-            return ImageCheck::W4;
+            return ImageCheck::TwinInputSites;
         if (!hasInput)
             continue;
-        auto input = twins.compileInput(next++);
-        if (input.kind != *expected)
-            return ImageCheck::W4;
-        // The operand the producer compared inline by its atom is an atom here too, since atom-ness only grows, unless the
-        // section disagrees with its UCB.
-        if (input.kind == CompileInputKind::StrictEqualityAtomOperand && input.value != static_cast<uint8_t>(StrictEqualityAtomOperand::None)) {
-            auto operands = strictEqualityOperands(instruction.ptr());
-            ASSERT(operands);
-            auto operand = input.value == static_cast<uint8_t>(StrictEqualityAtomOperand::Lhs) ? operands->first : operands->second;
-            if (!isAtomStringConstant(unlinkedCodeBlock, operand))
-                return ImageCheck::W4;
-        }
+        if (twins.compileInput(next++).kind != *expected)
+            return ImageCheck::TwinInputSites;
     }
     if (next != inputCount)
-        return ImageCheck::W4;
+        return ImageCheck::TwinInputSites;
     return std::nullopt;
 }
 

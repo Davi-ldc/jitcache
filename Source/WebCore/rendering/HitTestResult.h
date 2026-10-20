@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2006-2023 Apple Inc. All rights reserved.
+ * Copyright (C) 2006-2026 Apple Inc. All rights reserved.
  * Copyright (C) 2014 Google Inc.
  * Copyright (C) 2012 Nokia Corporation and/or its subsidiary(-ies)
  *
@@ -56,9 +56,11 @@ public:
     WEBCORE_EXPORT explicit HitTestResult(const LayoutRect&);
     WEBCORE_EXPORT explicit HitTestResult(const HitTestLocation&);
     WEBCORE_EXPORT HitTestResult(const HitTestResult&);
+    WEBCORE_EXPORT HitTestResult(HitTestResult&&);
     WEBCORE_EXPORT ~HitTestResult();
 
     WEBCORE_EXPORT HitTestResult& operator=(const HitTestResult&);
+    WEBCORE_EXPORT HitTestResult& operator=(HitTestResult&&);
 
     WEBCORE_EXPORT void setInnerNode(Node*);
     Node* innerNode() const { return m_innerNode.get(); }
@@ -125,7 +127,7 @@ public:
     WEBCORE_EXPORT URL absoluteLinkURL() const;
     WEBCORE_EXPORT bool hasLocalDataForLinkURL() const;
     WEBCORE_EXPORT String textContent() const;
-    bool NODELETE isOverLink() const;
+    WEBCORE_EXPORT bool NODELETE isOverLink() const;
     WEBCORE_EXPORT bool isContentEditable() const;
     void toggleMediaControlsDisplay() const;
     void toggleMediaLoopPlayback() const;

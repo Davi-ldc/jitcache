@@ -123,7 +123,7 @@ template<> constexpr TYPE fromCSSValueID(CSSValueID value) { \
 
 #define DEFINE_VALUE_REPRESENTATION_CSS_VALUE_ID_FUNCTION \
 template<> struct Style::ValueRepresentation<WebCore::TYPE> { \
-    template<typename... F> constexpr decltype(auto) operator()(WebCore::TYPE value, F&&... f) \
+    template<typename... F> constexpr decltype(auto) operator()(WebCore::TYPE value, NOESCAPE F&&... f) \
     { \
         auto visitor = WTF::makeVisitor(std::forward<F>(f)...); \
         switch (value) { \
@@ -158,6 +158,12 @@ DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 
 #define TYPE PrintColorAdjust
 #define FOR_EACH(CASE) CASE(Exact) CASE(Economy)
+DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
+#undef TYPE
+#undef FOR_EACH
+
+#define TYPE InterpolateSize
+#define FOR_EACH(CASE) CASE(NumericOnly) CASE(AllowKeywords)
 DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 #undef TYPE
 #undef FOR_EACH
@@ -859,6 +865,12 @@ DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 #undef TYPE
 #undef FOR_EACH
 
+#define TYPE ScrollAxisLock
+#define FOR_EACH(CASE) CASE(None) CASE(Auto)
+DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
+#undef TYPE
+#undef FOR_EACH
+
 constexpr CSSValueID toCSSValueID(BreakBetween e)
 {
     switch (e) {
@@ -986,6 +998,12 @@ DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 #undef TYPE
 #undef FOR_EACH
+
+#define TYPE PositionContextType
+#define FOR_EACH(CASE) CASE(Container) CASE(Anchor)
+DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
+#undef TYPE
+#undef FOR_EACH
 #endif
 
 constexpr CSSValueID toCSSValueID(Style::TextAlign e)
@@ -1028,7 +1046,7 @@ template<> constexpr Style::TextAlign fromCSSValueID(CSSValueID valueID)
 }
 
 template<> struct Style::ValueRepresentation<Style::TextAlign> {
-    template<typename... F> constexpr decltype(auto) operator()(Style::TextAlign value, F&&... f)
+    template<typename... F> constexpr decltype(auto) operator()(Style::TextAlign value, NOESCAPE F&&... f)
     {
         auto visitor = WTF::makeVisitor(std::forward<F>(f)...);
         switch (value) {
@@ -2292,6 +2310,12 @@ DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 
 #define TYPE QuoteType
 #define FOR_EACH(CASE) CASE(OpenQuote) CASE(CloseQuote) CASE(NoOpenQuote) CASE(NoCloseQuote)
+DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
+#undef TYPE
+#undef FOR_EACH
+
+#define TYPE SynthesizedGlyph
+#define FOR_EACH(CASE) CASE(PickerUp) CASE(PickerDown)
 DEFINE_TO_FROM_CSS_VALUE_ID_FUNCTIONS
 #undef TYPE
 #undef FOR_EACH

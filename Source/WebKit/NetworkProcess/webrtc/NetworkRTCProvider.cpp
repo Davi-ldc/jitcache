@@ -61,6 +61,8 @@ using namespace WebCore;
 #define RTC_RELEASE_LOG(fmt, ...) RELEASE_LOG(Network, "%p - NetworkRTCProvider::" fmt, this, ##__VA_ARGS__)
 #define RTC_RELEASE_LOG_ERROR(fmt, ...) RELEASE_LOG_ERROR(Network, "%p - NetworkRTCProvider::" fmt, this, ##__VA_ARGS__)
 
+#define MESSAGE_CHECK(assertion) MESSAGE_CHECK_BASE(assertion, this->connection())
+
 NetworkRTCProvider::NetworkRTCProvider(NetworkConnectionToWebProcess& connection)
     : m_connection(&connection)
     , m_ipcConnection(connection.connection())
@@ -113,9 +115,18 @@ void NetworkRTCProvider::close()
     });
 }
 
-static bool isEmptyRTCAddress(const webrtc::SocketAddress& address)
+static constexpr size_t maximumHostnameLength = 255;
+
+static bool isInvalidRTCAddress(const webrtc::SocketAddress& address)
 {
-    return address.ipaddr().IsNil() && address.hostname().empty();
+    auto& hostname = address.hostname();
+    if (address.ipaddr().IsNil() && hostname.empty())
+        return true;
+    if (hostname.length() > maximumHostnameLength)
+        return true;
+    // Hostnames are handed to platform APIs as null-terminated strings, so an embedded null byte would
+    // silently truncate the hostname, possibly down to the empty string.
+    return hostname.find('\0') != std::string::npos;
 }
 
 void NetworkRTCProvider::sendToSocket(LibWebRTCSocketIdentifier identifier, std::span<const uint8_t> data, RTCNetwork::SocketAddress&& address, RTCPacketOptions&& options)
@@ -125,7 +136,7 @@ void NetworkRTCProvider::sendToSocket(LibWebRTCSocketIdentifier identifier, std:
     if (iterator == m_sockets.end())
         return;
     auto rtcAddress = address.rtcAddress();
-    if (isEmptyRTCAddress(rtcAddress)) {
+    if (isInvalidRTCAddress(rtcAddress)) {
         RELEASE_LOG_ERROR(WebRTC, "NetworkRTCProvider::sendToSocket invalid address");
         return;
     }
@@ -185,6 +196,8 @@ void NetworkRTCProvider::dispatch(Function<void()>&& callback)
 
 void NetworkRTCProvider::createResolver(LibWebRTCResolverIdentifier identifier, String&& address)
 {
+    MESSAGE_CHECK(!address.isNull());
+
     if (!isMainRunLoop()) {
         callOnMainRunLoop([this, protectedThis = Ref { *this }, identifier, address = WTF::move(address).isolatedCopy()]() mutable {
             if (!m_connection)
@@ -220,11 +233,9 @@ void NetworkRTCProvider::createResolver(LibWebRTCResolverIdentifier identifier, 
 
         auto ipAddresses = WTF::compactMap(result.value(), [](auto& address) -> std::optional<RTCNetwork::IPAddress> {
             if (address.isIPv4())
-                // FIXME: Remove SUPPRESS_MEMORY_UNSAFE_CAST once rdar://144236356 is fixed.
-                SUPPRESS_MEMORY_UNSAFE_CAST return RTCNetwork::IPAddress { webrtc::IPAddress { address.ipv4Address() } };
+                return RTCNetwork::IPAddress { webrtc::IPAddress { address.ipv4Address() } };
             if (address.isIPv6())
-                // FIXME: Remove SUPPRESS_MEMORY_UNSAFE_CAST once rdar://144236356 is fixed.
-                SUPPRESS_MEMORY_UNSAFE_CAST return RTCNetwork::IPAddress { webrtc::IPAddress { address.ipv6Address() } };
+                return RTCNetwork::IPAddress { webrtc::IPAddress { address.ipv6Address() } };
             return std::nullopt;
         });
 
@@ -277,7 +288,7 @@ void NetworkRTCProvider::createUDPSocket(LibWebRTCSocketIdentifier identifier, c
     }
 
     auto rtcAddress = address.rtcAddress();
-    if (isEmptyRTCAddress(rtcAddress)) {
+    if (isInvalidRTCAddress(rtcAddress)) {
         RELEASE_LOG_ERROR(WebRTC, "NetworkRTCProvider::createUDPSocket invalid local address");
         signalSocketIsClosed(identifier);
         return;
@@ -297,7 +308,7 @@ void NetworkRTCProvider::createClientTCPSocket(LibWebRTCSocketIdentifier identif
     }
 
     auto rtcRemoteAddress = remoteAddress.rtcAddress();
-    if (isEmptyRTCAddress(rtcRemoteAddress)) {
+    if (isInvalidRTCAddress(rtcRemoteAddress)) {
         RELEASE_LOG_ERROR(WebRTC, "NetworkRTCProvider::createClientTCPSocket invalid remote address");
         signalSocketIsClosed(identifier);
         return;
@@ -427,6 +438,7 @@ void NetworkRTCProvider::updateSharedPreferencesForWebProcess(const SharedPrefer
 
 #undef RTC_RELEASE_LOG
 #undef RTC_RELEASE_LOG_ERROR
+#undef MESSAGE_CHECK
 
 } // namespace WebKit
 

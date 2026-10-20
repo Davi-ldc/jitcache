@@ -102,6 +102,8 @@ public:
 
     void setShowPaintRects(bool);
 
+    void disconnectFrameTargetForTesting(WebCore::FrameIdentifier);
+
 private:
     WebPageAgentContext NODELETE webPageAgentContext();
     void createLazyAgents();
@@ -121,8 +123,8 @@ private:
     HashMap<String, std::unique_ptr<InspectorTargetProxy>> m_targets;
 
     CheckedPtr<InspectorBrowserAgent> m_enabledBrowserAgent;
-    RefPtr<Inspector::ProxyingNetworkAgent> m_networkAgent;
-    RefPtr<Inspector::ProxyingPageAgent> m_pageAgent;
+    const RefPtr<Inspector::ProxyingNetworkAgent> m_networkAgent;
+    const RefPtr<Inspector::ProxyingPageAgent> m_pageAgent;
 
     bool m_didCreateLazyAgents { false };
 };

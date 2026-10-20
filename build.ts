@@ -4,23 +4,27 @@ import { mkdirSync, realpathSync, statSync } from "node:fs";
 import { availableParallelism, constants, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 
-const BUN_PIN = "744846f844374847c902b5e7fd59b4342a51ef99";
+const BUN_PIN = "c6da4a4d3010e5553438c60f6bd76d981976867c";
 // The webkitbun revision the Bun pin declares (skills/SKILL.md), which the pin comparison builds.
-const WEBKIT_PIN = "2e2aa2290fac856d6f451ceacb58f7f5b44dd057";
+const WEBKIT_PIN = "0c06faadf65bf8e8c8ad3a5a8aca83e1e9ed653f";
+// The LLVM major Bun's builder accepts at BUN_PIN, installed in the package layout under JITCACHE_LLVM_PREFIX.
+const LLVM_MAJOR = 23;
 // Each target selects a Bun profile and a ninja target; without one, Bun builds its
 // default targets, the executable and its smoke test. Targets of one profile pass
 // identical config flags, so they share build.ninja, the build directory and its WebKit.
 // The twins profile is debug-local with JITCache's test builds on (ENABLE_JITCACHE_TWINS):
 // its WebKit target builds jsc and testjitcache. The pin target builds debug's jsc from a
-// worktree of this repository at WEBKIT_PIN, in a build directory of its own
-// (SPEC-integrator.harness.md section 11.1).
-const TARGETS = new Map<string, { profile: string; ninja?: string; pin?: true }>([
+// worktree of this repository at WEBKIT_PIN, in a build directory of its own.
+// Bun retired its ci-release profile for the release profile with --ci=on --buildkite=on, which set LTO and Bun's target
+// settings; the ci targets pass those flags and keep the build directory they had.
+const CI_FLAGS = ["--ci=on", "--buildkite=on"];
+const TARGETS = new Map<string, { profile: string; ninja?: string; pin?: true; flags?: string[]; dir?: string }>([
   ["debug", { profile: "debug-local", ninja: "WebKit" }],
   ["release", { profile: "release-local", ninja: "WebKit" }],
-  ["ci-release", { profile: "ci-release", ninja: "WebKit" }],
+  ["ci-release", { profile: "release", ninja: "WebKit", flags: CI_FLAGS, dir: "ci-release" }],
   ["bun-debug", { profile: "debug-local" }],
   ["bun-release", { profile: "release-local" }],
-  ["bun-ci-release", { profile: "ci-release" }],
+  ["bun-ci-release", { profile: "release", flags: CI_FLAGS, dir: "ci-release" }],
   ["twins", { profile: "debug-local-twins", ninja: "WebKit" }],
   ["bun-twins", { profile: "debug-local-twins" }],
   ["pin", { profile: "debug-local", ninja: "WebKit", pin: true }],
@@ -66,7 +70,7 @@ const home = homedir();
 const engineDir = realpathSync(import.meta.dirname);
 const bunSource = resolve(process.env.JITCACHE_BUN_SOURCE || join(home, "bun"));
 const buildRoot = resolve(process.env.JITCACHE_BUILD_ROOT || join(home, "collo-local/build/jitcache"));
-const llvmPrefix = resolve(process.env.JITCACHE_LLVM_PREFIX || join(home, "collo-local/tools/llvm-21"));
+const llvmPrefix = resolve(process.env.JITCACHE_LLVM_PREFIX || join(home, `collo-local/tools/llvm-${LLVM_MAJOR}`));
 const builder = join(bunSource, "scripts/build.ts");
 
 if (!statSync(builder, { throwIfNoEntry: false })?.isFile()) {
@@ -117,23 +121,25 @@ if (target.pin) {
   if (changes.status !== 0) fail(`Cannot check ${pinSource} for changes: ${changes.stderr.trim() || `git exited with status ${changes.status}`}`);
   webkitSource = realpathSync(pinSource);
 }
-const buildDir = join(buildRoot, `linux-${architecture}-${target.profile}${target.pin ? "-pin" : ""}`);
+const buildDir = join(buildRoot, `linux-${architecture}-${target.dir ?? target.profile}${target.pin ? "-pin" : ""}`);
 const env = { ...process.env };
 env.PATH = `${join(home, "collo-local/tools/bin")}:${env.PATH || ""}`;
 
 // Bun's builder still validates the selected compiler version.
-const llvmBin = join(llvmPrefix, "usr/lib/llvm-21/bin");
+const llvmBin = join(llvmPrefix, `usr/lib/llvm-${LLVM_MAJOR}/bin`);
 if (statSync(llvmBin, { throwIfNoEntry: false })?.isDirectory()) {
   const libdir = hostArchitecture === "x86_64" ? "x86_64-linux-gnu" : "aarch64-linux-gnu";
   env.PATH = `${llvmBin}:${env.PATH}`;
   env.LD_LIBRARY_PATH = [
     join(llvmPrefix, "usr/lib", libdir),
-    join(llvmPrefix, "usr/lib/llvm-21/lib"),
+    join(llvmPrefix, `usr/lib/llvm-${LLVM_MAJOR}/lib`),
     env.LD_LIBRARY_PATH,
   ].filter(Boolean).join(":");
 }
 
-// Keep profiles separate and bound the outer Ninja and the nested CMake and cargo builds.
+// Keep profiles separate and bound the outer Ninja and the nested CMake and cargo builds. Without these variables the
+// builder stays on its local path, with no packaging, uploads or inherited symbol order file, even where the ci
+// targets' flags set the build's semantics.
 delete env.CI;
 delete env.BUILDKITE;
 delete env.GITHUB_ACTIONS;
@@ -146,18 +152,20 @@ const lock = ["--exclusive", "--no-fork", join(lockDir, "build.lock")];
 const exitCode = (run: ReturnType<typeof spawnSync>) =>
   run.status ?? (run.signal ? 128 + constants.signals[run.signal] : 1);
 
-// flock waits for any other build and retains the lock while the builder runs.
-const result = spawnSync("flock", [
-  ...lock,
+const builderArgs = [
   process.execPath, builder,
   `--profile=${target.profile}`,
+  ...(target.flags ?? []),
   ...(cross ? [`--arch=${architecture}`, `--linux-sysroot=${sysroot}`] : []),
   "--webkit=local",
   ...(target.ninja ? [`--target=${target.ninja}`] : []),
   `-j${JOBS}`,
   ...(keepGoing ? ["-k0"] : []),
   `--build-dir=${buildDir}`,
-], { cwd: bunSource, env, stdio: "inherit" });
+];
+
+// flock waits for any other build and retains the lock while the builder runs.
+const result = spawnSync("flock", [...lock, ...builderArgs], { cwd: bunSource, env, stdio: "inherit" });
 if (result.error) fail(`Cannot launch Bun builder: ${result.error.message}`);
 let status = exitCode(result);
 

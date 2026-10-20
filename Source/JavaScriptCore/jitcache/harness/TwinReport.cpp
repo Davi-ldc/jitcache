@@ -11,6 +11,7 @@
 #include <wtf/SafeStrerror.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
+#include <wtf/posix/POSIXExtras.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/StringBuilder.h>
 
@@ -64,7 +65,7 @@ static void appendField(StringBuilder& line, ASCIILiteral name, const String& va
 static void writeLine(int fd, StringBuilder&& line)
 {
     line.append("}\n"_s);
-    CString bytes = line.toString().utf8();
+    UTF8CString bytes = line.toString().utf8();
 
     // The line goes straight to the file, with no buffer of its own, so a later crash keeps it. The report runs only in
     // test processes, and a line it cannot write could hide a difference, so a failure ends the process, as the
@@ -87,7 +88,7 @@ static void writeLine(int fd, StringBuilder&& line)
 
 std::unique_ptr<TwinReport> TwinReport::open(const String& path)
 {
-    int fd = ::open(path.utf8().data(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    int fd = posixOpen(path.utf8(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0)
         return nullptr;
     return std::unique_ptr<TwinReport>(new TwinReport(fd));

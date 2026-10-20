@@ -620,12 +620,12 @@ Ref<XMLParserContext> XMLParserContext::createStringParser(xmlSAXHandlerPtr hand
 
 
 // Chunk should be encoded in UTF-8
-RefPtr<XMLParserContext> XMLParserContext::createMemoryParser(xmlSAXHandlerPtr handlers, void* userData, const CString& chunk)
+RefPtr<XMLParserContext> XMLParserContext::createMemoryParser(xmlSAXHandlerPtr handlers, void* userData, const UTF8CString& chunk)
 {
     initializeXMLParser();
 
     // appendFragmentSource() checks that the length doesn't overflow an int.
-    xmlParserCtxtPtr parser = xmlCreateMemoryParserCtxt(chunk.data(), chunk.length());
+    xmlParserCtxtPtr parser = xmlCreateMemoryParserCtxt(chunk.legacyCStringPointer(), chunk.length());
 
     if (!parser)
         return nullptr;
@@ -1505,7 +1505,7 @@ static void NODELETE ignorableWhitespaceHandler(void*, const xmlChar*, int)
     // http://bugs.webkit.org/show_bug.cgi?id=5792
 }
 
-void XMLDocumentParser::initializeParserContext(const CString& chunk)
+void XMLDocumentParser::initializeParserContext(const UTF8CString& chunk)
 {
     xmlSAXHandler sax;
     zeroBytes(sax);
@@ -1607,7 +1607,7 @@ xmlDocPtr xmlDocPtrForString(CachedResourceLoader& cachedResourceLoader, const S
         return nullptr;
 
     XMLDocumentParserScope scope(&cachedResourceLoader, errorFunc);
-    return xmlReadMemory(characters.data(), static_cast<int>(sizeInBytes), url.latin1().data(), encoding, XSLT_PARSE_OPTIONS);
+    return xmlReadMemory(characters.data(), static_cast<int>(sizeInBytes), url.utf8().legacyCStringPointer(), encoding, XSLT_PARSE_OPTIONS);
 }
 #endif
 
@@ -1669,7 +1669,7 @@ bool XMLDocumentParser::appendFragmentSource(const String& chunk)
     ASSERT(!m_context);
     ASSERT(m_parsingFragment);
 
-    CString chunkAsUTF8 = chunk.utf8();
+    auto chunkAsUTF8 = chunk.utf8();
     
     // libxml2 takes an int for a length, and therefore can't handle XML chunks larger than 2 GiB.
     if (chunkAsUTF8.length() > INT_MAX)

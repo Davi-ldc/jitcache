@@ -236,7 +236,7 @@ class ConvertStructState : angle::NonCopyable
             {
                 TInfoSinkBase aliasedName;
                 aliasedName << "ANGLE_ALIASED_";
-                info.modifiedFieldName.emit(aliasedName, mCompiler.getUserVariableNamePrefix());
+                info.modifiedFieldName.emit(aliasedName, kUserVariableNamePrefix);
 
                 TType *placeholderType = new TType(modified->getType());
                 placeholderType->setQualifier(EvqSpecConst);
@@ -881,12 +881,18 @@ bool SaturateScalarOrVectorCommon(ConvertStructState &state,
             }
         });
     }
-    for (uint8_t d = dim; d < saturation; ++d)
+
+    // Zero-initialize components added by saturation for pipeline outputs (original-to-modified)
+    // to avoid indeterminate GPU register residue leaking into color attachments.
+    if (state.config.convertType == ConvertType::OriginalToModified)
     {
-        state.addConversion([=](Access::Env &, OriginalAccess &, ModifiedAccess &m) {
-            auto &m_ = AccessIndex(m, d);
-            return Access{*CreateZeroNode(m_.getType()), m_};
-        });
+        for (uint8_t d = dim; d < saturation; ++d)
+        {
+            state.addConversion([=](Access::Env &, OriginalAccess &, ModifiedAccess &m) {
+                auto &m_ = AccessIndex(m, d);
+                return Access{*CreateZeroNode(m_.getType()), m_};
+            });
+        }
     }
 
     return true;

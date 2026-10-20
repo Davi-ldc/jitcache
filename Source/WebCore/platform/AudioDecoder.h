@@ -28,7 +28,7 @@
 
 #if ENABLE(WEB_CODECS)
 
-#include <span>
+#include <WebCore/AudioEncodedData.h>
 #include <wtf/CompletionHandler.h>
 #include <wtf/NativePromise.h>
 
@@ -49,12 +49,6 @@ public:
         uint64_t numberOfChannels { 0 };
     };
 
-    struct EncodedData {
-        std::span<const uint8_t> data;
-        bool isKeyFrame { false };
-        int64_t timestamp { 0 };
-        std::optional<uint64_t> duration;
-    };
     struct DecodedData {
         Ref<PlatformRawAudioData> data;
     };
@@ -70,7 +64,7 @@ public:
     static Ref<CreatePromise> create(const String&, const Config&, OutputCallback&&);
 
     using DecodePromise = NativePromise<void, String>;
-    virtual Ref<DecodePromise> decode(EncodedData&&) = 0;
+    virtual Ref<DecodePromise> decode(AudioEncodedData&&) = 0;
 
     virtual Ref<GenericPromise> flush() = 0;
     virtual void reset() = 0;

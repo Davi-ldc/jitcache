@@ -33,13 +33,12 @@
 namespace WebCore {
 namespace Style {
 
-// <'align-items'> = normal | stretch | <baseline-position> | <overflow-position>? <self-position>
+// <'align-items'> = <overflow-position>? normal | stretch | <baseline-position> | <overflow-position>? <self-position>
 // https://drafts.csswg.org/css-align/#propdef-align-items
-// Additional values, `anchor-center` and `dialog` added to <self-position> by CSS Anchor Positioning.
-// FIXME: Add support for `dialog`.
+// Additional value, `anchor-center` added to <self-position> by CSS Anchor Positioning.
 // https://drafts.csswg.org/css-anchor-position-1/#anchor-center
 struct AlignItems {
-    constexpr AlignItems(CSS::Keyword::Normal);
+    constexpr AlignItems(CSS::Keyword::Normal, std::optional<OverflowPosition> = std::nullopt);
     constexpr AlignItems(CSS::Keyword::Stretch);
     constexpr AlignItems(CSS::Keyword::Baseline, std::optional<BaselineAlignmentPreference> = std::nullopt);
     constexpr AlignItems(CSS::Keyword::Center, std::optional<OverflowPosition> = std::nullopt);
@@ -66,7 +65,7 @@ struct AlignItems {
     constexpr bool isFirstBaseline() const { return primary() == PrimaryKind::Baseline && baselineAlignmentPreference() == BaselineAlignmentPreferenceKind::First; }
     constexpr bool isLastBaseline() const { return primary() == PrimaryKind::Baseline && baselineAlignmentPreference() == BaselineAlignmentPreferenceKind::Last; }
 
-    template<typename... F> constexpr decltype(auto) switchOn(F&&...) const;
+    template<typename... F> constexpr decltype(auto) switchOn(NOESCAPE F&&...) const;
 
     constexpr bool operator==(const AlignItems&) const = default;
 
@@ -103,8 +102,8 @@ private:
 };
 static_assert(sizeof(AlignItems) == 1);
 
-constexpr AlignItems::AlignItems(CSS::Keyword::Normal)
-    : AlignItems { PrimaryKind::Normal }
+constexpr AlignItems::AlignItems(CSS::Keyword::Normal, std::optional<OverflowPosition> overflow)
+    : AlignItems { PrimaryKind::Normal, overflow }
 {
 }
 
@@ -204,10 +203,10 @@ constexpr bool AlignItems::canHaveBaselinePosition(PrimaryKind primary)
 constexpr bool AlignItems::canHaveOverflowPosition(PrimaryKind primary)
 {
     switch (primary) {
-    case PrimaryKind::Normal:
     case PrimaryKind::Stretch:
     case PrimaryKind::Baseline:
         return false;
+    case PrimaryKind::Normal:
     case PrimaryKind::Center:
     case PrimaryKind::Start:
     case PrimaryKind::End:
@@ -221,13 +220,13 @@ constexpr bool AlignItems::canHaveOverflowPosition(PrimaryKind primary)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-template<typename... F> constexpr decltype(auto) AlignItems::switchOn(F&&... f) const
+template<typename... F> constexpr decltype(auto) AlignItems::switchOn(NOESCAPE F&&... f) const
 {
     auto visitor = WTF::makeVisitor(std::forward<F>(f)...);
 
     switch (primary()) {
     case PrimaryKind::Normal:
-        return visitor(CSS::Keyword::Normal { });
+        return visitOverflowPosition(CSS::Keyword::Normal { }, overflowPosition(), visitor);
     case PrimaryKind::Stretch:
         return visitor(CSS::Keyword::Stretch { });
     case PrimaryKind::Baseline:

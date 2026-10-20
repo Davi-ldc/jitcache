@@ -37,6 +37,8 @@ struct RelativeAlphaColor;
 
 namespace Style {
 
+class ResolvedColors;
+
 struct ColorResolutionState;
 
 struct RelativeAlphaColor {
@@ -46,7 +48,7 @@ struct RelativeAlphaColor {
     using Alpha = GetCSSColorParseTypeWithCalcAndSymbolsComponentResult<Descriptor, 0>;
 
     Color origin;
-    std::optional<Alpha> alpha;
+    Alpha alpha;
 
     bool operator==(const RelativeAlphaColor&) const = default;
 };
@@ -57,7 +59,7 @@ inline bool operator==(const UniqueRef<RelativeAlphaColor>& a, const UniqueRef<R
 }
 
 Color toStyleColor(const CSS::RelativeAlphaColor&, ColorResolutionState&);
-WebCore::Color resolveColor(const RelativeAlphaColor&, const WebCore::Color& currentColor);
+WebCore::Color resolveColor(const RelativeAlphaColor&, const ResolvedColors&);
 bool containsCurrentColor(const RelativeAlphaColor&);
 
 void serializationForCSSTokenization(StringBuilder&, const CSS::SerializationContext&, const RelativeAlphaColor&);

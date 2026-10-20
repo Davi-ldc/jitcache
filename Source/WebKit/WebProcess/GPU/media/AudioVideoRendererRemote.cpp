@@ -128,7 +128,7 @@ AudioVideoRendererRemote::AudioVideoRendererRemote(LoggerHelper* loggerHelper, G
             return;
         }
         Locker locker { protectedThis->m_lock };
-        protectedThis->m_sharedTimebaseReader = WTF::move(reader);
+        lazyInitialize(protectedThis->m_sharedTimebaseReader, WTF::move(reader));
     }, 0);
 }
 
@@ -331,7 +331,7 @@ void AudioVideoRendererRemote::paintCurrentVideoFrameInContext(GraphicsContext& 
         return;
 
     if (RefPtr videoFrame = currentVideoFrame())
-        context.drawVideoFrame(*videoFrame, rect, ImageOrientation::Orientation::None, false);
+        context.drawVideoFrame(*videoFrame, rect, ShouldDiscardAlpha::No);
 }
 
 RefPtr<NativeImage> AudioVideoRendererRemote::currentNativeImage() const

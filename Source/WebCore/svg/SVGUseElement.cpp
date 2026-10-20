@@ -59,7 +59,7 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGUseElement);
 
 inline SVGUseElement::SVGUseElement(const QualifiedName& tagName, Document& document)
-    : SVGGraphicsElement(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGGraphicsElement(tagName, document, PropertyRegistry::singleton())
     , SVGURIReference(this)
 {
     ASSERT(hasCustomStyleResolveCallbacks());
@@ -160,13 +160,13 @@ FloatRect SVGUseElement::getBBox(StyleUpdateStrategy styleUpdateStrategy)
         return { };
 
     if (document().settings().layerBasedSVGEngineEnabled()) {
-        auto* transformableContainer = dynamicDowncast<RenderSVGTransformableContainer>(renderer());
+        CheckedPtr transformableContainer = dynamicDowncast<RenderSVGTransformableContainer>(renderer());
         ASSERT(transformableContainer);
         bbox.move(transformableContainer->additionalContainerTranslation());
         return bbox;
     }
 
-    auto* transformableContainer = dynamicDowncast<LegacyRenderSVGTransformableContainer>(renderer());
+    CheckedPtr transformableContainer = dynamicDowncast<LegacyRenderSVGTransformableContainer>(renderer());
     ASSERT(transformableContainer && transformableContainer->isObjectBoundingBoxValid());
     bbox.move(transformableContainer->additionalTranslation());
     return bbox;
@@ -291,7 +291,7 @@ void SVGUseElement::updateUserAgentShadowTree()
     AtomString targetID;
     RefPtr target = findTarget(&targetID);
     if (!target) {
-        treeScopeForSVGReferences().addPendingSVGResource(targetID, *this);
+        protect(treeScopeForSVGReferences())->addPendingSVGResource(targetID, *this);
         return;
     }
 
@@ -344,10 +344,10 @@ static bool NODELETE isDirectReference(const SVGElement& element)
         || element.hasTagName(textTag);
 }
 
-SVGGraphicsElement* SVGUseElement::visibleTargetGraphicsElement() const
+RefPtr<SVGGraphicsElement> SVGUseElement::visibleTargetGraphicsElement() const
 {
     RefPtr clone = this->targetClone();
-    auto* targetElement = dynamicDowncast<SVGGraphicsElement>(clone.get());
+    RefPtr targetElement = dynamicDowncast<SVGGraphicsElement>(clone.get());
     if (!targetElement)
         return nullptr;
 
@@ -355,8 +355,8 @@ SVGGraphicsElement* SVGUseElement::visibleTargetGraphicsElement() const
     if (!renderer)
         return nullptr;
 
-    auto& style = renderer->style();
-    if (style.display() == Style::DisplayType::None || style.usedVisibility() != Visibility::Visible)
+    CheckedRef style = renderer->style();
+    if (style->display() == Style::DisplayType::None || style->usedVisibility() != Visibility::Visible)
         return nullptr;
 
     // Spec: "If a <use> element is a child of a clipPath element, it must directly
@@ -493,7 +493,7 @@ RefPtr<SVGElement> SVGUseElement::findTarget(AtomString* targetID) const
     RefPtr correspondingElement = this->correspondingElement();
     Ref original = correspondingElement ? downcast<SVGUseElement>(*correspondingElement) : *this;
 
-    auto targetResult = targetElementFromIRIString(original->href(), original->treeScope(), protect(original->externalDocument()).get());
+    auto targetResult = targetElementFromIRIString(original->href(), protect(original->treeScope()), protect(original->externalDocument()).get());
     if (targetID) {
         *targetID = WTF::move(targetResult.identifier);
         // If the reference is external, don't return the target ID to the caller.

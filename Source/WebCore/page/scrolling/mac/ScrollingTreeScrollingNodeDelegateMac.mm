@@ -38,6 +38,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <pal/spi/mac/NSScrollerImpSPI.h>
 #import <wtf/BlockObjCExceptions.h>
+#import <wtf/SystemTracing.h>
 #import <wtf/TZoneMallocInlines.h>
 
 namespace WebCore {
@@ -67,8 +68,8 @@ void ScrollingTreeScrollingNodeDelegateMac::updateFromStateNode(const ScrollingS
     Ref verticalScroller = m_scrollerPair->verticalScroller();
 
     if (scrollingStateNode.hasChangedProperty(ScrollingStateNode::Property::PainterForScrollbar)) {
-        auto horizontalScrollbar = scrollingStateNode.horizontalScrollerImp();
-        auto verticalScrollbar = scrollingStateNode.verticalScrollerImp();
+        RetainPtr horizontalScrollbar = scrollingStateNode.horizontalScrollerImp();
+        RetainPtr verticalScrollbar = scrollingStateNode.verticalScrollerImp();
         if (horizontalScrollbar || verticalScrollbar) {
             m_scrollerPair->releaseReferencesToScrollerImpsOnTheMainThread();
             horizontalScroller->setScrollerImp(horizontalScrollbar);
@@ -80,10 +81,10 @@ void ScrollingTreeScrollingNodeDelegateMac::updateFromStateNode(const ScrollingS
         m_scrollerPair->mouseIsInScrollbar(scrollingStateNode.scrollbarHoverState());
 
     if (scrollingStateNode.hasChangedProperty(ScrollingStateNode::Property::HorizontalScrollbarLayer))
-        horizontalScroller->setHostLayer(static_cast<CALayer*>(scrollingStateNode.horizontalScrollbarLayer()));
+        horizontalScroller->setHostLayer(protect(static_cast<CALayer*>(scrollingStateNode.horizontalScrollbarLayer())));
 
     if (scrollingStateNode.hasChangedProperty(ScrollingStateNode::Property::VerticalScrollbarLayer))
-        verticalScroller->setHostLayer(static_cast<CALayer*>(scrollingStateNode.verticalScrollbarLayer()));
+        verticalScroller->setHostLayer(protect(static_cast<CALayer*>(scrollingStateNode.verticalScrollbarLayer())));
 
     if (scrollingStateNode.hasChangedProperty(ScrollingStateNode::Property::ScrollableAreaParams)) {
         horizontalScroller->setHiddenByStyle(scrollingStateNode.scrollableAreaParameters().horizontalNativeScrollbarVisibility);
@@ -349,6 +350,15 @@ void ScrollingTreeScrollingNodeDelegateMac::didStopRubberBandAnimation()
 
 void ScrollingTreeScrollingNodeDelegateMac::rubberBandingStateChanged(bool inRubberBand)
 {
+    if (scrollingTree()->scrollingPerformanceTestingEnabled()) {
+        auto stretch = stretchAmount();
+        WTFEmitSignpostAlways(this, ScrollingPerformanceTestRubberBand, "%{public}s; top=%d right=%d bottom=%d left=%d; stretch=%d,%d; isMainFrame=%d",
+            inRubberBand ? "started" : "ended",
+            stretch.height() < 0, stretch.width() > 0, stretch.height() > 0, stretch.width() < 0,
+            stretch.width(), stretch.height(),
+            scrollingNode()->nodeType() == ScrollingNodeType::MainFrame);
+    }
+
     scrollingTree()->setRubberBandingInProgressForNode(scrollingNode()->scrollingNodeID(), inRubberBand);
 #if HAVE(RUBBER_BANDING)
     if (!inRubberBand)
@@ -427,26 +437,37 @@ String ScrollingTreeScrollingNodeDelegateMac::scrollbarStateForOrientation(Scrol
     return m_scrollerPair->scrollbarStateForOrientation(orientation);
 }
 
-bool ScrollingTreeScrollingNodeDelegateMac::isPointInScrollbar(const FloatPoint& pointInReferenceLayer, CALayer *referenceLayer) const
+Vector<RetainPtr<CALayer>, 2> ScrollingTreeScrollingNodeDelegateMac::hitTestableScrollbarLayers() const
 {
-    if (!referenceLayer)
-        return false;
+    Ref node = scrollingNode();
+    bool usesOverlayScrollbars = m_scrollerPair->scrollbarStyle() == ScrollbarStyle::Overlay;
 
-    const auto scrollbarStyle = m_scrollerPair->scrollbarStyle();
-
-    const auto isPointOverScroller = [&](ScrollerMac& scroller) {
+    Vector<RetainPtr<CALayer>, 2> layers;
+    auto appendIfHitTestable = [&](ScrollerMac& scroller, NativeScrollbarVisibility visibility) {
         RetainPtr hostLayer = scroller.hostLayer();
         if (!hostLayer)
-            return false;
+            return;
 
-        if (scrollbarStyle == ScrollbarStyle::Overlay && scroller.knobAlpha() <= 0)
-            return false;
+        switch (visibility) {
+        case NativeScrollbarVisibility::HiddenByStyle:
+            return;
+        case NativeScrollbarVisibility::ReplacedByCustomScrollbar:
+            // The web process paints custom scrollbars into the host layer, and they are never overlay scrollbars.
+            break;
+        case NativeScrollbarVisibility::Visible:
+            // The web process only hit-tests an overlay scrollbar while it is shown, which it learns about
+            // through ScrollerMac::visibilityChanged(), so consult the same state here.
+            if (usesOverlayScrollbars && !scroller.isVisible())
+                return;
+            break;
+        }
 
-        const auto pointInHostLayer = [hostLayer convertPoint:pointInReferenceLayer fromLayer:referenceLayer];
-        return static_cast<bool>([hostLayer containsPoint:pointInHostLayer]);
+        layers.append(WTF::move(hostLayer));
     };
 
-    return isPointOverScroller(m_scrollerPair->verticalScroller()) || isPointOverScroller(m_scrollerPair->horizontalScroller());
+    appendIfHitTestable(m_scrollerPair->verticalScroller(), node->verticalNativeScrollbarVisibility());
+    appendIfHitTestable(m_scrollerPair->horizontalScroller(), node->horizontalNativeScrollbarVisibility());
+    return layers;
 }
 
 } // namespace WebCore

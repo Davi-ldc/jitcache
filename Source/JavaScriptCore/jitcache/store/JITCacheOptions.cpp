@@ -23,7 +23,10 @@
     v(useBaselineJIT, Bool, true) \
     v(useDFGJIT, Bool, true) \
     v(useBaselineJITCodeSharing, Bool, true) \
+    v(useLazyLLIntCallLinkInfos, Bool, true) \
+    v(useLazyModuleFunctionDeclarations, Bool, true) \
     v(useLOLJIT, Bool, false) \
+    v(useBytecodeOptimizer, Bool, false) \
     v(forceUnlinkedDFG, Bool, false) \
     v(forceDebuggerBytecodeGeneration, Bool, false) \
     v(debuggerTriggersBreakpointException, Bool, false) \
@@ -33,6 +36,7 @@
     v(switchJumpTableAmountThreshold, Unsigned, 15) \
     v(useTailCalls, Bool, true) \
     v(optimizeRecursiveTailCalls, Bool, true) \
+    v(useSharedRegExpLiteralObjects, Bool, true) \
     v(exposePrivateIdentifiers, Bool, false) \
     v(functionOverrides, OptionString, nullptr) \
     v(returnEarlyFromInfiniteLoopsForFuzzing, Bool, false) \
@@ -107,8 +111,8 @@ std::array<bool, numberOfMustMatchOptions> mustMatchOptionValues()
 bool FixedOptionRow::holds() const
 {
     FixedOptionValue effective = effectiveValue();
-    auto* requiredString = std::get_if<const char*>(&requiredValue);
-    auto* effectiveString = std::get_if<const char*>(&effective);
+    auto* requiredString = std::get_if<const char8_t*>(&requiredValue);
+    auto* effectiveString = std::get_if<const char8_t*>(&effective);
     if (requiredString && effectiveString) {
         if (!*requiredString || !*effectiveString)
             return *requiredString == *effectiveString;
@@ -155,10 +159,10 @@ String describeFixedOptionValue(const FixedOptionValue& value)
         [](double number) -> String {
             return String::number(number);
         },
-        [](const char* characters) -> String {
+        [](const char8_t* characters) -> String {
             if (!characters)
                 return "null"_s;
-            return makeString('"', String::fromLatin1(characters), '"');
+            return makeString('"', unsafeSpan(characters), '"');
         });
 }
 

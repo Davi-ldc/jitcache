@@ -31,6 +31,7 @@
 #import "Helpers/ios/IOSMouseEventTestHarness.h"
 #import "InstanceMethodSwizzler.h"
 #import "Helpers/PlatformUtilities.h"
+#import "Helpers/Test.h"
 #import "ScreenWakeLock.h"
 #import "Helpers/cocoa/TestCocoa.h"
 #import "Helpers/cocoa/TestNavigationDelegate.h"
@@ -74,6 +75,7 @@
 #import <wtf/Vector.h>
 
 #if PLATFORM(MAC)
+#import "Helpers/mac/LocalEventMonitorSwizzler.h"
 #import <Carbon/Carbon.h>
 #endif
 
@@ -795,6 +797,84 @@ TEST(WebKit, WindowFrame)
     TestWebKitAPI::Util::run(&done);
 }
 
+#if PLATFORM(MAC)
+
+// The getWindowFrameWithCompletionHandler delegate is optional. When a client does not implement
+// it we should report the frame of the window actually hosting the view, not zero: window.outerWidth
+// of 0 alongside a non-zero innerWidth is a well-known headless-browser signature.
+TEST(WebKit, WindowFrameFallsBackToHostingWindowWithoutUIDelegate)
+{
+    RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:NSMakeRect(0, 0, 320, 240)]);
+    RetainPtr window = [webView hostWindow];
+    EXPECT_NOT_NULL(window.get());
+
+    // Size the window differently from the view on purpose. Were the window to match the view, these
+    // assertions would also be satisfied by returning the view's frame, or by returning
+    // innerWidth/innerHeight.
+    [window setFrame:NSMakeRect(0, 0, 500, 400) display:YES];
+    [webView synchronouslyLoadHTMLString:@"<body></body>"];
+    [webView waitForNextPresentationUpdate];
+
+    EXPECT_EQ(500, [[webView objectByEvaluatingJavaScript:@"outerWidth"] intValue]);
+    EXPECT_EQ(400, [[webView objectByEvaluatingJavaScript:@"outerHeight"] intValue]);
+
+    // The view is still 320x240, so outer must not merely be echoing inner.
+    EXPECT_EQ(320, [[webView objectByEvaluatingJavaScript:@"innerWidth"] intValue]);
+    EXPECT_EQ(240, [[webView objectByEvaluatingJavaScript:@"innerHeight"] intValue]);
+}
+
+// A client that implements the delegate method is taken at its word, including when it deliberately
+// reports an empty rect.
+TEST(WebKit, WindowFrameHonorsDelegateReturningEmptyRect)
+{
+    RetainPtr delegate = adoptNS([[TestUIDelegate alloc] init]);
+    [delegate setGetWindowFrameWithCompletionHandler:^(WKWebView *, void (^completionHandler)(CGRect)) {
+        completionHandler(CGRectZero);
+    }];
+
+    RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:NSMakeRect(0, 0, 320, 240)]);
+    [webView setUIDelegate:delegate.get()];
+    EXPECT_NOT_NULL([webView hostWindow]);
+    [webView synchronouslyLoadHTMLString:@"<body></body>"];
+
+    EXPECT_EQ(0, [[webView objectByEvaluatingJavaScript:@"outerWidth"] intValue]);
+    EXPECT_EQ(0, [[webView objectByEvaluatingJavaScript:@"outerHeight"] intValue]);
+}
+
+// CSSOM View: "If there is no client window this attribute must return zero." A WKWebView that was
+// never added to a window has no client window, so zero remains correct there.
+TEST(WebKit, WindowFrameIsZeroWhenNotInAWindow)
+{
+    RetainPtr webView = adoptNS([[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, 320, 240)]);
+    [webView loadHTMLString:@"<body></body>" baseURL:nil];
+    [webView _test_waitForDidFinishNavigation];
+
+    EXPECT_NULL([webView window]);
+    EXPECT_EQ(0, [[webView objectByEvaluatingJavaScript:@"outerWidth"] intValue]);
+    EXPECT_EQ(0, [[webView objectByEvaluatingJavaScript:@"outerHeight"] intValue]);
+}
+
+// Removing the view from its window must invalidate the WebProcess-side cached window frame.
+// Otherwise WebChromeClient::windowRect() keeps answering from the cache -- it consults it before
+// issuing GetWindowFrame -- and outerWidth/outerHeight report the window the view used to live in.
+TEST(WebKit, WindowFrameIsZeroAfterRemovalFromWindow)
+{
+    RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:NSMakeRect(0, 0, 320, 240)]);
+    [[webView hostWindow] setFrame:NSMakeRect(0, 0, 500, 400) display:YES];
+    [webView synchronouslyLoadHTMLString:@"<body></body>"];
+    [webView waitForNextPresentationUpdate];
+    EXPECT_EQ(500, [[webView objectByEvaluatingJavaScript:@"outerWidth"] intValue]);
+
+    [webView removeFromTestWindow];
+    [webView waitForNextPresentationUpdate];
+
+    EXPECT_NULL([webView window]);
+    EXPECT_EQ(0, [[webView objectByEvaluatingJavaScript:@"outerWidth"] intValue]);
+    EXPECT_EQ(0, [[webView objectByEvaluatingJavaScript:@"outerHeight"] intValue]);
+}
+
+#endif // PLATFORM(MAC)
+
 static bool headerHeightCalled;
 static bool footerHeightCalled;
 static bool drawHeaderCalled;
@@ -1060,66 +1140,11 @@ TEST(WebKit, MouseMoveOverElement)
     TestWebKitAPI::Util::run(&done);
 }
 
-static BlockPtr<NSEvent*(NSEvent*)> gEventMonitorHandler;
-
-@interface TestLocalEventObserver : NSObject {
-    NSEventMask _mask;
-    id _block;
-    BOOL _isAdditive;
-}
-+ (void)initialize;
-- (instancetype)initMatchingEvents:(NSEventMask)mask handler:(NSEvent *(^)(NSEvent *))block;
-- (void)invalidate;
-- (void)dealloc;
-- (void)recomputeObserverMask;
-@end
-
-@implementation TestLocalEventObserver
-+ (void)initialize
-{
-}
-
-- (instancetype)initMatchingEvents:(NSEventMask)mask handler:(NSEvent *(^)(NSEvent *))block
-{
-    self = [super init];
-    return self;
-}
-
-- (void)dealloc
-{
-    [super dealloc];
-}
-
-- (void)invalidate
-{
-}
-
-- (void)recomputeObserverMask
-{
-}
-@end
-
-@interface TestEventMonitor : NSObject
-
-+ (id)addLocalMonitorForEventsMatchingMask:(NSEventMask)mask handler:(NSEvent* (^)(NSEvent *event))block;
-
-@end
-
-@implementation TestEventMonitor
-
-+ (id)addLocalMonitorForEventsMatchingMask:(NSEventMask)mask handler:(NSEvent* (^)(NSEvent *event))block
-{
-    gEventMonitorHandler = makeBlockPtr(block);
-    return adoptNS([[TestLocalEventObserver alloc] initMatchingEvents:mask handler:block]).leakRef();
-}
-
-@end
-
 TEST(WebKit, MouseMoveOverElementWithClosedWebView)
 {
     auto linkLocation = NSMakePoint(200, 150);
 
-    ClassMethodSwizzler localMonitorSwizzler(NSEvent.class, @selector(addLocalMonitorForEventsMatchingMask:handler:), [TestEventMonitor methodForSelector:@selector(addLocalMonitorForEventsMatchingMask:handler:)]);
+    TestWebKitAPI::LocalEventMonitorSwizzler localMonitorSwizzler;
 
     // We swizzle `NSWindow.mouseLocationOutsideOfEventStream` because manually calling the handler intercepted
     // from the swizzled `+[NSEvent addLocalMonitorForEventsMatchingMask:handler:]` with a fake event means we
@@ -1154,7 +1179,7 @@ TEST(WebKit, MouseMoveOverElementWithClosedWebView)
         [webView waitForNextPresentationUpdate];
         // This test just verifies that attempting to asynchronously dispatch a mouseDidMoveOverElement
         // update when the WKWebView and its page client have been destructed does not trigger a crash.
-        gEventMonitorHandler([NSEvent mouseEventWithType:NSEventTypeMouseMoved location:linkLocation modifierFlags:0 timestamp:0 windowNumber:[[webView hostWindow] windowNumber] context:nil eventNumber:0 clickCount:0 pressure:0]);
+        localMonitorSwizzler.sendEventToMonitor([NSEvent mouseEventWithType:NSEventTypeMouseMoved location:linkLocation modifierFlags:0 timestamp:0 windowNumber:[[webView hostWindow] windowNumber] context:nil eventNumber:0 clickCount:0 pressure:0]);
         [webView removeFromSuperview];
 
         EXPECT_FALSE([webView _hasFlagsChangedEventMonitorForTesting]);

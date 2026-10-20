@@ -61,6 +61,7 @@
 #include "VisitedLinkStore.h"
 #include <WebCore/HTTPStatusCodes.h>
 #include <wtf/text/CString.h>
+#include <wtf/text/TextStream.h>
 
 #if PLATFORM(COCOA)
 #import <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
@@ -207,7 +208,7 @@ void HistoryController::restoreScrollPositionAndViewState()
 
 void HistoryController::updateBackForwardListForFragmentScroll(WasCreatedByJSWithoutUserInteraction wasCreatedByJSWithoutUserInteraction)
 {
-    m_frame->navigationScheduler().adjustPendingHistoryNavigationForNewBackForwardEntry();
+    protect(protect(m_frame)->navigationScheduler())->adjustPendingHistoryNavigationForNewBackForwardEntry();
     updateBackForwardListClippedAtTarget(false, wasCreatedByJSWithoutUserInteraction);
 }
 
@@ -249,10 +250,7 @@ void HistoryController::saveDocumentState()
 void HistoryController::saveDocumentAndScrollState()
 {
     Ref frame = m_frame.get();
-    for (RefPtr<Frame> descendant = frame.ptr(); descendant; descendant = descendant->tree().traverseNext(frame.ptr())) {
-        RefPtr localFrame = dynamicDowncast<LocalFrame>(*descendant);
-        if (!localFrame)
-            continue;
+    for (Ref localFrame : inclusiveDescendantFrames<LocalFrame>(frame)) {
         Ref history = localFrame->loader().history();
         history->saveDocumentState();
         history->saveScrollPositionAndViewStateToItem(protect(history->currentItem()).get());
@@ -520,7 +518,7 @@ void HistoryController::setDefersLoading(bool defer)
 
 void HistoryController::updateForBackForwardNavigation()
 {
-    LOG(History, "HistoryController %p updateForBackForwardNavigation: Updating History for back/forward navigation in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string().utf8().data() : "");
+    LOG_WITH_STREAM(History, stream << "HistoryController "_s << this << " updateForBackForwardNavigation: Updating History for back/forward navigation in frame "_s << m_frame.ptr() << " (main frame "_s << m_frame->isMainFrame() << ") "_s << (m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string() : emptyString()));
 
     // Must grab the current scroll position before disturbing it
     if (!m_frameLoadComplete)
@@ -533,7 +531,7 @@ void HistoryController::updateForBackForwardNavigation()
 
 void HistoryController::updateForReloadOrReplace()
 {
-    LOG(History, "HistoryController %p updateForReloadOrReplace: Updating History for reload or replace in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string().utf8().data() : "");
+    LOG_WITH_STREAM(History, stream << "HistoryController "_s << this << " updateForReloadOrReplace: Updating History for reload or replace in frame "_s << m_frame.ptr() << " (main frame "_s << m_frame->isMainFrame() << ") "_s << (m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string() : emptyString()));
 
     if (RefPtr currentItem = m_currentItem) {
         BackForwardCache::singleton().remove(*currentItem);
@@ -558,7 +556,7 @@ void HistoryController::updateForReloadOrReplace()
 
 void HistoryController::updateForStandardLoad(HistoryUpdateType updateType)
 {
-    LOG(History, "HistoryController %p updateForStandardLoad: Updating History for standard load in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader()->url().string().ascii().data());
+    LOG(History, "HistoryController %p updateForStandardLoad: Updating History for standard load in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader()->url().string().utf8());
 
     Ref frameLoader = m_frame->loader();
 
@@ -604,41 +602,48 @@ void HistoryController::updateForStandardLoad(HistoryUpdateType updateType)
 
 void HistoryController::updateForRedirectWithLockedBackForwardList()
 {
-    LOG(History, "HistoryController %p updateForRedirectWithLockedBackForwardList: Updating History for redirect load in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string().utf8().data() : "");
+    LOG_WITH_STREAM(History, stream << "HistoryController "_s << this << " updateForRedirectWithLockedBackForwardList: Updating History for redirect load in frame "_s << m_frame.ptr() << " (main frame "_s << m_frame->isMainFrame() << ") "_s << (m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string() : emptyString()));
 
     RefPtr documentLoader = m_frame->loader().documentLoader();
     bool canRecordHistory = canRecordHistoryForFrame(m_frame);
     auto historyURL = documentLoader ? documentLoader->urlForHistory() : URL { };
 
+    auto createChildItemInParent = [&] {
+        RefPtr page = m_frame->page();
+        RefPtr parentFrame = dynamicDowncast<LocalFrame>(m_frame->tree().parent());
+        if (!page || !parentFrame)
+            return;
+        RefPtr parentCurrentItem = parentFrame->loader().history().currentItem();
+        if (!parentCurrentItem)
+            return;
+        Ref item = createItem(page->historyItemClient(), parentCurrentItem->itemID());
+        parentCurrentItem->setChildItem(item.copyRef());
+        protect(page->backForward())->setChildItem(parentCurrentItem->frameItemID(), WTF::move(item));
+    };
+
     if (documentLoader && documentLoader->isClientRedirect()) {
-        if (!m_currentItem && m_frame->isMainFrame()) {
-            if (!historyURL.isEmpty()) {
-                updateBackForwardListClippedAtTarget(true);
-                if (canRecordHistory) {
-                    Ref frameLoader = m_frame->loader();
-                    protect(frameLoader->client())->updateGlobalHistory();
-                    documentLoader->setDidCreateGlobalHistoryEntry(true);
-                    if (documentLoader->unreachableURL().isEmpty())
-                        protect(frameLoader->client())->updateGlobalHistoryRedirectLinks();
+        if (!m_currentItem) {
+            if (m_frame->isMainFrame()) {
+                if (!historyURL.isEmpty()) {
+                    updateBackForwardListClippedAtTarget(true);
+                    if (canRecordHistory) {
+                        Ref frameLoader = m_frame->loader();
+                        protect(frameLoader->client())->updateGlobalHistory();
+                        documentLoader->setDidCreateGlobalHistoryEntry(true);
+                        if (documentLoader->unreachableURL().isEmpty())
+                            protect(frameLoader->client())->updateGlobalHistoryRedirectLinks();
+                    }
                 }
-            }
+            } else
+                createChildItemInParent();
         }
         // The client redirect replaces the current history item.
         if (RefPtr page = m_frame->page()) {
-            auto scope = protect(page->historyItemClient())->ignoreChangesForScopeDuringRedirect(m_frame);
+            auto scope = protect(page->historyItemClient())->ignoreChangesForScopeDuringRedirect(protect(m_frame));
             updateCurrentItem();
         }
-    } else {
-        RefPtr page = m_frame->page();
-        RefPtr parentFrame = dynamicDowncast<LocalFrame>(m_frame->tree().parent());
-        if (page && parentFrame) {
-            if (RefPtr parentCurrentItem = parentFrame->loader().history().currentItem()) {
-                Ref item = createItem(page->historyItemClient(), parentCurrentItem->itemID());
-                parentCurrentItem->setChildItem(item.copyRef());
-                protect(page->backForward())->setChildItem(parentCurrentItem->frameItemID(), WTF::move(item));
-            }
-        }
-    }
+    } else
+        createChildItemInParent();
 
     if (!historyURL.isEmpty() && canRecordHistory) {
         Ref frame = m_frame.get();
@@ -652,7 +657,7 @@ void HistoryController::updateForRedirectWithLockedBackForwardList()
 
 void HistoryController::updateForClientRedirect()
 {
-    LOG(History, "HistoryController %p updateForClientRedirect: Updating History for client redirect in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string().utf8().data() : "");
+    LOG_WITH_STREAM(History, stream << "HistoryController "_s << this << " updateForClientRedirect: Updating History for client redirect in frame "_s << m_frame.ptr() << " (main frame "_s << m_frame->isMainFrame() << ") "_s << (m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string() : emptyString()));
 
     // Clear out form data so we don't try to restore it into the incoming page.  Must happen after
     // webcore has closed the URL and saved away the form state.
@@ -673,7 +678,7 @@ void HistoryController::updateForClientRedirect()
 void HistoryController::updateForCommit()
 {
     Ref frameLoader = m_frame->loader();
-    LOG(History, "HistoryController %p updateForCommit: Updating History for commit in frame %p (main frame %d) %s", this, m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string().utf8().data() : "");
+    LOG_WITH_STREAM(History, stream << "HistoryController "_s << this << " updateForCommit: Updating History for commit in frame "_s << m_frame.ptr() << " (main frame "_s << m_frame->isMainFrame() << ") "_s << (m_frame->loader().documentLoader() ? m_frame->loader().documentLoader()->url().string() : emptyString()));
 
     FrameLoadType type = frameLoader->loadType();
     if (isBackForwardLoadType(type)
@@ -1036,7 +1041,7 @@ void HistoryController::updateBackForwardListClippedAtTarget(bool doClip, WasCre
 
     if (wasCreatedByJSWithoutUserInteraction)
         item->setWasCreatedByJSWithoutUserInteraction(true);
-    LOG(History, "HistoryController %p updateBackForwardListClippedAtTarget: Adding backforward item %p in frame %p (main frame %d) %s", this, item.get(), m_frame.ptr(), m_frame->isMainFrame(), m_frame->loader().documentLoader()->url().string().utf8().data());
+    LOG_WITH_STREAM(History, stream << "HistoryController "_s << this << " updateBackForwardListClippedAtTarget: Adding backforward item "_s << item.get() << " in frame "_s << m_frame.ptr() << " (main frame "_s << m_frame->isMainFrame() << ") "_s << m_frame->loader().documentLoader()->url().string());
     protect(page->backForward())->addItem(item.releaseNonNull());
 }
 
@@ -1097,9 +1102,9 @@ void HistoryController::pushState(RefPtr<SerializedScriptValue>&& stateObject, c
     currentItem->setURLString(urlString);
     currentItem->setShouldRestoreScrollPosition(shouldRestoreScrollPosition);
 
-    LOG(History, "HistoryController %p pushState: Adding top item %p, setting url of current item %p to %s, scrollRestoration is %s", this, topItem.ptr(), m_currentItem.get(), urlString.ascii().data(), topItem->shouldRestoreScrollPosition() ? "auto" : "manual");
+    LOG(History, "HistoryController %p pushState: Adding top item %p, setting url of current item %p to %s, scrollRestoration is %s", this, topItem.ptr(), m_currentItem.get(), urlString.utf8(), topItem->shouldRestoreScrollPosition() ? "auto" : "manual");
 
-    m_frame->navigationScheduler().adjustPendingHistoryNavigationForNewBackForwardEntry();
+    protect(protect(m_frame)->navigationScheduler())->adjustPendingHistoryNavigationForNewBackForwardEntry();
     protect(page->backForward())->addItem(WTF::move(topItem));
 
     if (document && document->settings().navigationAPIEnabled())
@@ -1118,7 +1123,7 @@ void HistoryController::updateBackForwardListForReplaceState(RefPtr<SerializedSc
     if (!currentItem)
         return;
 
-    LOG(History, "HistoryController %p updateBackForwardListForReplaceState: Setting url of current item %p to %s scrollRestoration %s", this, currentItem.get(), urlString.ascii().data(), currentItem->shouldRestoreScrollPosition() ? "auto" : "manual");
+    LOG(History, "HistoryController %p updateBackForwardListForReplaceState: Setting url of current item %p to %s scrollRestoration %s", this, currentItem.get(), urlString.utf8(), currentItem->shouldRestoreScrollPosition() ? "auto" : "manual");
 
     if (!urlString.isEmpty())
         currentItem->setURLString(urlString);

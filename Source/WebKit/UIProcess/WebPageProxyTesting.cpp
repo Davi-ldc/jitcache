@@ -148,6 +148,15 @@ bool WebPageProxyTesting::isEditingCommandEnabled(const String& commandName)
     return result;
 }
 
+#if PLATFORM(IOS_FAMILY)
+void WebPageProxyTesting::screenIsBeingCaptured(FrameIdentifier frameID, CompletionHandler<void(bool)>&& completionHandler)
+{
+    Ref page = m_page.get();
+    Ref process = page->processContainingFrame(frameID);
+    process->sendWithAsyncReply(Messages::WebPageTesting::ScreenIsBeingCaptured(), WTF::move(completionHandler), page->webPageIDInProcess(process.get()));
+}
+#endif
+
 void WebPageProxyTesting::dumpPrivateClickMeasurement(CompletionHandler<void(const String&)>&& completionHandler)
 {
     protect(protect(protect(page())->websiteDataStore())->networkProcess())->sendWithAsyncReply(Messages::NetworkProcess::DumpPrivateClickMeasurement(m_page->websiteDataStore().sessionID()), WTF::move(completionHandler));
@@ -231,13 +240,13 @@ void WebPageProxyTesting::startMonitoringWheelEventsForTesting(CompletionHandler
     sendWithAsyncReply(Messages::WebPageTesting::StartMonitoringWheelEventsForTesting(), WTF::move(completionHandler));
 }
 
-void WebPageProxyTesting::waitForWheelEventsToCompleteForTesting(CompletionHandler<void()>&& completionHandler)
+void WebPageProxyTesting::waitForWheelEventsToCompleteForTesting(bool expectMomentumEnd, CompletionHandler<void()>&& completionHandler)
 {
     if (!page().hasRunningProcess()) {
         completionHandler();
         return;
     }
-    sendWithAsyncReply(Messages::WebPageTesting::WaitForWheelEventsToCompleteForTesting(), WTF::move(completionHandler));
+    sendWithAsyncReply(Messages::WebPageTesting::WaitForWheelEventsToCompleteForTesting(expectMomentumEnd), WTF::move(completionHandler));
 }
 
 #if PLATFORM(COCOA) && ENABLE(MEDIA_STREAM)

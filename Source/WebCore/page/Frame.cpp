@@ -47,10 +47,15 @@
 #include "ScrollingCoordinator.h"
 #include "Settings.h"
 #include "WindowProxy.h"
+#include <ranges>
 #include <wtf/Assertions.h>
 #include <wtf/NeverDestroyed.h>
 
 namespace WebCore {
+
+static_assert(std::ranges::viewable_range<FrameAncestorRange<Frame>>);
+static_assert(std::ranges::viewable_range<FrameAncestorRange<LocalFrame>>);
+static_assert(std::ranges::viewable_range<FrameAncestorRange<RemoteFrame>>);
 
 #if ASSERT_ENABLED
 class FrameLifetimeVerifier {
@@ -166,11 +171,6 @@ void Frame::detachFromPage()
             if (RefPtr scrollingCoordinator = page->scrollingCoordinator())
                 scrollingCoordinator->rootFrameWasRemoved(frameID());
         }
-    }
-
-    if (m_frameType == FrameType::Remote) {
-        if (RefPtr page = m_page.get())
-            page->didDetachRemoteFrame();
     }
 
     m_page = nullptr;
@@ -427,19 +427,12 @@ float Frame::frameScaleFactor() const
     // https://github.com/w3c/csswg-drafts/issues/9644
     // Check if this frame's owner element (iframe) has CSS zoom applied.
     if (!isMainFrame()) {
-        auto rootZoom = 1.0;
-
-        // FIXME: maybe pageZoomFactor should be available in remote frames?
-        if (auto* localMainFrame = dynamicDowncast<LocalFrame>(mainFrame()))
-            rootZoom = localMainFrame->pageZoomFactor();
-
         if (RefPtr parentFrame = tree().parent())
-            rootZoom = parentFrame->usedZoomForChild(*this) / rootZoom;
+            return parentFrame->frameScaleFactorForChild(*this);
 
-        return rootZoom;
+        return 1.0;
     }
 
-    // Main frame is scaled with respect to the container.
     if (page->delegatesScaling())
         return 1;
 

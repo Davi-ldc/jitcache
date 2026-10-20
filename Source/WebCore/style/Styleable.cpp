@@ -44,7 +44,7 @@
 #include "RenderElement.h"
 #include "RenderElementInlines.h"
 #include "RenderListItem.h"
-#include "RenderListMarker.h"
+#include "RenderListOutsideMarker.h"
 #include "RenderView.h"
 #include "StyleAnimations.h"
 #include "StyleableInlines.h"
@@ -250,6 +250,14 @@ bool Styleable::isRunningAcceleratedTransformRelatedAnimation() const
     auto* effectStack = keyframeEffectStack();
     return effectStack && effectStack->hasMatchingEffect([](auto& effect) {
         return effect.isRunningAcceleratedTransformRelatedAnimation();
+    });
+}
+
+bool Styleable::isRunningOrAboutToRunAcceleratedTransformRelatedAnimation() const
+{
+    auto* effectStack = keyframeEffectStack();
+    return effectStack && effectStack->hasMatchingEffect([](auto& effect) {
+        return effect.isRunningOrAboutToRunAcceleratedTransformRelatedAnimation();
     });
 }
 

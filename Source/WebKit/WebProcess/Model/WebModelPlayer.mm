@@ -84,7 +84,7 @@ public:
     {
         if (m_displayBuffer) {
             layer.setContentsFormat(m_contentsFormat);
-            layer.setDelegatedContents({ MachSendRight { m_displayBuffer }, { }, std::nullopt });
+            layer.setDelegatedContents({ MachSendRight { m_displayBuffer }, { } });
         } else
             layer.clearContents();
 
@@ -145,14 +145,14 @@ WebModelPlayer::WebModelPlayer(WebCore::Page& page, WebCore::ModelPlayerClient& 
     updateScreenHeadroomFromPage();
 
     if (RefPtr document = page.localTopDocument()) {
-        m_screenPropertiesChangedObserver = ScreenPropertiesChangedObserver::create([weakThis = ThreadSafeWeakPtr { *this }](WebCore::PlatformDisplayID displayID) {
+        lazyInitialize(m_screenPropertiesChangedObserver, ScreenPropertiesChangedObserver::create([weakThis = ThreadSafeWeakPtr { *this }](WebCore::PlatformDisplayID displayID) {
             RefPtr protectedThis { weakThis };
             if (!protectedThis)
                 return;
             auto platformScreen = WebCore::PlatformScreen::singleton();
             if (auto* data = platformScreen->screenData(displayID))
                 protectedThis->updateScreenHeadroom(data->currentEDRHeadroom, data->suppressEDR);
-        });
+        }));
 
         document->addScreenPropertiesChangedObserver(*m_screenPropertiesChangedObserver);
     }
@@ -383,7 +383,7 @@ void WebModelPlayer::handleMouseDown(const WebCore::LayoutPoint& startingPoint, 
 {
     m_initialPoint = startingPoint;
     if (!m_orbitSimulator) {
-        m_orbitSimulator = adoptNS([[WKStageModeOrbitSimulator alloc] init]);
+        lazyInitialize(m_orbitSimulator, adoptNS([[WKStageModeOrbitSimulator alloc] init]));
         // Seed from the current pose so a gesture after reload doesn't snap to default.
         if (m_nodeID) {
             if (auto transform = entityTransform(*m_nodeID)) {
@@ -611,7 +611,7 @@ void WebModelPlayer::scheduleUpdateIfNeeded()
         return;
 
     m_isUpdateScheduled = true;
-    document->eventLoop().queueTask(WebCore::TaskSource::ModelElement, [protectedThis = protect(*this)] {
+    protect(document->eventLoop())->queueTask(WebCore::TaskSource::ModelElement, [protectedThis = protect(*this)] {
         protectedThis->m_isUpdateScheduled = false;
         protectedThis->update();
     });
@@ -734,7 +734,7 @@ void WebModelPlayer::notifyClientDidFinishLoading()
     notifyEntityTransformUpdated();
 
     if (auto environmentMap = m_environmentMap)
-        setEnvironmentMap(WTF::move(*environmentMap));
+        setEnvironmentMap(WTF::move(*environmentMap), URL { });
 }
 
 bool WebModelPlayer::supportsTransform(WebCore::TransformationMatrix transformationMatrix)
@@ -864,7 +864,7 @@ void WebModelPlayer::setEntityTransform(WebCore::NodeIdentifier, WebCore::Transf
         (*m_cachedTransformState)->setEntityTransform(transform);
 }
 
-void WebModelPlayer::setEnvironmentMap(Ref<WebCore::SharedBuffer>&& data)
+void WebModelPlayer::setEnvironmentMap(Ref<WebCore::SharedBuffer>&& data, const URL&)
 {
     RefPtr currentModel = m_currentModel;
     if (!currentModel || !m_didFinishLoading || !m_modelLoader) {

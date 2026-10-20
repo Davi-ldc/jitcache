@@ -354,7 +354,7 @@ void RenderMultiColumnSet::prepareForLayout(bool initial)
 {
     // Guess box logical top. This might eliminate the need for another layout pass.
     if (RenderBox* previous = RenderMultiColumnFlow::previousColumnSetOrSpannerSiblingOf(this))
-        setLogicalTop(previous->logicalBottom() + previous->marginAfter());
+        setLogicalTop(previous->logicalBottom() + previous->marginAfter(previous->writingMode()));
     else
         setLogicalTop(multiColumnBlockFlow()->borderAndPaddingBefore());
 
@@ -894,7 +894,7 @@ void RenderMultiColumnSet::collectLayerFragments(LayerFragments& fragments, cons
         LayoutUnit blockOffset = initialBlockOffset + logicalTop() - fragmentedFlow()->logicalTop() + (isHorizontalWritingMode() ? -fragmentedFlowPortion.y() : -fragmentedFlowPortion.x());
         if (!progressionIsInline) {
             if (!progressionReversed)
-                blockOffset = i * colGap;
+                blockOffset += i * (computedColumnHeight() + colGap);
             else
                 blockOffset -= i * (computedColumnHeight() + colGap);
         }

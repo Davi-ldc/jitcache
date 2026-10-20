@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/StringToIntegerConversion.h>
+#include <wtf/text/UTF8CStringView.h>
 
 #if OS(DARWIN)
 #include <sys/sysctl.h>
@@ -56,13 +57,13 @@ int numberOfProcessorCores()
         return s_numberOfCores;
     
     ASCIILiteral coresEnvName = "WTF_numberOfProcessorCores";
-    CString coresEnv = getenv(coresEnvName);
+    auto coresEnv = UTF8CStringView::unsafeFromUTF8(getenv(coresEnvName));
 #if !USE(BUN_JSC_ADDITIONS)
     // Bun reports this value as navigator.hardwareConcurrency and os.availableParallelism(), which
     // (as in Node) do not follow NUMBER_OF_PROCESSORS.
     if (coresEnv.isNull()) {
         coresEnvName = "NUMBER_OF_PROCESSORS";
-        coresEnv = getenv(coresEnvName);
+        coresEnv = UTF8CStringView::unsafeFromUTF8(getenv(coresEnvName));
     }
 #endif
     if (!coresEnv.isNull()) {

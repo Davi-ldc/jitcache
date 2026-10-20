@@ -15,9 +15,9 @@
 //   captures it under that bit. In the Consumer the text before imports, and after Bun.gc(true) has emptied the UCB's
 //   sharing slot, the evaluation after meets that UCB through a CodeCache hit, whose SourceCodeKey ignores the bit:
 //   the attach misses RequestKey, so no body is installed on a UCB whose record holds the other bit.
-// - A CommonJS module required after the call, with Node's compile cache on, is decoded from a payload Bun generated
-//   without the bit once the first run persisted it: the decoded root gets no record, its request misses RequestKey, and
-//   none of its functions imports (misses NoKey) or is recorded, so none is captured.
+// - A CommonJS module required after the call, with Node's compile cache on, is decoded in every run after the first
+//   from the payload the first run persisted: the decoded root gets no record, and none of its functions imports or is
+//   recorded, so none is captured.
 const vm = require("node:vm");
 const path = require("node:path");
 const Module = require("node:module");
@@ -62,15 +62,8 @@ vm.compileFunction("return 1;")();
     for (let i = 0; i < 400; ++i)
         total = (total + required.withScopeSum(i & 31)) | 0;
     if (t.role !== "Producer") {
-        t.expect("the module decoded under the other bit", t.delta(before, loaded), { "misses.RequestKey": [">=", 1], imports: 0, seededDecodes: 0 });
-        t.expect("the decoded module's functions", t.delta(loaded, called), {
-            imports: 0,
-            seededDecodes: 0,
-            "misses.NoKey": [">=", 2],
-            "records.Generated": 0,
-            "records.Decoded": 0,
-            "records.Imported": 0,
-        });
+        t.expect("the decoded module", t.delta(before, loaded), { imports: 0, attaches: 0, "records.Generated": 0, "records.Imported": 0 });
+        t.expect("the decoded module's functions", t.delta(loaded, called), { imports: 0, attaches: 0, "records.Generated": 0, "records.Imported": 0 });
     }
     console.log(`module ${total}`);
 }

@@ -28,15 +28,21 @@
 
 #if PLATFORM(COCOA)
 
+#import "AnnexBUtilities.h"
+#import "CMUtilities.h"
 #import "FourCC.h"
 #import "HEVCUtilities.h"
+#import "Logging.h"
 #import "PlatformMediaCapabilitiesInfo.h"
+#import "TrackInfo.h"
+#import <algorithm>
 #import <wtf/cf/TypeCastsCF.h>
 #import <wtf/cocoa/TypeCastsCocoa.h>
 #import <wtf/cocoa/VectorCocoa.h>
 #import <wtf/text/StringToIntegerConversion.h>
 
 #import "VideoToolboxSoftLink.h"
+#import <pal/cf/CoreMediaSoftLink.h>
 #import <pal/cocoa/AVFoundationSoftLink.h>
 
 namespace WebCore {
@@ -198,6 +204,97 @@ std::optional<PlatformMediaCapabilitiesInfo> validateDoViParameters(const DoViPa
         return std::nullopt;
 
     return { { true, true, isHardwareAccelerated } };
+}
+
+Vector<uint8_t> convertHEVCCMSampleBufferToAnnexB(CMSampleBufferRef hvccSampleBuffer, bool isKeyframe)
+{
+    return convertParameterSetsCMSampleBufferToAnnexB(hvccSampleBuffer, isKeyframe, PAL::CMVideoFormatDescriptionGetHEVCParameterSetAtIndex);
+}
+
+static RetainPtr<CMFormatDescriptionRef> createHEVCFormatDescriptionFromParameterSets(std::span<const uint8_t* const> paramSetPointers, std::span<const size_t> paramSetSizes, size_t nalUnitHeaderLength)
+{
+    CMFormatDescriptionRef rawDescription = nullptr;
+    if (PAL::CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault, paramSetPointers.size(), paramSetPointers.data(), paramSetSizes.data(), nalUnitHeaderLength, nullptr, &rawDescription) != noErr)
+        return nullptr;
+    return adoptCF(rawDescription);
+}
+
+static bool hevcAnnexBVpsIsFollowedBySpsAndPps(std::span<const uint8_t> data, const Vector<NaluIndex>& naluIndices, size_t vpsIndex)
+{
+    if (vpsIndex + 2 >= naluIndices.size())
+        return false;
+
+    auto& spsIndex = naluIndices[vpsIndex + 1];
+    auto& ppsIndex = naluIndices[vpsIndex + 2];
+    return spsIndex.payloadSize && hevcNaluType(data[spsIndex.payloadStartOffset]) == HEVCNaluType::Sps
+        && ppsIndex.payloadSize && hevcNaluType(data[ppsIndex.payloadStartOffset]) == HEVCNaluType::Pps;
+}
+
+RefPtr<VideoInfo> createVideoInfoFromHEVCAnnexBStream(std::span<const uint8_t> data, const Vector<NaluIndex>& naluIndices)
+{
+    auto vpsIndex = findHEVCAnnexBVpsIndex(data, naluIndices);
+    if (vpsIndex == notFound)
+        return nullptr;
+
+    if (!hevcAnnexBVpsIsFollowedBySpsAndPps(data, naluIndices, vpsIndex)) {
+        RELEASE_LOG_ERROR(WebRTC, "createVideoInfoFromHEVCAnnexBStream NAL units following VPS are not SPS/PPS");
+        return nullptr;
+    }
+
+    std::array<std::span<const uint8_t>, 3> paramSets;
+    for (size_t i = 0; i < paramSets.size(); ++i) {
+        auto& index = naluIndices[vpsIndex + i];
+        paramSets[i] = data.subspan(index.payloadStartOffset, index.payloadSize);
+    }
+    std::array<const uint8_t*, 3> paramSetPointers { paramSets[0].data(), paramSets[1].data(), paramSets[2].data() };
+    std::array<size_t, 3> paramSetSizes { paramSets[0].size(), paramSets[1].size(), paramSets[2].size() };
+
+    RetainPtr description = createHEVCFormatDescriptionFromParameterSets(paramSetPointers, paramSetSizes, 4);
+    if (!description)
+        return nullptr;
+
+    return createVideoInfoFromFormatDescription(description);
+}
+
+Vector<uint8_t> convertHEVCAnnexBToLengthPrefixed(std::span<const uint8_t> data, const Vector<NaluIndex>& naluIndices)
+{
+    // FIXME: We basically assume that VPS is first, SPS is second and  PPS is thitd. But there may be nalus between them, and VPS/SPS/PPS order is not guaranteed.
+    // We also need to validate what to do for a frame with a VPS, or a SPS or a PPS but not all three of them.
+    // For now, we skip all NAL units up to and including the VPS/SPS/PPS triplet, if present, as parameter sets belong in the format description, not in the per-sample data.
+    size_t startIndex = 0;
+    auto vpsIndex = findHEVCAnnexBVpsIndex(data, naluIndices);
+    if (vpsIndex != notFound) {
+        if (hevcAnnexBVpsIsFollowedBySpsAndPps(data, naluIndices, vpsIndex))
+            startIndex = vpsIndex + 3;
+        else
+            RELEASE_LOG_ERROR(WebRTC, "convertHEVCAnnexBToLengthPrefixed NAL units following VPS are not SPS/PPS");
+    }
+
+    return annexBToLengthPrefixed(data, naluIndices.subspan(startIndex));
+}
+
+RefPtr<VideoInfo> createVideoInfoFromHVCC(const HVCCParameterSets& parameterSets)
+{
+    if (parameterSets.paramSets.isEmpty())
+        return nullptr;
+
+    auto& paramSets = parameterSets.paramSets;
+    Vector<const uint8_t*> paramSetPointers { paramSets.size(),
+        [&paramSets](auto index) {
+            return paramSets[index].data.data();
+        }
+    };
+    Vector<size_t> paramSetSizes { paramSets.size(),
+        [&paramSets](auto index) {
+            return paramSets[index].data.size();
+        }
+    };
+
+    RetainPtr description = createHEVCFormatDescriptionFromParameterSets(paramSetPointers.span(), paramSetSizes.span(), parameterSets.lengthFieldSize);
+    if (!description)
+        return nullptr;
+
+    return createVideoInfoFromFormatDescription(description);
 }
 
 }

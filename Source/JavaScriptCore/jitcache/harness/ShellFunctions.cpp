@@ -20,11 +20,13 @@
 #include "JSArrayBuffer.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
+#include "JSModuleRecord.h"
 #include "MacroAssembler.h"
 #include "MarkedSpaceInlines.h"
 #include "MathCommon.h"
 #include "ObjectConstructor.h"
 #include "TwinReport.h"
+#include "UCBAnalysis.h"
 #include "UCBRegistry.h"
 #include "UCBTwins.h"
 #include "UnlinkedCodeBlock.h"
@@ -47,20 +49,20 @@
 #include <wtf/text/StringView.h>
 
 // The twins harness's entry points for the hosts: the test flags the jsc shell parses before JSC::initialize, what it
-// keeps of its main VM's start, the body-event dump both hosts write at the end of a run, and the host functions the shell
-// registers in its realms, five of which bun:jsc registers under the same names. Plain builds have none of them.
+// keeps of its main VM's start, the body-event dump both hosts write at the end of a run, the module-analysis twin Bun's
+// loader calls, and the host functions the shell registers in its realms, six of which bun:jsc registers under the same
+// names. Plain builds have none of them.
 
 // The fields that jitcacheProgress, jitcacheBodyEvents with the body-event dump, and jitcacheUCBStatistics write by name.
 #define JITCACHE_HARNESS_FOR_EACH_PROGRESS_FIELD(v) \
-    v(indexedBodies) v(bodyOpens) v(transientOpenFailures) v(imports) v(seededDecodes) v(attaches) v(gateDrops) v(misses) \
-    v(installs) v(bakedFactMismatches) v(captureCandidates) v(capturesDeferred) v(capturesCommitted) v(bytesCommitted) \
-    v(deltaRuns)
+    v(indexedBodies) v(bodyOpens) v(transientOpenFailures) v(imports) v(attaches) v(gateDrops) v(misses) v(installs) \
+    v(bakedFactMismatches) v(captureCandidates) v(capturesDeferred) v(capturesCommitted) v(bytesCommitted) v(deltaRuns)
 #define JITCACHE_HARNESS_FOR_EACH_BODY_EVENT_COUNT(v) \
     v(llintInstructions) v(baselineCompiles) v(dfgCompiles) v(ftlCompiles) v(osrExits) v(jettisons) v(reoptimizations)
 #define JITCACHE_HARNESS_FOR_EACH_UCB_STATISTIC(v) \
-    v(imports) v(seededDecodes) v(attaches) v(gateDrops) v(sourceDigests) v(suppliedSourceDigests) \
-    v(suppliedDigestVerifications) v(contextDigests) v(holderDigests) v(tdzEnvironmentDigests) v(childHolderDigests) \
-    v(vouchedHolderChecks)
+    v(imports) v(attaches) v(gateDrops) v(sourceDigests) v(suppliedSourceDigests) v(suppliedDigestVerifications) \
+    v(contextDigests) v(holderDigests) v(tdzEnvironmentDigests) v(childHolderDigests) v(vouchedHolderChecks) \
+    v(analysisImports) v(analysisMisses) v(analysisAbsent) v(analysisCaptured) v(analysisCopied) v(analysisUnrepresentable)
 
 namespace JSC::JITCache {
 
@@ -75,13 +77,10 @@ static_assert(sizeof(UCBStatistics) == (0 JITCACHE_HARNESS_FOR_EACH_UCB_STATISTI
 #undef JITCACHE_HARNESS_COUNT_FIELD
 
 // The UCB statistics' indexed counters, by the enumerator names the UCB lane's tests use.
-static constexpr std::array missReasonNames {
-    "NoKey"_s, "NoBody"_s, "BodyUnchanged"_s, "RequestKey"_s, "Context"_s, "Provenance"_s, "Holder"_s, "AtomMap"_s,
-    "CoreDigest"_s, "Stack"_s,
-};
-static constexpr std::array originNames { "Generated"_s, "Decoded"_s, "Imported"_s };
+static constexpr std::array missReasonNames { "NoKey"_s, "NoBody"_s, "BodyUnchanged"_s, "RequestKey"_s, "Context"_s, "Holder"_s, "Stack"_s };
+static constexpr std::array originNames { "Generated"_s, "Imported"_s };
 static constexpr std::array invalidMaterialNames {
-    "Identity"_s, "Feedback"_s, "Decode"_s, "Closure"_s, "StrictCore"_s, "SuppliedDigest"_s,
+    "Identity"_s, "Feedback"_s, "Decode"_s, "Closure"_s, "StrictCore"_s, "SuppliedDigest"_s, "Analysis"_s,
 };
 static_assert(missReasonNames.size() == std::tuple_size_v<decltype(UCBStatistics::misses)>);
 static_assert(originNames.size() == std::tuple_size_v<decltype(UCBStatistics::records)>);
@@ -205,7 +204,7 @@ static std::optional<BodyKey> bodyKeyArgument(JSGlobalObject* globalObject, JSVa
         RETURN_IF_EXCEPTION(scope, std::nullopt);
         // The key's hex as bodyKeyHex writes it, which the store's own decoding reads back.
         if (hex.length() == bodyKeyHexLength && hex.containsOnlyASCII()) {
-            CString digits = hex.latin1();
+            ASCIICString digits = hex.ascii();
             if (auto key = bodyKeyFromHex(digits.span()))
                 return key;
         }
@@ -238,7 +237,7 @@ static String storeFailureText(const BodyOpen& opened)
     if (opened.outcome == StoreOutcome::Unavailable)
         return "the body is unavailable for now (EMFILE, ENFILE or ENOMEM)"_s;
     if (opened.failure.error)
-        return makeString(opened.failure.check, ": "_s, String::fromLatin1(safeStrerror(opened.failure.error).data()));
+        return makeString(opened.failure.check, ": "_s, String::fromUTF8(safeStrerror(opened.failure.error).span()));
     return String { opened.failure.check };
 }
 
@@ -489,6 +488,18 @@ void writeBodyEvents(VM& vm, const String& path)
     writeTestFile(path, dump.toString().utf8(), TestFileWrite::Replace);
 }
 
+void verifyModuleAnalysisTwin(VM& vm, JSModuleRecord& fromArtifact, JSModuleRecord& fromParse)
+{
+    VMState* state = vm.jitCacheState();
+    TwinReportSink* report = state ? state->twinReportSink() : nullptr;
+    if (!report)
+        return;
+    String difference = firstModuleAnalysisDifference(fromArtifact, fromParse);
+    if (difference.isNull())
+        return;
+    report->difference(TwinPart::UCB, "analysis"_s, makeString(difference, "; module "_s, fromArtifact.moduleKey().string()));
+}
+
 JSC_DEFINE_HOST_FUNCTION(functionJITCacheStatus, (JSGlobalObject* globalObject, CallFrame*))
 {
     VM& vm = globalObject->vm();
@@ -656,11 +667,12 @@ JSC_DEFINE_HOST_FUNCTION(functionJITCacheReadSection, (JSGlobalObject* globalObj
     case StoreOutcome::Found:
         break;
     }
-    // A body holds exactly the section kinds its highest tier requires, an empty section included, so any other kind is
-    // absent.
-    if (!isSectionRequired(*kind, opened.body->highestTier()))
+    // A body holds every section kind its highest tier requires, an empty section included, and ucb.analysis only when the
+    // UCB lane built one, which is never empty; any other kind is absent.
+    std::span<const uint8_t> section = opened.body->section(*kind);
+    if (!isSectionRequired(*kind, opened.body->highestTier()) && section.empty())
         return JSValue::encode(jsNull());
-    RefPtr<ArrayBuffer> buffer = ArrayBuffer::tryCreate(opened.body->section(*kind));
+    RefPtr<ArrayBuffer> buffer = ArrayBuffer::tryCreate(section);
     if (!buffer) {
         throwOutOfMemoryError(globalObject, scope);
         return { };

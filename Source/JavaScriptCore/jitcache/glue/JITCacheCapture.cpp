@@ -199,49 +199,6 @@ private:
 #endif
 };
 
-// The enumerator names the ICs lane's checks are raised at, as the fault's check.
-static ASCIILiteral icsCheckName(ICs::Check check)
-{
-    switch (check) {
-    case ICs::Check::SectionSize:
-        return "SectionSize"_s;
-    case ICs::Check::SummaryBound:
-        return "SummaryBound"_s;
-    case ICs::Check::CallLinkGroups:
-        return "CallLinkGroups"_s;
-    case ICs::Check::ReservedBits:
-        return "ReservedBits"_s;
-    case ICs::Check::EnumRange:
-        return "EnumRange"_s;
-    case ICs::Check::SummaryCount:
-        return "SummaryCount"_s;
-    case ICs::Check::MoldPairing:
-        return "MoldPairing"_s;
-    case ICs::Check::MetadataLayout:
-        return "MetadataLayout"_s;
-    case ICs::Check::MoldMegamorphicBit:
-        return "MoldMegamorphicBit"_s;
-    case ICs::Check::NewbornCallLinks:
-        return "NewbornCallLinks"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return { };
-}
-
-static ASCIILiteral icsCaptureCheckName(ICs::CaptureCheck check)
-{
-    switch (check) {
-    case ICs::CaptureCheck::NoBaselineJITData:
-        return "NoBaselineJITData"_s;
-    case ICs::CaptureCheck::OutputSizeMismatch:
-        return "OutputSizeMismatch"_s;
-    case ICs::CaptureCheck::MoldMismatch:
-        return "MoldMismatch"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return { };
-}
-
 static ASCIILiteral ucbCaptureCheckName(UCBCaptureFailure failure)
 {
     switch (failure) {
@@ -249,6 +206,9 @@ static ASCIILiteral ucbCaptureCheckName(UCBCaptureFailure failure)
         return "capture-budget"_s;
     case UCBCaptureFailure::StrictCheckFailed:
         return "capture-strict"_s;
+    case UCBCaptureFailure::SavedAnalysisInvalid:
+    case UCBCaptureFailure::SavedAnalysisUnusable:
+        break;
     }
     RELEASE_ASSERT_NOT_REACHED();
     return { };
@@ -257,6 +217,12 @@ static ASCIILiteral ucbCaptureCheckName(UCBCaptureFailure failure)
 static String bodyDetail(const BodyKey& key)
 {
     return makeString("body "_s, bodyKeyHex(key));
+}
+
+// A CB lane fault's detail: what its check rejected, in the lane's words, then the body.
+static String cbFaultDetail(CBCheck check, const BodyKey& key)
+{
+    return makeString(faultDetail(check), "; "_s, bodyDetail(key));
 }
 
 static void raiseBudgetLimit(VMState& state, String detail)
@@ -273,6 +239,25 @@ static void raiseCaptureFault(VMState& state, ProducerBudget& budget, ASCIILiter
         return;
     }
     state.raiseRecordingFault(part, check, WTF::move(detail));
+}
+
+// The UCB lane's capture failed. A refused charge or a strict check of what it built from the producer's own state is a
+// recording fault. A saved ucb.analysis the capture would copy that fails its strict check is invalid material, whose
+// detail says what the check found. A saved body the section read found damaged has had its fault raised by that read.
+static void raiseUCBCaptureFailure(VMState& state, ProducerBudget& budget, const UCBCaptureError& error, const BodyKey& key)
+{
+    switch (error.failure) {
+    case UCBCaptureFailure::BudgetExceeded:
+    case UCBCaptureFailure::StrictCheckFailed:
+        raiseCaptureFault(state, budget, "ucb"_s, ucbCaptureCheckName(error.failure), bodyDetail(key));
+        return;
+    case UCBCaptureFailure::SavedAnalysisInvalid:
+        state.raiseInvalidMaterial("ucb.analysis"_s, makeString("the saved body's ucb.analysis is no analysis the parse can produce: "_s, error.detail, "; "_s, bodyDetail(key)));
+        return;
+    case UCBCaptureFailure::SavedAnalysisUnusable:
+        return;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 // The CB is a candidate when it runs its own capturable baseline code and the UCB lane recorded its key; the record is
@@ -309,7 +294,7 @@ static std::expected<LiveScore, CBFault> scoreLiveCandidate(CodeBlock& codeBlock
     uint64_t afterCB = clock.now();
     if (!cbScore)
         return std::unexpected(cbScore.error());
-    UCBRichness ucbRichness = liveRichness(*codeBlock.unlinkedCodeBlock(), BodyImage::Present);
+    UCBRichness ucbRichness = liveRichness(*codeBlock.unlinkedCodeBlock());
     uint64_t end = clock.now();
 
     LiveScore live;
@@ -323,12 +308,12 @@ static std::expected<LiveScore, CBFault> scoreLiveCandidate(CodeBlock& codeBlock
 }
 
 // A body that ran without an image: tier 0, below every capture with an image, scored by the UCB lane
-// alone, its UCB copies included, with the LLInt progress it carries in place of the baseline counter's. Neither IC sites
-// nor a withheld counter apply.
+// alone, whose richness is its arithmetic categories and exit sites since such a body carries no UCB copies, with the
+// LLInt progress it carries in place of the baseline counter's. Neither IC sites nor a withheld counter apply.
 static LiveScore scoreImagelessCandidate(UnlinkedCodeBlock& ucb, const CaptureClock& clock)
 {
     uint64_t start = clock.now();
-    UCBRichness richness = liveRichness(ucb, BodyImage::Absent);
+    UCBRichness richness = liveRichness(ucb);
     BaselineExecutionCounter& counter = ucb.llintExecuteCounter();
     uint32_t progress = carriedLLIntPoints(counter.m_activeThreshold, counter.count());
     uint64_t end = clock.now();
@@ -555,7 +540,7 @@ static SavedScoring scoreSavedBody(VMState& state, ProducerBudget& budget, const
         ++state.progress().transientOpenFailures;
         return { Outcome::Deferred, std::nullopt, clock.now() - start };
     case StoreOutcome::Invalid: {
-        String detail = read.failure.error ? makeString(String::fromUTF8(safeStrerror(read.failure.error).data()), "; "_s, bodyDetail(key)) : bodyDetail(key);
+        String detail = read.failure.error ? makeString(String::fromUTF8(safeStrerror(read.failure.error).span()), "; "_s, bodyDetail(key)) : bodyDetail(key);
         state.raiseInvalidMaterial(read.failure.check, WTF::move(detail));
         return { Outcome::Faulted, std::nullopt, std::nullopt };
     }
@@ -569,7 +554,10 @@ static SavedScoring scoreSavedBody(VMState& state, ProducerBudget& budget, const
     read.summaries = nullptr;
     uint64_t readNanoseconds = clock.now() - start;
     if (!score) {
-        state.raiseInvalidMaterial(score.error().part, score.error().check, makeString("saved "_s, bodyDetail(key)));
+        // The rejection's own detail, which only the CB lane's reader gives, then the saved body.
+        const SummaryRejection& rejection = score.error();
+        String detail = rejection.detail.isEmpty() ? makeString("saved "_s, bodyDetail(key)) : makeString(rejection.detail, "; saved "_s, bodyDetail(key));
+        state.raiseInvalidMaterial(rejection.part, rejection.check, WTF::move(detail));
         return { Outcome::Faulted, std::nullopt, std::nullopt };
     }
 
@@ -582,41 +570,51 @@ static SavedScoring scoreSavedBody(VMState& state, ProducerBudget& budget, const
     return { Outcome::Scored, saved, readNanoseconds };
 }
 
+using SectionSources = std::array<SectionSource, numberOfSectionKinds>;
+
+// The UCB lane's sources, which come first in section-kind order: its three sections, then a module's analysis when the
+// lane built one. Returns how many it wrote.
+static size_t appendUCBSources(const UCBSections& ucb, SectionSources& sources)
+{
+    size_t count = 0;
+    sources[count++] = SectionSource::inMemory(SectionKind::UCBIdentity, ucb.identity.span());
+    sources[count++] = SectionSource::inMemory(SectionKind::UCBCore, ucb.core->span());
+    sources[count++] = SectionSource::inMemory(SectionKind::UCBFeedback, ucb.feedback.span());
+    if (!ucb.analysis.isEmpty())
+        sources[count++] = SectionSource::inMemory(SectionKind::UCBAnalysis, ucb.analysis.span());
+    return count;
+}
+
 // The ordered list of section sources the writer streams, in section-kind order. The bytes and objects the sources name
 // belong to the three captures and the ICs buffer, which outlive the commit.
 static CommitSections commitSectionsFor(const UCBSections& ucb, const ImageCapture& image, const CBStateCapture& cbState, std::span<const uint8_t> ics)
 {
-    std::array sources {
-        SectionSource::inMemory(SectionKind::UCBIdentity, ucb.identity.span()),
-        SectionSource::inMemory(SectionKind::UCBCore, ucb.core->span()),
-        SectionSource::inMemory(SectionKind::UCBFeedback, ucb.feedback.span()),
-        SectionSource::streamed(SectionKind::ImageBaseline, image.imageSectionSize(), [](const void* object, const SectionSink& sink) {
-            return static_cast<const ImageCapture*>(object)->writeImageSection(sink);
-        }, &image),
-        SectionSource::streamed(SectionKind::BakedFactsBaseline, image.bakedFactsSectionSize(), [](const void* object, const SectionSink& sink) {
-            return static_cast<const ImageCapture*>(object)->writeBakedFactsSection(sink);
-        }, &image),
+    SectionSources sources { };
+    size_t count = appendUCBSources(ucb, sources);
+    sources[count++] = SectionSource::streamed(SectionKind::ImageBaseline, image.imageSectionSize(), [](const void* object, const SectionSink& sink) {
+        return static_cast<const ImageCapture*>(object)->writeImageSection(sink);
+    }, &image);
+    sources[count++] = SectionSource::streamed(SectionKind::BakedFactsBaseline, image.bakedFactsSectionSize(), [](const void* object, const SectionSink& sink) {
+        return static_cast<const ImageCapture*>(object)->writeBakedFactsSection(sink);
+    }, &image);
 #if ENABLE(JITCACHE_TWINS)
-        SectionSource::streamed(SectionKind::ImageTwinsBaseline, image.twinsSectionSize(), [](const void* object, const SectionSink& sink) {
-            return static_cast<const ImageCapture*>(object)->writeTwinsSection(sink);
-        }, &image),
+    sources[count++] = SectionSource::streamed(SectionKind::ImageTwinsBaseline, image.twinsSectionSize(), [](const void* object, const SectionSink& sink) {
+        return static_cast<const ImageCapture*>(object)->writeTwinsSection(sink);
+    }, &image);
 #endif
-        SectionSource::inMemory(SectionKind::CBStateBaseline, cbState.stateSection()),
-        SectionSource::inMemory(SectionKind::CBSummaryBaseline, cbState.summarySection()),
-        SectionSource::inMemory(SectionKind::ICsBaseline, ics),
-    };
-    return CommitSections { std::span { sources } };
+    sources[count++] = SectionSource::inMemory(SectionKind::CBStateBaseline, cbState.stateSection());
+    sources[count++] = SectionSource::inMemory(SectionKind::CBSummaryBaseline, cbState.summarySection());
+    sources[count++] = SectionSource::inMemory(SectionKind::ICsBaseline, ics);
+    return CommitSections { std::span { sources }.first(count) };
 }
 
-// A body without an image: the UCB lane's three sections alone, the sections the container requires at tier 0.
+// A body without an image: the UCB lane's sections alone, the three the container requires at tier 0 and a module's
+// analysis.
 static CommitSections commitSectionsFor(const UCBSections& ucb)
 {
-    std::array sources {
-        SectionSource::inMemory(SectionKind::UCBIdentity, ucb.identity.span()),
-        SectionSource::inMemory(SectionKind::UCBCore, ucb.core->span()),
-        SectionSource::inMemory(SectionKind::UCBFeedback, ucb.feedback.span()),
-    };
-    return CommitSections { std::span { sources } };
+    SectionSources sources { };
+    size_t count = appendUCBSources(ucb, sources);
+    return CommitSections { std::span { sources }.first(count) };
 }
 
 // Any candidate beats an absent body, a tier-0 capture with no richness and no carried progress included; otherwise
@@ -726,15 +724,19 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
 
     // The UCB lane's sections and the richness of what they hold.
     start = clock.now();
-    auto ucbSections = buildSections(vm, ucb, holderOf(codeBlock), budget);
+    auto ucbSections = buildSections(vm, ucb, holderOf(codeBlock), BodyImage::Present, budget);
     UCBRichness ucbRichness;
     if (ucbSections)
-        ucbRichness = liveRichness(ucb, BodyImage::Present);
+        ucbRichness = liveRichness(ucb);
     times.buildSections = clock.now() - start;
     if (!ucbSections) {
-        raiseCaptureFault(state, budget, "ucb"_s, ucbCaptureCheckName(ucbSections.error()), bodyDetail(key));
+        raiseUCBCaptureFailure(state, budget, ucbSections.error(), key);
         return { Kind::Faulted };
     }
+    // A section read inside the build may have raised invalid material without failing the build; the capture then
+    // stops with nothing written.
+    if (!state.productionActive())
+        return { Kind::Faulted };
 
     // The ICs lane comes before the CB lane, whose capture takes its polymorphic bit for the same CB in the same pause.
     start = clock.now();
@@ -748,7 +750,7 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
     auto ics = ICs::captureBaselineICs(codeBlock, icsBuffer.mutableSpan(), strict ? ICs::StrictChecks::Yes : ICs::StrictChecks::No);
     times.captureBaselineICs = clock.now() - start;
     if (!ics) {
-        raiseCaptureFault(state, budget, "ics"_s, icsCaptureCheckName(ics.error().check), makeString("site "_s, ics.error().siteIndex, "; "_s, bodyDetail(key)));
+        raiseCaptureFault(state, budget, "ics"_s, ICs::description(ics.error().check), makeString("site "_s, ics.error().siteIndex, "; "_s, bodyDetail(key)));
         return { Kind::Faulted };
     }
 
@@ -758,7 +760,7 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
     auto cbState = CBStateCapture::capture(codeBlock, budget, strict, ics->hasPolymorphicSite);
     times.cbStateCapture = clock.now() - start;
     if (!cbState) {
-        raiseCaptureFault(state, budget, "cb"_s, description(cbState.error().check), bodyDetail(key));
+        raiseCaptureFault(state, budget, "cb"_s, description(cbState.error().check), cbFaultDetail(cbState.error().check, key));
         return { Kind::Faulted };
     }
     trace.build = times;
@@ -781,10 +783,10 @@ static CommitOutcome commitCapture(VM& vm, VMState& state, CodeBlock& codeBlock,
 }
 
 // commitCapture for a body that ran without an image, which delta's phase 3 finds: the UCB lane's sections alone, built
-// from the UCB and the holder its record keeps, at tier 0. Its L is the LLInt progress it carries and its P zero, so
-// compact orders it by that progress.
+// from the UCB and the holder its record keeps, at tier 0, once its live score in trace has beaten the saved body. Its L
+// is the LLInt progress it carries and its P zero, so compact orders it by that progress.
 static CommitOutcome commitImagelessCapture(VM& vm, VMState& state, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, const BodyKey& key,
-    const std::optional<CaptureScore>& saved, const CaptureClock& clock, CaptureTrace& trace)
+    const CaptureClock& clock, CaptureTrace& trace)
 {
     using Kind = CommitOutcome::Kind;
     ProducerBudget& budget = *state.producerBudget();
@@ -792,28 +794,25 @@ static CommitOutcome commitImagelessCapture(VM& vm, VMState& state, UnlinkedCode
 
     // The UCB lane's sections; there is no image, ICs or CB state to build.
     uint64_t start = clock.now();
-    auto ucbSections = buildSections(vm, ucb, holder, budget);
+    auto ucbSections = buildSections(vm, ucb, holder, BodyImage::Absent, budget);
     times.buildSections = clock.now() - start;
     if (!ucbSections) {
-        raiseCaptureFault(state, budget, "ucb"_s, ucbCaptureCheckName(ucbSections.error()), bodyDetail(key));
+        raiseUCBCaptureFailure(state, budget, ucbSections.error(), key);
         return { Kind::Faulted };
     }
+    // As for a capture with an image, invalid material raised inside the build stops the capture.
+    if (!state.productionActive())
+        return { Kind::Faulted };
     trace.build = times;
 
-    // The score of the bytes just built. Markers merge into the UCB copies of the value predictions without a lock, so the
-    // score is read from the feedback section the builder wrote, the lane's summary in the file, rather than from the UCB
-    // again.
-    auto feedback = FeedbackSection::parse(ucbSections->feedback.span(), false);
-    RELEASE_ASSERT(feedback);
-    UCBRichness richness = savedRichness(*feedback, BodyImage::Absent);
-    uint32_t progress = carriedLLIntPoints(feedback->llintActiveThreshold(), feedback->llintProgress());
-    CaptureScore committed { imagelessTier, richness.total(), 0, false, progress };
+    // The score of the bytes just built is the live score the capture was ranked with: it reads the arithmetic profiles, the
+    // exit sites and the LLInt counter, which no drain touches and nothing changes during a capture, so the glue reads none
+    // of the capture's own bytes back.
+    CaptureScore committed = trace.live.score;
     trace.committed = committed;
-    trace.committedExitSiteUnits = richness.exitSiteUnits;
-    if (!beatsSavedBody(committed, saved))
-        return { Kind::Beaten };
+    trace.committedExitSiteUnits = trace.live.exitSiteUnits;
 
-    CommitStamp stamp { key, progress, 0, imagelessTier };
+    CommitStamp stamp { key, committed.counterProgress, 0, imagelessTier };
 
     return commitBody(state, budget, stamp, commitSectionsFor(*ucbSections), committed, clock, trace);
 }
@@ -937,7 +936,8 @@ struct DeltaCounts {
 
 // Phase 2 and phase 3 commit a key's candidates the same way: score the saved body once, then take the candidates in
 // order until one commits or does not beat it. A candidate whose capture is NotEligible is passed over, as an ineligible
-// CodeBlock is. Returns false after a fault.
+// CodeBlock is. Returns false after a fault, and when production is no longer active after a capture: invalid material
+// raised inside a lane's build turns it off without failing that build.
 template<typename Candidate, typename Commit>
 static bool commitKey(VMState& state, ProducerBudget& budget, const BodyKey& key, const Vector<Candidate, 1>& candidates,
     const CaptureClock& clock, DeltaCounts& counts, const Commit& commit)
@@ -961,15 +961,18 @@ static bool commitKey(VMState& state, ProducerBudget& budget, const BodyKey& key
             return true;
         }
         CommitOutcome outcome = commit(candidate, scoredSaved, trace);
-        if (outcome.kind == CommitOutcome::Kind::NotEligible)
-            continue;
         if (outcome.kind == CommitOutcome::Kind::Faulted)
             return false;
         if (outcome.kind == CommitOutcome::Kind::Committed) {
             ++counts.committedBodies;
             counts.committedBytes += outcome.fileSize;
         }
-        recordCaptureEvent(clock.report(), trace, eventOutcome(outcome.kind));
+        if (outcome.kind != CommitOutcome::Kind::NotEligible)
+            recordCaptureEvent(clock.report(), trace, eventOutcome(outcome.kind));
+        if (!state.productionActive())
+            return false;
+        if (outcome.kind == CommitOutcome::Kind::NotEligible)
+            continue;
         return true;
     }
     return true;
@@ -1050,8 +1053,8 @@ static void runImagelessPhase(VM& vm, VMState& state, ProducerBudget& budget, co
 
     // Commits are independent, so their order is the table's.
     for (auto& entry : candidates.table()) {
-        bool committedOrBeaten = commitKey(state, budget, entry.key, entry.value, clock, counts, [&](const ImagelessCandidate& candidate, const std::optional<CaptureScore>& saved, CaptureTrace& trace) {
-            return commitImagelessCapture(vm, state, *candidate.codeBlock, candidate.holder, entry.key, saved, clock, trace);
+        bool committedOrBeaten = commitKey(state, budget, entry.key, entry.value, clock, counts, [&](const ImagelessCandidate& candidate, const std::optional<CaptureScore>&, CaptureTrace& trace) {
+            return commitImagelessCapture(vm, state, *candidate.codeBlock, candidate.holder, entry.key, clock, trace);
         });
         if (!committedOrBeaten) {
             counts.faulted = true;
@@ -1093,7 +1096,7 @@ static DeltaCounts runDeltaPhases(VM& vm, VMState& state, ProducerBudget& budget
             ++counts.candidates;
             auto live = scoreLiveCandidate(*codeBlock, strict, clock);
             if (!live) {
-                pendingFault = PendingFault { false, description(live.error().check), bodyDetail(record->key) };
+                pendingFault = PendingFault { false, description(live.error().check), cbFaultDetail(live.error().check, record->key) };
                 return;
             }
             if (!candidates.add(record->key, CodeBlockCandidate { codeBlock, *live }))
@@ -1145,20 +1148,20 @@ std::expected<CaptureScore, SummaryRejection> scoreSections(uint8_t tier, std::s
     // the rejection.
     auto feedback = FeedbackSection::parse(ucbFeedback, strict);
     if (!feedback)
-        return std::unexpected(SummaryRejection { "ucb"_s, "saved-summary"_s });
-    // A body without an image holds no CB or ICs summary: the UCB lane's summary is its whole score, its UCB copies
-    // included, with the LLInt progress it carries in place of the baseline counter's.
+        return std::unexpected(SummaryRejection { "ucb"_s, "saved-summary"_s, { } });
+    // A body without an image holds no CB or ICs summary: the UCB lane's summary is its whole score, its arithmetic
+    // categories and exit sites, with the LLInt progress it carries in place of the baseline counter's.
     if (tier == imagelessTier) {
-        UCBRichness richness = savedRichness(*feedback, BodyImage::Absent);
+        UCBRichness richness = savedRichness(*feedback);
         return CaptureScore { imagelessTier, richness.total(), 0, false, carriedLLIntPoints(feedback->llintActiveThreshold(), feedback->llintProgress()) };
     }
-    UCBRichness ucbRichness = savedRichness(*feedback, BodyImage::Present);
+    UCBRichness ucbRichness = savedRichness(*feedback);
     auto cbScore = decodeSummary(cbSummary, strict);
     if (!cbScore)
-        return std::unexpected(SummaryRejection { "cb"_s, description(cbScore.error().check) });
+        return std::unexpected(SummaryRejection { "cb"_s, description(cbScore.error().check), faultDetail(cbScore.error().check) });
     auto icsSummary = ICs::readBaselineICsSummary(ics, strict ? ICs::StrictChecks::Yes : ICs::StrictChecks::No);
     if (!icsSummary)
-        return std::unexpected(SummaryRejection { "ics"_s, icsCheckName(icsSummary.error().check) });
+        return std::unexpected(SummaryRejection { "ics"_s, ICs::description(icsSummary.error().check), { } });
     return CaptureScore { tier, ucbRichness.total() + cbScore->richnessUnits, icsSummary->icSitesWithCases, cbScore->counterWithheld, cbScore->counterProgress };
 }
 
@@ -1209,7 +1212,7 @@ void didFinalizeBaselineCompilation(VM& vm, CodeBlock& codeBlock, const Baseline
     CaptureClock clock(state->benchReport());
     auto live = scoreLiveCandidate(codeBlock, state->strict(), clock);
     if (!live) {
-        raiseCaptureFault(*state, budget, "cb"_s, description(live.error().check), bodyDetail(record->key));
+        raiseCaptureFault(*state, budget, "cb"_s, description(live.error().check), cbFaultDetail(live.error().check, record->key));
         return;
     }
     SavedScoring saved = scoreSavedBody(*state, budget, record->key, clock);
@@ -1321,6 +1324,9 @@ DeltaResult delta(VM& vm)
                 { "compactedBytes"_s, result ? result->packBytes : 0 }, { "compactionNanoseconds"_s, result ? result->nanoseconds : 0 } });
         }
     }
+    // A delta during which production ended never reports completed, whatever ended it.
+    if (!state->productionActive())
+        counts.faulted = true;
     finish(counts);
     if (counts.faulted)
         return faulted(counts);

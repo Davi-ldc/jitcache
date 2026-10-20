@@ -319,7 +319,7 @@ void NODELETE convert16BitFormatToRGBA8(GraphicsContextGL::DataFormat srcFormat,
 
 GraphicsContextGLImageExtractor::~GraphicsContextGLImageExtractor() = default;
 
-bool GraphicsContextGLImageExtractor::extractImage(AlphaPremultiplication sourceAlphaPremultiplication, bool premultiplyAlpha)
+bool GraphicsContextGLImageExtractor::extractImage(std::optional<AlphaPremultiplication> sourceAlphaPremultiplication, bool premultiplyAlpha)
 {
     RefPtr decodedImage = m_image.ptr();
     m_imageWidth = CGImageGetWidth(decodedImage->platformImage().get());
@@ -331,8 +331,7 @@ bool GraphicsContextGLImageExtractor::extractImage(AlphaPremultiplication source
     // so, re-render it into an RGB color space. The image re-packing
     // code requires color data, not color table indices, for the
     // image data.
-    CGColorSpaceRef colorSpace = CGImageGetColorSpace(decodedImage->platformImage().get());
-    CGColorSpaceModel model = CGColorSpaceGetModel(colorSpace);
+    CGColorSpaceModel model = CGColorSpaceGetModel(protect(CGImageGetColorSpace(decodedImage->platformImage().get())));
     if (model == kCGColorSpaceModelIndexed) {
         RetainPtr<CGContextRef> bitmapContext;
         // FIXME: we should probably manually convert the image by indexing into
@@ -405,20 +404,26 @@ bool GraphicsContextGLImageExtractor::extractImage(AlphaPremultiplication source
         }
     }
 
-    // The CGImage records the premultiplication of its contents, but it may record it incorrectly,
-    // so only the alpha channel position is taken from it and the premultiplication from the caller.
+    // The CGImage records the premultiplication of its contents, but the caller may know it to be
+    // recorded incorrectly, in which case the caller's statement wins.
     AlphaFormat alphaFormat = AlphaFormatNone;
-    bool hasAlpha = false;
+    std::optional<AlphaPremultiplication> imageAlphaPremultiplication;
     switch (CGImageGetAlphaInfo(decodedImage->platformImage().get())) {
     case kCGImageAlphaPremultipliedFirst:
+        alphaFormat = AlphaFormatFirst;
+        imageAlphaPremultiplication = AlphaPremultiplication::Premultiplied;
+        break;
     case kCGImageAlphaFirst:
         alphaFormat = AlphaFormatFirst;
-        hasAlpha = true;
+        imageAlphaPremultiplication = AlphaPremultiplication::Unpremultiplied;
         break;
     case kCGImageAlphaPremultipliedLast:
+        alphaFormat = AlphaFormatLast;
+        imageAlphaPremultiplication = AlphaPremultiplication::Premultiplied;
+        break;
     case kCGImageAlphaLast:
         alphaFormat = AlphaFormatLast;
-        hasAlpha = true;
+        imageAlphaPremultiplication = AlphaPremultiplication::Unpremultiplied;
         break;
     case kCGImageAlphaNoneSkipFirst:
         // The skipped channel holds undefined values, so it must not take part in an alpha op.
@@ -433,13 +438,13 @@ bool GraphicsContextGLImageExtractor::extractImage(AlphaPremultiplication source
     default:
         return false;
     }
-    m_alphaOp = hasAlpha ? alphaOpForPremultiplication(sourceAlphaPremultiplication, premultiplyAlpha) : AlphaOp::DoNothing;
+    m_alphaOp = imageAlphaPremultiplication ? alphaOpForPremultiplication(sourceAlphaPremultiplication.value_or(*imageAlphaPremultiplication), premultiplyAlpha) : AlphaOp::DoNothing;
 
     m_imageSourceFormat = getSourceDataFormat(componentsPerPixel, alphaFormat, bitsPerComponent == 16, bigEndianSource);
     if (m_imageSourceFormat == DataFormat::NumFormats)
         return false;
 
-    m_pixelData = adoptCF(CGDataProviderCopyData(CGImageGetDataProvider(decodedImage->platformImage().get())));
+    m_pixelData = adoptCF(CGDataProviderCopyData(protect(CGImageGetDataProvider(decodedImage->platformImage().get()))));
     if (!m_pixelData)
         return false;
 

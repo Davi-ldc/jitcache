@@ -35,6 +35,7 @@
 #include "IsoCellSetInlines.h"
 #include "JSArray.h"
 #include "JSCJSValueInlines.h"
+#include <wtf/Threading.h>
 
 namespace JSC {
 
@@ -52,6 +53,19 @@ FunctionExecutable::FunctionExecutable(VM& vm, ScriptExecutable* topLevelExecuta
 void FunctionExecutable::destroy(JSCell* cell)
 {
     static_cast<FunctionExecutable*>(cell)->FunctionExecutable::~FunctionExecutable();
+}
+
+UTF8CString FunctionExecutable::inferredNameForTools()
+{
+    // Only the thread running the VM may pull the name out of the bytecode cache (it atomizes); compiler, GC, sampling
+    // profiler and crash-reporter threads print what is there.
+    if (isCompilationThread() || Thread::mayBeGCThread() || !vm().currentThreadIsHoldingAPILock()) {
+        if (const Identifier* name = tryGetEcmaNameConcurrently())
+            return name->utf8();
+        return "<name not materialized>"_s;
+    }
+    // The mutator itself may be inside the collector's end phase (a CodeBlock dumped while it is jettisoned), where it must not atomize either.
+    return ecmaNameWithoutGC().utf8();
 }
 
 FunctionCodeBlock* FunctionExecutable::baselineCodeBlockFor(CodeSpecializationKind kind)
@@ -78,10 +92,12 @@ static inline bool shouldKeepInConstraintSet(Visitor& visitor, CodeBlock* codeBl
 template<typename Visitor>
 void FunctionExecutable::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 {
-    VM& vm = visitor.vm();
     FunctionExecutable* thisObject = uncheckedDowncast<FunctionExecutable>(cell);
     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
     Base::visitChildren(thisObject, visitor);
+#if USE(BUN_JSC_ADDITIONS)
+    thisObject->visitSourceFetcher(visitor);
+#endif
     visitor.append(thisObject->m_topLevelExecutable);
     visitor.append(thisObject->m_unlinkedExecutable);
     if (RareData* rareData = thisObject->m_rareData.get()) {
@@ -103,7 +119,7 @@ void FunctionExecutable::visitChildrenImpl(JSCell* cell, Visitor& visitor)
         visitCodeBlockEdge(visitor, codeBlockForConstruct);
 
     if (shouldKeepInConstraintSet(visitor, codeBlockForCall, codeBlockForConstruct))
-        vm.heap.functionExecutableSpaceAndSet.outputConstraintsSet.add(thisObject);
+        thisObject->vm().heap.functionExecutableSpaceAndSet.outputConstraintsSet.add(thisObject);
 }
 
 DEFINE_VISIT_CHILDREN(FunctionExecutable);
@@ -111,7 +127,6 @@ DEFINE_VISIT_CHILDREN(FunctionExecutable);
 template<typename Visitor>
 void FunctionExecutable::visitOutputConstraintsImpl(JSCell* cell, Visitor& visitor)
 {
-    VM& vm = visitor.vm();
     auto* executable = uncheckedDowncast<FunctionExecutable>(cell);
     auto* codeBlockForCall = executable->m_codeBlockForCall.get();
     if (codeBlockForCall) {
@@ -125,7 +140,7 @@ void FunctionExecutable::visitOutputConstraintsImpl(JSCell* cell, Visitor& visit
     }
 
     if (!shouldKeepInConstraintSet(visitor, codeBlockForCall, codeBlockForConstruct))
-        vm.heap.functionExecutableSpaceAndSet.outputConstraintsSet.remove(executable);
+        executable->vm().heap.functionExecutableSpaceAndSet.outputConstraintsSet.remove(executable);
 }
 
 DEFINE_VISIT_OUTPUT_CONSTRAINTS(FunctionExecutable);
@@ -156,8 +171,6 @@ FunctionExecutable::RareData& FunctionExecutable::ensureRareDataSlow()
 {
     ASSERT(!m_rareData);
     auto rareData = makeUnique<RareData>();
-    rareData->m_lineCount = lineCount();
-    rareData->m_endColumn = endColumn();
     rareData->m_parametersStartOffset = parametersStartOffset();
     rareData->m_functionStart = functionStart();
     rareData->m_functionEnd = functionEnd();
@@ -205,8 +218,6 @@ void FunctionExecutable::overrideInfo(const FunctionOverrideInfo& overrideInfo)
 {
     auto& rareData = ensureRareData();
     m_source = overrideInfo.sourceCode;
-    rareData.m_lineCount = overrideInfo.lineCount;
-    rareData.m_endColumn = overrideInfo.endColumn;
     rareData.m_parametersStartOffset = overrideInfo.parametersStartOffset;
     rareData.m_functionStart = overrideInfo.functionStart;
     rareData.m_functionEnd = overrideInfo.functionEnd;

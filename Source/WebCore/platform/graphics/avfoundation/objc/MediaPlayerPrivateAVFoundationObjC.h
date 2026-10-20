@@ -397,14 +397,10 @@ private:
 #endif
 
 
-    void forEachResourceLoader(Function<void(WebCoreAVFResourceLoader&)>&&) const;
+    void forEachResourceLoader(NOESCAPE const Function<void(WebCoreAVFResourceLoader&)>&) const;
     void addResourceLoader(AVAssetResourceLoadingRequest *, Ref<WebCoreAVFResourceLoader>&&);
     RefPtr<WebCoreAVFResourceLoader> getResourceLoader(AVAssetResourceLoadingRequest *) const;
     RefPtr<WebCoreAVFResourceLoader> takeResourceLoader(AVAssetResourceLoadingRequest *);
-
-#if HAVE(AVPLAYER_PARTICIPATESINAUDIOSESSION)
-    void setParticipatesInAudioSession(bool);
-#endif
 
     void updateLayerAttachment();
     bool shouldAttachLayerToPlayer();
@@ -439,11 +435,11 @@ private:
     RetainPtr<CVPixelBufferRef> m_lastPixelBuffer;
     RefPtr<NativeImage> m_lastImage;
     std::unique_ptr<ImageRotationSessionVT> m_imageRotationSession;
-    std::unique_ptr<PixelBufferConformerCV> m_pixelBufferConformer;
+    const std::unique_ptr<PixelBufferConformerCV> m_pixelBufferConformer;
 
     friend class WebCoreAVFResourceLoader;
     mutable Lock m_resourceLoaderMapLock;
-    HashMap<RetainPtr<AVAssetResourceLoadingRequest>, Ref<WebCoreAVFResourceLoader>> m_resourceLoaderMap;
+    HashMap<RetainPtr<AVAssetResourceLoadingRequest>, Ref<WebCoreAVFResourceLoader>> m_resourceLoaderMap WTF_GUARDED_BY_LOCK(m_resourceLoaderMapLock);
     const RetainPtr<WebCoreAVFLoaderDelegate> m_loaderDelegate;
     MemoryCompactRobinHoodHashMap<String, RetainPtr<AVAssetResourceLoadingRequest>> m_keyURIToRequestMap;
 
@@ -451,13 +447,13 @@ private:
 
     Vector<Ref<AudioTrackPrivateAVFObjC>> m_audioTracks;
     Vector<Ref<VideoTrackPrivateAVFObjC>> m_videoTracks;
-    RefPtr<MediaSelectionGroupAVFObjC> m_audibleGroup;
-    RefPtr<MediaSelectionGroupAVFObjC> m_visualGroup;
+    const RefPtr<MediaSelectionGroupAVFObjC> m_audibleGroup;
+    const RefPtr<MediaSelectionGroupAVFObjC> m_visualGroup;
 
     ThreadSafeWeakPtr<InbandTextTrackPrivateAVF> m_currentTextTrack;
 
 #if ENABLE(DATACUE_VALUE)
-    RefPtr<InbandMetadataTextTrackPrivateAVF> m_metadataTrack;
+    const RefPtr<InbandMetadataTextTrackPrivateAVF> m_metadataTrack;
 #endif
 
     MemoryCompactRobinHoodHashMap<String, Ref<InbandChapterTrackPrivateAVFObjC>> m_chapterTracks;

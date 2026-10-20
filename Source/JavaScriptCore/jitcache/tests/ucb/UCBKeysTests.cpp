@@ -200,7 +200,7 @@ static bool testSourceDigests(TestPart& part)
     auto fromProvider = rootSourceDigest(whole);
     if (!part.check(fromProvider.digest == supplied && fromProvider.origin == SourceDigestOrigin::Provider, "a source that spans its provider does not take the provider's digest"_s))
         return false;
-    SourceCode partial { RefPtr<SourceProvider> { provider.ptr() }, 1, static_cast<int>(text.length()), 1, 1 };
+    SourceCode partial { RefPtr<SourceProvider> { provider.ptr() }, 1, static_cast<int>(text.length()) };
     auto fromPart = rootSourceDigest(partial);
     if (!part.check(fromPart.digest == sourceDigest(partial.view()) && fromPart.origin == SourceDigestOrigin::Computed, "a source over part of a supplying provider does not compute its digest"_s))
         return false;
@@ -267,27 +267,27 @@ static bool testPinnedDigests(VM& vm, TestPart& part)
         { directEvalIdentityDigest(parent, BytecodeIndex(42), filledDigest(0x22)), "JITCache.deva.v1"_s,
             "01 01 00 00 00000000 1111111111111111111111111111111111111111111111111111111111111111 2a000000 2222222222222222222222222222222222222222222222222222222222222222"_s,
             "030199b882b969d4c9f3fd1d3d96cfd9934f10c11311967ea198290dc49473c4"_s, "a direct-eval identity digest"_s },
-        { globalContextDigest(IdentityKind::Program, 5, 3, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false), "JITCache.gctx.v1"_s,
-            "01 05000000 03000000 00 00 00 00"_s,
-            "7d96201a066ba937eb38cbd5ba55258aecd942a7b19739d62687f4e0b0dea236"_s, "a program's context digest"_s },
-        { globalContextDigest(IdentityKind::Module, 0, 1, JSParserScriptMode::Module, DerivedContextType::None, EvalContextType::None, false), "JITCache.gctx.v1"_s,
-            "02 00000000 01000000 01 00 00 00"_s,
-            "eca8c3dabf80cc2b1d839fdccba789300b09d63ec88e232a1ce2c67240b77635"_s, "a module's context digest"_s },
-        { globalContextDigest(IdentityKind::IndirectEval, 9, 2, JSParserScriptMode::Classic, DerivedContextType::DerivedConstructorContext, EvalContextType::FunctionEvalContext, true), "JITCache.gctx.v1"_s,
-            "03 09000000 02000000 00 01 01 01"_s,
-            "770fe23f8e01df3022d88aa841082ad5fe65c0031121e50815c9e9c2a60cdc3a"_s, "an indirect eval's context digest"_s },
-        { executableBodyContextDigest(IdentityKind::Child, 12, 2, std::nullopt), "JITCache.fctx.v1"_s,
-            "06 0c000000 02000000 00 0000000000000000000000000000000000000000000000000000000000000000"_s,
-            "c464b213b36640d59f748ad047fbbcf66de3e5734e9a56b40763489c20826132"_s, "a child body's context digest"_s },
-        { executableBodyContextDigest(IdentityKind::FunctionConstructor, 0, 1, filledDigest(0x33)), "JITCache.fctx.v1"_s,
-            "04 00000000 01000000 01 3333333333333333333333333333333333333333333333333333333333333333"_s,
-            "bd53125d8233578ffa3095a5f64c5fec677a4e17c84b88d84f0f5fa72aef3881"_s, "a root body's context digest"_s },
-        // Offset 7, first line 4, strict, DerivedMethodContext, a class field initializer, a private brand, an arrow
-        // context outside an ordinary function, FunctionEvalContext; TDZ names "a" and "b" sorted; private names "#x"
-        // (IsMethod) and "#y" (IsMethod | IsStatic) sorted, each followed by its u16 bits.
-        { directEvalContextDigest(7, 4, StrictModeLexicallyScopedFeature, DerivedContextType::DerivedMethodContext, NeedsClassFieldInitializer::Yes, PrivateBrandRequirement::Needed, true, false, EvalContextType::FunctionEvalContext, tdz, privateNames), "JITCache.dctx.v1"_s,
-            "07000000 04000000 01 02 01 01 01 00 01 02000000 01 01000000 61 01 01000000 62 02000000 01 02000000 2378 0100 01 02000000 2379 0900"_s,
-            "e28cbf9cf7a652e3d18376d7aead89bb92bcc4c48e17858c80b0310207880c81"_s, "a direct eval's context digest"_s },
+        { globalContextDigest(IdentityKind::Program, 5, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false), "JITCache.gctx.v1"_s,
+            "01 05000000 00 00 00 00"_s,
+            "498d352c51ede63224fee174270af011702eb59bec75909ca7eb804158cac071"_s, "a program's context digest"_s },
+        { globalContextDigest(IdentityKind::Module, 0, JSParserScriptMode::Module, DerivedContextType::None, EvalContextType::None, false), "JITCache.gctx.v1"_s,
+            "02 00000000 01 00 00 00"_s,
+            "b9a1b0671af8f3f49b82e249856886ae6f16316ceee43a6bc7c20a6901133f01"_s, "a module's context digest"_s },
+        { globalContextDigest(IdentityKind::IndirectEval, 9, JSParserScriptMode::Classic, DerivedContextType::DerivedConstructorContext, EvalContextType::FunctionEvalContext, true), "JITCache.gctx.v1"_s,
+            "03 09000000 00 01 01 01"_s,
+            "ab8cd8e7922c98a06b63ecd3076985360624b5fb439c124897e42c29dfbcdf79"_s, "an indirect eval's context digest"_s },
+        { executableBodyContextDigest(IdentityKind::Child, 12, std::nullopt), "JITCache.fctx.v1"_s,
+            "06 0c000000 00 0000000000000000000000000000000000000000000000000000000000000000"_s,
+            "71536cc85693c499e14066e148543c7de6fa86654ae181f436c6359c28216c10"_s, "a child body's context digest"_s },
+        { executableBodyContextDigest(IdentityKind::FunctionConstructor, 0, filledDigest(0x33)), "JITCache.fctx.v1"_s,
+            "04 00000000 01 3333333333333333333333333333333333333333333333333333333333333333"_s,
+            "9a0bc35cdbafc14c6a98109597f11b8deb14df75a9686fb4d736e9e88598e799"_s, "a root body's context digest"_s },
+        // Offset 7, strict, DerivedMethodContext, a class field initializer, a private brand, an arrow context outside an
+        // ordinary function, FunctionEvalContext; TDZ names "a" and "b" sorted; private names "#x" (IsMethod) and "#y"
+        // (IsMethod | IsStatic) sorted, each followed by its u16 bits.
+        { directEvalContextDigest(7, StrictModeLexicallyScopedFeature, DerivedContextType::DerivedMethodContext, NeedsClassFieldInitializer::Yes, PrivateBrandRequirement::Needed, true, false, EvalContextType::FunctionEvalContext, tdz, privateNames), "JITCache.dctx.v1"_s,
+            "07000000 01 02 01 01 01 00 01 02000000 01 01000000 61 01 01000000 62 02000000 01 02000000 2378 0100 01 02000000 2379 0900"_s,
+            "d8ce02a3f2e573c358db10e114a52ca41aae3813a8010a3ddfbfab458e11f995"_s, "a direct eval's context digest"_s },
         // The environment {alpha, beta}: its name count, then each name's EncodingOrder kind (0, a string) and canonical
         // string. Its digest is the first field of the link record below.
         { std::nullopt, "JITCache.tdze.v1"_s,
@@ -323,7 +323,7 @@ static bool testPinnedDigests(VM& vm, TestPart& part)
 }
 
 // A direct eval's context digest does not depend on the order its TDZ and private-name sets were built in, and changes with
-// each name added to either; each context digest changes with the first line.
+// each name added to either.
 static bool testContextInputs(VM& vm, TestPart& part)
 {
     Vector<String> names;
@@ -337,27 +337,21 @@ static bool testContextInputs(VM& vm, TestPart& part)
             addPrivateName(vm, environment, makeString('#', name), name.length() % 2 ? PrivateNameEntry::IsMethod : PrivateNameEntry::IsGetter);
         return environment;
     };
-    auto digest = [&](unsigned firstLine, const TDZEnvironment& tdz, const PrivateNameEnvironment& privateNames) {
-        return directEvalContextDigest(3, firstLine, NoLexicallyScopedFeatures, DerivedContextType::None, NeedsClassFieldInitializer::No, PrivateBrandRequirement::None, false, true, EvalContextType::None, tdz, privateNames);
+    auto digest = [&](const TDZEnvironment& tdz, const PrivateNameEnvironment& privateNames) {
+        return directEvalContextDigest(3, NoLexicallyScopedFeatures, DerivedContextType::None, NeedsClassFieldInitializer::No, PrivateBrandRequirement::None, false, true, EvalContextType::None, tdz, privateNames);
     };
     TDZEnvironment forwardTDZ = tdzNames(vm, names);
     TDZEnvironment backwardTDZ = tdzNames(vm, reversed);
     PrivateNameEnvironment forwardNames = privateSet(names);
     PrivateNameEnvironment backwardNames = privateSet(reversed);
-    Digest256 base = digest(1, forwardTDZ, forwardNames);
-    if (!part.check(base == digest(1, backwardTDZ, backwardNames), "a direct eval's context digest depends on the insertion order of its sets"_s))
+    Digest256 base = digest(forwardTDZ, forwardNames);
+    if (!part.check(base == digest(backwardTDZ, backwardNames), "a direct eval's context digest depends on the insertion order of its sets"_s))
         return false;
     TDZEnvironment widerTDZ = forwardTDZ;
     widerTDZ.add(RefPtr<UniquedStringImpl> { Identifier::fromString(vm, "jitcacheU3Added"_s).impl() });
     PrivateNameEnvironment widerNames = forwardNames;
     addPrivateName(vm, widerNames, "#jitcacheU3Added"_s, PrivateNameEntry::IsMethod);
-    if (!part.check(digest(1, widerTDZ, forwardNames) != base && digest(1, forwardTDZ, widerNames) != base, "a direct eval's context digest does not change with a name added to its TDZ or private-name set"_s))
-        return false;
-
-    bool changesWithLine = digest(2, forwardTDZ, forwardNames) != base
-        && globalContextDigest(IdentityKind::Program, 0, 1, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false) != globalContextDigest(IdentityKind::Program, 0, 2, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false)
-        && executableBodyContextDigest(IdentityKind::Child, 0, 1, std::nullopt) != executableBodyContextDigest(IdentityKind::Child, 0, 2, std::nullopt);
-    return part.check(changesWithLine, "a context digest does not change with the source's first line"_s);
+    return part.check(digest(widerTDZ, forwardNames) != base && digest(forwardTDZ, widerNames) != base, "a direct eval's context digest does not change with a name added to its TDZ or private-name set"_s);
 }
 
 // Whether a UFE's TDZ chain is the one a TDZ variant's side names (HolderSide::tdzLinks): one link per letter, the UFE's own
@@ -516,7 +510,7 @@ static bool testEnvironmentDigests(VM& vm, TestPart& part)
 // What each kind of request computes. contextDigestOf the inputs recordedContext keeps equals requestContext before and
 // after the body is generated, for a root UFE body too; a request's key and context read only the snapshot its request
 // object took; a program at another offset of its provider has another context, and no request context changes with the
-// start column; a decoded program takes the request's key with its own mode only when its with-scope bit is the snapshot's.
+// provider's start position, nor does computing one build the provider's line-start table.
 static bool testRequestKeysAndContexts(VM& vm, JSGlobalObject* globalObject, TestPart& part)
 {
     UCBRegistry& registry = vm.jitCacheState()->registry();
@@ -545,9 +539,10 @@ static bool testRequestKeysAndContexts(VM& vm, JSGlobalObject* globalObject, Tes
     if (!part.check(!!registry.recordOf(*program.get()) && program.get()->numberOfFunctionDecls() == 1, "the CodeCache's generation of a program did not record it"_s))
         return false;
 
-    // Another offset of the provider, another context; another start column, the same.
-    SourceCode shifted { RefPtr<SourceProvider> { provider.ptr() }, 1, static_cast<int>(programText.length()), 1, 1 };
-    SourceCode otherColumn { RefPtr<SourceProvider> { provider.ptr() }, 0, static_cast<int>(programText.length()), 1, 9 };
+    // Another offset of the provider, another context; another start position of the provider, the line and column a
+    // vm.Script lineOffset sets, the same, and its line-start table stays unbuilt.
+    SourceCode shifted { RefPtr<SourceProvider> { provider.ptr() }, 1, static_cast<int>(programText.length()) };
+    SourceCode otherStart = makeSource(programText, SourceOrigin { }, SourceTaintedOrigin::Untainted, String { }, TextPosition { OrdinalNumber::fromOneBasedInt(11), OrdinalNumber::fromOneBasedInt(9) });
     auto contextOf = [&](const SourceCode& source) -> std::optional<Digest256> {
         Strong<ProgramExecutable> sourceExecutable { vm, ProgramExecutable::create(globalObject, source) };
         RequestState request(vm, RequestKind::Program, source, { }, NoLexicallyScopedFeatures);
@@ -557,11 +552,11 @@ static bool testRequestKeysAndContexts(VM& vm, JSGlobalObject* globalObject, Tes
         return requestContext(request);
     };
     auto shiftedContext = contextOf(shifted);
-    auto otherColumnContext = contextOf(otherColumn);
-    if (!part.check(shiftedContext && shiftedContext != programBefore && otherColumnContext == programBefore, "a program's context does not follow its offset in the provider, or follows its start column"_s))
+    auto otherStartContext = contextOf(otherStart);
+    if (!part.check(shiftedContext && shiftedContext != programBefore && otherStartContext == programBefore, "a program's context does not follow its offset in the provider, or follows its start position"_s))
         return false;
 
-    // Child body, before and after its generation, and under another start column of its parent.
+    // Child body, before and after its generation, and under another start position of its parent's provider.
     UnlinkedFunctionExecutable& child = *program.get()->functionDecl(0);
     auto childContext = [&](const SourceCode& parentSource) -> std::optional<Digest256> {
         SourceCode source = child.linkedSourceCode(parentSource);
@@ -577,8 +572,11 @@ static bool testRequestKeysAndContexts(VM& vm, JSGlobalObject* globalObject, Tes
     auto childBefore = childContext(programSource);
     UnlinkedFunctionCodeBlock* childBody = child.unlinkedCodeBlockFor(vm, child.linkedSourceCode(programSource), CodeSpecializationKind::CodeForCall, { }, error, child.parseMode());
     auto childAfter = childContext(programSource);
-    auto childOtherColumn = childContext(otherColumn);
-    if (!part.check(childBody && childBefore && childBefore == childAfter && childOtherColumn == childBefore, "a child body's context differs from its recorded inputs, changes with its generation or with the start column"_s))
+    auto childOtherStart = childContext(otherStart);
+    if (!part.check(childBody && childBefore && childBefore == childAfter && childOtherStart == childBefore, "a child body's context differs from its recorded inputs, changes with its generation or with the start position"_s))
+        return false;
+    // No context records a line, and no request derives one: that would build the table from the provider's whole text.
+    if (!part.check(!otherStart.provider()->lineStartsIfBuilt(), "computing a request's key and context built its provider's line-start table"_s))
         return false;
 
     // Function-constructor root body: its context covers the holder digest of its UFE.
@@ -617,7 +615,7 @@ static bool testRequestKeysAndContexts(VM& vm, JSGlobalObject* globalObject, Tes
         request.scriptMode = scriptMode;
         if (!requestKey(request, { }))
             return false;
-        Digest256 expected = globalContextDigest(identityKind, source.startOffset(), source.firstLine().oneBasedInt(), scriptMode, global.derivedContextType(), EvalContextType::None, global.isArrowFunctionContext());
+        Digest256 expected = globalContextDigest(identityKind, source.startOffset(), scriptMode, global.derivedContextType(), EvalContextType::None, global.isArrowFunctionContext());
         return requestContext(request) == expected && contextDigestOf(identityKind, recordedContext(request), std::nullopt) == expected;
     };
     if (!part.check(globalContext(RequestKind::Module, *module.get(), moduleSource, JSParserScriptMode::Module, IdentityKind::Module), "a module request's context differs from its inputs' digest"_s))
@@ -663,46 +661,16 @@ static bool testRequestKeysAndContexts(VM& vm, JSGlobalObject* globalObject, Tes
     ProgramFixture snapshotUCB = generateFixture(vm, snapshotText);
     {
         GlobalRequest request(vm, *snapshotExecutable.get(), snapshotSource, SourceCodeType::ProgramType, JSParserScriptMode::Classic, { }, EvalContextType::None);
-        snapshotExecutable.get()->recordParse(0, StrictModeLexicallyScopedFeature | TaintedByWithScopeLexicallyScopedFeature, false, 1, 1);
+        snapshotExecutable.get()->recordParse(0, StrictModeLexicallyScopedFeature | TaintedByWithScopeLexicallyScopedFeature, false);
         request.didGenerate(*snapshotUCB.codeBlock.get());
     }
     auto snapshotRecord = registry.recordOf(*snapshotUCB.codeBlock.get());
     if (!part.check(expectedKey && snapshotRecord && snapshotRecord->key == *expectedKey && snapshotRecord->keyFeatures == NoLexicallyScopedFeatures, "a request's key or key features follow features overwritten after its request object was constructed"_s))
         return false;
-    {
-        RequestState request(vm, RequestKind::Program, snapshotSource, { }, NoLexicallyScopedFeatures);
-        prepareProgramRequest(request, *snapshotExecutable.get());
-        auto key = requestKey(request, { });
-        if (!part.check(key == expectedKey && requestContext(request) == *expectedContext, "a request's key or context reads the executable's overwritten features instead of the snapshot"_s))
-            return false;
-    }
-
-    // A decoded program: its own with-scope bit decides, and its own mode enters the key.
-    String decodedText = "var jitcacheU3Decoded = 4;\n"_s;
-    SourceCode decodedSource = makeSource(decodedText, SourceOrigin { }, SourceTaintedOrigin::Untainted);
-    Strong<ProgramExecutable> decodedExecutable { vm, ProgramExecutable::create(globalObject, decodedSource) };
-    ProgramFixture plainUCB = generateProgramFixture(vm, decodedText, 0);
-    ProgramFixture debuggerUCB = generateProgramFixture(vm, decodedText, 0, NoLexicallyScopedFeatures, CodeGenerationMode::Debugger);
-    ProgramFixture withScopeUCB = generateProgramFixture(vm, decodedText, 0, TaintedByWithScopeLexicallyScopedFeature);
-    if (!part.check(plainUCB.codeBlock && debuggerUCB.codeBlock && withScopeUCB.codeBlock, "a decoded-program fixture failed to generate"_s))
-        return false;
-    auto decodedKey = [&](UnlinkedGlobalCodeBlock& codeBlock) {
-        RequestState request(vm, RequestKind::Program, decodedSource, { }, NoLexicallyScopedFeatures);
-        prepareProgramRequest(request, *decodedExecutable.get());
-        return decodedRootKey(request, codeBlock);
-    };
-    auto requestKeyWithMode = [&](OptionSet<CodeGenerationMode> mode) {
-        RequestState request(vm, RequestKind::Program, decodedSource, mode, NoLexicallyScopedFeatures);
-        prepareProgramRequest(request, *decodedExecutable.get());
-        return requestKey(request, mode);
-    };
-    auto plainKey = decodedKey(*plainUCB.codeBlock.get());
-    auto debuggerKey = decodedKey(*debuggerUCB.codeBlock.get());
-    bool decodedKeys = plainKey && plainKey == requestKeyWithMode({ }) && debuggerKey && debuggerKey == requestKeyWithMode(CodeGenerationMode::Debugger)
-        && debuggerKey->codeGenerationMode() == OptionSet<CodeGenerationMode> { CodeGenerationMode::Debugger };
-    if (!part.check(decodedKeys, "a decoded program whose with-scope bit is the snapshot's does not take the request's key with its own mode"_s))
-        return false;
-    return part.check(!decodedKey(*withScopeUCB.codeBlock.get()), "a decoded program whose with-scope bit differs from the snapshot's has a key"_s);
+    RequestState request(vm, RequestKind::Program, snapshotSource, { }, NoLexicallyScopedFeatures);
+    prepareProgramRequest(request, *snapshotExecutable.get());
+    auto key = requestKey(request, { });
+    return part.check(key == expectedKey && requestContext(request) == *expectedContext, "a request's key or context reads the executable's overwritten features instead of the snapshot"_s);
 }
 
 // Every JSC builtin's generated metadata carries the digest of the text name##Source() spans.

@@ -329,7 +329,7 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
         }
     } else {
         char32_t c = pos.characterAfter();
-        CFCharacterSetRef set = CFCharacterSetGetPredefined(kCFCharacterSetWhitespaceAndNewline);
+        RetainPtr set = CFCharacterSetGetPredefined(kCFCharacterSetWhitespaceAndNewline);
         if (c == 0 || CFCharacterSetIsLongCharacterMember(set, c)) {
             // search backward for a non-space
             while (1) {
@@ -387,7 +387,7 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
 
 - (BOOL)atAlphaNumericBoundaryInDirection:(WebTextAdjustmentDirection)direction
 {
-    static CFCharacterSetRef set = CFCharacterSetGetPredefined(kCFCharacterSetAlphaNumeric);
+    RetainPtr set = CFCharacterSetGetPredefined(kCFCharacterSetAlphaNumeric);
     VisiblePosition pos = [self _visiblePosition];
     char32_t charBefore = pos.characterBefore();
     char32_t charAfter = pos.characterAfter();
@@ -407,13 +407,12 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
     *alternatives = nil;
 
     auto position = [self _visiblePosition];
-    auto* node = position.deepEquivalent().anchorNode();
+    RefPtr node = position.deepEquivalent().anchorNode();
     if (!node)
         return nil;
 
     unsigned offset = position.deepEquivalent().deprecatedEditingOffset();
-    auto& document = node->document();
-    for (auto& marker : document.markers().markersFor(*node, DocumentMarkerType::DictationPhraseWithAlternatives)) {
+    for (auto& marker : protect(protect(node->document())->markers())->markersFor(*node, DocumentMarkerType::DictationPhraseWithAlternatives)) {
         if (marker->startOffset() <= offset && marker->endOffset() >= offset) {
             *alternatives = createNSArray(std::get<Vector<String>>(marker->data())).autorelease();
             return kit(makeSimpleRange(*node, *marker));
@@ -425,13 +424,12 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
 - (DOMRange *)enclosingRangeWithCorrectionIndicator
 {
     auto position = [self _visiblePosition];
-    auto* node = position.deepEquivalent().anchorNode();
+    RefPtr node = position.deepEquivalent().anchorNode();
     if (!node)
         return nil;
 
     unsigned offset = position.deepEquivalent().deprecatedEditingOffset();
-    auto& document = node->document();
-    for (auto& marker : document.markers().markersFor(*node, DocumentMarkerType::Spelling)) {
+    for (auto& marker : protect(protect(node->document())->markers())->markersFor(*node, DocumentMarkerType::Spelling)) {
         if (marker->startOffset() <= offset && marker->endOffset() >= offset)
             return kit(makeSimpleRange(*node, *marker));
     }
@@ -454,22 +452,22 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
 
 - (WebVisiblePosition *)startPosition
 {
-    auto& range = *core(self);
-    return [WebVisiblePosition _wrapVisiblePosition:makeDeprecatedLegacyPosition(&range.startContainer(), range.startOffset())];
+    Ref range = *core(self);
+    return [WebVisiblePosition _wrapVisiblePosition:makeDeprecatedLegacyPosition(&range->startContainer(), range->startOffset())];
 }
 
 - (WebVisiblePosition *)endPosition
 {
-    auto& range = *core(self);
-    return [WebVisiblePosition _wrapVisiblePosition:makeDeprecatedLegacyPosition(&range.endContainer(), range.endOffset())];
+    Ref range = *core(self);
+    return [WebVisiblePosition _wrapVisiblePosition:makeDeprecatedLegacyPosition(&range->endContainer(), range->endOffset())];
 }
 
 - (DOMRange *)enclosingWordRange
 {
     VisibleSelection selection([self.startPosition _visiblePosition], [self.endPosition _visiblePosition]);
     selection = FrameSelection::wordSelectionContainingCaretSelection(selection);
-    WebVisiblePosition *start = [WebVisiblePosition _wrapVisiblePosition:selection.visibleStart()];
-    WebVisiblePosition *end = [WebVisiblePosition _wrapVisiblePosition:selection.visibleEnd()];
+    RetainPtr start = [WebVisiblePosition _wrapVisiblePosition:selection.visibleStart()];
+    RetainPtr end = [WebVisiblePosition _wrapVisiblePosition:selection.visibleEnd()];
     return [DOMRange rangeForFirstPosition:start second:end];
 }
 
@@ -497,18 +495,18 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
 - (WebVisiblePosition *)startPosition
 {
     // When in editable content, we need to calculate the startPosition from the beginning of the editable area.
-    auto& node = *core(self);
-    if (node.isContentEditable())
-        return [WebVisiblePosition _wrapVisiblePosition:startOfEditableContent(VisiblePosition(makeDeprecatedLegacyPosition(&node, 0)))];
+    Ref node = *core(self);
+    if (node->isContentEditable())
+        return [WebVisiblePosition _wrapVisiblePosition:startOfEditableContent(VisiblePosition(makeDeprecatedLegacyPosition(node.ptr(), 0)))];
     return [[self rangeOfContents] startPosition];
 }
 
 - (WebVisiblePosition *)endPosition
 {
     // When in editable content, we need to calculate the endPosition from the end of the editable area.
-    auto& node = *core(self);
-    if (node.isContentEditable())
-        return [WebVisiblePosition _wrapVisiblePosition:endOfEditableContent(VisiblePosition(makeDeprecatedLegacyPosition(&node, 0)))];
+    Ref node = *core(self);
+    if (node->isContentEditable())
+        return [WebVisiblePosition _wrapVisiblePosition:endOfEditableContent(VisiblePosition(makeDeprecatedLegacyPosition(node.ptr(), 0)))];
     return [[self rangeOfContents] endPosition];
 }
 
@@ -518,24 +516,24 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
 
 - (WebVisiblePosition *)startPosition
 {
-    Node* node = core(self);
-    RenderObject* object = node->renderer();
+    RefPtr node = core(self);
+    CheckedPtr object = node->renderer();
     if (!is<RenderTextControl>(object))
         return [super startPosition];
     
-    VisiblePosition visiblePosition = downcast<RenderTextControl>(*object).textFormControlElement().visiblePositionForIndex(0);
+    VisiblePosition visiblePosition = protect(downcast<RenderTextControl>(*object).textFormControlElement())->visiblePositionForIndex(0);
     return [WebVisiblePosition _wrapVisiblePosition:visiblePosition];
 }
 
 - (WebVisiblePosition *)endPosition
 {
-    Node* node = core(self);
-    RenderObject* object = node->renderer();
+    RefPtr node = core(self);
+    CheckedPtr object = node->renderer();
     if (!is<RenderTextControl>(object))
         return [super endPosition];
     
-    RenderTextControl& textControl = downcast<RenderTextControl>(*object);
-    VisiblePosition visiblePosition = textControl.textFormControlElement().visiblePositionForIndex(textControl.textFormControlElement().value()->length());
+    Ref textFormControlElement = downcast<RenderTextControl>(*object).textFormControlElement();
+    VisiblePosition visiblePosition = textFormControlElement->visiblePositionForIndex(textFormControlElement->value()->length());
     return [WebVisiblePosition _wrapVisiblePosition:visiblePosition];
 }
 
@@ -545,24 +543,24 @@ static inline SelectionDirection toSelectionDirection(WebTextAdjustmentDirection
 
 - (WebVisiblePosition *)startPosition
 {
-    Node* node = core(self);
-    RenderObject* object = node->renderer();
+    RefPtr node = core(self);
+    CheckedPtr object = node->renderer();
     if (!object) 
         return [super startPosition];
     
-    VisiblePosition visiblePosition = downcast<RenderTextControl>(*object).textFormControlElement().visiblePositionForIndex(0);
+    VisiblePosition visiblePosition = protect(downcast<RenderTextControl>(*object).textFormControlElement())->visiblePositionForIndex(0);
     return [WebVisiblePosition _wrapVisiblePosition:visiblePosition];
 }
 
 - (WebVisiblePosition *)endPosition
 {
-    Node* node = core(self);
-    RenderObject* object = node->renderer();
+    RefPtr node = core(self);
+    CheckedPtr object = node->renderer();
     if (!object) 
         return [super endPosition];
     
-    RenderTextControl& textControl = downcast<RenderTextControl>(*object);
-    VisiblePosition visiblePosition = textControl.textFormControlElement().visiblePositionForIndex(textControl.textFormControlElement().value()->length());
+    Ref textFormControlElement = downcast<RenderTextControl>(*object).textFormControlElement();
+    VisiblePosition visiblePosition = textFormControlElement->visiblePositionForIndex(textFormControlElement->value()->length());
     return [WebVisiblePosition _wrapVisiblePosition:visiblePosition];
 }
 

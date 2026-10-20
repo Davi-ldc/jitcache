@@ -39,6 +39,7 @@ WI.NetworkManager = class NetworkManager extends WI.Object
 
         this._waitingForMainFrameResourceTreePayload = true;
         this._transitioningPageTarget = false;
+        this._needsAggregatedResourceTreeMerge = false;
 
         this._sourceMapURLMap = new Map;
         this._downloadingSourceMaps = new Set;
@@ -59,6 +60,8 @@ WI.NetworkManager = class NetworkManager extends WI.Object
         WI.notifications.addEventListener(WI.Notification.ExtraDomainsActivated, this._extraDomainsActivated, this);
 
         WI.Frame.addEventListener(WI.Frame.Event.MainResourceDidChange, this._handleFrameMainResourceDidChange, this);
+
+        WI.targetManager.addEventListener(WI.TargetManager.Event.TargetRemoved, this._handleTargetRemoved, this);
 
         if (NetworkManager.supportsOverridingResponses()) {
             WI.Resource.addEventListener(WI.SourceCode.Event.ContentDidChange, this._handleResourceContentChangedForLocalResourceOverride, this);
@@ -256,6 +259,11 @@ WI.NetworkManager = class NetworkManager extends WI.Object
             this._enabledPageForSiteIsolation = true;
             if (WI.backendTarget && WI.backendTarget.hasDomain("Network"))
                 this.initializeTarget(WI.backendTarget);
+
+            // The bootstrap snapshot cannot describe a frame in another process, and nothing replays loads
+            // that finished before the frontend attached, so fold in the aggregated tree now that
+            // ProxyingPageAgent is live.
+            this._requestAggregatedResourceTree();
         }
     }
 
@@ -685,6 +693,11 @@ WI.NetworkManager = class NetworkManager extends WI.Object
 
             frame.initialize(framePayload.name, framePayload.securityOrigin, framePayload.loaderId, mainResource);
         }
+
+        // Both commitProvisionalLoad() and initialize() clear the frame's execution contexts, which
+        // would discard anything adopted while the frame was created above. Re-adopt now that the
+        // navigation has settled.
+        this._associateTargetExecutionContextsWithFrame(frame);
 
         var oldMainFrame = this._mainFrame;
 
@@ -1192,21 +1205,55 @@ WI.NetworkManager = class NetworkManager extends WI.Object
 
     // RuntimeObserver
 
-    executionContextCreated(payload)
+    executionContextCreated(target, payload)
     {
-        let frame = this.frameForIdentifier(payload.frameId);
-        // Under site isolation, FrameTargets report their own contexts.
-        // PageTarget should only handle contexts for frames in its own frame tree.
-        if (!frame)
-            return;
-
         let type = WI.ExecutionContext.typeFromPayload(payload);
-        let target = frame.mainResource.target;
+
+        // A context identifier is only meaningful to the agent that minted it.
         let executionContext = new WI.ExecutionContext(target, payload.id, type, payload.name, payload.frameId);
-        frame.addExecutionContext(executionContext);
+
+        if (target instanceof WI.FrameTarget)
+            target.addExecutionContext(executionContext);
+
+        // If the frame is not known yet, _associateTargetExecutionContextsWithFrame files the context
+        // once it is. FIXME: <webkit.org/b/325086> A frame nested inside an out-of-process frame is
+        // never added to the frame map, so its frame target is the only record of this context.
+        let frame = this.frameForIdentifier(payload.frameId);
+        if (frame)
+            frame.addExecutionContext(executionContext);
     }
 
     // Private
+
+    _associateTargetExecutionContextsWithFrame(frame)
+    {
+        // A frame target reports its realm as soon as the document's window object is set up, which
+        // can precede the Page.getResourceTree or Page.frameNavigated that tells the frontend the
+        // frame exists, and the report is never repeated. So the frame has to go and collect it. Safe to call repeatedly:
+        // a frame target's list holds only its current realms, and Frame.addExecutionContext
+        // ignores a context the frame already has.
+        for (let target of WI.targetManager.targets) {
+            if (!(target instanceof WI.FrameTarget))
+                continue;
+
+            for (let executionContext of target.executionContextList.contexts) {
+                if (executionContext.frameId === frame.id)
+                    frame.addExecutionContext(executionContext);
+            }
+        }
+    }
+
+    _disassociateTargetExecutionContextsFromFrame(target, frame)
+    {
+        let contexts = frame.executionContextList.contexts;
+        if (!contexts.some((context) => context.target === target))
+            return;
+
+        let survivors = contexts.filter((context) => context.target !== target);
+        frame.clearExecutionContexts();
+        for (let context of survivors)
+            frame.addExecutionContext(context);
+    }
 
     _addNewResourceToFrameOrTarget(url, frameIdentifier, resourceOptions = {}, frameOptions = {})
     {
@@ -1225,17 +1272,18 @@ WI.NetworkManager = class NetworkManager extends WI.Object
 
         let frame = this.frameForIdentifier(frameIdentifier);
 
-        // FIXME: <webkit.org/b/308896> Under Site Isolation, cross-origin iframe frames may
-        // not be in the frame map. They don't appear in getResourceTree (dynamically added) or
-        // Page.frameNavigated (RemoteFrame, not LocalFrame), and Page.frameDetached removes any
-        // stubs during the provisional frame commit lifecycle. Create a stub frame on-demand so
-        // the resource is added as a subresource (firing ResourceWasAdded) rather than being
-        // treated as the main resource of a brand-new frame (firing FrameWasAdded). This will be
-        // resolved when Page.getResourceTree supports Site Isolation cross-process frames.
+        // Under Site Isolation, cross-origin iframe frames may not be in the frame map. They don't appear
+        // in the page target's getResourceTree (a RemoteFrame is reported as a placeholder with no
+        // subresources) or in Page.frameNavigated (RemoteFrame, not LocalFrame), and Page.frameDetached
+        // removes any stubs during the provisional frame commit lifecycle. The aggregated cross-process
+        // tree fills those gaps, but live events can arrive before it has been merged, so still create a
+        // stub frame on demand: the resource is then added as a subresource (firing ResourceWasAdded)
+        // rather than being treated as the main resource of a brand-new frame (firing FrameWasAdded).
         if (!frame && frameIdentifier.startsWith("frame-")) {
             let mainResource = new WI.Resource("about:blank");
             frame = new WI.Frame(frameIdentifier, frameOptions.name, frameOptions.securityOrigin, null, mainResource);
             this._frameIdentifierMap.set(frame.id, frame);
+            this._associateTargetExecutionContextsWithFrame(frame);
             mainResource.markAsFinished();
             if (this._mainFrame)
                 this._mainFrame.addChildFrame(frame);
@@ -1261,6 +1309,7 @@ WI.NetworkManager = class NetworkManager extends WI.Object
             resource = new WI.Resource(url, resourceOptions);
             frame = new WI.Frame(frameIdentifier, frameOptions.name, frameOptions.securityOrigin, resourceOptions.loaderIdentifier, resource);
             this._frameIdentifierMap.set(frame.id, frame);
+            this._associateTargetExecutionContextsWithFrame(frame);
 
             // If we don't have a main frame, assume this is it. This can change later in
             // frameDidNavigate when the parent frame is known.
@@ -1439,6 +1488,20 @@ WI.NetworkManager = class NetworkManager extends WI.Object
             this._transitioningPageTarget = false;
             this._mainFrame._dispatchMainResourceDidChangeEvent(oldMainFrame.mainResource);
         }
+
+        if (this._needsAggregatedResourceTreeMerge) {
+            this._needsAggregatedResourceTreeMerge = false;
+            this._requestAggregatedResourceTree();
+        }
+    }
+
+    // Only served once ProxyingPageAgent is live, which the first Frame target signals; see initializeTarget.
+    _requestAggregatedResourceTree()
+    {
+        if (!WI.backendTarget || !WI.backendTarget.hasDomain("Page"))
+            return;
+
+        WI.backendTarget.PageAgent.getResourceTree(this._mergeAggregatedResourceTreePayload.bind(this));
     }
 
     _createFrame(payload)
@@ -1452,6 +1515,8 @@ WI.NetworkManager = class NetworkManager extends WI.Object
         var frame = new WI.Frame(payload.id, payload.name, payload.securityOrigin, payload.loaderId, mainResource);
 
         this._frameIdentifierMap.set(frame.id, frame);
+
+        this._associateTargetExecutionContextsWithFrame(frame);
 
         mainResource.markAsFinished();
 
@@ -1508,6 +1573,112 @@ WI.NetworkManager = class NetworkManager extends WI.Object
         this._dispatchFrameWasAddedEvent(frame);
 
         return frame;
+    }
+
+    // Fold the aggregated cross-process resource tree into the frame model. Unlike
+    // _processMainFrameResourceTreePayload, which rebuilds the model from scratch, this only fills in what
+    // the model is missing, so it is safe to call at any point and more than once.
+    //
+    // FIXME: <https://webkit.org/b/324918> Once Page and Network fully move to the WebPage target, this
+    // becomes the only bootstrap and the merge-vs-placeholder distinction goes away entirely.
+    _mergeAggregatedResourceTreePayload(error, mainFramePayload)
+    {
+        if (error) {
+            console.error(JSON.stringify(error));
+            return;
+        }
+
+        // A bootstrap in flight is about to rebuild the model, so merging now would accomplish nothing. The
+        // order of the two replies isn't guaranteed by the protocol -- the aggregated fetch is even issued
+        // later than the page target's own getResourceTree -- but in practice it usually still arrives first.
+        if (this._waitingForMainFrameResourceTreePayload) {
+            this._needsAggregatedResourceTreeMerge = true;
+            return;
+        }
+
+        console.assert(mainFramePayload);
+        console.assert(mainFramePayload.frame);
+        if (!mainFramePayload || !mainFramePayload.frame)
+            return;
+
+        this._mergeAggregatedFrameTreePayload(mainFramePayload, null);
+    }
+
+    _mergeAggregatedFrameTreePayload(payload, parentFrame)
+    {
+        let framePayload = payload.frame;
+
+        let frame = this.frameForIdentifier(framePayload.id);
+        let isNewFrame = !frame;
+        if (isNewFrame) {
+            // A root frame the model has never seen would mean the page target and ProxyingPageAgent
+            // disagree on frame ids; adding it would build a second, parentless copy of the whole tree.
+            console.assert(parentFrame, "The aggregated tree's root frame should already be in the frame model.");
+            if (!parentFrame)
+                return;
+
+            frame = this._createFrame(framePayload);
+            parentFrame.addChildFrame(frame);
+        } else if (this._canUpdateMainResourceFromPayload(frame, framePayload)) {
+            frame.updateInitialPlaceholderMainResource(framePayload.url, {
+                mimeType: framePayload.mimeType,
+                loaderIdentifier: framePayload.loaderId,
+                name: framePayload.name,
+                securityOrigin: framePayload.securityOrigin,
+            });
+        }
+
+        for (let resourcePayload of payload.resources || []) {
+            // The main resource is included as a resource. Skip it, since the frame already has one.
+            if (resourcePayload.type === "Document" && resourcePayload.url === framePayload.url)
+                continue;
+
+            // Never replace: a resource the frontend watched load carries request, timing and size data this
+            // snapshot lacks. Resources carrying a targetId go to that target below, not to the frame.
+            if (frame.resourceCollection.resourcesForURL(resourcePayload.url).size)
+                continue;
+
+            let resource = this._createResource(resourcePayload, payload);
+            if (resource.target === WI.pageTarget)
+                frame.addResource(resource);
+            else if (resource.target)
+                resource.target.addResource(resource);
+            else
+                this._addOrphanedResource(resource, resourcePayload.targetId);
+
+            if (resourcePayload.failed || resourcePayload.canceled)
+                resource.markAsFailed(resourcePayload.canceled);
+            else
+                resource.markAsFinished();
+        }
+
+        // Announce the frame only once its resources are in place, as the bootstrap path does.
+        if (isNewFrame)
+            this._dispatchFrameWasAddedEvent(frame);
+
+        for (let childPayload of payload.childFrames || [])
+            this._mergeAggregatedFrameTreePayload(childPayload, frame);
+    }
+
+    // Whether the snapshot is describing the same load the model already holds, and so may correct it in
+    // place rather than being treated as a navigation.
+    _canUpdateMainResourceFromPayload(frame, framePayload)
+    {
+        // Nothing to learn: the model already describes this document.
+        if (frame.mainResource.url === framePayload.url)
+            return false;
+
+        // Mid-navigation. The provisional load owns what this frame becomes next; stay out of it.
+        if (frame.provisionalLoaderIdentifier)
+            return false;
+
+        // No loader identifier: no way to tell whether this is the load the model already holds.
+        if (!framePayload.loaderId)
+            return false;
+
+        // Live events are at least as current as the snapshot, so only correct a placeholder that was never
+        // attributed to a load, or one for this very load.
+        return !frame.loaderIdentifier || frame.loaderIdentifier === framePayload.loaderId;
     }
 
     _addOrphanedResource(resource, targetId)
@@ -1567,11 +1738,11 @@ WI.NetworkManager = class NetworkManager extends WI.Object
         if (!WI.settings.experimentalEnableNetworkEmulatedCondition.value)
             return;
 
-        // COMPATIBILITY (macOS 13.0, iOS 16.0): Network.setEmulatedConditions did not exist.
+        // COMPATIBILITY (macOS X.Y, iOS X.Y): Network.setEmulatedConditions did not exist.
         if (!target.hasCommand("Network.setEmulatedConditions"))
             return;
 
-        target.NetworkAgent.setEmulatedConditions(this._emulatedCondition.bytesPerSecondLimit);
+        target.NetworkAgent.setEmulatedConditions(this._emulatedCondition.bandwidth, this._emulatedCondition.latency);
     }
 
     _dispatchFrameWasAddedEvent(frame)
@@ -1778,6 +1949,18 @@ WI.NetworkManager = class NetworkManager extends WI.Object
         this._downloadingSourceMaps.clear();
         this._failedSourceMapURLs.clear();
     }
+
+    _handleTargetRemoved(event)
+    {
+        let {target} = event.data;
+        if (!(target instanceof WI.FrameTarget))
+            return;
+
+        // A frame target is replaced whenever its frame moves to another process. Its contexts are
+        // unusable from here on, so drop them and let the surviving targets' reports take over.
+        for (let frame of this._frameIdentifierMap.values())
+            this._disassociateTargetExecutionContextsFromFrame(target, frame);
+    }
 };
 
 // Keep this in sync with `Network.NetworkStage`.
@@ -1790,43 +1973,50 @@ WI.NetworkManager.EmulatedCondition = {
     // Keep this first.
     None: {
         id: "none",
-        bytesPerSecondLimit: 0,
+        bandwidth: 0,
+        latency: 0,
         get displayName() { return WI.UIString("No throttling", "Label indicating that network throttling is inactive."); }
     },
 
     Mobile3G: {
         id: "mobile-3g",
-        bytesPerSecondLimit: 780 * 1000 / 8, // 780kbps
+        bandwidth: 780 * 1000 / 8, // 780kbps
+        latency: 100, // 100ms
         get displayName() { return WI.UIString("3G", "Label indicating that network activity is being simulated with 3G connectivity."); }
     },
 
     DSL: {
         id: "dsl",
-        bytesPerSecondLimit: 2 * 1000 * 1000 / 8, // 2mbps
+        bandwidth: 2 * 1000 * 1000 / 8, // 2mbps
+        latency: 5, // 5ms
         get displayName() { return WI.UIString("DSL", "Label indicating that network activity is being simulated with DSL connectivity."); }
     },
 
     Edge: {
         id: "edge",
-        bytesPerSecondLimit: 240 * 1000 / 8, // 240kbps
+        bandwidth: 240 * 1000 / 8, // 240kbps
+        latency: 400, // 400ms
         get displayName() { return WI.UIString("Edge", "Label indicating that network activity is being simulated with Edge connectivity."); }
     },
 
     LTE: {
         id: "lte",
-        bytesPerSecondLimit: 50 * 1000 * 1000 / 8, // 50mbps
+        bandwidth: 50 * 1000 * 1000 / 8, // 50mbps
+        latency: 50, // 50ms
         get displayName() { return WI.UIString("LTE", "Label indicating that network activity is being simulated with LTE connectivity"); }
     },
 
     WiFi: {
         id: "wifi",
-        bytesPerSecondLimit: 40 * 1000 * 1000 / 8, // 40mbps
+        bandwidth: 40 * 1000 * 1000 / 8, // 40mbps
+        latency: 5, // 5ms
         get displayName() { return WI.UIString("Wi-Fi", "Label indicating that network activity is being simulated with Wi-Fi connectivity"); }
     },
 
     WiFi802_11ac: {
         id: "wifi-802_11ac",
-        bytesPerSecondLimit: 250 * 1000 * 1000 / 8, // 250mbps
+        bandwidth: 250 * 1000 * 1000 / 8, // 250mbps
+        latency: 2, // 2ms
         get displayName() { return WI.UIString("Wi-Fi 802.11ac", "Label indicating that network activity is being simulated with Wi-Fi 802.11ac connectivity"); }
     },
 };

@@ -45,6 +45,7 @@
 #include "CSSUnits.h"
 #include "CSSValueKeywords.h"
 #include "CSSValuePair.h"
+#include "CSSValuePool.h"
 #include <wtf/Variant.h>
 #include <wtf/text/ASCIILiteral.h>
 
@@ -64,21 +65,6 @@ SUPPRESS_NODELETE static bool NODELETE isNumber(const CSSPrimitiveValue& value, 
         },
         [&](const CSSPrimitiveValue::Raw& raw) {
             return raw == number;
-        }
-    );
-}
-
-// FIXME: SUPPRESS_NODELETE shouldn't be necessary.
-template<auto unit>
-SUPPRESS_NODELETE static bool NODELETE isNumber(const CSSPrimitiveValue& value, CSS::ValueLiteral<unit> literal)
-{
-    return WTF::switchOn(value,
-        [&](const CSSPrimitiveValue::Calc&) {
-            return false;
-        },
-        [&](const CSSPrimitiveValue::Raw& raw) {
-            return raw.unit == toCSSUnitType(literal.unit)
-                && raw.value == literal.value;
         }
     );
 }
@@ -239,6 +225,18 @@ CSSValueID initialValueIDForLonghand(CSSPropertyID longhand)
         },
         [](CSSPrimitiveValue::Raw) {
             return CSSValueInvalid;
+        }
+    );
+}
+
+Ref<CSSValue> initialCSSValueForLonghand(CSSPropertyID longhand)
+{
+    return WTF::switchOn(initialValueForLonghand(longhand),
+        [](CSSValueID value) -> Ref<CSSValue> {
+            return CSSKeywordValue::create(value);
+        },
+        [](CSSPrimitiveValue::Raw value) -> Ref<CSSValue> {
+            return CSSPrimitiveValue::create(value.value, value.unit);
         }
     );
 }

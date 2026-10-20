@@ -53,6 +53,7 @@
 #include <wtf/URL.h>
 #include <wtf/UUID.h>
 #include <wtf/ZippedRange.h>
+#include <wtf/glib/GLibExtras.h>
 #include <wtf/glib/GMallocString.h>
 #include <wtf/glib/GSpanExtras.h>
 #include <wtf/glib/GThreadSafeWeakPtr.h>
@@ -122,7 +123,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebCoreLogObserver);
 static GstClockTime s_webkitGstInitTime;
 static bool s_isGstDebugDotFilesSupportEnabled;
 
-[[nodiscard]] GstPad* webkitGstGhostPadFromStaticTemplate(GstStaticPadTemplate* staticPadTemplate, CStringView name, GstPad* target)
+[[nodiscard]] GstPad* webkitGstGhostPadFromStaticTemplate(GstStaticPadTemplate* staticPadTemplate, UTF8CStringView name, GstPad* target)
 {
     GstPad* pad;
     GRefPtr padTemplate = gst_static_pad_template_get(staticPadTemplate);
@@ -303,31 +304,33 @@ std::optional<WebCore::IntSize> getDisplaySize(WebCore::IntSize originalSize, in
     return computedSize;
 }
 
+static bool isProtocolAllowedByEnvironment(StringView protocol)
+{
+    auto additionalProtocols = StringView::fromLatin1(std::getenv("WEBKIT_GST_ALLOWED_URI_PROTOCOLS"));
+    for (auto additionalProtocol : additionalProtocols.split(',')) {
+        if (additionalProtocol.trim(deprecatedIsSpaceOrNewline).toString().convertToLowercaseWithoutLocale() == protocol)
+            return true;
+    }
+    return false;
+}
+
 bool isProtocolAllowed(const WTF::URL& url)
 {
-    HashSet<String> allowedProtocols = { "blob"_s, "data"_s, "file"_s, "http"_s, "https"_s };
+    static NeverDestroyed<HashSet<String>> allowedProtocols = std::initializer_list<String> {
+        "blob"_s, "data"_s, "file"_s, "http"_s, "https"_s,
 #if ENABLE(MEDIA_SOURCE)
-    allowedProtocols.add("mediasourceblob"_s);
+        "mediasourceblob"_s,
 #endif
 #if ENABLE(MEDIA_STREAM)
-    allowedProtocols.add("mediastream"_s);
+        "mediastream"_s,
 #endif
+    };
 
-    // Parse and add protocols from environment variable
-    auto additionalProtocols = String::fromLatin1(std::getenv("WEBKIT_GST_ALLOWED_URI_PROTOCOLS"));
-    if (!additionalProtocols.isEmpty()) {
-        for (auto protocols : additionalProtocols.split(',')) {
-            auto trimmedProtocol = protocols.trim(deprecatedIsSpaceOrNewline).convertToLowercaseWithoutLocale();
-            if (!trimmedProtocol.isEmpty())
-                allowedProtocols.add(trimmedProtocol);
-        }
-    }
+    auto protocol = url.protocol();
+    bool isAllowed = !protocol.isEmpty() && (allowedProtocols->contains<StringViewHashTranslator>(protocol) || isProtocolAllowedByEnvironment(protocol));
 
-    auto protocol = url.protocol().toString().convertToLowercaseWithoutLocale();
-    bool isAllowed = allowedProtocols.contains(protocol);
-
-    GST_DEBUG("URL: %s", url.string().utf8().data());
-    GST_DEBUG("Requested protocol: %s (allowed: %s)", protocol.utf8().data(), isAllowed ? "yes" : "no");
+    GST_DEBUG("URL: %s", url.string().utf8());
+    GST_DEBUG("Requested protocol: %s (allowed: %s)", protocol.utf8(), isAllowed ? "yes" : "no");
 
     return isAllowed;
 }
@@ -350,7 +353,7 @@ std::optional<TrackID> getStreamIdFromPad(const GRefPtr<GstPad>& pad)
 
 std::optional<TrackID> getStreamIdFromStream(const GRefPtr<GstStream>& stream)
 {
-    auto streamIdAsString = CStringView::unsafeFromUTF8(gst_stream_get_stream_id(stream.get()));
+    auto streamIdAsString = UTF8CStringView::unsafeFromUTF8(gst_stream_get_stream_id(stream.get()));
     if (!streamIdAsString) {
         GST_DEBUG_OBJECT(stream.get(), "Failed to get stream-id from stream");
         return std::nullopt;
@@ -379,7 +382,7 @@ std::optional<TrackID> parseStreamId(const String& stringId)
     return parseIntegerAllowingTrailingJunk<TrackID>(stringId.substring(position + 1));
 }
 
-CStringView capsMediaType(const GstCaps* caps)
+UTF8CStringView capsMediaType(const GstCaps* caps)
 {
     ASSERT(caps);
     GstStructure* structure = gst_caps_get_structure(caps, 0);
@@ -492,9 +495,9 @@ bool ensureGStreamerInitialized()
         int argc = parameters.size() + 1;
         char** argv = g_new0(char*, argc + 1);
         auto argvSpan = unsafeMakeSpan(argv, argc);
-        argvSpan[0] = g_strdup(FileSystem::currentExecutableName().data());
+        argvSpan[0] = gStrdup(FileSystem::currentExecutableName());
         for (auto [arg, parameter] : zippedRange(argvSpan.subspan(1), parameters))
-            arg = g_strdup(parameter.utf8().data());
+            arg = gStrdup(parameter.utf8());
 
         GUniqueOutPtr<GError> error;
         isGStreamerInitialized = gst_init_check(&argc, &argv, &error.outPtr());
@@ -509,7 +512,7 @@ bool ensureGStreamerInitialized()
         s_isGstDebugDotFilesSupportEnabled = false;
 #endif
         if (isFastMallocEnabled()) {
-            auto disableFastMalloc = CStringView::unsafeFromUTF8(getenv("WEBKIT_GST_DISABLE_FAST_MALLOC"));
+            auto disableFastMalloc = UTF8CStringView::unsafeFromUTF8(getenv("WEBKIT_GST_DISABLE_FAST_MALLOC"));
             if (!disableFastMalloc || disableFastMalloc == "0"_s)
                 gst_allocator_set_default(GST_ALLOCATOR(g_object_new(gst_allocator_fast_malloc_get_type(), nullptr)));
         }
@@ -586,7 +589,7 @@ void registerWebKitGStreamerElements()
 
         // Prevent decodebin(3) from auto-plugging hlsdemux if it was disabled. UAs should be able
         // to fallback to MSE when this happens.
-        auto hlsSupport = CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_HLS_SUPPORT"));
+        auto hlsSupport = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_HLS_SUPPORT"));
         if (!hlsSupport || hlsSupport == "0"_s) {
             if (GRefPtr factory = adoptGRef(gst_element_factory_find("hlsdemux")))
                 gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE_CAST(factory.get()), GST_RANK_NONE);
@@ -594,7 +597,7 @@ void registerWebKitGStreamerElements()
 
         // Prevent decodebin(3) from auto-plugging dashdemux if it was disabled. UAs should be able
         // to fallback to MSE when this happens.
-        auto dashSupport = CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_DASH_SUPPORT"));
+        auto dashSupport = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_DASH_SUPPORT"));
         if (!dashSupport || dashSupport == "0"_s) {
             if (GRefPtr factory = adoptGRef(gst_element_factory_find("dashdemux")))
                 gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE_CAST(factory.get()), GST_RANK_NONE);
@@ -618,7 +621,7 @@ void registerWebKitGStreamerElements()
         // The VAAPI plugin is not much maintained anymore and prone to rendering issues. In the
         // mid-term we will leverage the new stateless VA decoders. Disable the legacy plugin,
         // unless the WEBKIT_GST_ENABLE_LEGACY_VAAPI environment variable is set to 1.
-        auto enableLegacyVAAPIPlugin = CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_LEGACY_VAAPI"));
+        auto enableLegacyVAAPIPlugin = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_LEGACY_VAAPI"));
         if (enableLegacyVAAPIPlugin.isEmpty() || enableLegacyVAAPIPlugin == "0"_s) {
             auto* registry = gst_registry_get();
             if (GRefPtr vaapiPlugin = adoptGRef(gst_registry_find_plugin(registry, "vaapi")))
@@ -705,7 +708,7 @@ void WebCoreLogObserver::didLogMessage(const WTFLogChannel& channel, WTFLogLevel
     const char* file = location ? location->file : __FILE__;
     const char* function = location ? location->function : __FUNCTION__;
     int line = location ? location->line : __LINE__;
-    gst_debug_log(debugCategory(), gstDebugLevel, file, function, line, nullptr, "%s", logString.utf8().data());
+    gst_debug_log(debugCategory(), gstDebugLevel, file, function, line, nullptr, "%s", logString.utf8().legacyCStringPointer());
 #else
     UNUSED_PARAM(channel);
     UNUSED_PARAM(level);
@@ -818,13 +821,11 @@ MediaTime fromGstClockTime(GstClockTime time)
 
 RefPtr<GstMappedOwnedBuffer> GstMappedOwnedBuffer::create(GRefPtr<GstBuffer>&& buffer)
 {
-    auto* mappedBuffer = new GstMappedOwnedBuffer(WTF::move(buffer));
-    if (!mappedBuffer->isValid()) {
-        delete mappedBuffer;
+    Ref mappedBuffer = adoptRef(*new GstMappedOwnedBuffer(WTF::move(buffer)));
+    if (!mappedBuffer->isValid())
         return nullptr;
-    }
 
-    return adoptRef(mappedBuffer);
+    return mappedBuffer;
 }
 
 RefPtr<GstMappedOwnedBuffer> GstMappedOwnedBuffer::create(const GRefPtr<GstBuffer>& buffer)
@@ -953,11 +954,59 @@ size_t GstMappedFrame::planeHeight(uint32_t planeIndex) const
 }
 
 #if USE(GSTREAMER_GL)
-GLuint GstMappedFrame::textureID(int planeIndex) const
+GstGLMemory* GstMappedFrame::glMemory(uint32_t planeIndex) const
 {
     RELEASE_ASSERT(isValid());
     RELEASE_ASSERT(m_frame.map->flags & GST_MAP_GL);
-    return *reinterpret_cast<GLuint*>(m_frame.data[planeIndex]);
+    RELEASE_ASSERT(planeIndex < GST_VIDEO_INFO_N_PLANES(&m_frame.info));
+    return GST_GL_MEMORY_CAST(m_frame.map[planeIndex].memory);
+}
+
+unsigned GstMappedFrame::textureID(uint32_t planeIndex) const
+{
+    return gst_gl_memory_get_texture_id(glMemory(planeIndex));
+}
+
+IntSize GstMappedFrame::textureSize(uint32_t planeIndex) const
+{
+    auto* memory = glMemory(planeIndex);
+    return { gst_gl_memory_get_texture_width(memory), gst_gl_memory_get_texture_height(memory) };
+}
+
+unsigned GstMappedFrame::textureFormat(uint32_t planeIndex) const
+{
+    auto format = gst_gl_memory_get_texture_format(glMemory(planeIndex));
+    switch (format) {
+    case GST_GL_RED:
+        if (GST_VIDEO_INFO_COMP_DEPTH(&m_frame.info, planeIndex) == 8)
+            return GST_GL_R8;
+        return GST_GL_R16;
+    case GST_GL_RG:
+        if (GST_VIDEO_INFO_COMP_DEPTH(&m_frame.info, planeIndex) == 8)
+            return GST_GL_RG8;
+        return GST_GL_RG16;
+    case GST_GL_RGB:
+        if (GST_VIDEO_INFO_COMP_DEPTH(&m_frame.info, planeIndex) == 8)
+            return GST_GL_RGB8;
+        return GST_GL_RGB16;
+    case GST_GL_RGBA:
+        if (GST_VIDEO_INFO_COMP_DEPTH(&m_frame.info, planeIndex) == 8)
+            return GST_GL_RGBA8;
+        return GST_GL_RGBA16;
+    default:
+        break;
+    }
+    return format;
+}
+
+void GstMappedFrame::waitForCPUSyncIfNeeded() const
+{
+    RELEASE_ASSERT(isValid());
+    if (!m_needsCPUSync)
+        return;
+
+    if (auto* meta = gst_buffer_get_gl_sync_meta(m_frame.buffer))
+        gst_gl_sync_meta_wait_cpu(meta, reinterpret_cast<GstGLBaseMemory*>(gst_buffer_peek_memory(m_frame.buffer, 0))->context);
 }
 #endif
 
@@ -1039,7 +1088,7 @@ template<typename T> Vector<std::span<T>> GstMappedAudioBuffer::samples(size_t o
         auto inputSpan = unsafeMakeSpan(reinterpret_cast<T*>(m_buffer.planes[0]), planeSizeTotal * planeCount);
         for (uint32_t s = offset; s < m_buffer.n_samples; s++) {
             for (uint32_t c = 0; c < planeCount; c++)
-                result[c][s] = inputSpan[s * planeCount + c];
+                result[c][s - offset] = inputSpan[s * planeCount + c];
         }
         return result;
     }
@@ -1191,10 +1240,10 @@ GstElement* /* (transfer floating) */ createAutoAudioSink(const String& role)
         auto* role = reinterpret_cast<StringImpl*>(userData);
         auto* objectClass = G_OBJECT_GET_CLASS(object);
         if (role && g_object_class_find_property(objectClass, "stream-properties")) {
-            GUniquePtr<GstStructure> properties(gst_structure_new("stream-properties", "media.role", G_TYPE_STRING, role->utf8().data(), nullptr));
+            GUniquePtr<GstStructure> properties(gstStructureNew("stream-properties", "media.role", G_TYPE_STRING, role->utf8()));
             g_object_set(object, "stream-properties", properties.get(), nullptr);
 IGNORE_WARNINGS_BEGIN("cast-align")
-            GST_DEBUG("Set media.role as %s on %" GST_PTR_FORMAT, role->utf8().data(), GST_ELEMENT_CAST(object));
+            GST_DEBUG("Set media.role as %s on %" GST_PTR_FORMAT, role->utf8(), GST_ELEMENT_CAST(object));
 IGNORE_WARNINGS_END
         }
         if (g_object_class_find_property(objectClass, "client-name")) {
@@ -1226,7 +1275,7 @@ GstElement* /* (transfer floating) */ createPlatformAudioSink(const String& role
     return audioSink;
 }
 
-bool webkitGstSetElementStateSynchronously(GstElement* pipeline, GstState targetState, Function<bool(GstMessage*)>&& messageHandler)
+bool webkitGstSetElementStateSynchronously(GstElement* pipeline, GstState targetState, NOESCAPE const Function<bool(GstMessage*)>& messageHandler)
 {
     GST_DEBUG_OBJECT(pipeline, "Setting state to %s", gst_state_get_name(targetState));
 
@@ -1277,7 +1326,7 @@ GstBuffer* /* (transfer full) */ gstBufferNewWrappedFast(void* data, size_t leng
     return gst_buffer_new_wrapped_full(static_cast<GstMemoryFlags>(0), data, length, 0, length, data, fastFreeCallback);
 }
 
-GstElement* /* (transfer floating) */ makeGStreamerElement(CStringView factoryName, const String& name)
+GstElement* /* (transfer floating) */ makeGStreamerElement(UTF8CStringView factoryName, const String& name)
 {
     static Lock lock;
     static Vector<String> cache WTF_GUARDED_BY_LOCK(lock);
@@ -1287,7 +1336,7 @@ GstElement* /* (transfer floating) */ makeGStreamerElement(CStringView factoryNa
         String factoryNameString(factoryName.span());
         if (!cache.contains(factoryNameString)) {
             cache.append(WTF::move(factoryNameString));
-            WTFLogAlways("GStreamer element %s not found. Please install it", factoryName.utf8());
+            SAFE_WTFLOGALWAYS("GStreamer element %s not found. Please install it", factoryName);
             ASSERT_NOT_REACHED_WITH_MESSAGE("GStreamer element %s not found. Please install it", factoryName.utf8());
         }
     }
@@ -1296,7 +1345,7 @@ GstElement* /* (transfer floating) */ makeGStreamerElement(CStringView factoryNa
 }
 
 template<typename T>
-std::optional<T> gstStructureGet(const GstStructure* structure, CStringView key)
+std::optional<T> gstStructureGet(const GstStructure* structure, UTF8CStringView key)
 {
     if (!structure) {
         ASSERT_NOT_REACHED_WITH_MESSAGE("tried to access a field of a null GstStructure");
@@ -1330,14 +1379,14 @@ std::optional<T> gstStructureGet(const GstStructure* structure, CStringView key)
     return std::nullopt;
 }
 
-template std::optional<int> gstStructureGet(const GstStructure*, CStringView key);
-template std::optional<int64_t> gstStructureGet(const GstStructure*, CStringView key);
-template std::optional<unsigned> gstStructureGet(const GstStructure*, CStringView key);
-template std::optional<uint64_t> gstStructureGet(const GstStructure*, CStringView key);
-template std::optional<double> gstStructureGet(const GstStructure*, CStringView key);
-template std::optional<bool> gstStructureGet(const GstStructure*, CStringView key);
+template std::optional<int> gstStructureGet(const GstStructure*, UTF8CStringView key);
+template std::optional<int64_t> gstStructureGet(const GstStructure*, UTF8CStringView key);
+template std::optional<unsigned> gstStructureGet(const GstStructure*, UTF8CStringView key);
+template std::optional<uint64_t> gstStructureGet(const GstStructure*, UTF8CStringView key);
+template std::optional<double> gstStructureGet(const GstStructure*, UTF8CStringView key);
+template std::optional<bool> gstStructureGet(const GstStructure*, UTF8CStringView key);
 
-CStringView gstStructureGetString(const GstStructure* structure, CStringView key)
+UTF8CStringView gstStructureGetString(const GstStructure* structure, UTF8CStringView key)
 {
     if (!structure) {
         ASSERT_NOT_REACHED_WITH_MESSAGE("tried to access a field of a null GstStructure");
@@ -1347,21 +1396,21 @@ CStringView gstStructureGetString(const GstStructure* structure, CStringView key
     const GValue* value = gst_structure_get_value(structure, key.utf8());
     if (!value || !G_VALUE_HOLDS_STRING(value))
         return { };
-    return CStringView::unsafeFromUTF8(g_value_get_string(value));
+    return UTF8CStringView::unsafeFromUTF8(g_value_get_string(value));
 }
 
-CStringView gstStructureGetName(const GstStructure* structure)
+UTF8CStringView gstStructureGetName(const GstStructure* structure)
 {
     if (!structure) {
         ASSERT_NOT_REACHED_WITH_MESSAGE("tried to access a field of a null GstStructure");
         return { };
     }
 
-    return CStringView::unsafeFromUTF8(gst_structure_get_name(structure));
+    return UTF8CStringView::unsafeFromUTF8(gst_structure_get_name(structure));
 }
 
 template<typename T>
-Vector<T> gstStructureGetArray(const GstStructure* structure, CStringView key)
+Vector<T> gstStructureGetArray(const GstStructure* structure, UTF8CStringView key)
 {
     static_assert(std::is_same_v<T, int> || std::is_same_v<T, int64_t> || std::is_same_v<T, unsigned>
         || std::is_same_v<T, uint64_t> || std::is_same_v<T, double> || std::is_same_v<T, const GstStructure*>);
@@ -1390,10 +1439,10 @@ Vector<T> gstStructureGetArray(const GstStructure* structure, CStringView key)
     return result;
 }
 
-template Vector<const GstStructure*> gstStructureGetArray(const GstStructure*, CStringView key);
+template Vector<const GstStructure*> gstStructureGetArray(const GstStructure*, UTF8CStringView key);
 
 template<typename T>
-Vector<T> gstStructureGetList(const GstStructure* structure, CStringView key)
+Vector<T> gstStructureGetList(const GstStructure* structure, UTF8CStringView key)
 {
     static_assert(std::is_same_v<T, int> || std::is_same_v<T, int64_t> || std::is_same_v<T, unsigned>
         || std::is_same_v<T, uint64_t> || std::is_same_v<T, double> || std::is_same_v<T, const GstStructure*>);
@@ -1430,12 +1479,12 @@ Vector<T> gstStructureGetList(const GstStructure* structure, CStringView key)
     return result;
 }
 
-template Vector<int> gstStructureGetList(const GstStructure*, CStringView key);
-template Vector<int64_t> gstStructureGetList(const GstStructure*, CStringView key);
-template Vector<unsigned> gstStructureGetList(const GstStructure*, CStringView key);
-template Vector<uint64_t> gstStructureGetList(const GstStructure*, CStringView key);
-template Vector<double> gstStructureGetList(const GstStructure*, CStringView key);
-template Vector<const GstStructure*> gstStructureGetList(const GstStructure*, CStringView key);
+template Vector<int> gstStructureGetList(const GstStructure*, UTF8CStringView key);
+template Vector<int64_t> gstStructureGetList(const GstStructure*, UTF8CStringView key);
+template Vector<unsigned> gstStructureGetList(const GstStructure*, UTF8CStringView key);
+template Vector<uint64_t> gstStructureGetList(const GstStructure*, UTF8CStringView key);
+template Vector<double> gstStructureGetList(const GstStructure*, UTF8CStringView key);
+template Vector<const GstStructure*> gstStructureGetList(const GstStructure*, UTF8CStringView key);
 
 static RefPtr<JSON::Value> gstStructureToJSON(const GstStructure*);
 
@@ -1901,7 +1950,7 @@ bool gstElementMatchesFactoryAndHasProperty(GstElement* element, ASCIILiteral fa
     if (!factory)
         return gstObjectHasProperty(element, propertyName);
 
-    auto nameView = CStringView::unsafeFromUTF8(GST_OBJECT_NAME(factory));
+    auto nameView = UTF8CStringView::unsafeFromUTF8(GST_OBJECT_NAME(factory));
     if (fnmatch(factoryNamePattern.characters(), nameView.utf8(), 0))
         return false;
 
@@ -1922,6 +1971,18 @@ GRefPtr<GstBuffer> wrapSpanData(const std::span<const uint8_t>& span)
     return buffer;
 }
 
+GRefPtr<GstBuffer> wrapSharedBuffer(Ref<SharedBuffer>&& data)
+{
+    if (data->isEmpty())
+        return nullptr;
+
+    gpointer bufferData = const_cast<uint8_t*>(data->span().data());
+    auto bufferLength = data->size();
+    return adoptGRef(gst_buffer_new_wrapped_full(GST_MEMORY_FLAG_READONLY, bufferData, bufferLength, 0, bufferLength, &data.leakRef(), [](gpointer data) {
+        static_cast<SharedBuffer*>(data)->deref();
+    }));
+}
+
 std::optional<unsigned> gstGetAutoplugSelectResult(ASCIILiteral nick)
 {
     static auto enumClass = static_cast<GEnumClass*>(g_type_class_ref(g_type_from_name("GstAutoplugSelectResult")));
@@ -1932,18 +1993,18 @@ std::optional<unsigned> gstGetAutoplugSelectResult(ASCIILiteral nick)
     return enumValue->value;
 }
 
-bool gstStructureForeach(const GstStructure* structure, Function<bool(GstId, const GValue*)>&& callback)
+bool gstStructureForeach(const GstStructure* structure, NOESCAPE const Function<bool(GstId, const GValue*)>& callback)
 {
 #if GST_CHECK_VERSION(1, 26, 0)
     return gst_structure_foreach_id_str(structure, [](GstId id, const GValue* value, gpointer userData) -> gboolean {
-        auto& callback = *reinterpret_cast<Function<bool(GstId, const GValue*)>*>(userData);
+        auto& callback = *reinterpret_cast<const Function<bool(GstId, const GValue*)>*>(userData);
         return callback(id, value);
-    }, &callback);
+    }, const_cast<Function<bool(GstId, const GValue*)>*>(&callback));
 #else
     return gst_structure_foreach(structure, [](GQuark quark, const GValue* value, gpointer userData) -> gboolean {
-        auto& callback = *reinterpret_cast<Function<bool(GQuark, const GValue*)>*>(userData);
+        auto& callback = *reinterpret_cast<const Function<bool(GQuark, const GValue*)>*>(userData);
         return callback(quark, value);
-    }, &callback);
+    }, const_cast<Function<bool(GstId, const GValue*)>*>(&callback));
 #endif
 }
 
@@ -1956,18 +2017,18 @@ void gstStructureIdSetValue(GstStructure* structure, GstId id, const GValue* val
 #endif
 }
 
-bool gstStructureMapInPlace(GstStructure* structure, Function<bool(GstId, GValue*)>&& callback)
+bool gstStructureMapInPlace(GstStructure* structure, NOESCAPE const Function<bool(GstId, GValue*)>& callback)
 {
 #if GST_CHECK_VERSION(1, 26, 0)
     return gst_structure_map_in_place_id_str(structure, [](GstId id, GValue* value, gpointer userData) -> gboolean {
-        auto& callback = *reinterpret_cast<Function<bool(GstId, GValue*)>*>(userData);
+        auto& callback = *reinterpret_cast<const Function<bool(GstId, GValue*)>*>(userData);
         return callback(id, value);
-    }, &callback);
+    }, const_cast<Function<bool(GstId, GValue*)>*>(&callback));
 #else
     return gst_structure_map_in_place(structure, [](GQuark quark, GValue* value, gpointer userData) -> gboolean {
-        auto& callback = *reinterpret_cast<Function<bool(GQuark, GValue*)>*>(userData);
+        auto& callback = *reinterpret_cast<const Function<bool(GQuark, GValue*)>*>(userData);
         return callback(quark, value);
-    }, &callback);
+    }, const_cast<Function<bool(GstId, GValue*)>*>(&callback));
 #endif
 }
 
@@ -1980,18 +2041,18 @@ String gstIdToString(GstId id)
 #endif
 }
 
-void gstStructureFilterAndMapInPlace(GstStructure* structure, Function<bool(GstId, GValue*)>&& callback)
+void gstStructureFilterAndMapInPlace(GstStructure* structure, NOESCAPE const Function<bool(GstId, GValue*)>& callback)
 {
 #if GST_CHECK_VERSION(1, 26, 0)
     gst_structure_filter_and_map_in_place_id_str(structure, [](GstId id, GValue* value, gpointer userData) -> gboolean {
-        auto& callback = *reinterpret_cast<Function<bool(GstId, GValue*)>*>(userData);
+        auto& callback = *reinterpret_cast<const Function<bool(GstId, GValue*)>*>(userData);
         return callback(id, value);
-    }, &callback);
+    }, const_cast<Function<bool(GstId, GValue*)>*>(&callback));
 #else
     gst_structure_filter_and_map_in_place(structure, [](GQuark quark, GValue* value, gpointer userData) -> gboolean {
-        auto& callback = *reinterpret_cast<Function<bool(GQuark, GValue*)>*>(userData);
+        auto& callback = *reinterpret_cast<const Function<bool(GQuark, GValue*)>*>(userData);
         return callback(quark, value);
-    }, &callback);
+    }, const_cast<Function<bool(GstId, GValue*)>*>(&callback));
 #endif
 }
 
@@ -2039,14 +2100,14 @@ GRefPtr<GstCaps> buildDMABufCaps()
 #if GST_CHECK_VERSION(1, 24, 0)
     gst_caps_set_simple(caps.get(), "format", G_TYPE_STRING, "DMA_DRM", nullptr);
 
-    auto formats = CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_DMABUF_FORMATS"));
+    auto formats = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_DMABUF_FORMATS"));
     if (!formats.isEmpty()) {
         GValue drmSupportedFormats = G_VALUE_INIT;
         g_value_init(&drmSupportedFormats, GST_TYPE_LIST);
         for (auto token : String(formats.span()).split(',')) {
             GValue value = G_VALUE_INIT;
             g_value_init(&value, G_TYPE_STRING);
-            g_value_set_string(&value, token.utf8().data());
+            gValueSetString(&value, token.utf8());
             gst_value_list_append_and_take_value(&drmSupportedFormats, &value);
         }
         gst_caps_set_value(caps.get(), "drm-format", &drmSupportedFormats);
@@ -2172,7 +2233,7 @@ GRefPtr<GstElement> createVideoConvertScaleElement(const String& name)
     // Enable multi-threading in the converter.
     g_object_set(videoConvert, "n-threads", 0U, nullptr);
 
-    GRefPtr bin = gst_bin_new(name.utf8().data());
+    GRefPtr bin = gst_bin_new(name.utf8().legacyCStringPointer());
     gst_bin_add_many(GST_BIN_CAST(bin.get()), videoScale, videoConvert, nullptr);
     gst_element_link(videoScale, videoConvert);
 
@@ -2192,7 +2253,7 @@ void dumpBinToDotFile(GstBin* bin, const String& filename, GstDebugGraphDetails 
         return;
 
     auto sanitizedFilename = makeStringByReplacingAll(filename, '/', '-');
-    GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(bin, details, sanitizedFilename.utf8().data());
+    GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS(bin, details, sanitizedFilename.utf8().legacyCStringPointer());
 }
 
 void dumpBinToDotFile(const GRefPtr<GstElement>& element, const String& filename, GstDebugGraphDetails details)
@@ -2203,7 +2264,7 @@ void dumpBinToDotFile(const GRefPtr<GstElement>& element, const String& filename
 
 bool enableMSEAdditionalPipelineDumps()
 {
-    static bool result = CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_MSE_VERBOSE_PIPELINE_DUMPS")) == "1"_s;
+    static bool result = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_MSE_VERBOSE_PIPELINE_DUMPS")) == "1"_s;
     return result;
 }
 

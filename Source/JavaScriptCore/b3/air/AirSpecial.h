@@ -53,9 +53,9 @@ public:
 
     Code& code() const { return *m_code; }
 
-    CString name() const;
+    UTF8CString name() const;
 
-    virtual void forEachArg(Inst&, const ScopedLambda<Inst::EachArgCallback>&) = 0;
+    virtual void forEachArg(Inst&, NOESCAPE const ScopedLambda<Inst::EachArgCallback>&) = 0;
     virtual bool isValid(Inst&) = 0;
     virtual bool admitsStack(Inst&, unsigned argIndex) = 0;
     virtual bool admitsExtendedOffsetAddr(Inst&, unsigned argIndex) = 0;

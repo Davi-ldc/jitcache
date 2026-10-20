@@ -29,6 +29,7 @@
 #include "config.h"
 #include "RuleSet.h"
 
+#include "CSSEnvironmentMapRule.h"
 #include "CSSFontSelector.h"
 #include "CSSKeyframesRule.h"
 #include "CSSPositionTryRule.h"
@@ -81,24 +82,6 @@ static unsigned NODELETE rulesCountForName(const RuleSet::AtomRuleMap& map, cons
     if (const auto* rules = map.get(name))
         return rules->size();
     return 0;
-}
-
-// FIXME: Maybe we can unify both following functions
-
-static bool NODELETE hasHostOrScopePseudoClassSubjectInSelectorList(const CSSSelectorList* selectorList)
-{
-    if (!selectorList)
-        return false;
-
-    for (auto& selector : *selectorList) {
-        if (selector.isHostPseudoClass() || selector.isScopePseudoClass())
-            return true;
-
-        if (hasHostOrScopePseudoClassSubjectInSelectorList(selector.selectorList()))
-            return true;
-    }
-
-    return false;
 }
 
 static bool isHostSelectorMatchingInShadowTree(const CSSSelector& startSelector)
@@ -216,6 +199,13 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
             case CSSSelector::Match::Id:
                 idSelector = current;
                 break;
+            case CSSSelector::Match::List:
+                if (!current->isEquivalentToClassSelector()) {
+                    if (shouldHaveBucketForAttributeName(*current))
+                        attributeSelector = current;
+                    break;
+                }
+                [[fallthrough]];
             case CSSSelector::Match::Class: {
                 auto& className = current->value();
                 if (!classSelector) {
@@ -232,7 +222,6 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
             }
             case CSSSelector::Match::Exact:
             case CSSSelector::Match::Set:
-            case CSSSelector::Match::List:
             case CSSSelector::Match::Hyphen:
             case CSSSelector::Match::Contain:
             case CSSSelector::Match::Begin:
@@ -268,7 +257,7 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
                 case CSSSelector::PseudoElement::ViewTransitionImagePair:
                 case CSSSelector::PseudoElement::ViewTransitionOld:
                 case CSSSelector::PseudoElement::ViewTransitionNew:
-                    if (current->stringList()->first() != starAtom())
+                    if (current->stringList()->first() != universalPseudoElementNameAtom())
                         namedPseudoElementSelector = current;
                     break;
                 default:
@@ -303,9 +292,6 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
                     fullscreenPseudoClassSelector = current;
                     break;
 #endif
-                case CSSSelector::PseudoClass::Scope:
-                    m_hasHostOrScopePseudoClassRulesInUniversalBucket = true;
-                    break;
                 case CSSSelector::PseudoClass::Heading:
                     headingPseudoClassSelector = current;
                     break;
@@ -316,13 +302,9 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
                         for (auto* inner = &selectorList->first(); inner; inner = inner->followingInCompound())
                             nestedSelectors.append(inner);
                     }
-                    if (hasHostOrScopePseudoClassSubjectInSelectorList(selectorList))
-                        m_hasHostOrScopePseudoClassRulesInUniversalBucket = true;
                     break;
                 }
                 default:
-                    if (hasHostOrScopePseudoClassSubjectInSelectorList(current->selectorList()))
-                        m_hasHostOrScopePseudoClassRulesInUniversalBucket = true;
                     break;
                 }
                 break;
@@ -332,6 +314,7 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
             case CSSSelector::Match::HasScope:
             case CSSSelector::Match::NestingParent:
             case CSSSelector::Match::PagePseudoClass:
+            case CSSSelector::Match::ClassPrefix:
                 break;
             }
         }
@@ -530,6 +513,11 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
         m_universalHTMLPseudoElementTypes.add(*stylePseudoElement);
         if (!isHTMLNamespace)
             m_universalPseudoElementTypes.add(*stylePseudoElement);
+        if (ruleData.pseudoElementBoxGeneration() == PseudoElementBoxGeneration::Normal) {
+            m_universalHTMLPseudoElementBoxGeneration = PseudoElementBoxGeneration::Normal;
+            if (!isHTMLNamespace)
+                m_universalPseudoElementBoxGeneration = PseudoElementBoxGeneration::Normal;
+        }
         return true;
     };
 
@@ -538,6 +526,9 @@ void RuleSet::addRuleToBucket(RuleData& ruleData)
 
     // If we didn't find a specialized map to stick it in, file under universal rules.
     m_universalRules.append(ruleData);
+    // Only a rule whose subject compound is allowed to match a featureless element can match the shadow host.
+    if (SelectorChecker::isCompoundSelectorAllowedToMatchFeaturelessShadowHost(ruleData.selector()))
+        m_shadowHostRulesInUniversalBucket.append(ruleData);
 }
 
 void RuleSet::addPageRule(StyleRulePage& rule)
@@ -556,7 +547,7 @@ RefPtr<StyleRuleViewTransition> RuleSet::viewTransitionRule() const
 }
 
 template<typename Function>
-void RuleSet::traverseRuleDatas(Function&& function)
+void RuleSet::traverseRuleDatas(NOESCAPE const Function& function)
 {
     auto traverseVector = [&](auto& vector) {
         for (auto& ruleData : vector)
@@ -581,6 +572,7 @@ void RuleSet::traverseRuleDatas(Function&& function)
     traverseVector(m_cuePseudoRules);
 #endif
     traverseVector(m_hostPseudoClassRules);
+    traverseVector(m_shadowHostRulesInUniversalBucket);
     traverseVector(m_slottedPseudoElementRules);
     traverseVector(m_partPseudoElementRules);
     traverseVector(m_focusPseudoClassRules);
@@ -591,7 +583,7 @@ void RuleSet::traverseRuleDatas(Function&& function)
     traverseVector(m_universalPseudoElementRules);
 }
 
-template<typename Function> void RuleSet::traverseRuleDatas(Function&& function) const
+template<typename Function> void RuleSet::traverseRuleDatas(NOESCAPE const Function& function) const
 {
     const_cast<RuleSet&>(*this).traverseRuleDatas([&](const RuleData& ruleData) {
         function(ruleData);
@@ -686,6 +678,7 @@ void RuleSet::shrinkToFit()
     m_cuePseudoRules.shrinkToFit();
 #endif
     m_hostPseudoClassRules.shrinkToFit();
+    m_shadowHostRulesInUniversalBucket.shrinkToFit();
     m_slottedPseudoElementRules.shrinkToFit();
     m_partPseudoElementRules.shrinkToFit();
     m_focusPseudoClassRules.shrinkToFit();
@@ -740,6 +733,15 @@ const RefPtr<const StyleRulePositionTry> RuleSet::positionTryRuleForName(const A
 {
     return m_positionTryRules.get(name);
 }
+
+#if ENABLE(SPATIAL_PORTAL)
+
+RefPtr<const StyleRuleEnvironmentMap> RuleSet::environmentMapRuleForName(const AtomString& name) const
+{
+    return m_environmentMapRules.get(name);
+}
+
+#endif // ENABLE(SPATIAL_PORTAL)
 
 WTF::String RuleSet::selectorsForDebugging() const
 {

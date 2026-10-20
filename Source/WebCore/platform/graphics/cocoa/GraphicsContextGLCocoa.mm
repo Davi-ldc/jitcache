@@ -271,12 +271,12 @@ bool GraphicsContextGLCocoa::platformInitializeContext()
         LOG(WebGL, "EGLContext Initialization failed.");
         return false;
     }
-    m_finishedMetalSharedEventListener = adoptNS([[MTLSharedEventListener alloc] init]);
+    lazyInitialize(m_finishedMetalSharedEventListener, adoptNS([[MTLSharedEventListener alloc] init]));
     if (!m_finishedMetalSharedEventListener) {
         ASSERT_NOT_REACHED();
         return false;
     }
-    m_finishedMetalSharedEvent = newSharedEvent(m_displayObj);
+    lazyInitialize(m_finishedMetalSharedEvent, newSharedEvent(m_displayObj));
     if (!m_finishedMetalSharedEvent) {
         ASSERT_NOT_REACHED();
         return false;
@@ -305,7 +305,7 @@ bool GraphicsContextGLCocoa::platformInitializeExtensions()
 bool GraphicsContextGLCocoa::platformInitialize()
 {
     // Compute platform-specific max internal framebuffer size.
-    m_maxInternalFramebufferSize.clampToMinimumSize(IOSurface::maximumSize());
+    m_maxInternalFramebufferSize.clampToMaximumSize(IOSurface::maximumSize());
     return true;
 }
 
@@ -315,20 +315,8 @@ GraphicsContextGLANGLE::~GraphicsContextGLANGLE()
         GL_Disable(DEBUG_OUTPUT);
         if (m_texture)
             GL_DeleteTextures(1, &m_texture);
-        if (m_multisampleColorBuffer)
-            GL_DeleteRenderbuffers(1, &m_multisampleColorBuffer);
-        if (m_multisampleDepthStencilBuffer)
-            GL_DeleteRenderbuffers(1, &m_multisampleDepthStencilBuffer);
-        if (m_multisampleFBO)
-            GL_DeleteFramebuffers(1, &m_multisampleFBO);
-        if (m_depthStencilBuffer)
-            GL_DeleteRenderbuffers(1, &m_depthStencilBuffer);
         if (m_fbo)
             GL_DeleteFramebuffers(1, &m_fbo);
-        if (m_preserveDrawingBufferTexture)
-            GL_DeleteTextures(1, &m_preserveDrawingBufferTexture);
-        if (m_preserveDrawingBufferFBO)
-            GL_DeleteFramebuffers(1, &m_preserveDrawingBufferFBO);
     }
     if (m_contextObj) {
         for (auto* image : m_eglImages.values()) {
@@ -487,7 +475,12 @@ IOSurfacePbuffer& GraphicsContextGLCocoa::surfaceBuffer(SurfaceBuffer buffer)
 IOSurfacePbuffer GraphicsContextGLCocoa::createDrawingBuffer()
 {
     const auto size = getInternalFramebufferSize();
-    auto surface = IOSurface::create(nullptr, size, m_drawingBufferColorSpace, IOSurface::Name::GraphicsContextGL);
+    IOSurface::IOSurfaceOptions options;
+#if HAVE(IOSURFACE_ALPHA_CHANNEL_MODE)
+    if (contextAttributes().alpha)
+        options.alphaPremultiplication = contextAttributes().premultipliedAlpha ? AlphaPremultiplication::Premultiplied : AlphaPremultiplication::Unpremultiplied;
+#endif
+    auto surface = IOSurface::create(nullptr, size, m_drawingBufferColorSpace, IOSurface::Name::GraphicsContextGL, IOSurface::Format::BGRA, UseLosslessCompression::No, options);
     if (!surface)
         return { };
     if (m_resourceOwner)
@@ -521,14 +514,12 @@ bool GraphicsContextGLCocoa::bindNextDrawingBuffer()
     m_currentDrawingBufferIndex++;
     auto& buffer = drawingBuffer();
 
-    if (buffer && (buffer.isInUse() || m_failNextStatusCheck)) {
+    if (buffer && (buffer.isInUse() || m_failNextDrawingBufferAllocation)) {
         EGL_DestroySurface(m_displayObj, buffer.pbuffer());
         buffer = { };
     }
-    if (m_failNextStatusCheck) {
-        m_failNextStatusCheck = false;
+    if (std::exchange(m_failNextDrawingBufferAllocation, false))
         return false;
-    }
     if (!buffer) {
         buffer = createDrawingBuffer();
         if (!buffer)
@@ -699,13 +690,6 @@ void GraphicsContextGLCocoa::disableFoveation()
 }
 
 #if ENABLE(WEBXR)
-void GraphicsContextGLCocoa::framebufferDiscard(GCGLenum target, std::span<const GCGLenum> attachments)
-{
-    if (!makeContextCurrent())
-        return;
-    GL_DiscardFramebufferEXT(target, attachments.size(), attachments.data());
-}
-
 void GraphicsContextGLCocoa::framebufferResolveRenderbuffer(GCGLenum target, GCGLenum attachment, GCGLenum renderbuffertarget, PlatformGLObject renderbuffer)
 {
     if (!makeContextCurrent())
@@ -750,11 +734,12 @@ bool GraphicsContextGLCocoa::enableRequiredWebXRExtensions()
 
 bool GraphicsContextGLCocoa::enableRequiredWebXRExtensionsImpl()
 {
+    if (!m_isForWebGL2 && !enableExtensionsImpl({ "GL_EXT_sRGB"_s }))
+        return false;
     return enableExtensionsImpl({
         "GL_ANGLE_framebuffer_multisample"_s,
         "GL_ANGLE_framebuffer_blit"_s,
         "GL_EXT_discard_framebuffer"_s,
-        "GL_EXT_sRGB"_s,
         "GL_OES_EGL_image"_s,
         "GL_OES_rgb8_rgba8"_s,
 #if !PLATFORM(IOS_FAMILY_SIMULATOR)
@@ -819,7 +804,7 @@ void GraphicsContextGLCocoa::prepareForDisplayWithFinishedSignal(Function<void()
 GraphicsContextGLCV* GraphicsContextGLCocoa::cvContext()
 {
     if (!m_cv)
-        m_cv = GraphicsContextGLCVCocoa::create(*this);
+        lazyInitialize(m_cv, GraphicsContextGLCVCocoa::create(*this));
     return m_cv.get();
 }
 #endif

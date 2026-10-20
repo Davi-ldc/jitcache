@@ -106,10 +106,10 @@ public:
             notifyEncodedFrame(WTF::move(encodedFrame));
         });
         if (!result) {
-            gst_printerrln("Unable to create GStreamer video encoder: %s", result.error().utf8().data());
+            gst_printerrln("Unable to create GStreamer video encoder: %s", result.error().utf8().legacyCStringPointer());
             return;
         }
-        m_internalEncoder = WTF::move(*result);
+        lazyInitialize(m_internalEncoder, WTF::move(*result));
     }
 
     void notifyEncodedFrame(WebCore::VideoEncoder::EncodedFrame&& frame)
@@ -273,7 +273,7 @@ public:
 private:
     webrtc::SdpVideoFormat m_sdpVideoFormat;
     webrtc::CodecSpecificInfo m_codecInfo;
-    RefPtr<WebCore::VideoEncoder> m_internalEncoder;
+    const RefPtr<WebCore::VideoEncoder> m_internalEncoder;
     webrtc::EncodedImageCallback* m_encodedImageCallback;
     IntSize m_size;
     std::optional<double> m_frameRate;

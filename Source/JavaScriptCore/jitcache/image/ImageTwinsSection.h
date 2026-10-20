@@ -42,24 +42,16 @@ enum class CompileInputKind : uint8_t {
     IteratorOpenMode,
     AsyncIteratorOpenMode,
     EnumeratorMetadata,
-    StrictEqualityAtomOperand,
 };
 
-// The operand a strict-equality template compares inline by its atom, if any. Atom-ness only grows, so the twin cannot
-// recreate it in its metadata; the template records its choice and the twin reads it back. The values are the value
-// byte of a StrictEqualityAtomOperand compile input.
-enum class StrictEqualityAtomOperand : uint8_t {
-    None = 0,
-    Lhs = 1,
-    Rhs = 2,
-};
-
-// One value emission read at one instruction.
+// One value emission read at one instruction. A resolve_scope of a closure or module variable walks its depth, and one of
+// a module variable then loads the import slot that holds the exporting module's environment, so its input carries both.
 struct CompileInput {
     uint32_t bytecodeOffset { 0 };
     CompileInputKind kind { };
-    uint8_t value { 0 }; // A ResolveType, a GetByIdMode, the enumerator byte or a StrictEqualityAtomOperand.
-    uint32_t localScopeDepth { 0 }; // ResolveScopeType of type ClosureVar only, else 0.
+    uint8_t value { 0 }; // A ResolveType, a GetByIdMode or the enumerator byte.
+    uint32_t localScopeDepth { 0 }; // ResolveScopeType of type ClosureVar or ModuleVar only, else 0.
+    uint32_t moduleImportSlot { 0 }; // ResolveScopeType of type ModuleVar only, else 0.
 
     friend bool operator==(const CompileInput&, const CompileInput&) = default;
 };
@@ -115,7 +107,7 @@ std::span<const uint8_t, captureProcessTokenSize> captureProcessToken();
 // The image-twins.baseline section: a 48-byte header, then the seeds, the compile inputs, the two arithmetic profile
 // vectors, the regeneration log and the producer values, each region starting 8-byte aligned.
 inline constexpr size_t imageTwinsHeaderSize = 48;
-inline constexpr size_t imageTwinsCompileInputEntrySize = 12;
+inline constexpr size_t imageTwinsCompileInputEntrySize = 16;
 inline constexpr size_t imageTwinsRegenerationFixedSize = 16; // MathIC index, profile bits, attach count, mask, replacement
 
 namespace ImageTwinsFlags {
@@ -143,13 +135,13 @@ struct ImageTwinsHeader {
 };
 
 // A located image-twins.baseline: a span into the borrowed payload, whose accessors read with memcpy-based loads on
-// access. Under strict it passed the structure checks, ImageCheck::W1 to W3.
+// access. Under strict it passed the structure checks, ImageCheck::TwinsHeader to TwinRegenerations.
 class ImageTwinsView {
 public:
     ImageTwinsView() = default;
 
     // The regions the header's counts imply, or nullopt when they do not fit inside the span; such a section fails
-    // ImageCheck::W1 in either mode, as a body without the section does in a twins build.
+    // ImageCheck::TwinsHeader in either mode, as a body without the section does in a twins build.
     static std::optional<ImageTwinsView> locate(std::span<const uint8_t>);
 
     const ImageTwinsHeader& header() const LIFETIME_BOUND { return m_header; }
@@ -194,20 +186,21 @@ private:
     std::span<const uint8_t> regenerationEntry(size_t offset) const;
     static TwinRegeneration decodeRegeneration(std::span<const uint8_t> entry);
 
-    bool passesW1() const;
-    bool passesW2() const;
-    bool passesW3(const ImageSectionsView&) const;
+    bool passesTwinsHeader() const;
+    bool passesTwinInputs() const;
+    bool passesTwinRegenerations(const ImageSectionsView&) const;
 
     std::span<const uint8_t> m_bytes;
     ImageTwinsHeader m_header;
     Layout m_layout;
 };
 
-// ImageCheck::W1 to W3 on the view's twins section, which needs the parsed image section for W3. parseImageSections runs
-// it under strict, after the image's own structure checks; with strict off, debug builds ASSERT it.
+// ImageCheck::TwinsHeader to TwinRegenerations on the view's twins section, which needs the parsed image section for the
+// regenerations. parseImageSections runs it under strict, after the image's own structure checks; with strict off,
+// debug builds ASSERT it.
 std::optional<ImageCheck> firstTwinsStructureFailure(const ImageSectionsView&);
-// ImageCheck::W4, the compile inputs against the import's UCB. validateImageSectionsAgainst runs it after the image's
-// checks against the UCB.
+// ImageCheck::TwinInputSites, the compile inputs against the import's UCB. validateImageSectionsAgainst runs it after
+// the image's checks against the UCB.
 std::optional<ImageCheck> firstTwinsFailureAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
 
 // The writer capture streams the section through: the record's twin data, the producer values capture computed by

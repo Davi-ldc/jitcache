@@ -159,6 +159,9 @@ std::optional<MatchedDeclarationsCache::Result> MatchedDeclarationsCache::find(u
         if (&entry.parentRenderStyle->inheritedCustomProperties() != &inheritedCustomProperties)
             continue;
 
+        if (entry.parentRenderStyle->inBaseAppearanceSubtree() != parentStyle.inBaseAppearanceSubtree())
+            continue;
+
         if (parentStyle.inheritedEqual(*entry.parentRenderStyle))
             return std::make_optional(Result { .entry = entry, .inheritedEqual = true });
         partiallyMatchingEntry = &entry;
@@ -209,7 +212,7 @@ void MatchedDeclarationsCache::invalidate()
 }
 
 template<typename Callback>
-void MatchedDeclarationsCache::removeAllMatching(const Callback& matches)
+void MatchedDeclarationsCache::removeAllMatching(NOESCAPE const Callback& matches)
 {
     m_entries.removeIf([&](auto& keyValue) {
         keyValue.value.removeAllMatching(matches);

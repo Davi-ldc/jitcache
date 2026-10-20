@@ -3,15 +3,18 @@
 
 #if ENABLE(JIT)
 
+#include "ArrayProfile.h"
 #include "BaselineJITCode.h"
 #include "BytecodeStructs.h"
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "ConcurrentJSLock.h"
 #include "ICSites.h"
+#include "Instruction.h"
 #include "JITCode.h"
 #include "Repatch.h"
 #include <array>
+#include <wtf/OptionSet.h>
 #include <wtf/StdLibExtras.h>
 
 // The strict checks of an ICsBaseline section against the prepared code and the newborn CB, and the three restoration
@@ -21,13 +24,26 @@ namespace JSC::JITCache::ICs {
 
 namespace ICRestoreInternal {
 
-// Whether a call-link site is as linking left it: every field seeding writes over is as DataOnlyCallLinkInfo::initialize
-// left it, and the site holds no callee, stub or incoming-call link. useLLIntICs is fixed on, so linking starts every
-// site in Init.
-static bool isAsLinkingLeftIt(OpcodeID opcodeID, CallLinkInfo& callLinkInfo)
+// Whether a call-link site is as linking left it, under the fixed useLazyLLIntCallLinkInfos and useLLIntICs. A lazy site
+// has no data of its own and does not point at the executed-once data; every lazy site but an op_tail_call one points at
+// the never-executed data, and an op_tail_call one does not, which leaves it on the not-executed tail-call data, the only
+// other data linking gives. An inline site has every field seeding writes over as DataOnlyCallLinkInfo::initialize left
+// it, in Init, and holds no callee, stub or incoming-call link.
+static bool isAsLinkingLeftIt(VM& vm, const CallLinkSite& site)
 {
+    if (!site.inlineInfo) {
+        const LazyCallLinkInfo& lazyInfo = *site.lazyInfo;
+        if (lazyInfo.get() || lazyInfo.hasExecutedOnce())
+            return false;
+        bool neverExecuted = lazyInfo.hasNeverExecuted(vm);
+        if (site.opcode().kind == CallLinkSiteKind::LazyTailCall)
+            return !neverExecuted;
+        return neverExecuted;
+    }
+
+    DataOnlyCallLinkInfo& callLinkInfo = *site.inlineInfo;
     return callLinkInfo.type() == CallLinkInfo::Type::DataOnly
-        && callLinkInfo.callType() == CallLinkInfo::callTypeFor(opcodeID)
+        && callLinkInfo.callType() == CallLinkInfo::callTypeFor(site.opcode().opcodeID)
         && callLinkInfo.mode() == CallLinkInfo::Mode::Init
         && !callLinkInfo.seenOnce()
         && !callLinkInfo.hasSeenClosure()
@@ -37,6 +53,27 @@ static bool isAsLinkingLeftIt(OpcodeID opcodeID, CallLinkInfo& callLinkInfo)
         && !callLinkInfo.stub()
         && !callLinkInfo.haveLastSeenCallee()
         && !callLinkInfo.isOnList();
+}
+
+// The index in the section's call-link records of each canonical position's first record. A strict parse checked the
+// group table; normal mode trusts it, as debug builds assert.
+static CallLinkSiteCounts callLinkGroupStarts(const SectionView& view)
+{
+    CallLinkSiteCounts counts { };
+    for (unsigned index = 0; index < view.header.callLinkGroupCount; ++index) {
+        CallLinkGroup group = view.group(index);
+        auto position = canonicalCallLinkPosition(static_cast<OpcodeID>(group.opcodeID));
+        ASSERT(position);
+        if (position)
+            counts[*position] += group.siteCount;
+    }
+    CallLinkSiteCounts starts { };
+    uint32_t start = 0;
+    for (unsigned position = 0; position < numberOfCallLinkOpcodes; ++position) {
+        starts[position] = start;
+        start += counts[position];
+    }
+    return starts;
 }
 
 } // namespace ICRestoreInternal
@@ -98,13 +135,14 @@ std::optional<Invalid> checkNewbornCodeBlock(CodeBlock& codeBlock)
     if (codeBlock.jitType() != JITType::None)
         return Invalid { Check::NewbornCallLinks, 0 };
 
+    VM& vm = codeBlock.vm();
     std::optional<Invalid> result;
     uint32_t siteIndex = 0;
-    forEachCallLinkSite(codeBlock, [&](unsigned canonicalPosition, unsigned, CallLinkInfo& callLinkInfo) {
+    forEachCallLinkSite(codeBlock, [&](const CallLinkSite& site) {
         uint32_t index = siteIndex++;
         if (result)
             return;
-        if (!ICRestoreInternal::isAsLinkingLeftIt(callLinkOpcodes[canonicalPosition], callLinkInfo))
+        if (!ICRestoreInternal::isAsLinkingLeftIt(vm, site))
             result = Invalid { Check::NewbornCallLinks, index };
     });
     return result;
@@ -133,6 +171,7 @@ std::expected<PreparedBaselineICs, Invalid> prepareBaselineICs(std::span<const u
     PreparedBaselineICs prepared;
     prepared.m_propertyICs = view->propertyICs;
     prepared.m_callLinks = view->callLinks;
+    prepared.m_callLinkGroupStarts = ICRestoreInternal::callLinkGroupStarts(*view);
     prepared.m_summary = Summary { view->header.icSitesWithCases };
 #if ASSERT_ENABLED
     prepared.m_codeBlock = &newbornCodeBlock;
@@ -146,30 +185,60 @@ void seedCallLinkHistory(const PreparedBaselineICs& prepared, CodeBlock& codeBlo
     ASSERT(codeBlock.jitType() == JITType::None);
 
     // Native linking writes these fields without a lock, and nothing else reaches the newborn CB, so seeding takes none.
-    // An imported UCB keeps the producer's metadata layout, so the record count equals the number of sites the walk
-    // visits; checkMetadataLayout confirms it under strict.
+    // Within a group, records follow metadata IDs, and an imported UCB keeps the producer's metadata layout and gives each
+    // instruction the producer's metadata ID, so record k of a site's group is the site whose metadata ID is k;
+    // checkMetadataLayout confirms the counts under strict. Seeding walks instructions rather than metadata because data
+    // of a site's own needs the site's bytecode index, which only its instruction knows.
     VM& vm = codeBlock.vm();
     std::span<const CallLinkRecord> records = prepared.callLinks();
-    size_t cursor = 0;
-    forEachCallLinkSite(codeBlock, [&](unsigned, unsigned, CallLinkInfo& callLinkInfo) {
-        ASSERT(cursor < records.size());
-        RestoredCallLink restored = restoredCallLink(records[cursor++]);
-        // setVirtualCall comes first, because the reset it runs clears the seen bit. It allocates nothing and takes no
-        // lock: the virtual-call thunks exist from the VM's construction.
+    const CallLinkSiteCounts& groupStarts = prepared.callLinkGroupStarts();
+    forEachCallLinkInstruction(codeBlock, [&](const CallLinkSite& site, const JSInstruction* instruction) {
+        size_t recordIndex = static_cast<size_t>(groupStarts[site.canonicalPosition]) + site.metadataID;
+        ASSERT(recordIndex < (site.canonicalPosition + 1 < numberOfCallLinkOpcodes ? groupStarts[site.canonicalPosition + 1] : records.size()));
+        RestoredCallLink restored = restoredCallLink(site.opcode(), records[recordIndex]);
+
+        CallLinkInfo* callLinkInfo = nullptr;
+        switch (restored.data) {
+        case CallSiteDataState::NotExecuted:
+            // The site keeps what linking gave it.
+            return;
+        case CallSiteDataState::ExecutedOnce:
+            // The site ran and holds nothing, so its next call gives it data of its own and links it, as the producer's
+            // next call would have. Only the site's pointer moves; the shared data never changes.
+            site.lazyInfo->setExecutedOnce(vm);
+            return;
+        case CallSiteDataState::Own:
+            // The native slow paths' route to a site's data, which derives the call type and the code origin from the
+            // instruction as linking would. The new data starts unseen, is published after a store-store fence and is
+            // reported to the heap in batches, which under the install function's GC deferral only records deferred
+            // work.
+            callLinkInfo = &codeBlock.ensureCallLinkInfoAt(instruction);
+            break;
+        case CallSiteDataState::Inline:
+            callLinkInfo = site.inlineInfo;
+            break;
+        }
+
+        // Every setter below runs on a CallLinkInfo of the site's own, never on one the VM's sites share. setVirtualCall
+        // comes first, because the reset it runs clears the seen bit. It allocates nothing and takes no lock: the
+        // virtual-call thunks exist from the VM's construction.
         if (restored.isVirtual)
-            callLinkInfo.setVirtualCall(vm);
+            callLinkInfo->setVirtualCall(vm);
         else if (restored.seenOnce)
-            callLinkInfo.setSeen();
+            callLinkInfo->setSeen();
         if (restored.hasSeenClosure)
-            callLinkInfo.setHasSeenClosure();
+            callLinkInfo->setHasSeenClosure();
         if (restored.clearedByGC)
-            callLinkInfo.setClearedByGC();
+            callLinkInfo->setClearedByGC();
         if (restored.clearedByVirtual)
-            callLinkInfo.setClearedByVirtual();
+            callLinkInfo->setClearedByVirtual();
         if (restored.maxArgumentCountIncludingThisForVarargs)
-            callLinkInfo.updateMaxArgumentCountIncludingThisForVarargs(restored.maxArgumentCountIncludingThisForVarargs);
+            callLinkInfo->updateMaxArgumentCountIncludingThisForVarargs(restored.maxArgumentCountIncludingThisForVarargs);
+
+        // The this profile last, into the data the site now owns, whose two structure samples start empty.
+        if (restored.data == CallSiteDataState::Own && site.opcode().hasThisProfile)
+            site.lazyInfo->arrayProfile()->restoreAccumulatedState(restored.thisArrayModes, OptionSet<ArrayProfileFlag>::fromRaw(restored.thisArrayProfileFlags));
     });
-    ASSERT(cursor == records.size());
 }
 
 void attachPropertyICState(const PreparedBaselineICs& prepared, CodeBlock& codeBlock)

@@ -147,6 +147,7 @@ public:
 #if ENABLE(RESOURCE_USAGE)
     size_t NODELETE externalMemoryCost() const;
 #endif
+    uint32_t owningThreadUID() const { return m_owningThreadUID; }
     bool isContextThread() const { return m_owningThreadUID == currentThreadID(); }
 
 protected:
@@ -163,12 +164,11 @@ protected:
 
     explicit CanvasRenderingContext(CanvasBase&, Type);
     bool NODELETE taintsOrigin(const CanvasPattern*);
-    bool NODELETE taintsOrigin(const CanvasBase*);
-    bool taintsOrigin(const CachedImage*);
+    bool taintsOrigin(const CanvasBase*);
     bool taintsOrigin(const HTMLImageElement*);
     bool taintsOrigin(const SVGImageElement*);
     bool taintsOrigin(const HTMLVideoElement*);
-    bool NODELETE taintsOrigin(const ImageBitmap*);
+    bool taintsOrigin(const ImageBitmap*);
     bool taintsOrigin(const URL&);
 
     template<class T> void checkOrigin(const T* arg)

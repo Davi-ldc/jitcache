@@ -91,7 +91,7 @@ void FindIndicatorOverlayClientIOS::drawRect(PageOverlay& overlay, GraphicsConte
     for (const auto& path : paths)
         context.fillPath(path);
 
-    context.drawImage(*indicatorImage, overlay.bounds());
+    context.drawBitmapImage(*indicatorImage, overlay.bounds());
 }
 
 bool FindIndicatorIOS::update(WebCore::LocalFrame* selectedFrame, bool isShowingOverlay, bool shouldAnimate)
@@ -110,7 +110,7 @@ bool FindIndicatorIOS::update(WebCore::LocalFrame* selectedFrame, bool isShowing
         return false;
 
     m_findIndicatorOverlayClient = makeUnique<FindIndicatorOverlayClientIOS>(*selectedFrame, textIndicator.get());
-    m_findIndicatorRect = enclosingIntRect(textIndicator->selectionRectInRootViewCoordinates());
+    m_findIndicatorRect = enclosingIntRect(textIndicator->selectionRectInMainFrameViewCoordinates());
     m_findIndicatorOverlay = PageOverlay::create(*m_findIndicatorOverlayClient, PageOverlay::OverlayType::Document);
     Ref findIndicatorOverlay = *m_findIndicatorOverlay;
     protect(*m_webPage)->corePage()->pageOverlayController().installPageOverlay(findIndicatorOverlay, PageOverlay::FadeMode::DoNotFade);

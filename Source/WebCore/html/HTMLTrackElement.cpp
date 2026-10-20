@@ -27,6 +27,8 @@
 #include "config.h"
 #include "HTMLTrackElement.h"
 
+#include <wtf/text/TextStream.h>
+
 #if ENABLE(VIDEO)
 
 #include "ContentSecurityPolicy.h"
@@ -224,7 +226,7 @@ bool HTMLTrackElement::canLoadURL(const URL& url)
     ASSERT(document->contentSecurityPolicy());
     // Elements in user agent show tree should load whatever the embedding document policy is.
     if (!isInUserAgentShadowTree() && !protect(document->contentSecurityPolicy())->allowMediaFromSource(url, document->currentParserSourcePosition())) {
-        LOG(Media, "HTMLTrackElement::canLoadURL(%s) -> rejected by Content Security Policy", urlForLoggingTrack(url).utf8().data());
+        LOG_WITH_STREAM(Media, stream << "HTMLTrackElement::canLoadURL("_s << urlForLoggingTrack(url) << ") -> rejected by Content Security Policy"_s);
         return false;
     }
 
@@ -288,7 +290,7 @@ const AtomString& HTMLTrackElement::mediaElementCrossOriginAttribute() const
     return nullAtom();
 }
 
-void HTMLTrackElement::textTrackModeChanged(TextTrack&)
+void HTMLTrackElement::textTrackModeChanged(TextTrack&, TextTrack::ModeChangeType)
 {
     // Since we've moved to a new parent, we may now be able to load.
     if (readyState() == HTMLTrackElement::NONE)

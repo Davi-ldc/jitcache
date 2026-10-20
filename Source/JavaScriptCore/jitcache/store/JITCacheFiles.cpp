@@ -7,6 +7,7 @@
 #if OS(LINUX)
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <wtf/unix/UnixFileDescriptor.h>
 #endif
@@ -71,6 +72,11 @@ std::expected<HeaderFile, HeaderFileFailure> readHeaderFile(int cacheFd)
     UnixFileDescriptor fd { opened, UnixFileDescriptor::Adopt };
 
     HeaderFile file;
+    struct stat status;
+    if (fstat(fd.value(), &status))
+        return std::unexpected(HeaderFileFailure { HeaderFileFailure::Step::Read, errno });
+    if (!S_ISREG(status.st_mode))
+        return file;
     while (file.size < file.bytes.size()) {
         auto rest = std::span { file.bytes }.subspan(file.size);
         ssize_t count = ::read(fd.value(), rest.data(), rest.size());

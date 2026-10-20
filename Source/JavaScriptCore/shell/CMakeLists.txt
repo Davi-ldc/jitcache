@@ -21,12 +21,34 @@ endif ()
 if (USE_EXTERNAL_MIMALLOC)
     # The shipped static archives intentionally leave mi_* unresolved so the
     # consumer links its own mimalloc. The jsc shell still needs a working
-    # allocator, so link the vendored mimalloc object library here only.
+    # allocator, so link the vendored mimalloc object library here only, plus
+    # the entry points the archives expect from the consumer's mimalloc that
+    # the vendored one does not have (ExternalMimallocShims.cpp).
+    list(APPEND jsc_SOURCES ExternalMimallocShims.cpp)
     list(APPEND jsc_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
 endif ()
 
 if (ENABLE_FUZZILLI)
   list(APPEND jsc_SOURCES ../fuzzilli/Fuzzilli.cpp)
+endif ()
+
+# The ICU data the release lanes bundle is repacked with a zstd frame per item (icu/compress-data.ts), and the ICU they
+# build calls the weak hook bun_icu_maybe_decompress on each item it loads (icu/udata-decompress-hook.patch). Bun
+# defines the hook. So does the shell (jsc.cpp), so that it reads the data Bun reads, when it is given zstd's lib/
+# directory to build the decoder from.
+if (BUN_ICU_ZSTD_SOURCE_DIR)
+    file(GLOB jsc_ZSTD_DECODER_SOURCES
+        ${BUN_ICU_ZSTD_SOURCE_DIR}/common/*.c
+        ${BUN_ICU_ZSTD_SOURCE_DIR}/decompress/*.c
+    )
+    if (NOT jsc_ZSTD_DECODER_SOURCES)
+        message(FATAL_ERROR "BUN_ICU_ZSTD_SOURCE_DIR=${BUN_ICU_ZSTD_SOURCE_DIR} has no common/*.c and decompress/*.c")
+    endif ()
+    # ZSTD_DISABLE_ASM: no huf_decompress_amd64.S, the C one everywhere.
+    set_source_files_properties(${jsc_ZSTD_DECODER_SOURCES} PROPERTIES COMPILE_DEFINITIONS "ZSTD_DISABLE_ASM=1;ZSTD_LEGACY_SUPPORT=0;DEBUGLEVEL=0")
+    set_source_files_properties(../jsc.cpp PROPERTIES COMPILE_DEFINITIONS "BUN_ICU_ZSTD=1")
+    list(APPEND jsc_C_SOURCES ${jsc_ZSTD_DECODER_SOURCES})
+    list(APPEND jsc_PRIVATE_INCLUDE_DIRECTORIES ${BUN_ICU_ZSTD_SOURCE_DIR})
 endif ()
 
 # mya analyzes process corpses through Mach task APIs, so it only builds on
@@ -75,6 +97,7 @@ if (USE_BUN_JSC_ADDITIONS)
         # Same as jsc above: the shipped static archives leave mi_* unresolved
         # under USE_EXTERNAL_MIMALLOC, so any executable that links the
         # framework must supply the vendored mimalloc objects itself.
+        list(APPEND testFFI_SOURCES ExternalMimallocShims.cpp)
         list(APPEND testFFI_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
     endif ()
 
@@ -101,6 +124,7 @@ if (ENABLE_JITCACHE_TWINS)
         ../jitcache/tests/ucb/UCBFeedbackTests.cpp
         ../jitcache/tests/ucb/UCBCodecTests.cpp
         ../jitcache/tests/ucb/UCBEngineTests.cpp
+        ../jitcache/tests/ucb/UCBAnalysisTests.cpp
         ../jitcache/tests/image/ImageSectionTests.cpp
         ../jitcache/tests/image/ImageRecorderTests.cpp
         ../jitcache/tests/image/ImageBudgetTests.cpp
@@ -194,6 +218,7 @@ if (DEVELOPER_MODE)
             ../corpse/tests/CorpseAddressTest.cpp
             ../corpse/tests/CorpseByteParserTest.cpp
             ../corpse/tests/CorpseExportsTrieTest.cpp
+            ../corpse/tests/CorpseMemoryTest.cpp
             ../corpse/tests/CorpseProcessTest.cpp
             ../corpse/tests/CorpseRegionTest.cpp
             ../corpse/tests/CorpseSnapshotTest.cpp

@@ -106,6 +106,12 @@ To do so, remove `angle_restricted_traces` from your GN args, then compile with:
 ```
 autoninja -C out/<config> angle_trace_perf_tests
 ```
+
+Tip: If you have `use_remoteexec = true` enabled in your GN args, you can pass `-config=remote-link` to Siso to link all trace libraries in parallel remotely on RBE workers, significantly speeding up the build:
+```
+autoninja -C out/<config> -config=remote-link angle_trace_perf_tests
+```
+
 and run with (including recommended options):
 ```
 out/<config>/angle_trace_tests --filter='*among_us*' --verbose --fixed-test-time-with-warmup 10
@@ -694,6 +700,17 @@ vpython3 restricted_trace_perf.py --fixedtime 10 --sleep 10 --memory --cpu-inst 
 Verify using a spreadsheet that the values are relatively the same.
 If you notice a marked difference, spend some time understanding it.
 For instance, you may see memory decrease due to fixed in the upgrade.
+
+## Measuring cold-start performance
+
+The numbers above are steady-state. To measure a cold cache run instead:
+
+```
+vpython3 restricted_trace_perf.py --cold-run --loop-count 5 --build-dir ../../../out/AndroidPerformance --renderer vulkan --filter ${TRACE_NAME}
+```
+
+Each iteration clears the shader/pipeline cache and runs one pass with no warmup, so
+`--loop-count N` gives N cold samples. Works with either renderer.
 
 ## Part 3: Test the upgraded traces under an experimental prefix
 

@@ -49,6 +49,7 @@ CachedScript::~CachedScript() = default;
 
 void CachedScript::setEncoding(const String& chs)
 {
+    assertIsOwnerThread();
     protect(m_decoder)->setEncoding(chs, TextResourceDecoder::EncodingFromHTTPHeader);
 }
 
@@ -59,6 +60,8 @@ ASCIILiteral CachedScript::encoding() const
 
 StringView CachedScript::script(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
 {
+    assertIsOwnerThread();
+
     if (!m_data)
         return emptyString();
 
@@ -71,10 +74,12 @@ StringView CachedScript::script(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
         && contiguousData->size()
         && charactersAreAllASCII(contiguousData->span())) {
 
+        releaseOwnerThreadAssertion();
         {
             Locker locker { m_lock };
             m_decodingState = DataAndDecodedStringHaveSameBytes;
         }
+        assertIsOwnerThread();
 
         // If the encoded and decoded data are the same, there is no decoded data cost!
         setDecodedSize(0);
@@ -102,12 +107,14 @@ StringView CachedScript::script(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
             m_scriptHash = result.hash();
         ASSERT(!m_scriptHash || m_scriptHash == result.hash());
 
+        releaseOwnerThreadAssertion();
         {
             Locker locker { m_lock };
             m_script = WTF::move(result);
             m_decodingState = DataAndDecodedStringHaveDifferentBytes;
             m_wasForceDecodedAsUTF8 = shouldDecodeAsUTF8Only == ShouldDecodeAsUTF8Only::Yes;
         }
+        assertIsOwnerThread();
         setDecodedSize(m_script.sizeInBytes());
     }
 
@@ -115,54 +122,57 @@ StringView CachedScript::script(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
     return m_script;
 }
 
-JSC::CodeBlockHash CachedScript::codeBlockHashConcurrently(int startOffset, int endOffset, JSC::CodeSpecializationKind kind, ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
+void CachedScript::withScriptConcurrently(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only, NOESCAPE const ScopedLambda<void(StringView)>& function)
 {
     Locker locker { m_lock };
     auto data = m_data;
-    if (!data)
-        return JSC::CodeBlockHash { emptyString(), emptyString(), kind };
+    if (!data) {
+        function(emptyString());
+        return;
+    }
 
     switch (m_decodingState) {
-    case NeverDecoded: {
-        // This is rare, but unfortunately, when running CodeBlockHash concurrently, CachedScript was not decoding the source code.
-        // Thus, we need to decode them and need to compute. This is costly, but fine as CodeBlockHash is only used for debugging.
-        if (!data->isContiguous())
-            data = data->makeContiguous();
-        Ref contiguousData = downcast<SharedBuffer>(*data);
-
-        if (PAL::TextEncoding(encoding()).isByteBasedEncoding() && contiguousData->size() && charactersAreAllASCII(contiguousData->span())) {
-            StringView entireSource { byteCast<Latin1Character>(contiguousData->span()) };
-            return JSC::CodeBlockHash { entireSource.substring(startOffset, endOffset - startOffset), entireSource, kind };
+    case DataAndDecodedStringHaveSameBytes:
+        function(byteCast<Latin1Character>(downcast<SharedBuffer>(*data).span()));
+        return;
+    case DataAndDecodedStringHaveDifferentBytes:
+        // destroyDecodedData() drops m_script without changing the state, and m_script may have been
+        // decoded for the other mode.
+        if (!m_script.isNull() && m_wasForceDecodedAsUTF8 == (shouldDecodeAsUTF8Only == ShouldDecodeAsUTF8Only::Yes)) {
+            function(m_script);
+            return;
         }
-
-        String result;
-        if (shouldDecodeAsUTF8Only == ShouldDecodeAsUTF8Only::Yes) {
-            Ref forceUTF8Decoder = TextResourceDecoder::create("text/javascript"_s, PAL::UTF8Encoding());
-            forceUTF8Decoder->setAlwaysUseUTF8();
-            result = forceUTF8Decoder->decodeAndFlush(contiguousData->span());
-        } else {
-            auto decoder = TextResourceDecoder::create(m_decoder->contentType(), m_decoder->encoding(), m_decoder->usesEncodingDetector());
-            result = decoder->decodeAndFlush(contiguousData->span());
-        }
-
-        StringView entireSource { result };
-        return JSC::CodeBlockHash { entireSource.substring(startOffset, endOffset - startOffset), entireSource, kind };
-    }
-    case DataAndDecodedStringHaveSameBytes: {
-        StringView entireSource { byteCast<Latin1Character>(downcast<SharedBuffer>(*data).span()) };
-        return JSC::CodeBlockHash { entireSource.substring(startOffset, endOffset - startOffset), entireSource, kind };
+        break;
+    case NeverDecoded:
+        break;
     }
 
-    case DataAndDecodedStringHaveDifferentBytes: {
-        StringView entireSource { m_script };
-        return JSC::CodeBlockHash { entireSource.substring(startOffset, endOffset - startOffset), entireSource, kind };
+    // Decoding a private copy of a non-ASCII script is costly. Building a line table can need one, at
+    // most once per provider, but possibly during a GC pause.
+    if (!data->isContiguous())
+        data = data->makeContiguous();
+    Ref contiguousData = downcast<SharedBuffer>(*data);
+
+    if (PAL::TextEncoding(encoding()).isByteBasedEncoding() && contiguousData->size() && charactersAreAllASCII(contiguousData->span())) {
+        function(byteCast<Latin1Character>(contiguousData->span()));
+        return;
     }
+
+    String result;
+    if (shouldDecodeAsUTF8Only == ShouldDecodeAsUTF8Only::Yes) {
+        Ref forceUTF8Decoder = TextResourceDecoder::create("text/javascript"_s, PAL::UTF8Encoding());
+        forceUTF8Decoder->setAlwaysUseUTF8();
+        result = forceUTF8Decoder->decodeAndFlush(contiguousData->span());
+    } else {
+        auto decoder = TextResourceDecoder::create(m_decoder->contentType(), m_decoder->encoding(), m_decoder->usesEncodingDetector());
+        result = decoder->decodeAndFlush(contiguousData->span());
     }
-    return { };
+    function(result);
 }
 
 unsigned CachedScript::scriptHash(ShouldDecodeAsUTF8Only shouldDecodeAsUTF8Only)
 {
+    assertIsOwnerThread();
     if (m_decodingState == NeverDecoded || (m_decodingState == DataAndDecodedStringHaveDifferentBytes && m_wasForceDecodedAsUTF8 != (shouldDecodeAsUTF8Only == ShouldDecodeAsUTF8Only::Yes)))
         script(shouldDecodeAsUTF8Only);
     return m_scriptHash;
@@ -196,6 +206,7 @@ void CachedScript::setBodyDataFrom(const CachedResource& resource)
 
     CachedResource::setBodyDataFrom(resource);
 
+    script.assertIsOwnerThread();
     {
         Locker locker { m_lock };
         m_script = script.m_script;

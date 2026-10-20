@@ -68,6 +68,7 @@
 #import <WebCore/WebCoreFrameView.h>
 #import <WebCore/WebCoreView.h>
 #import <wtf/Assertions.h>
+#import <wtf/cocoa/TypeCastsCocoa.h>
 
 #if PLATFORM(IOS_FAMILY)
 #import "WebFrameInternal.h"
@@ -113,7 +114,7 @@ enum {
 
 @interface WebFrameViewPrivate : NSObject {
 @public
-    WebFrame *webFrame;
+    __weak WebFrame *webFrame;
     RetainPtr<WebDynamicScrollBarsView> frameScrollView;
     BOOL includedInWebKitStatistics;
 }
@@ -143,7 +144,7 @@ enum {
 // Note that the WebVew is not retained.
 - (WebView *)_webView
 {
-    return [_private->webFrame webView];
+    return [protect(_private->webFrame) webView];
 }
 
 - (void)_setDocumentView:(NSView <WebDocumentView> *)view
@@ -161,7 +162,7 @@ enum {
     // a convenience and so that we don't leave the window pointing to a view that's no longer in it.
     NSWindow *window = [sv window];
     NSResponder *firstResponder = [window firstResponder];
-    bool makeNewViewFirstResponder = [firstResponder isKindOfClass:[NSView class]] && [(NSView *)firstResponder isDescendantOf:[sv documentView]];
+    bool makeNewViewFirstResponder = [dynamic_objc_cast<NSView>(firstResponder) isDescendantOf:[sv documentView]];
 
     // Suppress the resetting of drag margins since we know we can't affect them.
     BOOL resetDragMargins = [window _needsToResetDragMargins];
@@ -177,7 +178,7 @@ enum {
 #else
     ASSERT(_private->webFrame);
 
-    auto* frame = core(_private->webFrame);
+    RefPtr frame = core(_private->webFrame);
 
     ASSERT(frame);
     ASSERT(frame->page());
@@ -298,7 +299,7 @@ enum {
     ASSERT(_private->webFrame);
     ASSERT(_private->frameScrollView);
 
-    auto* frame = core(_private->webFrame);
+    RefPtr frame = core(_private->webFrame);
 
     ASSERT(frame);
     ASSERT(frame->page());
@@ -307,12 +308,12 @@ enum {
     // won't ever get installed in the view hierarchy.
     ASSERT(frame->isMainFrame() || frame->ownerElement());
 
-    auto* view = frame->view();
+    RefPtr view = frame->view();
 
     view->setPlatformWidget(_private->frameScrollView.get());
 
     // FIXME: Frame tries to do this too. Is this code needed?
-    if (WebCore::RenderWidget* owner = frame->ownerRenderer()) {
+    if (RefPtr owner = frame->ownerRenderer()) {
         owner->setWidget(view);
         // Now the RenderWidget owns the view, so we don't any more.
     }
@@ -326,7 +327,7 @@ enum {
     if ([[[self webFrame] webView] drawsBackground])
         [[self _scrollView] setDrawsBackground:YES];
     if (auto coreFrame = [self _web_frame]) {
-        if (auto* coreFrameView = coreFrame->view())
+        if (RefPtr coreFrameView = coreFrame->view())
             coreFrameView->availableContentSizeChanged(WebCore::ScrollableArea::AvailableSizeChangeReason::AreaSizeChanged);
     }
 }
@@ -388,7 +389,8 @@ enum {
     if (_private && _private->includedInWebKitStatistics)
         --WebFrameViewCount;
     
-    [_private release];
+    // Retaining the member just to release it would be pointless.
+    SUPPRESS_UNRETAINED_ARG [_private release];
     _private = nil;
     
     [super dealloc];
@@ -398,7 +400,7 @@ enum {
 - (BOOL)scrollView:(WAKScrollView *)scrollView shouldScrollToPoint:(CGPoint)point
 {
     WebView *webView = [self _webView];
-    return [[webView _UIKitDelegateForwarder] webView:webView shouldScrollToPoint:point forFrame:_private->webFrame];
+    return [[webView _UIKitDelegateForwarder] webView:webView shouldScrollToPoint:point forFrame:protect(_private->webFrame)];
 }
 #endif
 
@@ -410,15 +412,15 @@ enum {
 
 - (void)setAllowsScrolling:(BOOL)flag
 {
-    WebCore::LocalFrame *frame = core([self webFrame]);
-    if (auto* view = frame? frame->view() : 0)
+    RefPtr frame = core([self webFrame]);
+    if (RefPtr view = frame ? frame->view() : nullptr)
         view->setCanHaveScrollbars(flag);
 }
 
 - (BOOL)allowsScrolling
 {
-    auto* frame = core([self webFrame]);
-    if (auto* view = frame? frame->view() : 0)
+    RefPtr frame = core([self webFrame]);
+    if (RefPtr view = frame ? frame->view() : nullptr)
         return view->canHaveScrollbars();
     return YES;
 }
@@ -492,7 +494,7 @@ enum {
             [[[self _webView] backgroundColor] set];
             NSRectFill(rect);
 #else
-            CGContextRef cgContext = WKGetCurrentGraphicsContext();
+            RetainPtr cgContext = WKGetCurrentGraphicsContext();
             CGContextSetFillColorWithColor(cgContext, WebCore::cachedCGColor(WebCore::Color::white).get());
             WKRectFill(cgContext, rect);
 #endif
@@ -504,7 +506,7 @@ enum {
             [[NSColor cyanColor] set];
             NSRectFill(rect);
 #else
-            CGContextRef cgContext = WKGetCurrentGraphicsContext();
+            RetainPtr cgContext = WKGetCurrentGraphicsContext();
             CGContextSetFillColorWithColor(cgContext, WebCore::cachedCGColor(WebCore::Color::cyan).get());
             WKRectFill(cgContext, rect);
 #endif
@@ -594,7 +596,7 @@ enum {
     // scrolling overflows is only applicable if we're dealing with an WebHTMLView
     if (![[self documentView] isKindOfClass:[WebHTMLView class]])
         return NO;
-    auto* frame = core([self webFrame]);
+    RefPtr frame = core([self webFrame]);
     if (!frame)
         return NO;
     return frame->eventHandler().scrollOverflow(direction, granularity);
@@ -606,10 +608,10 @@ enum {
     auto coreFrame = [self _web_frame];
     if (!coreFrame)
         return YES;
-    auto* document = coreFrame->document();
+    RefPtr document = coreFrame->document();
     if (!document)
         return YES;
-    auto* renderView = document->renderView();
+    CheckedPtr renderView = document->renderView();
     if (!renderView)
         return YES;
     return renderView->writingMode().isHorizontal();
@@ -620,10 +622,10 @@ enum {
     auto coreFrame = [self _web_frame];
     if (!coreFrame)
         return NO;
-    auto* document = coreFrame->document();
+    RefPtr document = coreFrame->document();
     if (!document)
         return NO;
-    auto* renderView = document->renderView();
+    CheckedPtr renderView = document->renderView();
     if (!renderView)
         return NO;
     return renderView->writingMode().isBlockFlipped();
@@ -886,7 +888,7 @@ enum {
     int index, count;
     BOOL callSuper = YES;
     auto coreFrame = [self _web_frame];
-    BOOL maintainsBackForwardList = coreFrame && static_cast<BackForwardList&>(coreFrame->page()->backForward().client()).enabled() ? YES : NO;
+    BOOL maintainsBackForwardList = coreFrame && downcast<BackForwardList>(coreFrame->page()->backForward().client()).enabled() ? YES : NO;
 
     count = [characters length];
     for (index = 0; index < count; ++index) {

@@ -64,7 +64,7 @@ MockRealtimeVideoSourceGStreamer::MockRealtimeVideoSourceGStreamer(String&& devi
         return;
 
     device->setIsMockDevice(true);
-    m_capturer = adoptRef(*new GStreamerVideoCapturer(WTF::move(*device)));
+    lazyInitialize(m_capturer, adoptRef(*new GStreamerVideoCapturer(WTF::move(*device))));
     m_capturer->addObserver(*this);
     m_capturer->setupPipeline();
     m_capturer->setSinkVideoFrameCallback([this](auto&& videoFrame) {
@@ -123,7 +123,7 @@ void MockRealtimeVideoSourceGStreamer::updateSampleBuffer()
         return;
 
     int frameRateNumerator, frameRateDenominator;
-    gst_util_double_to_fraction(settings().frameRate(), &frameRateNumerator, &frameRateDenominator);
+    gst_util_double_to_fraction(frameRate(), &frameRateNumerator, &frameRateDenominator);
 
     VideoFrameTimeMetadata metadata;
     metadata.captureTime = MonotonicTime::now().secondsSinceEpoch();

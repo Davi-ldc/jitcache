@@ -71,7 +71,6 @@ namespace JSC {
         class ImageRecorder;
 #if ENABLE(JITCACHE_TWINS)
         class ProducerBudget;
-        struct TwinCompileInputs;
         struct TwinSeeds;
 #endif
     }
@@ -200,7 +199,7 @@ namespace JSC {
         static int NODELETE stackPointerOffsetFor(UnlinkedCodeBlock*);
         static int stackPointerOffsetFor(CodeBlock*);
 
-        JS_EXPORT_PRIVATE static UncheckedKeyHashMap<CString, Seconds> compileTimeStats();
+        JS_EXPORT_PRIVATE static UncheckedKeyHashMap<ASCIICString, Seconds> compileTimeStats();
         JS_EXPORT_PRIVATE static Seconds NODELETE totalCompileTime();
 
         // The private thunk generator a JITCache support key names. Defined in JITPropertyAccess.cpp, the one file that
@@ -214,9 +213,9 @@ namespace JSC {
 
 #if ENABLE(JITCACHE_TWINS)
         // The image check's twin compile: creates the twin recorder at once, so that
-        // compileAndLinkWithoutFinalizing records into it with the producer's seeds and compile inputs, in any VM. The
-        // seeds and inputs must outlive this JIT.
-        void setJITCacheTwin(Ref<JITCache::ProducerBudget>&&, const JITCache::TwinSeeds&, const JITCache::TwinCompileInputs&);
+        // compileAndLinkWithoutFinalizing records into it with the producer's seeds, in any VM. The seeds must outlive
+        // this JIT.
+        void setJITCacheTwin(Ref<JITCache::ProducerBudget>&&, const JITCache::TwinSeeds&);
 #endif
 
     private:
@@ -365,7 +364,7 @@ namespace JSC {
         template<typename Op>
         void emit_compare(const JSInstruction*, RelationalCondition);
         template <typename EmitCompareFunctor>
-        void emit_compareImpl(VirtualRegister op1, VirtualRegister op2, RelationalCondition, const EmitCompareFunctor&);
+        void emit_compareImpl(VirtualRegister op1, VirtualRegister op2, RelationalCondition, NOESCAPE const EmitCompareFunctor&);
         template<typename Op>
         void emit_compareAndJump(const JSInstruction*, RelationalCondition);
         template<typename Op>
@@ -377,7 +376,7 @@ namespace JSC {
         template<typename Op, typename SlowOperation>
         void emit_compareSlow(const JSInstruction*, DoubleCondition, SlowOperation, Vector<SlowCaseEntry>::iterator&);
         template<typename SlowOperation, typename HanldeReturnValueGPRFunctor, typename EmitDoubleCompareFunctor>
-        void emit_compareSlowImpl(VirtualRegister op1, VirtualRegister op2, size_t instructionSize, SlowOperation, Vector<SlowCaseEntry>::iterator&, const HanldeReturnValueGPRFunctor&, const EmitDoubleCompareFunctor&);
+        void emit_compareSlowImpl(VirtualRegister op1, VirtualRegister op2, size_t instructionSize, SlowOperation, Vector<SlowCaseEntry>::iterator&, NOESCAPE const HanldeReturnValueGPRFunctor&, NOESCAPE const EmitDoubleCompareFunctor&);
         template<typename Op, typename SlowOperation>
         void emit_compareAndJumpSlow(const JSInstruction*, DoubleCondition, SlowOperation, bool invert, Vector<SlowCaseEntry>::iterator&);
 
@@ -498,6 +497,7 @@ namespace JSC {
         void emit_op_new_async_generator_func_exp(const JSInstruction*);
         void emit_op_new_object(const JSInstruction*);
         void emit_op_new_reg_exp(const JSInstruction*);
+        void emit_op_new_reg_exp_shared(const JSInstruction*);
         void emit_op_create_lexical_environment(const JSInstruction*);
         void emit_op_create_direct_arguments(const JSInstruction*);
         void emit_op_create_scoped_arguments(const JSInstruction*);
@@ -625,6 +625,7 @@ namespace JSC {
 
         void emitSlowCaseCall(Vector<SlowCaseEntry>::iterator&, SlowPathFunction);
 
+        void emit_op_iterator_close_check(const JSInstruction*);
         void emit_op_iterator_open(const JSInstruction*);
         void emitSlow_op_iterator_open(const JSInstruction*, Vector<SlowCaseEntry>::iterator&);
         template<typename Op> void emitIteratorOpenGeneric(const JSInstruction*);

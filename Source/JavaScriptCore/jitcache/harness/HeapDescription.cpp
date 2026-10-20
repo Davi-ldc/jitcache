@@ -408,7 +408,7 @@ private:
             !(attributes & PropertyAttribute::DontEnum) ? 'e' : '-',
             !(attributes & PropertyAttribute::DontDelete) ? 'c' : '-',
         };
-        return String { std::span<const char> { letters } };
+        return String::fromLatin1(std::span<const char> { letters });
     }
 
     // The own properties in the order getOwnPropertyNames gives them, private names included, each read with a VMInquiry
@@ -759,7 +759,7 @@ private:
         else if (auto* regExpObject = dynamicDowncast<RegExpObject>(&object)) {
             RegExp* regExp = regExpObject->regExp();
             auto flags = Yarr::flagsString(regExp->flags());
-            line.append(" pattern "_s, jsonString(regExp->pattern()), " flags "_s, jsonString(String::fromLatin1(flags.data())));
+            line.append(" pattern "_s, jsonString(regExp->pattern()), " flags "_s, jsonString(String { flags.span() }));
         } else if (auto* arrayBuffer = dynamicDowncast<JSArrayBuffer>(&object)) {
             ArrayBuffer* buffer = arrayBuffer->impl();
             line.append(" shared="_s, flagText(buffer->isShared()), " detached="_s, flagText(buffer->isDetached()), " byteLength="_s, buffer->byteLength());

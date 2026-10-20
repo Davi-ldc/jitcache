@@ -31,22 +31,27 @@
 #include "AbortSignal.h"
 #include "ContainerNodeInlines.h"
 #include "Document.h"
+#include "DocumentEventLoop.h"
 #include "DocumentPage.h"
 #include "Element.h"
 #include "ElementInlines.h"
+#include "EnvironmentMapLoader.h"
 #include "EventListener.h"
+#include "EventLoop.h"
 #include "EventNames.h"
 #include "GraphicsLayer.h"
 #include "HTMLModelElement.h"
 #include "IntersectionObserver.h"
 #include "IntersectionObserverCallback.h"
 #include "IntersectionObserverEntry.h"
+#include "Logging.h"
 #include "Model.h"
 #include "ModelPlayer.h"
 #include "ModelPlayerClient.h"
 #include "ModelPlayerGraphicsLayerConfiguration.h"
 #include "ModelPlayerProvider.h"
 #include "ModelPlayerTransformState.h"
+#include "NodeInlines.h"
 #include "Page.h"
 #include "PlaceholderModelPlayer.h"
 #include "RenderBox.h"
@@ -55,10 +60,24 @@
 #include "RenderLayerBacking.h"
 #include "RenderLayerModelObject.h"
 #include "ResourceError.h"
+#include "SharedBuffer.h"
+#include "StyleAnchorName.h"
+#include "StyleEnvironmentMap.h"
+#include "StylePortalTransform.h"
+#include "StylePositionAnchor.h"
+#include "TypedElementDescendantIteratorInlines.h"
 #include "VisibilityChangeClient.h"
 #include <JavaScriptCore/ConsoleTypes.h>
+#include <ranges>
 #include <wtf/RefCounted.h>
 #include <wtf/Vector.h>
+#include <wtf/text/MakeString.h>
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+#include "Chrome.h"
+#include "ChromeClient.h"
+#include "ElementVolumetricScene.h"
+#endif
 
 namespace WebCore {
 
@@ -244,8 +263,18 @@ SpatialPortalController::~SpatialPortalController()
 
 void SpatialPortalController::prepareForRemoval()
 {
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (RefPtr element = m_portalElement.get())
+        ElementVolumetricScene::exitVolumetricScene(*element);
+#endif
+
     m_portalAction = PortalActionKind::None;
     updateGestureHandling();
+
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+    if (m_environmentMapLoader)
+        m_environmentMapLoader->cancel();
+#endif
 
     stopObservingPortalVisibility();
 }
@@ -256,6 +285,20 @@ HTMLModelElement* SpatialPortalController::hostedModelElement(NodeIdentifier nod
     if (it == m_hostedModels.end())
         return nullptr;
     return it->value.element.get();
+}
+
+Vector<Ref<HTMLModelElement>> SpatialPortalController::hostedModelsInTreeOrder() const
+{
+    RefPtr portalElement = m_portalElement.get();
+    if (!portalElement)
+        return { };
+
+    Vector<Ref<HTMLModelElement>> models;
+    for (Ref model : descendantsOfType<HTMLModelElement>(*portalElement)) {
+        if (hostedModelElement(model->nodeIdentifier()) == model.ptr())
+            models.append(WTF::move(model));
+    }
+    return models;
 }
 
 void SpatialPortalController::unregisterChildModel(HTMLModelElement& model)
@@ -270,7 +313,13 @@ void SpatialPortalController::unregisterChildModel(HTMLModelElement& model)
     if (RefPtr player = m_modelPlayer)
         player->unload(nodeID);
 
+    scheduleAnchorUpdate();
+
     if (m_hostedModels.isEmpty()) {
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+        if (RefPtr element = m_portalElement.get())
+            ElementVolumetricScene::exitVolumetricScene(*element);
+#endif
         deleteModelPlayer();
         stopObservingPortalVisibility();
         reconfigurePortalLayer();
@@ -284,6 +333,7 @@ void SpatialPortalController::registerChildModel(HTMLModelElement& model)
     });
 
     observePortalVisibility();
+    scheduleAnchorUpdate();
 
     model.visibilityStateChanged();
 }
@@ -326,6 +376,7 @@ void SpatialPortalController::loadChildModelIfReady(HTMLModelElement& model)
 
     it->value.loadedModel = modelData;
 
+    scheduleAnchorUpdate();
     model.updateEntityTransformFromCSS();
 
     if (RefPtr<ModelPlayer> placeholder = std::exchange(it->value.placeholder, nullptr)) {
@@ -403,7 +454,11 @@ void SpatialPortalController::viewportIntersectionChanged(bool isIntersecting)
         return;
 
     m_isIntersectingViewport = isIntersecting;
+    portalVisibilityChanged();
+}
 
+void SpatialPortalController::portalVisibilityChanged()
+{
     if (RefPtr player = m_modelPlayer)
         player->visibilityStateDidChange();
 
@@ -415,6 +470,11 @@ void SpatialPortalController::viewportIntersectionChanged(bool isIntersecting)
 
 void SpatialPortalController::documentVisibilityChanged()
 {
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (RefPtr element = m_portalElement.get())
+        ElementVolumetricScene::documentVisibilityDidChange(*element);
+#endif
+
     if (RefPtr player = m_modelPlayer)
         player->visibilityStateDidChange();
 }
@@ -424,6 +484,16 @@ void SpatialPortalController::childVisibilityStateChanged(HTMLModelElement& chil
     if (isPortalVisible())
         loadChildModelIfReady(child);
 }
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+RefPtr<ModelPlayer> SpatialPortalController::liveModelPlayer() const
+{
+    RefPtr modelPlayer = m_modelPlayer;
+    if (!modelPlayer || modelPlayer->isPlaceholder())
+        return nullptr;
+    return modelPlayer;
+}
+#endif
 
 ModelPlayer* SpatialPortalController::ensureModelPlayer()
 {
@@ -453,15 +523,43 @@ ModelPlayer* SpatialPortalController::ensureModelPlayer()
     m_modelPlayer->setPortalTransform(m_portalTransform);
     m_modelPlayer->setPortalAction(m_portalAction);
 
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+    pushEnvironmentMapToPlayer(*m_modelPlayer);
+#endif
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (m_presentationMode == ModelPresentationMode::Volumetric)
+        page->chrome().client().reconnectVolumetricSceneForElement(*element);
+#endif
+
     return m_modelPlayer.get();
 }
 
-void SpatialPortalController::setPortalTransform(PortalTransformKind kind)
+void SpatialPortalController::updatePortalTransform()
 {
-    if (m_portalTransform == kind)
+    RefPtr element = m_portalElement.get();
+    if (!element)
         return;
 
-    m_portalTransform = kind;
+    if (CheckedPtr box = dynamicDowncast<RenderBox>(element->renderer()))
+        updatePortalTransform(*box);
+}
+
+void SpatialPortalController::updatePortalTransform(const RenderBox& box)
+{
+    auto& style = box.style();
+    auto& portalTransform = style.portalTransform();
+    auto referenceSize = FloatSize { box.borderBoxSize() };
+    auto zoom = style.usedZoomForLength();
+
+    UsedPortalTransform used { .fitsContent = portalTransform.hasAuto() };
+    portalTransform.applyBeforeAuto(used.transformBeforeAuto, referenceSize, zoom);
+    portalTransform.applyAfterAuto(used.transformAfterAuto, referenceSize, zoom);
+
+    if (m_portalTransform == used)
+        return;
+
+    m_portalTransform = WTF::move(used);
 
     if (RefPtr player = m_modelPlayer)
         player->setPortalTransform(m_portalTransform);
@@ -480,6 +578,144 @@ void SpatialPortalController::setPortalAction(PortalActionKind kind)
     updateGestureHandling();
 }
 
+#if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+
+void SpatialPortalController::environmentMapStyleDidChange()
+{
+    RefPtr element = m_portalElement.get();
+    if (!element)
+        return;
+
+    protect(element->document().eventLoop())->queueTask(TaskSource::ModelElement, [weakThis = WeakPtr { *this }] {
+        if (CheckedPtr controller = weakThis.get())
+            controller->updateEnvironmentMap();
+    });
+}
+
+void SpatialPortalController::updateEnvironmentMap()
+{
+    RefPtr element = m_portalElement.get();
+    if (!element)
+        return;
+
+    CheckedPtr style = element->existingComputedStyle();
+    if (!style)
+        return;
+
+    auto& environmentMap = style->environmentMap();
+
+    auto kind = EnvironmentMapKind::Default;
+    URL url;
+    if (environmentMap.isNone())
+        kind = EnvironmentMapKind::None;
+    else if (!environmentMap.isAuto()) {
+        if (auto resolvedURL = resolvedEnvironmentMapURL(*element, environmentMap)) {
+            kind = EnvironmentMapKind::Custom;
+            url = WTF::move(*resolvedURL);
+        }
+    }
+
+    if (m_environmentMapKind == kind && m_environmentMapURL == url)
+        return;
+
+    m_environmentMapKind = kind;
+    m_environmentMapURL = WTF::move(url);
+    m_environmentMapData = nullptr;
+    m_environmentMapFailed = false;
+
+    if (RefPtr loader = m_environmentMapLoader)
+        loader->cancel();
+
+    if (m_environmentMapKind != EnvironmentMapKind::Custom) {
+        if (RefPtr player = m_modelPlayer)
+            pushEnvironmentMapToPlayer(*player);
+        return;
+    }
+
+    startEnvironmentMapLoad();
+}
+
+void SpatialPortalController::startEnvironmentMapLoad()
+{
+    RefPtr element = m_portalElement.get();
+    if (!element)
+        return;
+
+    if (!m_environmentMapLoader)
+        lazyInitialize(m_environmentMapLoader, EnvironmentMapLoader::create());
+
+    RefPtr loader = m_environmentMapLoader;
+    loader->load(*element, m_environmentMapURL, [weakThis = WeakPtr { *this }, url = m_environmentMapURL](RefPtr<SharedBuffer>&& data) {
+        if (CheckedPtr controller = weakThis.get())
+            controller->environmentMapDidLoad(url, WTF::move(data));
+    });
+}
+
+void SpatialPortalController::environmentMapDidLoad(const URL& url, RefPtr<SharedBuffer>&& data)
+{
+    if (m_environmentMapKind != EnvironmentMapKind::Custom || m_environmentMapURL != url)
+        return;
+
+    m_environmentMapData = WTF::move(data);
+    m_environmentMapFailed = !m_environmentMapData;
+
+    if (m_environmentMapFailed)
+        RELEASE_LOG_ERROR(ModelElement, "%p - SpatialPortalController failed to load the environment map, falling back to the default lighting", this);
+
+    if (RefPtr player = m_modelPlayer)
+        pushEnvironmentMapToPlayer(*player);
+}
+
+void SpatialPortalController::pushEnvironmentMapToPlayer(ModelPlayer& player) const
+{
+    switch (m_environmentMapKind) {
+    case EnvironmentMapKind::None:
+        player.disableEnvironmentMap();
+        return;
+
+    case EnvironmentMapKind::Default:
+        player.enableSystemEnvironmentMap();
+        return;
+
+    case EnvironmentMapKind::Custom:
+        if (RefPtr environmentMapData = m_environmentMapData)
+            player.setEnvironmentMap(environmentMapData.releaseNonNull(), m_environmentMapURL);
+        else if (m_environmentMapFailed)
+            player.enableSystemEnvironmentMap();
+        return;
+    }
+}
+
+String SpatialPortalController::effectiveEnvironmentMapForTesting() const
+{
+    if (RefPtr player = m_modelPlayer)
+        return player->environmentMapForTesting();
+
+    return "no player"_s;
+}
+
+#endif // ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
+
+#if ENABLE(MODEL_PROCESS)
+void SpatialPortalController::sceneGraphAsTextForTesting(std::optional<NodeIdentifier> rootNode, const ModelSceneGraphAsTextOptions& options, CompletionHandler<void(String&&)>&& completionHandler)
+{
+    RefPtr player = m_modelPlayer;
+    if (!player) {
+        completionHandler({ });
+        return;
+    }
+
+    updateAnchors();
+
+    Vector<std::pair<NodeIdentifier, String>> modelLabels;
+    unsigned treeOrderPosition = 0;
+    for (Ref model : hostedModelsInTreeOrder())
+        modelLabels.append({ model->nodeIdentifier(), model->dumpLabelForTesting(++treeOrderPosition) });
+
+    player->sceneGraphAsTextForTesting(rootNode, WTF::move(modelLabels), options, WTF::move(completionHandler));
+}
+#endif
+
 void SpatialPortalController::updateGestureHandling()
 {
     bool shouldHandleGesture = m_portalAction != PortalActionKind::None;
@@ -491,7 +727,7 @@ void SpatialPortalController::updateGestureHandling()
 #if ENABLE(TOUCH_EVENTS)
     if (RefPtr element = m_portalElement.get()) {
         if (!m_eventListener)
-            m_eventListener = SpatialPortalEventListener::create();
+            lazyInitialize(m_eventListener, SpatialPortalEventListener::create());
 
         if (shouldHandleGesture) {
             element->addEventListener(eventNames().touchstartEvent, *m_eventListener, { });
@@ -531,6 +767,11 @@ CheckedPtr<SpatialPortalController> SpatialPortalController::interactiveControll
     if (!controller || !controller->supportsInteraction())
         return nullptr;
 
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (controller->presentationMode() == ModelPresentationMode::Volumetric)
+        return nullptr;
+#endif
+
     return controller;
 }
 
@@ -566,8 +807,13 @@ void SpatialPortalController::deleteModelPlayer()
             provider->deleteModelPlayer(*m_modelPlayer);
         m_modelPlayer = nullptr;
     }
-    for (auto& hostedModel : m_hostedModels.values())
+    for (auto& hostedModel : m_hostedModels.values()) {
         hostedModel.loadedModel = nullptr;
+
+        hostedModel.anchorNode = std::nullopt;
+        hostedModel.anchorPlacement = { };
+        hostedModel.anchorWarningIssued = false;
+    }
 
     m_lastPushedContentSize = std::nullopt;
     m_resolvedPortalTransform = std::nullopt;
@@ -585,6 +831,8 @@ void SpatialPortalController::unloadChildModel(NodeIdentifier nodeID)
         return;
 
     it->value.loadedModel = nullptr;
+    it->value.anchorNode = std::nullopt;
+    it->value.anchorPlacement = { };
 
     if (RefPtr player = m_modelPlayer)
         player->unload(nodeID);
@@ -668,14 +916,16 @@ void SpatialPortalController::configureGraphicsLayer(GraphicsLayer& graphicsLaye
 #if ENABLE(MODEL_ELEMENT_PORTAL)
         .hasPortal = true, // N/A
 #endif
-#if ENABLE(MODEL_ELEMENT_IMMERSIVE)
-        .detachedForImmersive = false, // N/A
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+        .presentationMode = m_presentationMode,
 #endif
     });
 }
 
 void SpatialPortalController::sizeMayHaveChanged()
 {
+    updatePortalTransform();
+
     RefPtr player = m_modelPlayer;
     if (!player)
         return;
@@ -731,6 +981,163 @@ void SpatialPortalController::childTransformDidChange(HTMLModelElement& model, c
     model.didUpdateEntityTransformInsidePortal(transform);
 }
 
+HTMLModelElement* SpatialPortalController::anchorModelForChild(NodeIdentifier nodeID) const
+{
+    auto it = m_hostedModels.find(nodeID);
+    if (it == m_hostedModels.end() || !it->value.anchorNode)
+        return nullptr;
+
+    return hostedModelElement(*it->value.anchorNode);
+}
+
+auto SpatialPortalController::collectAnchorNames(const Vector<Ref<HTMLModelElement>>& modelsInTreeOrder) -> AnchorsByName
+{
+    AnchorsByName anchorsByName;
+
+    for (Ref candidate : modelsInTreeOrder) {
+        CheckedPtr candidateStyle = candidate->computedStyle();
+        if (!candidateStyle)
+            continue;
+
+        for (auto& scopedName : candidateStyle->anchorNamesOutOfLine())
+            anchorsByName.add(Style::ResolvedScopedName::createFromScopedName(candidate, scopedName), Vector<NodeIdentifier> { }).iterator->value.append(candidate->nodeIdentifier());
+    }
+
+    return anchorsByName;
+}
+
+std::optional<NodeIdentifier> SpatialPortalController::anchorNodeForName(const HTMLModelElement& model, const Style::ScopedName& anchorName, const AnchorsByName& anchorsByName)
+{
+    auto it = anchorsByName.find(Style::ResolvedScopedName::createFromScopedName(model, anchorName));
+    if (it == anchorsByName.end())
+        return std::nullopt;
+
+    for (auto candidateID : it->value | std::views::reverse) {
+        if (candidateID != model.nodeIdentifier())
+            return candidateID;
+    }
+
+    return std::nullopt;
+}
+
+bool SpatialPortalController::anchorChainReaches(NodeIdentifier startNode, NodeIdentifier targetNode, const AnchorsByName& anchorsByName) const
+{
+    auto currentNode = startNode;
+
+    for (unsigned step = 0; step <= m_hostedModels.size(); ++step) {
+        if (currentNode == targetNode)
+            return true;
+
+        RefPtr current = hostedModelElement(currentNode);
+        if (!current)
+            return false;
+
+        CheckedPtr currentStyle = current->computedStyle();
+        if (!currentStyle || currentStyle->positionContextOutOfLine() != PositionContextType::Anchor)
+            return false;
+
+        auto anchorName = currentStyle->positionAnchorOutOfLine().tryName();
+        if (!anchorName)
+            return false;
+
+        auto nextNode = anchorNodeForName(*current, *anchorName, anchorsByName);
+        if (!nextNode)
+            return false;
+
+        currentNode = *nextNode;
+    }
+
+    return false;
+}
+
+SpatialPortalController::AnchorResolution SpatialPortalController::resolvedAnchorNode(const HTMLModelElement& model, const Style::ComputedStyle& style, const AnchorsByName& anchorsByName) const
+{
+    auto anchorName = style.positionAnchorOutOfLine().tryName();
+    if (!anchorName)
+        return { };
+
+    if (style.positionContextOutOfLine() != PositionContextType::Anchor)
+        return { { }, "position-anchor on a <model> inside a spatial portal has no effect without position-context: anchor."_s };
+
+    auto anchorNode = anchorNodeForName(model, *anchorName, anchorsByName);
+    if (!anchorNode)
+        return { { }, makeString("No other <model> in this spatial portal has anchor-name: "_s, anchorName->name, '.') };
+
+    if (anchorChainReaches(*anchorNode, model.nodeIdentifier(), anchorsByName))
+        return { { }, makeString("Ignoring position-anchor: "_s, anchorName->name, " because it would create a cycle between anchored models."_s) };
+
+    return { anchorNode, { } };
+}
+
+void SpatialPortalController::updateAnchorForChild(const HTMLModelElement& model, HostedModel& hostedModel, const Style::ComputedStyle& style, const AnchorsByName& anchorsByName)
+{
+    auto resolution = resolvedAnchorNode(model, style, anchorsByName);
+
+    if (resolution.node)
+        hostedModel.anchorWarningIssued = false;
+    else if (!resolution.warning.isNull() && !hostedModel.anchorWarningIssued) {
+        hostedModel.anchorWarningIssued = true;
+        addConsoleWarning(resolution.warning);
+    }
+
+    String placement;
+    if (resolution.node) {
+        if (auto attachment = style.positionAnchorOutOfLine().tryAttachment())
+            placement = attachment->value;
+    }
+
+    if (hostedModel.anchorNode == resolution.node && hostedModel.anchorPlacement == placement)
+        return;
+
+    RefPtr player = m_modelPlayer;
+    if (!player)
+        return;
+
+    hostedModel.anchorNode = resolution.node;
+    hostedModel.anchorPlacement = placement;
+
+    player->setAnchor(model.nodeIdentifier(), resolution.node, placement);
+}
+
+void SpatialPortalController::updateAnchors()
+{
+    if (!m_modelPlayer || m_hostedModels.isEmpty())
+        return;
+
+    auto models = hostedModelsInTreeOrder();
+    auto anchorsByName = collectAnchorNames(models);
+
+    for (Ref model : models) {
+        auto it = m_hostedModels.find(model->nodeIdentifier());
+        if (it == m_hostedModels.end())
+            continue;
+
+        CheckedPtr style = model->computedStyle();
+        if (!style)
+            continue;
+
+        updateAnchorForChild(model, it->value, *style, anchorsByName);
+    }
+}
+
+void SpatialPortalController::scheduleAnchorUpdate()
+{
+    if (m_anchorUpdateScheduled)
+        return;
+
+    RefPtr portalElement = m_portalElement.get();
+    if (!portalElement)
+        return;
+
+    m_anchorUpdateScheduled = true;
+    Node::queueTaskKeepingNodeAlive(*portalElement, TaskSource::ModelElement, [](Element& element) {
+        if (CheckedPtr controller = element.spatialPortalController()) {
+            controller->m_anchorUpdateScheduled = false;
+            controller->updateAnchors();
+        }
+    });
+}
+
 void SpatialPortalController::modelDidUnload(ModelPlayer& player)
 {
     //  Mirrors HTMLModelElement::didUnload().
@@ -756,16 +1163,21 @@ void SpatialPortalController::modelDidUpdatePortalTransform(ModelPlayer& player,
 }
 
 // Mirrors HTMLModelElement::logWarning().
-void SpatialPortalController::logWarning(ModelPlayer& player, const String& warningMessage)
+void SpatialPortalController::addConsoleWarning(const String& warningMessage) const
 {
-    ASSERT_UNUSED(player, &player == m_modelPlayer);
-
     RefPtr element = m_portalElement.get();
     if (!element)
         return;
 
     Ref document = element->document();
     document->addConsoleMessage(MessageSource::Other, MessageLevel::Warning, warningMessage);
+}
+
+void SpatialPortalController::logWarning(ModelPlayer& player, const String& warningMessage)
+{
+    ASSERT_UNUSED(player, &player == m_modelPlayer);
+
+    addConsoleWarning(warningMessage);
 }
 
 void SpatialPortalController::reconfigurePortalLayer()
@@ -797,8 +1209,30 @@ RefPtr<GraphicsLayer> SpatialPortalController::portalGraphicsLayer() const
 bool SpatialPortalController::isPortalVisible() const
 {
     RefPtr element = m_portalElement.get();
-    return element && !element->document().hidden() && m_isIntersectingViewport;
+    if (!element)
+        return false;
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    // The portal's inline box is blank while its content is presented elsewhere, so scrolling it away must not
+    // unload what that scene is showing.
+    if (m_presentationMode != ModelPresentationMode::Inline)
+        return true;
+#endif
+    return !element->document().hidden() && m_isIntersectingViewport;
 }
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+
+void SpatialPortalController::setPresentationMode(ModelPresentationMode mode)
+{
+    if (m_presentationMode == mode)
+        return;
+
+    m_presentationMode = mode;
+    reconfigurePortalLayer();
+    portalVisibilityChanged();
+}
+
+#endif
 
 } // namespace WebCore
 

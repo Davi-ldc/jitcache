@@ -177,6 +177,7 @@ MediaSession::MediaSession(Navigator& navigator)
     : ActiveDOMObject(navigator.scriptExecutionContext())
     , m_navigator(navigator)
     , m_platformSession { PlatformMediaSession::create(*this) }
+    , m_logger(Document::sharedLogger())
 #if ENABLE(MEDIA_SESSION_COORDINATOR)
     , m_coordinator(MediaSessionCoordinator::create(protect(navigator.scriptExecutionContext()).get()))
 #endif
@@ -184,7 +185,6 @@ MediaSession::MediaSession(Navigator& navigator)
     if (RefPtr document = this->document())
         m_needsYouTubeCaptionsQuirk = document->quirks().needsYouTubeCaptionsQuirk();
 
-    m_logger = Document::sharedLogger();
     m_logIdentifier = nextLogIdentifier();
 #if PLATFORM(COCOA)
     if (RefPtr document = navigator.document())
@@ -201,7 +201,7 @@ MediaSession::~MediaSession()
     if (m_metadata)
         protect(m_metadata)->resetMediaSession();
     if (m_defaultMetadata)
-        protect(m_defaultMetadata)->resetMediaSession();
+        m_defaultMetadata->resetMediaSession();
 }
 
 void MediaSession::suspend(ReasonForSuspension reason)
@@ -608,7 +608,7 @@ void MediaSession::updateNowPlayingInfo(NowPlayingInfo& info)
     if (!m_defaultArtworkAttempted && (!m_metadata || m_metadata->artwork().isEmpty())) {
         m_defaultArtworkAttempted = true;
         if (auto images = fallbackArtwork(document() ? protect(document()->loader()) : nullptr); images.size())
-            m_defaultMetadata = MediaMetadata::create(*this, WTF::move(images));
+            lazyInitialize(m_defaultMetadata, MediaMetadata::create(*this, WTF::move(images)));
     }
 
     if (RefPtr metadataWithImage = m_metadata && m_metadata->artworkImage() ? m_metadata : (m_defaultMetadata && m_defaultMetadata->artworkImage() ? m_defaultMetadata : nullptr)) {
@@ -648,10 +648,10 @@ void MediaSession::updateCaptureState(bool isActive, DOMPromiseDeferred<void>&& 
     }
 
     controller->updateCaptureState(*document, isActive, kind, [weakDocument = WeakPtr { document.get() }, promise = WTF::move(promise)] (auto&& exception) mutable {
-        RefPtr protectedDocument = weakDocument.get();
-        if (!protectedDocument)
+        RefPtr document = weakDocument;
+        if (!document)
             return;
-        protectedDocument->eventLoop().queueTask(TaskSource::MediaElement, [promise = WTF::move(promise), exception = WTF::move(exception)] () mutable {
+        protect(document->eventLoop())->queueTask(TaskSource::MediaElement, [promise = WTF::move(promise), exception = WTF::move(exception)] () mutable {
             if (exception) {
                 promise.reject(WTF::move(*exception));
                 return;

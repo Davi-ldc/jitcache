@@ -55,6 +55,7 @@
 #include <JavaScriptCore/InspectorAgentBase.h>
 #include <JavaScriptCore/InspectorBackendDispatcher.h>
 #include <JavaScriptCore/InspectorFrontendRouter.h>
+#include <JavaScriptCore/InspectorScriptProfilerAgent.h>
 #include <JavaScriptCore/JSLock.h>
 #include <JavaScriptCore/Strong.h>
 #include <wtf/CheckedPtr.h>
@@ -127,7 +128,7 @@ void FrameInspectorController::createConsoleAgent()
 
     auto context = frameAgentContext();
     UniqueRef consoleAgent = makeUniqueRef<FrameConsoleAgent>(context);
-    m_instrumentingAgents->setWebConsoleAgent(consoleAgent.ptr());
+    m_instrumentingAgents->setWebConsoleAgent(protect(consoleAgent).ptr());
     m_agents.append(WTF::move(consoleAgent));
     m_didCreateConsoleAgent = true;
 }
@@ -147,7 +148,10 @@ void FrameInspectorController::createLazyAgents()
         return;
 
     // Create debugger before agents that depend on it.
-    m_debugger = makeUnique<FrameDebugger>(*frame);
+    lazyInitialize(m_debugger, makeUnique<FrameDebugger>(*frame));
+
+    if (CheckedPtr scriptProfilerAgent = m_instrumentingAgents->persistentScriptProfilerAgent())
+        scriptProfilerAgent->installProfilingClientIfTracking(*m_debugger);
 
     auto context = frameAgentContext();
     m_agents.append(makeUniqueRef<FrameDebuggerAgent>(context));
@@ -254,6 +258,13 @@ Stopwatch& FrameInspectorController::executionStopwatch() const
 JSC::Debugger* FrameInspectorController::debugger()
 {
     return m_debugger.get();
+}
+
+JSC::Debugger* FrameInspectorController::attachedDebugger() const
+{
+    if (m_debugger && m_debugger->isAttachedToFrame())
+        return m_debugger.get();
+    return nullptr;
 }
 
 JSC::VM& FrameInspectorController::vm()

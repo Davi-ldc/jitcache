@@ -72,6 +72,7 @@ FlexLayoutConstraints FlexLayout::flexLayoutConstraints() const
     FlexFormattingUtils utils { flexBox() };
     return {
         .style = flexBox().style(),
+        .minimumLineCount = FlexFormattingUtils::minimumLineCount(flexBox()),
         .isHorizontalFlow = FlexFormattingUtils::isHorizontalFlow(flexBox()),
         .isColumnFlow = FlexFormattingUtils::isColumnFlow(flexBox()),
         .isMultiline = FlexFormattingUtils::isMultiline(flexBox()),
@@ -489,8 +490,10 @@ bool FlexLayout::hasDefiniteSizeForPercentResolution(const RenderBox& flexItem)
         return FlexFormattingUtils::alignmentForFlexItem(flexItem) == ItemPosition::Stretch;
 
     // Flexbox 9.8 rule 2: definite flex-basis makes post-flexing main size definite.
+    // A percentage (or stretch) flex-basis is definite only when the container's block size is, which is rule 1 below.
     auto* flexLayoutState = m_flexLayoutState ? &*m_flexLayoutState : nullptr;
-    if (FlexIntegrationUtils::flexItemMainSizeIsDefinite(flexItem, FlexFormattingUtils::flexBasisForFlexItem(flexItem), flexLayoutState))
+    auto flexBasis = FlexFormattingUtils::flexBasisForFlexItem(flexItem);
+    if (!flexBasis.isPercentOrCalculated() && !flexBasis.isStretch() && FlexIntegrationUtils::flexItemMainSizeIsDefinite(flexItem, flexBasis, flexLayoutState))
         return true;
 
     // Flexbox 9.8 rule 1: definite container main size makes post-flexing sizes definite.

@@ -85,10 +85,10 @@ static FloatRect inlineVideoFrame(HTMLVideoElement& element)
     if (renderer->hasLayer() && renderer->enclosingLayer()->isComposited()) {
         FloatQuad contentsBox = static_cast<FloatRect>(renderer->enclosingLayer()->backing()->inlineVideoContentsBox());
         contentsBox = renderer->localToContainerQuad(contentsBox, nullptr);
-        return protect(document->view())->contentsToRootView(contentsBox.boundingBox());
+        return protect(document->view())->contentsToMainFrameView(contentsBox.boundingBox());
     }
 
-    return renderer->videoBoxInRootView();
+    return renderer->videoBoxInMainFrameView();
 }
 
 #pragma mark - VideoPresentationInterfaceContext
@@ -265,6 +265,15 @@ void VideoPresentationManager::removeContext(WebCore::MediaPlayerClientIdentifie
 
     model->setVideoElement(nullptr);
     m_videoElements.remove(*videoElement);
+}
+
+RefPtr<WebCore::HTMLVideoElement> VideoPresentationManager::videoElementForContext(WebCore::MediaPlayerClientIdentifier contextId) const
+{
+    auto it = m_contextMap.find(contextId);
+    if (it == m_contextMap.end())
+        return nullptr;
+
+    return std::get<0>(it->value)->videoElement();
 }
 
 void VideoPresentationManager::addClientForContext(WebCore::MediaPlayerClientIdentifier contextId)

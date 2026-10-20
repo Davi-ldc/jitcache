@@ -1,4 +1,17 @@
 #!/usr/bin/env vpython3
+# /// script
+# requires-python = '>=3.11,<3.12'
+# dependencies = [
+#   'requests==2.32.5',
+#   'charset-normalizer==2.0.12',
+#   'idna==3.10',
+#   'urllib3==2.5.0',
+#   'certifi==2025.8.3',
+#   'httplib2==0.22.0',
+#   'pyparsing==3.2.0'
+# ]
+# ///
+
 # Copyright 2026 The ANGLE project authors. All Rights Reserved.
 #
 # Use of this source code is governed by a BSD-style license
@@ -66,6 +79,7 @@ SYNCED_VARIABLES = {
     # directly once `gclient setdeps` works properly with the specified
     # version.
     'android_ndk_version': None,
+    'cpython3_version': None,
 }
 
 # DEPS entries which have dep_type = cipd. In the Chromium DEPS file, these

@@ -90,7 +90,8 @@ static WorkerParameters generateWorkerParameters(const WorkerFetchResult& worker
         *initializationData.clientIdentifier,
         document.advancedPrivacyProtections(),
         document.noiseInjectionHashSalt(),
-        makeString(Process::identifier().toUInt64(), "-sharedworker-"_s, initializationData.clientIdentifier->toString())
+        makeString(Process::identifier().toUInt64(), "-sharedworker-"_s, initializationData.clientIdentifier->toString()),
+        document.networkLoadPolicy()
     };
 }
 
@@ -146,7 +147,7 @@ void SharedWorkerThreadProxy::notifyNetworkStateChange(bool isOnline)
     postTaskForModeToWorkerOrWorkletGlobalScope([isOnline] (ScriptExecutionContext& context) {
         auto& globalScope = downcast<WorkerGlobalScope>(context);
         globalScope.setIsOnline(isOnline);
-        globalScope.eventLoop().queueTask(TaskSource::DOMManipulation, [globalScope = Ref { globalScope }, isOnline] {
+        protect(globalScope.eventLoop())->queueTask(TaskSource::DOMManipulation, [globalScope = Ref { globalScope }, isOnline] {
             globalScope->dispatchEvent(Event::create(isOnline ? eventNames().onlineEvent : eventNames().offlineEvent, Event::CanBubble::No, Event::IsCancelable::No));
         });
     }, WorkerRunLoop::defaultMode());
@@ -183,7 +184,7 @@ RefPtr<CacheStorageConnection> SharedWorkerThreadProxy::createCacheStorageConnec
 {
     ASSERT(isMainThread());
     if (!m_cacheStorageConnection)
-        m_cacheStorageConnection = Ref { m_cacheStorageProvider.get() }->createCacheStorageConnection();
+        lazyInitialize(m_cacheStorageConnection, Ref { m_cacheStorageProvider.get() }->createCacheStorageConnection());
     return m_cacheStorageConnection;
 }
 

@@ -41,6 +41,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 namespace JSC {
 
 class UnlinkedValueProfile;
+class ValueProfileRef;
 
 template<unsigned numberOfBucketsArgument, unsigned numberOfSpecFailBucketsArgument>
 struct ValueProfileBase {
@@ -83,14 +84,15 @@ struct ValueProfileBase {
     }
 
     bool isSampledBefore() const { return m_prediction != SpecNone; }
+    SpeculatedType prediction() const { return m_prediction; }
     
-    CString briefDescription()
+    UTF8CString briefDescription()
     {
         SpeculatedType prediction = computeUpdatedPrediction();
         
         StringPrintStream out;
         out.print("predicting ", SpeculationDump(prediction));
-        return out.toCString();
+        return out.toUTF8CString();
     }
     
     void dump(PrintStream& out)
@@ -155,6 +157,15 @@ struct ArgumentValueProfile : public ValueProfileBase<1, 1> {
 };
 
 struct ValueProfileAndVirtualRegister : public ValueProfile {
+    // An empty bucket means no sample, so the empty value goes to the prediction: a sampled operand never predicts SpecNone.
+    void sample(JSValue value)
+    {
+        if (value)
+            m_buckets[0] = JSValue::encode(value);
+        else
+            mergeSpeculation(m_prediction, SpecEmpty);
+    }
+
     VirtualRegister m_operand;
 };
 
@@ -215,12 +226,7 @@ class UnlinkedValueProfile {
 public:
     UnlinkedValueProfile() = default;
 
-    void update(ValueProfile& profile)
-    {
-        SpeculatedType newType = profile.m_prediction | m_prediction;
-        profile.m_prediction = newType;
-        m_prediction = newType;
-    }
+    inline void update(ValueProfileRef&);
 
     void update(ArgumentValueProfile& profile)
     {

@@ -226,6 +226,7 @@ void ComputedStyle::copyContentFrom(const ComputedStyle& other)
 void ComputedStyle::copyPseudoElementBitsFrom(const ComputedStyle& other)
 {
     m_nonInheritedFlags.pseudoBits = other.m_nonInheritedFlags.pseudoBits;
+    m_nonInheritedFlags.pseudoElementBoxGeneration = other.m_nonInheritedFlags.pseudoElementBoxGeneration;
 }
 
 bool ComputedStyle::operator==(const ComputedStyle& other) const
@@ -308,9 +309,12 @@ bool ComputedStyle::borderAndBackgroundEqual(const ComputedStyle& other) const
         && backgroundColor() == other.backgroundColor();
 }
 
-float ComputedStyle::computedLineHeight() const
+float ComputedStyle::usedLineHeight() const
 {
-    return evaluate<float>(lineHeight(), LineHeightEvaluationContext { usedFontSize(), metricsOfPrimaryFont().lineSpacing() }, usedZoomForLength());
+    return evaluate<float>(textAutosizingAdjustedLineHeight(), LineHeightEvaluationContext {
+        usedFontSize(),
+        metricsOfPrimaryFont().lineSpacing()
+    }, usedZoomForLength());
 }
 
 bool ComputedStyle::scrollSnapDataEquivalent(const ComputedStyle& other) const

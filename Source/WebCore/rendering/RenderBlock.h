@@ -77,7 +77,7 @@ public:
     void addOutOfFlowBox(RenderBox&);
     static void removeOutOfFlowBox(const RenderBox&);
     enum class ContainingBlockState : bool { NewContainingBlock, SameContainingBlock };
-    void removeOutOfFlowBoxes(const RenderBlock*, ContainingBlockState = ContainingBlockState::SameContainingBlock);
+    void removeOutOfFlowBoxes(const RenderElement*, ContainingBlockState = ContainingBlockState::SameContainingBlock);
 
     TrackedRendererListHashSet* NODELETE outOfFlowBoxes() const LIFETIME_BOUND;
     bool hasOutOfFlowBoxes() const
@@ -180,7 +180,6 @@ public:
     LayoutUnit borderBefore() const override;
 
     LayoutUnit marginBefore(WritingMode) const override;
-    LayoutUnit marginBefore() const { return marginBefore(writingMode()); }
 
     LayoutUnit adjustBorderBoxLogicalHeightForBoxSizing(LayoutUnit height) const override;
     LayoutUnit adjustContentBoxLogicalHeightForBoxSizing(std::optional<LayoutUnit> height) const override;
@@ -259,8 +258,6 @@ public:
     void adjustBorderBoxRectForPainting(LayoutRect&) override;
     LayoutRect paintRectToClipOutFromBorder(const LayoutRect&) override;
 
-    void boundingRects(Vector<LayoutRect>&, const LayoutPoint& accumulatedOffset) const override;
-    void absoluteQuads(Vector<FloatQuad>&, bool* wasFixed) const override;
     Node* nodeForHitTest() const override;
 
     PaintInfo paintInfoForBlockChildren(const PaintInfo&) const;
@@ -293,6 +290,8 @@ protected:
 
     std::pair<LayoutUnit, LayoutUnit> computeIntrinsicLogicalWidths() const override;
     void computeIntrinsicLogicalWidthContributions() override;
+    std::optional<LayoutUnit> fixedLogicalWidthContribution(const Style::PreferredSize&) const;
+    std::pair<LayoutUnit, LayoutUnit> logicalWidthContributionsForSize(const Style::PreferredSize&, LayoutUnit minContentLogicalWidth, LayoutUnit maxContentLogicalWidth) const;
     
     std::optional<LayoutUnit> firstLineBaseline() const override;
     std::optional<LayoutUnit> lastLineBaseline() const override;
@@ -340,6 +339,10 @@ protected:
 
     LayoutSize intrinsicSize() const override;
 
+    // Hit-tests a fieldset's legend, which is excluded from normal layout and placed in the border,
+    // so it is positioned against the unscrolled offset rather than the scrolled content.
+    bool hitTestExcludedChildrenInBorder(const HitTestRequest&, HitTestResult&, const HitTestLocation& locationInContainer, const LayoutPoint& accumulatedOffset, HitTestAction);
+
 private:
     // FIXME-BLOCKFLOW: Remove virtualizaion when all callers have moved to RenderBlockFlow
     virtual LayoutUnit logicalRightFloatOffsetForLine(LayoutUnit, LayoutUnit fixedOffset, LayoutUnit) const { return fixedOffset; };
@@ -367,12 +370,9 @@ private:
     virtual bool hitTestFloats(const HitTestRequest&, HitTestResult&, const HitTestLocation&, const LayoutPoint&) { return false; }
     virtual bool hitTestChildren(const HitTestRequest&, HitTestResult&, const HitTestLocation& locationInContainer, const LayoutPoint& adjustedLocation, HitTestAction);
     virtual bool hitTestInlineChildren(const HitTestRequest&, HitTestResult&, const HitTestLocation&, const LayoutPoint&, HitTestAction) { return false; }
-    bool hitTestExcludedChildrenInBorder(const HitTestRequest&, HitTestResult&, const HitTestLocation& locationInContainer, const LayoutPoint& accumulatedOffset, HitTestAction);
 
     std::pair<LayoutUnit, LayoutUnit> computeBlockIntrinsicLogicalWidths() const;
     
-    LayoutRect rectWithOutlineForRepaint(const RenderLayerModelObject* repaintContainer, LayoutUnit outlineWidth) const final;
-    const Style::ComputedStyle& outlineStyleForRepaint() const LIFETIME_BOUND final;
 
     LayoutRect selectionRectForRepaint(const RenderLayerModelObject* repaintContainer, bool /*clipToVisibleContent*/) final
     {

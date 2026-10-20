@@ -32,6 +32,7 @@
 #import <pal/spi/cocoa/NetworkSPI.h>
 #import <wtf/SoftLinking.h>
 #import <wtf/cocoa/TypeCastsCocoa.h>
+#import <wtf/text/CString.h>
 #import <wtf/text/WTFString.h>
 
 SOFT_LINK_LIBRARY(libnetworkextension)
@@ -47,15 +48,15 @@ SOFT_LINK_OPTIONAL(libnetwork, nw_parameters_set_attributed_bundle_identifier, v
 
 namespace WebKit {
 
-void setNWParametersApplicationIdentifiers(nw_parameters_t parameters, const char* sourceApplicationBundleIdentifier, std::optional<audit_token_t> sourceApplicationAuditToken, const String& attributedBundleIdentifier)
+void setNWParametersApplicationIdentifiers(nw_parameters_t parameters, const UTF8CString& sourceApplicationBundleIdentifier, std::optional<audit_token_t> sourceApplicationAuditToken, const String& attributedBundleIdentifier)
 {
-    if (sourceApplicationBundleIdentifier && *sourceApplicationBundleIdentifier)
-        nw_parameters_set_source_application_by_bundle_id(parameters, sourceApplicationBundleIdentifier);
+    if (!sourceApplicationBundleIdentifier.isEmpty())
+        nw_parameters_set_source_application_by_bundle_id(parameters, sourceApplicationBundleIdentifier.legacyCStringPointer());
     else if (sourceApplicationAuditToken)
         nw_parameters_set_source_application(parameters, *sourceApplicationAuditToken);
 
     if (!attributedBundleIdentifier.isEmpty() && nw_parameters_set_attributed_bundle_identifierPtr())
-        nw_parameters_set_attributed_bundle_identifierPtr()(parameters, attributedBundleIdentifier.utf8().data());
+        nw_parameters_set_attributed_bundle_identifierPtr()(parameters, attributedBundleIdentifier.utf8().legacyCStringPointer());
 }
 
 void setNWParametersTrackerOptions(nw_parameters_t parameters, bool shouldBypassRelay, bool isFirstParty, bool isKnownTracker)
@@ -111,6 +112,20 @@ std::optional<uint32_t> trafficClassFromDSCP(webrtc::DiffServCodePoint dscpValue
         break;
     };
     return { };
+}
+
+nw_ip_version_t ipVersionFromFamily(int family)
+{
+    switch (family) {
+    case AF_INET:
+        return nw_ip_version_4;
+    case AF_INET6:
+        return nw_ip_version_6;
+    case AF_UNSPEC:
+        return nw_ip_version_any;
+    }
+    ASSERT_NOT_REACHED();
+    return nw_ip_version_any;
 }
 
 } // namespace WebKit

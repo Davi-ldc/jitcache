@@ -88,12 +88,13 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, useExecutionCountForCodeBlockAging, true, Normal, "If true, an LLInt/Baseline CodeBlock whose execution counter has advanced since the last old-age check is treated as still in use and its TTL is renewed instead of being jettisoned."_s) \
     v(Unsigned, optimizedCodeAgingQuietAllocationMB, 1, Normal, "A collection that finds more than this much allocated since the last one that did marks the mutator as active for the aging of FTL code (and DFG code without a tier-up counter); an embedder-tagged idle collection lets such code go once nothing has been active for optimizedCodeAgingQuietSeconds. 0 = such code never ages out."_s) \
     v(Double, optimizedCodeAgingQuietSeconds, 30, Normal, "How long since the last active collection (and since the code was installed) before an idle collection lets such code go (capped at the tier's TTL under useEagerCodeBlockJettisonTiming)."_s) \
-    v(Double, codeBlockAgingLeaseMultiplier, 3.0, Normal, "When useExecutionCountForCodeBlockAging proves a CodeBlock is still active, renew its old-age TTL to this many multiples of timeToLive for its tier."_s)
+    v(Double, codeBlockAgingLeaseMultiplier, 3.0, Normal, "When useExecutionCountForCodeBlockAging proves a CodeBlock is still active, renew its old-age TTL to this many multiples of timeToLive for its tier."_s) \
+    v(Bool, useSharedModuleFunctionExpressionExecutables, false, Normal, "If true, the FunctionExecutables of the function expressions and classes in a module's top-level code belong to its ModuleProgramExecutable rather than to each linked ModuleProgramCodeBlock, so their CodeBlocks and JIT code outlive the module's own linked code and are shared by every evaluation of the module."_s) \
+    v(Bool, useRunOnceCodeRelease, true, Normal, "If true, a module program lets go of its CodeBlock, unlinked code block (and its CodeCache entry) as soon as its evaluation has finished (unless records of several module loaders share it, which run the same code again), and a program does once it has run, instead of keeping them for as long as any function they created lives."_s)
 #define FOR_EACH_JSC_BYTECODE_CACHE_DECODER_OPTION(v) \
-    v(Bool, useLeanBytecodeCacheDecoder, true, Normal, "If true, the bytecode cache Decoder skips bookkeeping that is only needed for decoded objects shared by multiple references."_s) \
-    v(Bool, useBorrowedBytecodeFromCache, true, Normal, "If true, instruction streams and expression info decoded from a persistent (mmap'd/embedded) bytecode cache alias the cache instead of copying it."_s) \
-    v(Bool, diskCachePayloadIsPersistentForTesting, false, Normal, "jsc shell: keep files mapped from diskCachePath for the life of the process and mark them persistent, so useBorrowedBytecodeFromCache applies to them."_s) \
-    v(Bool, verifyBytecodeCacheChecksums, true, Normal, "check each code block's CRC when it is decoded from a bytecode cache and fall back to generating it from source on a mismatch"_s)
+    v(Bool, diskCachePayloadIsPersistentForTesting, false, Normal, "jsc shell: keep files mapped from diskCachePath for the life of the process and mark them persistent, so what is decoded from them borrows from and defers into the mapping as it does with an embedded payload."_s) \
+    v(Bool, usePrelinkedModuleInfo, true, Normal, "If true, module records the embedder creates from a pre-resolved module graph (PrelinkedModuleGraph) keep their entries in the graph: requested modules are wired by index, import/export resolution, GetImportedModule, InitializeEnvironment and GetModuleNamespace read the graph's tables, and the by-name entry maps are only built on demand. If false such records copy their entries out of the graph and behave like ModuleAnalyzer's."_s) \
+    v(Bool, validatePrelinkedModuleInfo, false, Normal, "Cross-check every pre-resolved import/export binding of a PrelinkedModuleGraph against the specification's ResolveExport and crash on a mismatch."_s)
 #else
 #define FOR_EACH_JSC_FFI_OPTION(v)
 #define FOR_EACH_JSC_CODEBLOCK_AGING_OPTION(v)
@@ -116,6 +117,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, useRegExpAlternationFactoring, true, Normal, "factors shared prefixes out of wide alternations and folds wide top-level alternations into a group"_s) \
     v(Bool, useRegExpAlternationDispatch, true, Normal, "lets the RegExp JIT dispatch a group's alternatives on their first character and compare short literal alternatives inline"_s) \
     v(Unsigned, regExpDispatchMaxInlineLiteralLength, 32, Normal, "longest literal alternative (up to the JIT's ceiling of 32) the RegExp JIT compares inline inside a first-character dispatch chain; 0 disables inline literals"_s) \
+    v(Bool, useLazyRegExpPatternConstruction, true, Normal, "RegExp creation only syntax-checks and capture-counts patterns longer than 64 characters (other than pure literals, named-group and deeply nested patterns) instead of building a YarrPattern it then discards; the pattern is first built when the RegExp is compiled, so YarrPatternConstructor::setupOffsets errors surface there and its error code can differ from the eager one"_s) \
     \
     v(Bool, reportMustSucceedExecutableAllocations, false, Normal, nullptr) \
     /* Bun Features */\
@@ -133,6 +135,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Unsigned, structureHeapSizeInKB, 0, Normal, "Override for Structure Heap size (in KBs) if non-zero"_s) \
     v(Unsigned, jitMemoryReservationSize, 0, Normal, "Set this number to change the executable allocation size in ExecutableAllocatorFixedVMPool. (In bytes.)"_s) \
     v(Size, jitMemoryReservationAddress, 0, Restricted, "If non-zero, we will attempt to allocate JIT memory at the address provided and crash if we cannot.") \
+    v(Size, maximumCachedAssemblerDataCapacity, 4 * MB, Normal, "When useCachedAssemblerDataCapacityLimit is true, a thread does not keep an AssemblerData buffer larger than this cached for reuse. (In bytes.)"_s) \
     \
     v(Bool, forceCodeBlockLiveness, false, Normal, nullptr) \
     v(Bool, forceICFailure, false, Normal, nullptr) \
@@ -144,6 +147,15 @@ bool hasCapacityToUseLargeGigacage();
     v(Unsigned, initialRepatchBufferingCountdown, 6, Normal, nullptr) \
     \
     v(Bool, dumpGeneratedBytecodes, false, Normal, nullptr) \
+    v(Bool, useSharedRegExpLiteralObjects, true, Normal, "reuse one RegExpObject per literal site when the object provably cannot be observed"_s) \
+    v(Bool, useBytecodeOptimizer, false, Normal, "run the whole-function bytecode optimizer on all generated bytecode (bytecode-cache image generation runs it when the embedder passes OptimizeBytecode::Yes)") \
+    v(Bool, useBytecodeOptimizerCopyPropagation, true, Normal, "bytecode optimizer: copy propagation / destination coalescing") \
+    v(Bool, useBytecodeOptimizerTDZ, true, Normal, "bytecode optimizer: redundant TDZ check elimination") \
+    v(Bool, useBytecodeOptimizerScopeCache, true, Normal, "bytecode optimizer: cache environment-record scope resolutions in fresh registers") \
+    v(Bool, useBytecodeOptimizerStaticScopes, true, Normal, "bytecode optimizer: resolve environment-record variables statically (no abstractResolve at link)") \
+    v(Bool, validateBytecodeOptimizerStaticScopes, false, Normal, "check statically resolved scopes against JSScope::abstractResolve when linking") \
+    v(Bool, dumpBytecodeOptimizer, false, Normal, "dump the bytecode optimizer IR") \
+    v(Bool, reportBytecodeOptimizer, false, Normal, "report per-code-block bytecode optimizer statistics") \
     v(Bool, dumpBytecodeLivenessResults, false, Normal, nullptr) \
     v(Bool, validateBytecode, false, Normal, nullptr) \
     v(Bool, forceDebuggerBytecodeGeneration, false, Normal, nullptr) \
@@ -261,7 +273,6 @@ bool hasCapacityToUseLargeGigacage();
     v(Double, minEdenToOldGenerationRatio, 1.0 / 3.0, Normal, "after an eden GC, schedule a full collection if remainingHeapSize / maxHeapSize falls below this; bounds the usable heap growth factor below at 1 / (1 - value)"_s) \
     v(Unsigned, heapGrowthFunctionThresholdInMB, 16 * 1024, Normal, nullptr) \
     v(Double, criticalGCMemoryThreshold, 0.80, Normal, "percent memory in use the GC considers critical.  The collector is much more aggressive above this threshold"_s) \
-    v(Double, customFullGCCallbackBailThreshold, -1.0, Normal, "percent of memory paged out before we bail out of timer based Full GCs. -1.0 means use (maxHeapGrowthFactor - 1)"_s) \
     v(Double, minimumMutatorUtilization, 0, Normal, nullptr) \
     v(Double, maximumMutatorUtilization, 0.7, Normal, nullptr) \
     v(Double, epsilonMutatorUtilization, 0.01, Normal, nullptr) \
@@ -279,11 +290,15 @@ bool hasCapacityToUseLargeGigacage();
     v(Double, warmUpMarkedBlockIdleTimeout, 10, Normal, "seconds without a MarkedBlock request before the helper thread releases what it is holding and shuts down"_s) \
     v(Bool, scribbleFreeCells, false, Normal, nullptr) \
     v(Bool, decommitUnusedMarkedBlockPages, true, Normal, "after sweeping a MarkedBlock, return its interior OS pages that hold no live cell to the OS (only where OS pages are smaller than a MarkedBlock)") \
+    v(Bool, evacuateAuxiliaryBlocksAfterEveryFullCollection, false, Normal, "testing: evacuate every Auxiliary block after each full collection, wherever the mutator happens to be, and scribble the old copies"_s) \
+    v(Bool, poisonDecommittedMarkedBlockPages, false, Normal, "testing: make any read of a decommitted MarkedBlock page before the block's next sweep to a free list fail (ASan poison; without ASan a 0xbd fill)"_s) \
     v(Bool, decommitUnusedMarkedBlockPagesAfterEdenCollections, false, Normal, "also do it for blocks swept after an eden collection (mostly young blocks that are refilled straight away)") \
+    v(Bool, releaseIdleRegExpCodeWhenShrinkingFootprint, false, Normal, "VM::shrinkFootprintNow(KeepCodeInUse) also drops the compiled code of RegExps that have not matched since the last full collection began"_s) \
     v(Double, sizeClassProgression, 1.4, Normal, nullptr) \
     v(Unsigned, preciseAllocationCutoff, 100000, Normal, nullptr) \
     v(Bool, dumpSizeClasses, false, Normal, nullptr) \
     v(Bool, stealEmptyBlocksFromOtherAllocators, true, Normal, nullptr) \
+    v(Unsigned, weakBlockPoolDivisor, 16, Normal, "MarkedBlocks per empty WeakBlock the Heap keeps pooled for reuse. 0 pools nothing.") \
     v(Bool, eagerlyUpdateTopCallFrame, false, Normal, nullptr) \
     v(Bool, dumpZappedCellCrashData, false, Normal, nullptr) \
     \
@@ -403,10 +418,12 @@ bool hasCapacityToUseLargeGigacage();
     v(Double, dfgThresholdScaleForFewPerformanceCores, 2.0, Normal, "On Apple silicon Macs with few Super and Performance cores, scale the DFG tier-up thresholds (thresholdForOptimize*) by this factor."_s) \
     v(Double, ftlThresholdScaleForFewPerformanceCores, 1.5, Normal, "On Apple silicon Macs with few Super and Performance cores, scale the FTL tier-up thresholds (thresholdForFTLOptimize*) by this factor."_s) \
     v(Bool, forceEagerCompilation, false, Normal, nullptr) \
+    v(Double, startupJITDeferralScale, 1, Normal, "While the VM's startup window is active, LLInt->Baseline and Baseline->DFG tier-up require this multiple of the normal execution-count threshold (1 = off)."_s) \
     v(Int32, thresholdForJITAfterWarmUp, 500, Normal, nullptr) \
     v(Int32, thresholdForJITSoon, 100, Normal, nullptr) \
     v(Bool, jitCacheImportLLIntProgress, true, Normal, "JITCache: a body imported without baseline code arms its LLInt counter with the progress it carries, at most one invocation short of crossing; false arms it from zero. A measurement switch."_s) \
     v(Bool, jitCacheVouchedHolderDigests, true, Normal, "JITCache: a child UFE an imported parent's decode made is checked against the holder digest the parent's body lists for it, which strict also recomputes; false computes every child's holder digest. A measurement switch."_s) \
+    v(Bool, jitCacheImportModuleAnalysis, true, Normal, "JITCache: a module whose body carries its analysis gets it in place of the analysis parse; false parses every module as without JITCache while its UCB still imports. A measurement switch."_s) \
     \
     v(Int32, thresholdForOptimizeAfterWarmUp, 1000, Normal, nullptr) \
     v(Int32, thresholdForOptimizeAfterLongWarmUp, 1000, Normal, nullptr) \
@@ -436,6 +453,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Unsigned, osrExitCountForReoptimizationFromLoop, 5, Normal, nullptr) \
     \
     v(Unsigned, reoptimizationRetryCounterMax, 0, Normal, nullptr)  \
+    v(Unsigned, weakReferenceJettisonReoptimizationLimit, 4, Normal, "Optimized code jettisoned because a cell it references weakly died counts toward the reoptimization back-off of its function, like code jettisoned for exiting too often, while the function's reoptimization retry counter is below this value. 0: it never counts."_s) \
     \
     v(Unsigned, minimumOptimizationDelay, 1, Normal, nullptr) \
     v(Unsigned, maximumOptimizationDelay, 5, Normal, nullptr) \
@@ -582,7 +600,8 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, useB3HoistLoopInvariantValues, true, Normal, nullptr) \
     v(Bool, useB3CanonicalizePrePostIncrements, false, Normal, nullptr) \
     v(Bool, useB3EliminateWasmGCAllocations, true, Normal, "eliminate non-escaping wasm-GC struct allocations in B3"_s) \
-    v(Bool, useB3ReduceStrengthFixpoint, false, Normal, "iterate B3 reduceStrength to a fixpoint instead of a single pass (for debugging)"_s) \
+    v(Unsigned, maxB3WasmGCEpochSnapshotEntries, 1024 * 1024, Normal, "blocks times version counters above which B3 reduceStrength gives all wasm-GC struct fields one shared counter rather than one each"_s) \
+    v(Bool, useB3SpecializeSelect, true, Normal, "turn Selects consumed by a nearby Check into control flow in B3"_s) \
     v(Bool, useAirOptimizePairedLoadStore, true, Normal, nullptr) \
     \
     v(Bool, useDollarVM, false, Restricted, "installs the $vm debugging tool in global objects"_s) \
@@ -647,6 +666,7 @@ bool hasCapacityToUseLargeGigacage();
     v(OptionRange, wasmFunctionIndexRangeToCompile, nullptr, Normal, "wasm function index range to allow compilation on, e.g. 1:100"_s) \
     v(Bool, useEagerWasmModuleHashing, false, Normal, "Unnamed Wasm modules are identified in backtraces through their hash, if available."_s) \
     v(Bool, useArrayAllocationProfiling, true, Normal, "If true, we will use our normal array allocation profiling. If false, the allocation profile will always claim to be undecided."_s) \
+    v(Bool, useCopyOnWriteArraysForImmutableProperties, true, Normal, "If true, JSObject::makePropertiesImmutable() makes a JSArray whose Int32, Double or Contiguous elements have no holes a copy-on-write array. If false, it enters dictionary indexing mode, as every other object with elements does."_s) \
     v(Bool, forcePolyProto, false, Normal, "If true, create_this will always create an object with a poly proto structure."_s) \
     v(Bool, forceMiniVMMode, false, Normal, "If true, it will force mini VM mode on."_s) \
     v(Bool, useTracePoints, false, Normal, nullptr) \
@@ -696,6 +716,13 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, verboseExecutablePoolAllocation, false, Normal, nullptr) \
     v(Bool, useHandlerICInFTL, false, Normal, nullptr) \
     v(Bool, useLLIntICs, true, Normal, "Use property and call ICs in LLInt code."_s) \
+    v(Bool, useLazyValueProfilePredictions, true, Normal, "Allocate the predictions of a CodeBlock's value profiles the first time one of them has something to predict instead of when the CodeBlock is linked."_s) \
+    v(Int32, thresholdForValueProfilePredictions, 40, Normal, "LLInt execution count (5 per call, 10 per return, 1 per loop iteration) below which a collection leaves the samples of an interpreted CodeBlock's value profiles in their buckets instead of folding them into predictions."_s) \
+    v(Bool, useLazyLLIntCallLinkInfos, true, Normal, "Allocate the CallLinkInfo and the ArrayProfile of a call site in LLInt / Baseline metadata when the site is executed for the second time (tail calls: for the first time) instead of when the CodeBlock is linked."_s) \
+    v(Bool, useLazyFunctionExecutables, true, Normal, "If true, a CodeBlock creates the FunctionExecutable for a function declaration / expression the first time that new_func* executes (or before a JIT compiles the block) instead of creating all of them when the CodeBlock is linked; a module body never creates one for its heap-allocated declarations (the module environment already did)."_s) \
+    v(Bool, useLazyModuleFunctionDeclarations, true, Normal, "If true, InitializeEnvironment leaves the module environment slot of a function declaration empty and the function object (and its FunctionExecutable) is created the first time the binding is read: get_from_scope with the LazyClosureVar resolve type, a by-name lookup on the module environment, or a module namespace object property access."_s) \
+    v(Bool, predictFunctionForUnprofiledLazyClosureVarForTesting, false, Normal, "The DFG treats a get_from_scope<LazyClosureVar> that never ran as producing a function instead of exiting, so that tests reach the optimizing tiers' code for instantiating a function declaration."_s) \
+    v(Bool, useLazyCatchLiveness, true, Normal, "If true, an op_catch that executes in the LLInt / Baseline JIT does not run the function's bytecode liveness analysis to size its value-profile buffer; the buffers of the catches that have executed are created when the function first crosses its DFG threshold (that tier-up is delayed once so they can profile), and op_catch profiles only once its buffer exists."_s) \
     v(Bool, useBaselineJITCodeSharing, jitEnabledByDefault(), Normal, nullptr) \
     v(Bool, libpasScavengeContinuously, false, Normal, nullptr) \
     v(Unsigned, libpasForcePGMWithRate, 0, Normal, "Forces on probablistic guard malloc and guards allocations with a rate 1/N (0 is disabled)"_s) \
@@ -832,7 +859,7 @@ struct OptionsStorage {
     using Int32 = int32_t;
     using Size = size_t;
     using OptionRange = JSC::OptionRange;
-    using OptionString = const char*;
+    using OptionString = const char8_t*;
     using GCLogLevel = GCLogging::Level;
     using OSLogType = JSC::OSLogType;
 

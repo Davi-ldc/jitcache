@@ -38,6 +38,7 @@
 #include "Latin1TextIterator.h"
 #include "LayoutInlineTextBox.h"
 #include "RenderBox.h"
+#include "RenderGlyph.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "SurrogatePairAwareTextIterator.h"
 #include "TextRun.h"
@@ -66,8 +67,9 @@ InlineLayoutUnit TextUtil::width(const InlineTextBox& inlineTextBox, const FontC
         return 0;
 
     if (inlineTextBox.hasSynthesizedGlyph()) {
-        // The glyph the counter style's character would draw is not used: TextBoxPainter draws in its place, sized from the font metrics, and reserving that same size here keeps the two in step.
-        return (fontCascade.metricsOfPrimaryFont().intAscent() * 2 / 3 + 1) / 2 + 2;
+        if (CheckedPtr glyphRenderer = dynamicDowncast<RenderGlyph>(inlineTextBox.rendererForIntegration()))
+            return glyphRenderer->advanceRatio() * fontCascade.size();
+        return (fontCascade.metricsOfPrimaryFont().intAscent() * 2 / 3 + 1) / 2 + 2; // List bullet.
     }
 
     if (inlineTextBox.isCombined())
@@ -158,10 +160,10 @@ static void fallbackFontsForRunWithIterator(SingleThreadWeakHashSet<const Font>&
                 // "Unsupported Default_ignorable characters must be ignored for text rendering."
                 auto isIgnored = isDefaultIgnorableCodePoint(character);
 
-                // If we include the synthetic bold expansion, then even zero-width glyphs will have their fonts added.
-                if (isNonSpacingMark || glyphData.font->widthForGlyph(glyphData.glyph, Font::SyntheticBoldInclusion::Exclude))
+                if (isNonSpacingMark || glyphData.font->widthForGlyph(glyphData.glyph)) {
                     if (!isIgnored)
                         fallbackFonts.add(*glyphData.font);
+                }
             }
         };
         addFallbackFontForCharacterIfApplicable(currentCharacter);
@@ -391,7 +393,7 @@ bool TextUtil::mayBreakInBetween(String previousContent, const Style::ComputedSt
         // See the templated CharacterType in nextBreakablePosition for last and lastlast characters.
         nextContent.convertTo16Bit();
     }
-    auto lineBreakIteratorFactory = CachedLineBreakIteratorFactory { nextContent, Style::toPlatform(nextContentStyle.computedLocale()), TextUtil::lineBreakIteratorMode(nextContentStyle.lineBreak()), TextUtil::contentAnalysis(nextContentStyle.wordBreak()) };
+    auto lineBreakIteratorFactory = CachedLineBreakIteratorFactory { nextContent, Style::toPlatform(nextContentStyle.usedLocale()), TextUtil::lineBreakIteratorMode(nextContentStyle.lineBreak()), TextUtil::contentAnalysis(nextContentStyle.wordBreak()) };
     auto previousContentLength = previousContent.length();
     // FIXME: We should look into the entire uncommitted content for more text context.
     char16_t lastCharacter = previousContentLength ? previousContent[previousContentLength - 1] : 0;
@@ -464,7 +466,7 @@ EnumSet<TextUtil::WordBreakRule> TextUtil::wordBreakBehavior(const Style::Comput
         return { WordBreakRule::AtArbitraryPositionWithinWords };
 
     auto includeHyphenationIfAllowed = [&](std::optional<WordBreakRule> wordBreakRule) -> EnumSet<WordBreakRule> {
-        auto hyphenationIsAllowed = hyphenationIsDisabled == HyphenationIsDisabled::No && style.hyphens() == Hyphens::Auto && canHyphenate(Style::toPlatform(style.computedLocale()));
+        auto hyphenationIsAllowed = hyphenationIsDisabled == HyphenationIsDisabled::No && style.hyphens() == Hyphens::Auto && canHyphenate(Style::toPlatform(style.usedLocale()));
         if (hyphenationIsAllowed) {
             if (wordBreakRule)
                 return { *wordBreakRule, WordBreakRule::AtHyphenationOpportunities };
@@ -728,6 +730,15 @@ float TextUtil::hangablePunctuationEndWidth(const InlineTextItem& inlineTextItem
     return width(inlineTextItem, protect(style.fontCascade()), trailingPosition, trailingPosition + 1, { });
 }
 
+float TextUtil::hangablePunctuationEndWidth(const String& text, const Style::ComputedStyle& style)
+{
+    if (text.isEmpty() || !style.hangingPunctuation().contains(Style::HangingPunctuationValue::Last))
+        return { };
+    if (!isHangableClosePunctuation(text[text.length() - 1]))
+        return { };
+    return style.fontCascade().width(text.right(1));
+}
+
 bool TextUtil::hasHangableStopOrCommaEnd(const InlineTextItem& inlineTextItem, const Style::ComputedStyle& style)
 {
     if (!inlineTextItem.length() || !style.hangingPunctuation().containsAny({ Style::HangingPunctuationValue::AllowEnd, Style::HangingPunctuationValue::ForceEnd }))
@@ -786,8 +797,6 @@ bool TextUtil::canUseSimplifiedTextMeasuring(StringView textContent, const FontC
         return false;
 
     Ref primaryFont = fontCascade.primaryFont();
-    if (primaryFont->syntheticBoldOffset())
-        return false;
 
     if (textContent.is8Bit())
         return canUseSimplifiedTextMeasuringForCharacters(textContent.span8(), fontCascade, primaryFont, whitespaceIsCollapsed);

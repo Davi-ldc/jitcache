@@ -46,6 +46,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "ICStats.h"
 #include "InlineCacheCompiler.h"
 #include "Interpreter.h"
+#include "IteratorOperations.h"
 #include "JIT.h"
 #include "JITExceptions.h"
 #include "JITThunks.h"
@@ -66,6 +67,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "JSLexicalEnvironmentInlines.h"
 #include "JSMapIterator.h"
 #include "JSMicrotask.h"
+#include "JSModuleEnvironment.h"
 #include "JSPromise.h"
 #include "JSRemoteFunction.h"
 #include "JSSentinel.h"
@@ -74,12 +76,14 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "JSWithScope.h"
 #include "JumpTable.h"
 #include "LLIntEntrypoint.h"
+#include "LLIntSlowPaths.h"
+#include "MaxFrameExtentForSlowPathCall.h"
 #include "MegamorphicCache.h"
 #include "ObjectConstructor.h"
 #include "PropertyInlineCache.h"
 #include "PropertyName.h"
 #include "PropertyNameInlines.h"
-#include "RegExpObject.h"
+#include "RegExpObjectInlines.h"
 #include "RepatchInlines.h"
 #include "ShadowChicken.h"
 #include "SuperSampler.h"
@@ -2446,7 +2450,8 @@ JSC_DEFINE_JIT_OPERATION(operationPolymorphicCall, UCPURegister, (CallFrame* cal
     JSCell* owner = callLinkInfo->ownerForSlowPath(calleeFrame);
     VM& vm = owner->vm();
     NativeCallFrameTracer tracer(vm, calleeFrame);
-    sanitizeStackForVM(vm);
+    sanitizeStackForVMInCallSlowPath(vm);
+    ASSERT_CALL_SLOW_PATH_RUNS_IN_CLEARED_STACK(calleeFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
     calleeFrame->setCodeBlock(nullptr);
     JSCell* calleeAsFunctionCell;
@@ -2468,7 +2473,8 @@ JSC_DEFINE_JIT_OPERATION(operationVirtualCall, UCPURegister, (CallFrame* calleeF
     JSCell* owner = callLinkInfo->ownerForSlowPath(calleeFrame);
     VM& vm = owner->vm();
     NativeCallFrameTracer tracer(vm, calleeFrame);
-    sanitizeStackForVM(vm);
+    sanitizeStackForVMInCallSlowPath(vm);
+    ASSERT_CALL_SLOW_PATH_RUNS_IN_CLEARED_STACK(calleeFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
     calleeFrame->setCodeBlock(nullptr);
     JSCell* calleeAsFunctionCell;
@@ -2485,12 +2491,48 @@ JSC_DEFINE_JIT_OPERATION(operationDefaultCall, UCPURegister, (CallFrame* calleeF
     JSCell* owner = callLinkInfo->ownerForSlowPath(calleeFrame);
     VM& vm = owner->vm();
     NativeCallFrameTracer tracer(vm, calleeFrame);
-    sanitizeStackForVM(vm);
+    sanitizeStackForVMInCallSlowPath(vm);
+    ASSERT_CALL_SLOW_PATH_RUNS_IN_CLEARED_STACK(calleeFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
     calleeFrame->setCodeBlock(nullptr);
     void* callTarget = linkFor(vm, owner, calleeFrame, callLinkInfo);
     // Keep owner alive explicitly. Now this function can be called from tail-call. This means that CallFrame for that owner already goes away, so we should keep it alive if we would like to use it.
     ensureStillAliveHere(owner);
+    if (scope.exception()) [[unlikely]]
+        OPERATION_RETURN(scope, std::bit_cast<UCPURegister>(vm.getCTIStub(CommonJITThunkID::ThrowExceptionFromCall).template retagged<JSEntryPtrTag>().code().taggedPtr()));
+    OPERATION_RETURN(scope, std::bit_cast<UCPURegister>(std::bit_cast<uintptr_t>(callTarget)));
+}
+
+// For the call sites of Baseline code that cannot leave it to operationUnlinkedCall(): see JIT::compileOpCall().
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationEnsureCallLinkInfo, void, (CodeBlock* codeBlock, uint32_t bytecodeIndexBits))
+{
+    VM& vm = codeBlock->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    codeBlock->ensureCallLinkInfoAt(codeBlock->instructionAt(BytecodeIndex::fromBits(bytecodeIndexBits)));
+}
+
+// For a tail call of Baseline code whose site has not run yet: CallLinkInfo::emitFastPathImpl(). The caller has stored the call
+// site in its frame.
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationEnsureCallLinkInfoForTailCall, CallLinkInfo*, (CallFrame* callFrame))
+{
+    CodeBlock* codeBlock = callFrame->codeBlock();
+    VM& vm = codeBlock->vm();
+    NativeCallFrameTracer tracer(vm, callFrame); // The inline cache's code has not said where the top of the stack is.
+    const JSInstruction* instruction = codeBlock->instructionAt(callFrame->bytecodeIndex());
+    RELEASE_ASSERT(instruction->opcodeID() == op_tail_call);
+    return &codeBlock->ensureCallLinkInfoAt(instruction);
+}
+
+// See LLInt::handleUnlinkedCall().
+JSC_DEFINE_JIT_OPERATION(operationUnlinkedCall, UCPURegister, (CallFrame* calleeFrame, CallLinkInfo*))
+{
+    VM& vm = calleeFrame->callerFrame()->codeBlock()->vm();
+    NativeCallFrameTracer tracer(vm, calleeFrame);
+    sanitizeStackForVMInCallSlowPath(vm);
+    ASSERT_CALL_SLOW_PATH_RUNS_IN_CLEARED_STACK(calleeFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    void* callTarget = LLInt::handleUnlinkedCall(vm, calleeFrame);
     if (scope.exception()) [[unlikely]]
         OPERATION_RETURN(scope, std::bit_cast<UCPURegister>(vm.getCTIStub(CommonJITThunkID::ThrowExceptionFromCall).template retagged<JSEntryPtrTag>().code().taggedPtr()));
     OPERATION_RETURN(scope, std::bit_cast<UCPURegister>(std::bit_cast<uintptr_t>(callTarget)));
@@ -2899,6 +2941,16 @@ JSC_DEFINE_JIT_OPERATION(operationNewRegExp, JSCell*, (JSGlobalObject* globalObj
     OPERATION_RETURN(scope, RegExpObject::create(vm, globalObject->regExpStructure(), regexp, areLegacyFeaturesEnabled));
 }
 
+JSC_DEFINE_JIT_OPERATION(operationNewRegExpShared, JSCell*, (JSGlobalObject* globalObject, JSCell* regexpPtr, WriteBarrier<JSCell>* cachedObject, int32_t forTest))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    OPERATION_RETURN(scope, RegExpObject::literalAsReceiver(globalObject, callFrame->codeBlock(), static_cast<RegExp*>(regexpPtr), forTest, *cachedObject));
+}
+
 // The only reason for returning an UnusedPtr (instead of void) is so that we can reuse the
 // existing DFG slow path generator machinery when creating the slow path for CheckTraps
 // in the DFG. If a DFG slow path generator that supports a void return type is added in the
@@ -3082,6 +3134,14 @@ JSC_DEFINE_JIT_OPERATION(operationOptimize, UGPRPair, (VM* vmPointer, uint32_t b
             OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
         }
     } else {
+        if (codeBlock->ensureCatchLivenessIsComputedForExecutedCatches()) {
+            // Options::useLazyCatchLiveness(): those catches only start profiling now; give them a warm-up like the other value profiles had.
+            CODEBLOCK_LOG_EVENT(codeBlock, "delayOptimizeToDFG", ("catch profiling just started"));
+            updateAllPredictionsAndOptimizeAfterWarmUp(codeBlock);
+            dataLogLnIf(Options::verboseOSR(), "Delaying optimization for ", *codeBlock, " because its catch value profiles were just created.");
+            OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
+        }
+
         if (!codeBlock->shouldOptimizeNowFromBaseline()) {
             dataLogLnIf(Options::verboseOSR(),
                 "Delaying optimization for ", *codeBlock,
@@ -3190,11 +3250,11 @@ JSC_DEFINE_JIT_OPERATION(operationTryOSREnterAtCatchAndValueProfile, UGPRPair, (
         break;
     }
 
-    codeBlock->ensureCatchLivenessIsComputedForBytecodeIndex(bytecodeIndex);
-    auto bytecode = codeBlock->instructions().at(bytecodeIndex)->as<OpCatch>();
-    auto& metadata = bytecode.metadata(codeBlock);
-    metadata.m_buffer->forEach([&] (ValueProfileAndVirtualRegister& profile) {
-        profile.m_buckets[0] = JSValue::encode(callFrame->uncheckedR(profile.m_operand).jsValue());
+    auto* buffer = codeBlock->ensureCatchLivenessIsComputedForBytecodeIndex(bytecodeIndex);
+    if (!buffer)
+        OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
+    buffer->forEach([&] (ValueProfileAndVirtualRegister& profile) {
+        profile.sample(callFrame->uncheckedR(profile.m_operand).jsValue());
     });
 
     OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
@@ -3412,17 +3472,48 @@ JSC_DEFINE_JIT_OPERATION(operationIteratorNextTryFast, UGPRPair, (JSGlobalObject
         OPERATION_RETURN(scope, makeUGPRPair(JSValue::encode(jsBoolean(done)), JSValue::encode(value)));
     }
 
-    if (auto* stringIterator = dynamicDowncast<JSStringIterator>(iterator)) {
-        metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::FastString;
-        JSString* nextValue = stringIterator->nextWithAdvance(globalObject, vm);
-        OPERATION_RETURN_IF_EXCEPTION(scope, makeUGPRPair(0, 0));
-        bool done = !nextValue;
-        JSValue value = done ? JSValue() : JSValue(nextValue);
-        OPERATION_RETURN(scope, makeUGPRPair(JSValue::encode(jsBoolean(done)), JSValue::encode(value)));
-    }
-
     RELEASE_ASSERT_NOT_REACHED();
     OPERATION_RETURN(scope, makeUGPRPair(0, 0));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationIteratorNextFastArray, UGPRPair, (JSGlobalObject* globalObject, EncodedJSValue encodedIterable, EncodedJSValue* indexInFrame, void* metadataPointer))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    auto& metadata = *std::bit_cast<OpIteratorNext::Metadata*>(metadataPointer);
+    JSValue iterable = JSValue::decode(encodedIterable);
+    RELEASE_ASSERT(isJSArray(iterable));
+    auto* array = asArray(iterable);
+    metadata.m_iterableProfile.observeStructureID(array->structureID());
+    metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::FastArray;
+
+    JSValue index = JSValue::decode(*indexInFrame);
+    JSValue value;
+    bool hasNext = iteratorNextFastArray(globalObject, array, index, value);
+    *indexInFrame = JSValue::encode(index);
+    OPERATION_RETURN_IF_EXCEPTION(scope, makeUGPRPair(0, 0));
+
+    OPERATION_RETURN(scope, makeUGPRPair(JSValue::encode(jsBoolean(!hasNext)), JSValue::encode(value)));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationIteratorNextFastString, UGPRPair, (JSGlobalObject* globalObject, JSString* string, EncodedJSValue* indexInFrame, void* metadataPointer))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    auto& metadata = *std::bit_cast<OpIteratorNext::Metadata*>(metadataPointer);
+    metadata.m_iterationMetadata.seenModes = metadata.m_iterationMetadata.seenModes | IterationMode::FastString;
+
+    auto [value, nextPosition] = JSStringIterator::advance(globalObject, vm, string, JSValue::decode(*indexInFrame).asInt32());
+    OPERATION_RETURN_IF_EXCEPTION(scope, makeUGPRPair(0, 0));
+    *indexInFrame = JSValue::encode(jsNumber(nextPosition));
+
+    OPERATION_RETURN(scope, makeUGPRPair(JSValue::encode(jsBoolean(!value)), JSValue::encode(value)));
 }
 
 #endif
@@ -4520,15 +4611,19 @@ JSC_DEFINE_JIT_OPERATION(operationResolveScopeForBaseline, EncodedJSValue, (JSGl
     auto bytecode = pc->as<OpResolveScope>();
     const Identifier& ident = codeBlock->identifier(bytecode.m_var);
     JSScope* environment = callFrame->uncheckedR(bytecode.m_scope).Register::scope();
+    auto& metadata = bytecode.metadata(codeBlock);
+
+    if (metadata.m_resolveType == ModuleVar) {
+        JSObject* result = JSModuleEnvironment::fillImportSlot(globalObject, environment, metadata.m_localScopeDepth, ScopeOffset(metadata.m_moduleImportSlot));
+        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+        OPERATION_RETURN(scope, JSValue::encode(result));
+    }
+
     JSObject* resolvedScope = JSScope::resolve(globalObject, environment, ident);
     // Proxy can throw an error here, e.g. Proxy in with statement's @unscopables.
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-    auto& metadata = bytecode.metadata(codeBlock);
     ResolveType resolveType = metadata.m_resolveType;
-
-    // ModuleVar does not keep the scope register value alive in DFG.
-    ASSERT(resolveType != ModuleVar);
 
     switch (resolveType) {
     case GlobalProperty:
@@ -4576,6 +4671,10 @@ JSC_DEFINE_JIT_OPERATION(operationGetFromScope, EncodedJSValue, (JSGlobalObject*
 
     // ModuleVar is always converted to ClosureVar for get_from_scope.
     ASSERT(getPutInfo.resolveType() != ModuleVar);
+
+    // The shared baseline code for LazyClosureVar also runs in CodeBlocks that linked this as ClosureVar.
+    if (getPutInfo.resolveType() == LazyClosureVar || getPutInfo.resolveType() == ClosureVar)
+        OPERATION_RETURN(scope, JSValue::encode(JSModuleEnvironment::readLazyClosureVar(vm, environment, ScopeOffset(bytecode.metadata(codeBlock).m_operand))));
 
     OPERATION_RETURN(scope, JSValue::encode(environment->getPropertySlot(globalObject, ident, [&] (bool found, PropertySlot& slot) -> JSValue {
         if (!found) {

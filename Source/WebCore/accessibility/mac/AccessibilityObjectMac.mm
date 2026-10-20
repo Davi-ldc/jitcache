@@ -61,7 +61,7 @@ namespace WebCore {
 
 void AccessibilityObject::detachPlatformWrapper(AccessibilityDetachmentType)
 {
-    [wrapper() detach];
+    [protect(wrapper()) detach];
 }
 
 void AccessibilityObject::detachFromParent()
@@ -83,7 +83,7 @@ void AccessibilityObject::overrideAttachmentParent(AccessibilityObject* parent)
         parentWrapper = axParent->wrapper();
 
 ALLOW_DEPRECATED_DECLARATIONS_BEGIN
-    [[wrapper() attachmentView] accessibilitySetOverrideValue:parentWrapper forAttribute:NSAccessibilityParentAttribute];
+    [protect([protect(wrapper()) attachmentView]) accessibilitySetOverrideValue:parentWrapper forAttribute:NSAccessibilityParentAttribute];
 ALLOW_DEPRECATED_DECLARATIONS_END
 }
 
@@ -102,7 +102,7 @@ FloatRect AccessibilityObject::convertRectToPlatformSpace(const FloatRect& rect,
         CGRect cgRect = CGRectMake(point.x, point.y, size.width, size.height);
 
         NSRect nsRect = NSRectFromCGRect(cgRect);
-        NSView *view = frameView->documentView();
+        RetainPtr view = frameView->documentView();
 
         ALLOW_DEPRECATED_DECLARATIONS_BEGIN
         nsRect = [[view window] convertRectToScreen:[view convertRect:nsRect toView:nil]];
@@ -123,7 +123,7 @@ bool AccessibilityObject::accessibilityIgnoreAttachment() const
         return true;
 
 ALLOW_DEPRECATED_DECLARATIONS_BEGIN
-    id attachmentView = widget ? NSAccessibilityUnignoredDescendant(widget->platformWidget()) : nil;
+    RetainPtr<id> attachmentView = widget ? NSAccessibilityUnignoredDescendant(protect(widget->platformWidget())) : nil;
     if (attachmentView)
         return [attachmentView accessibilityIsIgnored];
 ALLOW_DEPRECATED_DECLARATIONS_END
@@ -198,7 +198,7 @@ String AccessibilityObject::subrolePlatformString() const
         return NSAccessibilitySearchFieldSubrole;
 
     if (isAttachment()) {
-        NSView* attachView = [wrapper() attachmentView];
+        RetainPtr<NSView> attachView = [protect(wrapper()) attachmentView];
 
         ALLOW_DEPRECATED_DECLARATIONS_BEGIN
         if ([[attachView accessibilityAttributeNames] containsObject:NSAccessibilitySubroleAttribute])
@@ -419,7 +419,7 @@ String AccessibilityObject::subrolePlatformString() const
 static void attributedStringSetCompositionAttributes(NSMutableAttributedString *attrString, Node& node, const SimpleRange& textSimpleRange)
 {
 #if HAVE(INLINE_PREDICTIONS)
-    Ref editor = node.document().editor();
+    Ref editor = protect(node.document())->editor();
     if (&node != editor->compositionNode())
         return;
 
@@ -446,7 +446,7 @@ static void attributedStringSetCompositionAttributes(NSMutableAttributedString *
 static bool shouldHaveAnySpellCheckAttribute(Node& node)
 {
     // If this node is not inside editable content, do not run the spell checker on the text.
-    CheckedPtr cache = node.document().axObjectCache();
+    CheckedPtr cache = protect(node.document())->axObjectCache();
     return cache && cache->rootAXEditableElement(&node);
 }
 
@@ -455,13 +455,16 @@ void attributedStringSetSpelling(NSMutableAttributedString *attrString, Node& no
     if (!shouldHaveAnySpellCheckAttribute(node))
         return;
 
-    if (unifiedTextCheckerEnabled(node.document().frame())) {
+    Ref document = node.document();
+    RefPtr frame = document->frame();
+    Ref editor = document->editor();
+    if (unifiedTextCheckerEnabled(frame)) {
         // Check the spelling directly since document->markersForNode() does not store the misspelled marking when the cursor is in a word.
-        auto* checker = node.document().editor().textChecker();
+        auto* checker = editor->textChecker();
 
         // checkTextOfParagraph is the only spelling/grammar checker implemented in WK1 and WK2
         Vector<TextCheckingResult> results;
-        checkTextOfParagraph(*checker, text, TextCheckingType::Spelling, results, node.document().frame()->selection().selection());
+        checkTextOfParagraph(*checker, text, TextCheckingType::Spelling, results, frame->selection().selection());
         for (const auto& result : results) {
             attributedStringSetNumber(attrString, NSAccessibilityMisspelledTextAttribute, @YES, NSMakeRange(result.range.location + range.location, result.range.length));
             attributedStringSetNumber(attrString, NSAccessibilityMarkedMisspelledTextAttribute, @YES, NSMakeRange(result.range.location + range.location, result.range.length));
@@ -473,7 +476,7 @@ void attributedStringSetSpelling(NSMutableAttributedString *attrString, Node& no
     for (unsigned current = 0; current < text.length(); ) {
         int misspellingLocation = -1;
         int misspellingLength = 0;
-        node.document().editor().textChecker()->checkSpellingOfString(text.substring(current), &misspellingLocation, &misspellingLength);
+        editor->textChecker()->checkSpellingOfString(text.substring(current), &misspellingLocation, &misspellingLength);
         if (misspellingLocation < 0 || !misspellingLength)
             break;
 
@@ -495,7 +498,7 @@ RetainPtr<NSAttributedString> attributedStringCreate(Node& node, StringView text
     if (!renderer)
         return nil;
 
-    CheckedPtr cache = renderer->document().axObjectCache();
+    CheckedPtr cache = protect(renderer->document())->axObjectCache();
     RefPtr object = cache ? cache->getOrCreate(node) : nullptr;
     if (!object)
         return nil;
@@ -511,7 +514,7 @@ AccessibilityRemoteToken AXRemoteFrame::generateRemoteToken() const
 {
     if (RefPtr parent = parentObject()) {
         // We use the parent's wrapper so that the remote frame acts as a pass through for the remote token bridge.
-        return { makeVector([NSAccessibilityRemoteUIElement remoteTokenForLocalUIElement:parent->wrapper()]) };
+        return { makeVector([NSAccessibilityRemoteUIElement remoteTokenForLocalUIElement:protect(parent->wrapper())]) };
     }
 
     return { };
@@ -520,8 +523,9 @@ AccessibilityRemoteToken AXRemoteFrame::generateRemoteToken() const
 void AXRemoteFrame::initializePlatformElementWithRemoteToken(AccessibilityRemoteToken token, int processIdentifier)
 {
     m_processIdentifier = processIdentifier;
-    if ([wrapper() respondsToSelector:@selector(accessibilitySetPresenterProcessIdentifier:)])
-        [(id)wrapper() accessibilitySetPresenterProcessIdentifier:processIdentifier];
+    RetainPtr wrapper = this->wrapper();
+    if ([wrapper respondsToSelector:@selector(accessibilitySetPresenterProcessIdentifier:)])
+        [(id)wrapper.get() accessibilitySetPresenterProcessIdentifier:processIdentifier];
     m_remoteFramePlatformElement = adoptNS([[NSAccessibilityRemoteUIElement alloc] initWithRemoteToken:WTF::toNSData(token.bytes.span()).get()]);
 
     if (CheckedPtr cache = axObjectCache())

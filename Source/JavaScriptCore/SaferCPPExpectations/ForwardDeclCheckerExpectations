@@ -15,13 +15,9 @@ dfg/DFGPromotedHeapLocation.h
 ftl/FTLFormattedValue.h
 ftl/FTLState.h
 heap/AbstractSlotVisitor.h
-heap/Heap.h
 heap/HeapProfiler.h
 heap/HeapSnapshotBuilder.h
-heap/SlotVisitor.h
 inspector/InspectorBackendDispatchers.h
-inspector/JSGlobalObjectConsoleClient.h
-inspector/JSGlobalObjectInspectorController.h
 jit/JIT.h
 jit/JITCode.h
 jit/JITWorklistThread.h

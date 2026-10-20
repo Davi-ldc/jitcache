@@ -30,8 +30,8 @@
 #endif
 
 // Besides the declarations of its header, the index that turns a mold's identifier into the UCB's, the capturing VM's
-// resolution context, strict's ImageCheck::S1 to S4, and in twins builds the producer values and the target the
-// ChangeRecordedTarget hook substitutes.
+// resolution context, strict's capture checks (ImageCheck::CodeFixupTargets to SideTablePointers), and in twins builds
+// the producer values and the target the ChangeRecordedTarget hook substitutes.
 
 namespace JSC::JITCache {
 
@@ -245,7 +245,7 @@ private:
     ResolutionContext m_context;
 };
 
-// ImageCheck::S3: the holder owns as many ICs of each kind as the record lists.
+// ImageCheck::MathICCount: the holder owns as many ICs of each kind as the record lists.
 static bool holderMatchesRecord(const BaselineJITCode& code, const ImageRecord& record)
 {
     constexpr size_t kindCount = static_cast<size_t>(MathICKind::Negate) + 1;
@@ -259,9 +259,9 @@ static bool holderMatchesRecord(const BaselineJITCode& code, const ImageRecord& 
     return listed == owned;
 }
 
-// ImageCheck::S4: every code pointer of the side tables, and the four locations of every MathIC with inline code, lie
-// inside [start, start + codeSize]; every MathIC the record lists without inline code still has null locations, no
-// m_code and its regeneration flag clear.
+// ImageCheck::SideTablePointers: every code pointer of the side tables, and the four locations of every MathIC with
+// inline code, lie inside [start, start + codeSize]; every MathIC the record lists without inline code still has null
+// locations, no m_code and its regeneration flag clear.
 static bool pointersLieInImage(BaselineJITCode& code, const ImageRecord& record)
 {
     const void* start = code.start();
@@ -313,23 +313,23 @@ static bool pointersLieInImage(BaselineJITCode& code, const ImageRecord& record)
     return true;
 }
 
-// ImageCheck::S1 to S4, in order, S1 and S2 against the producer's resolution of every target: each fixup decodes as
-// its form, jump islands followed, to it.
+// The capture checks, in order, the first two against the producer's resolution of every target: each fixup of the
+// image, then of each snippet, decodes as its form, jump islands followed, to it.
 static std::optional<ImageCheck> firstStrictFailure(BaselineJITCode& code, const ImageRecord& record, const ResolutionContext& context)
 {
     if (!fixupsReachTargets(code.start(), record.codeSize(), record.fixups(), context))
-        return ImageCheck::S1;
+        return ImageCheck::CodeFixupTargets;
     for (auto& mathIC : record.mathICs()) {
         if (!hasSnippet(mathIC))
             continue;
         auto& snippet = *mathIC.snippet;
         if (!fixupsReachTargets(snippet.start, snippet.size, snippet.fixups, context))
-            return ImageCheck::S2;
+            return ImageCheck::SnippetFixupTargets;
     }
     if (!holderMatchesRecord(code, record))
-        return ImageCheck::S3;
+        return ImageCheck::MathICCount;
     if (!pointersLieInImage(code, record))
-        return ImageCheck::S4;
+        return ImageCheck::SideTablePointers;
     return std::nullopt;
 }
 
@@ -360,9 +360,9 @@ static void appendProducerValues(Vector<uint64_t>& values, const ImageRecord& re
 }
 
 // The ChangeRecordedTarget test hook: another valid target for the fixup's form, which resolves elsewhere, so that
-// ImageCheck::S1 finds the footprint does not reach it. A Pointer names another VM field; a Call or a Jump the thunk
-// every baseline compilation links for a stack overflow at its prologue, or the exception handler where it already names
-// that one.
+// ImageCheck::CodeFixupTargets finds the footprint does not reach it. A Pointer names another VM field; a Call or a Jump
+// the thunk every baseline compilation links for a stack overflow at its prologue, or the exception handler where it
+// already names that one.
 static ImageTarget changedTargetForTesting(const ImageFixup& fixup)
 {
     if (fixup.form == FixupForm::Pointer) {
@@ -647,8 +647,8 @@ std::expected<ImageCapture, CaptureFailure> captureImage(VM& vm, CodeBlock& code
     auto arityEntryOffset = offsetInCode(imageStart, codeSize, code.addressForCall(ArityCheckMode::MustCheckArity).untaggedPtr());
     ASSERT(arityEntryOffset && *arityEntryOffset < codeSize);
 
-    // The writes convert the side tables' code pointers to offsets as they stream them (imageOffsetOf); ImageCheck::S4
-    // checks them under strict.
+    // The writes convert the side tables' code pointers to offsets as they stream them (imageOffsetOf);
+    // ImageCheck::SideTablePointers checks them under strict.
 
     // Each mold's identifier field, kept for the writes and charged for as long as the capture lives.
     auto& molds = code.m_unlinkedPropertyInlineCaches;
@@ -716,7 +716,7 @@ std::expected<ImageCapture, CaptureFailure> captureImage(VM& vm, CodeBlock& code
         .fullnessRateBits = std::bit_cast<uint64_t>(code.fullnessRate()),
     };
 
-    // Strict's ImageCheck::S1 and S2 and, in twins builds, the producer values resolve targets in this VM's context,
+    // Strict's fixup checks and, in twins builds, the producer values resolve targets in this VM's context,
     // whose arrays are charged while it lives. A support lookup takes JITThunks::m_lock, and every support target
     // already exists, since the compilation generated it.
 #if ENABLE(JITCACHE_TWINS)
@@ -742,7 +742,7 @@ std::expected<ImageCapture, CaptureFailure> captureImage(VM& vm, CodeBlock& code
     producerValues.reserveInitialCapacity(valueCount);
     appendProducerValues(producerValues, record, resolution->context());
 
-    // The ChangeRecordedTarget test hook changes the record's first fixup before ImageCheck::S1 runs.
+    // The ChangeRecordedTarget test hook changes the record's first fixup before ImageCheck::CodeFixupTargets runs.
     if (imageTestHook() == ImageTestHook::ChangeRecordedTarget && !record.fixups().isEmpty()) [[unlikely]]
         record.setFixupTargetForTesting(0, changedTargetForTesting(record.fixups()[0]));
 #endif

@@ -114,8 +114,9 @@ constexpr uint32_t testBodyLLIntThreshold = 500;
 constexpr uint32_t testBodyCounterProgress = 7;
 
 // Commits a body through a producing VM's writer: every section a body of highest tier 1 holds in this build, with
-// bytes drawn from the seed. The writer reads no lane format, so any bytes make a body the container accepts.
-static std::optional<CommitResult> commitTestBody(TestContext& context, VMState& producer, const BodyKey& key, uint8_t seed)
+// bytes drawn from the seed, and the analysis as its ucb.analysis when it is not empty, which only a module's key may
+// carry. The writer reads no lane format, so any bytes make a body the container accepts.
+static std::optional<CommitResult> commitTestBody(TestContext& context, VMState& producer, const BodyKey& key, uint8_t seed, std::span<const uint8_t> analysis = { })
 {
     ArtifactWriter* writer = producer.writer();
     if (!writer) {
@@ -126,6 +127,11 @@ static std::optional<CommitResult> commitTestBody(TestContext& context, VMState&
     Vector<SectionSource, numberOfSectionKinds> sources;
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
         auto kind = static_cast<SectionKind>(index);
+        if (kind == SectionKind::UCBAnalysis) {
+            if (!analysis.empty())
+                sources.append(SectionSource::inMemory(kind, analysis));
+            continue;
+        }
         if (!isSectionRequired(kind, 1))
             continue;
         bytes[index] = patternBytes(16 + 8 * index, static_cast<uint8_t>(seed + index));
@@ -139,36 +145,60 @@ static std::optional<CommitResult> commitTestBody(TestContext& context, VMState&
     return *committed;
 }
 
+// The header's CRC over the bytes before it, written in place.
+static void resealHeader(Vector<uint8_t>& header)
+{
+    uint32_t crc = ~crc32cExtend(~0u, header.span().first(header.size() - 8));
+    memcpySpan(header.mutableSpan().subspan(header.size() - 8, sizeof(crc)), asByteSpan(crc));
+}
+
 // The process's header with one must-match option's value flipped and its CRC recomputed, so only the comparison with
-// the process's own header fails, at that option.
+// the process's own header fails, at that option. The build-ID records start at offset 40, after the app record.
 static Vector<uint8_t> headerWithFlippedOption(unsigned optionIndex)
 {
     Vector<uint8_t> header;
     header.append(expectedHeader().span());
     size_t buildIDRecords = header[11];
-    header[32 + 72 * buildIDRecords + 8 * optionIndex + 3] ^= 1;
-    uint32_t crc = ~crc32cExtend(~0u, header.span().first(header.size() - 8));
-    memcpySpan(header.mutableSpan().subspan(header.size() - 8, sizeof(crc)), asByteSpan(crc));
+    header[40 + 72 * buildIDRecords + 8 * optionIndex + 3] ^= 1;
+    resealHeader(header);
     return header;
 }
 
-#if ENABLE(JIT)
+// The header with an app record naming app, bytes [28, 40), and its CRC recomputed.
+static Vector<uint8_t> headerNamingAppOf(Vector<uint8_t> header, uint64_t app)
+{
+    header[28] = 1;
+    memcpySpan(header.mutableSpan().subspan(32, sizeof(app)), asByteSpan(app));
+    resealHeader(header);
+    return header;
+}
 
-// The exported headers the Image lane edits, by the names their copies carry.
-static constexpr std::array imageEditedExportedHeaders {
-    "AbstractMacroAssembler.h"_s,
-    "LinkBuffer.h"_s,
-    "MacroAssemblerARM64.h"_s,
-    "AssemblyHelpers.h"_s,
-    "BaselineJITCode.h"_s,
-    "CCallHelpers.h"_s,
-    "JIT.h"_s,
-    "JITCodeMap.h"_s,
-    "JITMathIC.h"_s,
-    "JITOperations.h"_s,
+// The app the header at path names, or none; a header that cannot be read or does not parse fails the test.
+static std::optional<uint64_t> appOfHeaderAt(TestContext& context, const String& path)
+{
+    auto bytes = readFileBytes(path);
+    if (!bytes) {
+        JITCACHE_FAIL(makeString(path, " cannot be read"_s));
+        return std::nullopt;
+    }
+    auto parsed = readArtifactHeader(bytes->span());
+    if (!parsed) {
+        JITCACHE_FAIL(makeString(path, " holds no header that parses: "_s, parsed.error().reason));
+        return std::nullopt;
+    }
+    return parsed->app;
+}
+
+// The module's own exported headers, by the names their copies carry: the only copies that may include a jitcache/
+// header, and only one that is itself a copy.
+static constexpr std::array integratorExportedJITCacheHeaders {
+    "JITCacheAPI.h"_s,
+    "JITCacheBun.h"_s,
+    "JITCacheMaintenance.h"_s,
+    "JITCacheTwinsHost.h"_s,
 };
 
-static std::optional<String> imageReadText(const String& path)
+static std::optional<String> integratorReadText(const String& path)
 {
     auto bytes = FileSystem::readEntireFile(path);
     if (!bytes)
@@ -179,7 +209,7 @@ static std::optional<String> imageReadText(const String& path)
 // The file each #include directive of a header names, without its directories: "X.h" for "X.h", "jitcache/X.h" and
 // <JavaScriptCore/X.h>. Every directive counts, whatever preprocessor condition it sits under, since another build's
 // switches can turn it on.
-static Vector<String> imageIncludedFileNames(StringView text)
+static Vector<String> integratorIncludedFileNames(StringView text)
 {
     Vector<String> names;
     for (StringView line : text.split('\n')) {
@@ -213,9 +243,9 @@ static Vector<String> imageIncludedFileNames(StringView text)
 }
 
 // The source root CMake configured the build from, which Bun's recipe sets to this repository.
-static String imageCMakeHomeDirectory(const String& buildDirectory)
+static String integratorCMakeHomeDirectory(const String& buildDirectory)
 {
-    auto cache = imageReadText(FileSystem::pathByAppendingComponent(buildDirectory, "CMakeCache.txt"_s));
+    auto cache = integratorReadText(FileSystem::pathByAppendingComponent(buildDirectory, "CMakeCache.txt"_s));
     if (!cache)
         return { };
     constexpr auto prefix = "CMAKE_HOME_DIRECTORY:INTERNAL="_s;
@@ -228,18 +258,16 @@ static String imageCMakeHomeDirectory(const String& buildDirectory)
 
 // The name of every header in directory and in the directories below it: the module's headers sit in one directory per
 // part, and the include path holds each of them, so a header is included by its name alone.
-static void imageAddHeaderNamesBelow(const String& directory, HashSet<String>& headers)
+static void integratorAddHeaderNamesBelow(const String& directory, HashSet<String>& headers)
 {
     for (auto& name : FileSystem::listDirectory(directory)) {
         String path = FileSystem::pathByAppendingComponent(directory, name);
         if (FileSystem::fileType(path) == FileSystem::FileType::Directory)
-            imageAddHeaderNamesBelow(path, headers);
+            integratorAddHeaderNamesBelow(path, headers);
         else if (name.endsWith(".h"_s))
             headers.add(name);
     }
 }
-
-#endif // ENABLE(JIT)
 
 } // namespace SessionTestsInternal
 
@@ -555,6 +583,8 @@ JITCACHE_TEST(integratorStartRejections, Yes)
         }
     }
 
+    // Strict off on purpose, the one start of this test that is: every other start here has strict on, and only a Config
+    // left at its defaults shows that strict is off unless the host turns it on.
     {
         ExtraVM defaults;
         Config config;
@@ -665,6 +695,36 @@ JITCACHE_TEST(integratorStartFaults, Yes)
     }
 }
 
+#if OS(LINUX)
+// A FIFO at cache/header is a corrupt header and one at cache/pack a damaged pack, so start faults at once instead of
+// waiting for a writer that never opens the FIFO. A regression shows as this test hanging.
+JITCACHE_TEST(integratorStartFaultsOnAFIFO, Yes)
+{
+    ProcessHooksScope hooks;
+    auto directory = TemporaryDirectory::create(context, "jitcache-integrator"_s);
+    if (!directory)
+        return;
+
+    String headerFIFO = directory->path("header-fifo"_s);
+    if (!createTestArtifact(context, headerFIFO) || !replaceWithFIFO(context, directory->path("header-fifo/cache/header"_s)))
+        return;
+    {
+        ExtraVM faulted;
+        if (startsAs(context, "a FIFO at cache/header"_s, JITCache::start(faulted.vm(), strictConfig(headerFIFO, Role::Consumer)), StartOutcome::Fault, "start.header"_s))
+            JITCACHE_CHECK(JITCache::status(faulted.vm()).state == SessionState::Faulted);
+    }
+
+    String packFIFO = directory->path("pack-fifo"_s);
+    if (!createTestArtifact(context, packFIFO) || !replaceWithFIFO(context, directory->path("pack-fifo/cache/pack"_s)))
+        return;
+    for (Role role : { Role::Consumer, Role::ConsumerProducer }) {
+        ExtraVM faulted;
+        if (startsAs(context, "a FIFO at cache/pack"_s, JITCache::start(faulted.vm(), strictConfig(packFIFO, role)), StartOutcome::Fault, "start.pack"_s))
+            JITCACHE_CHECK(JITCache::status(faulted.vm()).state == SessionState::Faulted);
+    }
+}
+#endif // OS(LINUX)
+
 // A header-less cache/ holding only temporaries is reset and reused, while names that are not temporaries stay; one whose
 // pack may hold a body is start.not-an-artifact and keeps everything; an artifact with a header is
 // start.artifact-exists.
@@ -720,6 +780,101 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     JITCACHE_CHECK(pathExists(directory->path("with-pack/cache/pack"_s)));
 
     startsAs(context, "a producer over an artifact"_s, JITCache::start(vm, strictConfig(remnant, Role::Producer)), StartOutcome::Rejected, "start.artifact-exists"_s);
+    JITCACHE_CHECK(!vm.jitCacheState());
+}
+
+// The app a config names. A Producer naming X writes a header naming X, which a Consumer naming X and one naming no app
+// open, while one naming Y is rejected at start.another-app with both apps in the detail, and a ConsumerProducer naming Y
+// replaces it with an artifact of Y. A ConsumerProducer naming no app opens an artifact of X and keeps its header. A
+// Producer naming no app writes a header naming none, which Consumers of every app open. A header both incompatible and
+// made for another app is incompatible.
+JITCACHE_TEST(integratorStartApps, Yes)
+{
+    ProcessHooksScope hooks;
+    auto directory = TemporaryDirectory::create(context, "jitcache-integrator"_s);
+    if (!directory)
+        return;
+    VM& vm = *context.vm();
+    constexpr uint64_t appX = 0x0123456789abcdef;
+    constexpr uint64_t appY = 0xfedcba9876543210;
+    auto configNaming = [](const String& path, Role role, std::optional<uint64_t> app) {
+        Config config = strictConfig(path, role);
+        config.appDigest = app;
+        return config;
+    };
+    auto startsAnother = [&](ASCIILiteral label, std::optional<uint64_t> app, const String& path, Role role) {
+        ExtraVM other;
+        return startsAs(context, label, JITCache::start(other.vm(), configNaming(path, role, app)), StartOutcome::Started);
+    };
+    String detailXInYRun = "app 0123456789abcdef in the cache, fedcba9876543210 in this run"_s;
+
+    String ofX = directory->path("of-x"_s);
+    if (!startsAnother("a Producer naming X"_s, appX, ofX, Role::Producer))
+        return;
+    String ofXHeader = directory->path("of-x/cache/header"_s);
+    JITCACHE_CHECK(appOfHeaderAt(context, ofXHeader) == appX);
+    auto headerOfX = readFileBytes(ofXHeader);
+    JITCACHE_CHECK(headerOfX && equalSpans(headerOfX->span(), headerNamingApp(appX).span()));
+    startsAnother("a Consumer naming X"_s, appX, ofX, Role::Consumer);
+    startsAnother("a Consumer naming no app"_s, std::nullopt, ofX, Role::Consumer);
+
+    StartResult refused = JITCache::start(vm, configNaming(ofX, Role::Consumer, appY));
+    startsAs(context, "a Consumer naming Y"_s, refused, StartOutcome::Rejected, "start.another-app"_s);
+    JITCACHE_CHECK(refused.detail == detailXInYRun);
+    JITCACHE_CHECK(!vm.jitCacheState());
+
+    {
+        ExtraVM replacing;
+        StartResult replaced = JITCache::start(replacing.vm(), configNaming(ofX, Role::ConsumerProducer, appY));
+        if (startsAs(context, "a ConsumerProducer naming Y"_s, replaced, StartOutcome::Started, "start.replaced"_s)) {
+            JITCACHE_CHECK(replaced.detail == detailXInYRun);
+            JITCACHE_CHECK(appOfHeaderAt(context, ofXHeader) == appY);
+            JITCACHE_CHECK(pathExists(directory->path("of-x/cache/pack"_s)));
+            JITCACHE_CHECK(!pathExists(directory->path("of-x/.cache.replaced"_s)));
+        }
+    }
+    {
+        ExtraVM consumer;
+        StartResult result = JITCache::start(consumer.vm(), configNaming(ofX, Role::Consumer, appX));
+        startsAs(context, "a Consumer naming X after the replacement"_s, result, StartOutcome::Rejected, "start.another-app"_s);
+        JITCACHE_CHECK(result.detail == "app fedcba9876543210 in the cache, 0123456789abcdef in this run"_s);
+    }
+
+    // A ConsumerProducer that names no app opens another app's artifact and leaves its header as it was.
+    String alsoOfX = directory->path("also-of-x"_s);
+    if (!startsAnother("another Producer naming X"_s, appX, alsoOfX, Role::Producer))
+        return;
+    auto headerBefore = readFileBytes(directory->path("also-of-x/cache/header"_s));
+    {
+        ExtraVM opening;
+        StartResult opened = JITCache::start(opening.vm(), configNaming(alsoOfX, Role::ConsumerProducer, std::nullopt));
+        startsAs(context, "a ConsumerProducer naming no app"_s, opened, StartOutcome::Started);
+    }
+    auto headerAfter = readFileBytes(directory->path("also-of-x/cache/header"_s));
+    JITCACHE_CHECK(headerBefore && headerAfter && *headerBefore == *headerAfter);
+
+    // A Producer that names no app writes the process's own header, which every config opens.
+    String ofNone = directory->path("of-none"_s);
+    if (!startsAnother("a Producer naming no app"_s, std::nullopt, ofNone, Role::Producer))
+        return;
+    String ofNoneHeader = directory->path("of-none/cache/header"_s);
+    JITCACHE_CHECK(appOfHeaderAt(context, ofNoneHeader) == std::nullopt);
+    auto headerOfNone = readFileBytes(ofNoneHeader);
+    JITCACHE_CHECK(headerOfNone && equalSpans(headerOfNone->span(), expectedHeader().span()));
+    startsAnother("a Consumer naming X of an artifact naming none"_s, appX, ofNone, Role::Consumer);
+    startsAnother("a Consumer naming Y of an artifact naming none"_s, appY, ofNone, Role::Consumer);
+
+    // A header that differs in a must-match option and names X is incompatible, not made for another app.
+    String both = directory->path("both"_s);
+    Vector<uint8_t> header = headerNamingAppOf(headerWithFlippedOption(0), appX);
+    Vector<uint8_t> packBytes = patternBytes(33, 5);
+    if (!makeDirectory(context, both) || !makeDirectory(context, directory->path("both/cache"_s))
+        || !writeFile(context, directory->path("both/cache/header"_s), header.span())
+        || !writeFile(context, directory->path("both/cache/pack"_s), packBytes.span()))
+        return;
+    StartResult incompatible = JITCache::start(vm, configNaming(both, Role::Consumer, appY));
+    startsAs(context, "a Consumer naming Y of a header both incompatible and of X"_s, incompatible, StartOutcome::Rejected, "start.incompatible"_s);
+    JITCACHE_CHECK(incompatible.detail.contains("evalMode"_s));
     JITCACHE_CHECK(!vm.jitCacheState());
 }
 
@@ -932,8 +1087,9 @@ JITCACHE_TEST(integratorFaultEntryPointsIgnoreAnUnconfiguredVM, Yes)
     startConsumerProducer(context, vm, artifact);
 }
 
-// Body lookups in a Consumer over an artifact holding a body the writer committed: bodyVersion from the index alone,
-// openBody, a transient error, the test override, and last an error that turns activity off.
+// Body lookups in a Consumer over an artifact holding a module's body the writer committed with its ucb.analysis:
+// bodyVersion from the index alone, openBody, readBodySection in step with them, a transient error, the test override,
+// and last an error that turns activity off.
 JITCACHE_TEST(integratorBodyLookups, Yes)
 {
     ProcessHooksScope hooks;
@@ -941,14 +1097,15 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     if (!directory)
         return;
     String artifact = directory->path("artifact"_s);
-    BodyKey committedKey = testKey(21);
+    BodyKey committedKey = testKey(21, IdentityKind::Module);
     BodyKey absentKey = testKey(22);
+    Vector<uint8_t> committedAnalysis = patternBytes(29, 21);
     std::optional<CommitResult> committed;
     {
         ExtraVM producer;
         if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), strictConfig(artifact, Role::Producer)), StartOutcome::Started))
             return;
-        committed = commitTestBody(context, *producer.vm().jitCacheState(), committedKey, 21);
+        committed = commitTestBody(context, *producer.vm().jitCacheState(), committedKey, 21, committedAnalysis.span());
         if (!committed)
             return;
     }
@@ -983,6 +1140,17 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     JITCACHE_CHECK(state.openBody(absentKey).kind() == BodyLookup::Kind::Missing);
     JITCACHE_CHECK(state.progress().bodyOpens == 1);
 
+    // readBodySection reads one section of the same body, which its lookup keeps readable, and counts no body open.
+    {
+        SectionLookup analysis = state.readBodySection(committedKey, SectionKind::UCBAnalysis);
+        JITCACHE_CHECK(analysis.kind() == SectionLookup::Kind::Found && equalSpans(analysis.bytes(), committedAnalysis.span()));
+        SectionLookup moved = WTF::move(analysis);
+        JITCACHE_CHECK(moved.kind() == SectionLookup::Kind::Found && equalSpans(moved.bytes(), committedAnalysis.span()));
+        JITCACHE_CHECK(state.readBodySection(absentKey, SectionKind::UCBAnalysis).kind() == SectionLookup::Kind::Absent);
+    }
+    JITCACHE_CHECK(state.progress().bodyOpens == 1);
+    JITCACHE_CHECK(state.activityOn());
+
     // A transient error is a miss, counted, and the artifact is not at fault.
     StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::Open, EMFILE, std::nullopt });
     JITCACHE_CHECK(state.openBody(committedKey).kind() == BodyLookup::Kind::Missing);
@@ -1014,6 +1182,12 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     JITCACHE_CHECK(overridden.kind() == BodyLookup::Kind::Found && overridden.body() == testBody.ptr());
     JITCACHE_CHECK(testBody->version() != state.bodyVersion(committedKey));
     JITCACHE_CHECK(state.openBody(absentKey).kind() == BodyLookup::Kind::Missing);
+    // readBodySection answers with the override's body's section, empty for a kind the body lacks.
+    SectionLookup overriddenSection = state.readBodySection(committedKey, SectionKind::UCBFeedback);
+    JITCACHE_CHECK(overriddenSection.kind() == SectionLookup::Kind::Found && equalSpans(overriddenSection.bytes(), std::span<const uint8_t> { feedback }));
+    SectionLookup overriddenAnalysis = state.readBodySection(committedKey, SectionKind::UCBAnalysis);
+    JITCACHE_CHECK(overriddenAnalysis.kind() == SectionLookup::Kind::Found && overriddenAnalysis.bytes().empty());
+    JITCACHE_CHECK(state.readBodySection(absentKey, SectionKind::UCBAnalysis).kind() == SectionLookup::Kind::Absent);
     JITCACHE_CHECK(state.progress().bodyOpens == 1);
     JITCACHE_CHECK(state.progress().transientOpenFailures == 1);
 
@@ -1021,9 +1195,11 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     JITCACHE_CHECK(state.bodyVersion(committedKey) == token);
     BodyLookup again = state.openBody(committedKey);
     JITCACHE_CHECK(again.kind() == BodyLookup::Kind::Found && again.body() && again.body()->version() == committed->version);
+    SectionLookup analysisAgain = state.readBodySection(committedKey, SectionKind::UCBAnalysis);
+    JITCACHE_CHECK(analysisAgain.kind() == SectionLookup::Kind::Found && equalSpans(analysisAgain.bytes(), committedAnalysis.span()));
 
-    // Last: any other error is invalid material at container.io, which turns activity off; both calls then answer 0 and
-    // Unusable, with or without the override.
+    // Last: any other error is invalid material at container.io, which turns activity off; the three calls then answer
+    // 0, Unusable and Unusable, with or without the override.
     StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::Open, EIO, std::nullopt });
     JITCACHE_CHECK(state.openBody(committedKey).kind() == BodyLookup::Kind::Unusable);
     StoreTesting::setFault(std::nullopt);
@@ -1031,9 +1207,11 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     checkFault(context, "the open's fault"_s, JITCache::status(vm).activityFault, FaultClass::InvalidMaterial, "container.io"_s);
     JITCACHE_CHECK(!state.bodyVersion(committedKey));
     JITCACHE_CHECK(state.openBody(committedKey).kind() == BodyLookup::Kind::Unusable);
+    JITCACHE_CHECK(state.readBodySection(committedKey, SectionKind::UCBAnalysis).kind() == SectionLookup::Kind::Unusable);
     setOverride();
     JITCACHE_CHECK(!state.bodyVersion(committedKey));
     JITCACHE_CHECK(state.openBody(committedKey).kind() == BodyLookup::Kind::Unusable);
+    JITCACHE_CHECK(state.readBodySection(committedKey, SectionKind::UCBFeedback).kind() == SectionLookup::Kind::Unusable);
     state.clearBodyLookupForTesting();
 }
 
@@ -1114,7 +1292,7 @@ JITCACHE_TEST(integratorJSONLines, No)
     DeltaResult rejectedDelta { DeltaOutcome::Rejected, "delta.role"_s, std::nullopt };
     JITCACHE_CHECK(toJSON(rejectedDelta) == "{\"jitcache\":\"delta\",\"outcome\":\"rejected\",\"rejection\":\"delta.role\",\"fault\":null,\"eligibleKeys\":0,\"committedBodies\":0,\"committedBytes\":0,\"deferredKeys\":0}"_s);
 
-    JITCACHE_CHECK(toJSON(Status { }) == "{\"jitcache\":\"status\",\"state\":\"unconfigured\",\"role\":null,\"strict\":false,\"activityOn\":false,\"activityFault\":null,\"production\":\"not-producing\",\"productionFault\":null,\"firstFault\":null,\"progress\":{\"indexedBodies\":0,\"bodyOpens\":0,\"transientOpenFailures\":0,\"imports\":0,\"seededDecodes\":0,\"attaches\":0,\"gateDrops\":0,\"misses\":0,\"installs\":0,\"bakedFactMismatches\":0,\"captureCandidates\":0,\"capturesDeferred\":0,\"capturesCommitted\":0,\"bytesCommitted\":0,\"deltaRuns\":0},\"budget\":{\"limitBytes\":0,\"chargedBytes\":0,\"peakBytes\":0,\"refused\":false}}"_s);
+    JITCACHE_CHECK(toJSON(Status { }) == "{\"jitcache\":\"status\",\"state\":\"unconfigured\",\"role\":null,\"strict\":false,\"activityOn\":false,\"activityFault\":null,\"production\":\"not-producing\",\"productionFault\":null,\"firstFault\":null,\"progress\":{\"indexedBodies\":0,\"bodyOpens\":0,\"transientOpenFailures\":0,\"imports\":0,\"attaches\":0,\"gateDrops\":0,\"misses\":0,\"installs\":0,\"bakedFactMismatches\":0,\"captureCandidates\":0,\"capturesDeferred\":0,\"capturesCommitted\":0,\"bytesCommitted\":0,\"deltaRuns\":0},\"budget\":{\"limitBytes\":0,\"chargedBytes\":0,\"peakBytes\":0,\"refused\":false}}"_s);
     Status faultedStatus;
     faultedStatus.state = SessionState::Started;
     faultedStatus.role = Role::ConsumerProducer;
@@ -1186,18 +1364,17 @@ JITCACHE_TEST(runOnceDeltaCaptureAtStart, Yes)
     }
 }
 
-#if ENABLE(JIT)
-
 // The check over the copied headers; the other half, Bun's build against those copies, is a build. Bun compiles against
 // the copies JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS puts in <build>/JavaScriptCore/PrivateHeaders/JavaScriptCore and
-// against no source directory, so no header the Image lane edits may include a jitcache/ header, and every jitcache/
-// header any copy includes must be a copy itself. testjitcache runs from <build>/bin, and the build's CMake cache names
-// the source root whose jitcache/ directory lists the module's headers.
-JITCACHE_TEST(imageExportedHeadersIncludeOnlyExportedJITCacheHeaders, No)
+// against no source directory, so no copy other than the module's own exported headers may include a jitcache/ header,
+// and every jitcache/ header any copy includes must be a copy itself. testjitcache runs from <build>/bin, and the
+// build's CMake cache names the source root whose jitcache/ directory lists the module's headers, so a copy that comes
+// to include a header added there later fails as well.
+JITCACHE_TEST(integratorExportedHeadersIncludeOnlyExportedHeaders, No)
 {
     String executable = FileSystem::realPath("/proc/self/exe"_s);
     String buildDirectory = FileSystem::parentPath(FileSystem::parentPath(executable));
-    String sourceRoot = imageCMakeHomeDirectory(buildDirectory);
+    String sourceRoot = integratorCMakeHomeDirectory(buildDirectory);
     if (sourceRoot.isEmpty()) {
         JITCACHE_FAIL(makeString("no CMAKE_HOME_DIRECTORY in the CMake cache of "_s, buildDirectory, ", the build testjitcache ("_s, executable, ") runs from"_s));
         return;
@@ -1208,7 +1385,7 @@ JITCACHE_TEST(imageExportedHeadersIncludeOnlyExportedJITCacheHeaders, No)
     String copiesDirectory = FileSystem::pathByAppendingComponents(buildDirectory, copiesComponents);
 
     HashSet<String> jitcacheHeaders;
-    imageAddHeaderNamesBelow(jitcacheDirectory, jitcacheHeaders);
+    integratorAddHeaderNamesBelow(jitcacheDirectory, jitcacheHeaders);
     HashSet<String> copies;
     for (auto& name : FileSystem::listDirectory(copiesDirectory)) {
         if (name.endsWith(".h"_s))
@@ -1218,27 +1395,29 @@ JITCACHE_TEST(imageExportedHeadersIncludeOnlyExportedJITCacheHeaders, No)
         JITCACHE_FAIL(makeString(jitcacheDirectory, " does not list the module's headers"_s));
         return;
     }
-    if (!copies.contains("JITCacheAPI.h"_s)) {
-        JITCACHE_FAIL(makeString(copiesDirectory, " holds no copy of the exported JITCacheAPI.h"_s));
+    bool everyOwnHeaderCopied = true;
+    for (auto exported : integratorExportedJITCacheHeaders) {
+        if (!copies.contains(exported)) {
+            JITCACHE_FAIL(makeString(copiesDirectory, " holds no copy of the exported "_s, exported));
+            everyOwnHeaderCopied = false;
+        }
+    }
+    if (!everyOwnHeaderCopied)
         return;
-    }
-    for (auto edited : imageEditedExportedHeaders) {
-        if (!copies.contains(edited))
-            JITCACHE_FAIL(makeString("the exported header "_s, edited, " has no copy in "_s, copiesDirectory));
-    }
 
     for (auto& copy : copies) {
-        auto text = imageReadText(FileSystem::pathByAppendingComponent(copiesDirectory, copy));
+        auto text = integratorReadText(FileSystem::pathByAppendingComponent(copiesDirectory, copy));
         if (!text) {
             JITCACHE_FAIL(makeString("the copy "_s, copy, " cannot be read"_s));
             continue;
         }
-        bool editedByImageLane = std::ranges::any_of(imageEditedExportedHeaders, [&](ASCIILiteral edited) { return copy == edited; });
-        for (auto& included : imageIncludedFileNames(*text)) {
+        bool ownHeader = std::ranges::any_of(integratorExportedJITCacheHeaders, [&](ASCIILiteral exported) { return copy == exported; });
+        for (auto& included : integratorIncludedFileNames(*text)) {
             if (!jitcacheHeaders.contains(included))
                 continue;
-            // The headers the Image lane edits reach recording only through the hooks they declare themselves.
-            if (editedByImageLane)
+            // An engine header reaches the module only through declarations of its own, never through a jitcache/
+            // header, exported or not.
+            if (!ownHeader)
                 JITCACHE_FAIL(makeString("the exported header "_s, copy, " includes the jitcache/ header "_s, included));
             // A jitcache/ header that an exported header includes must resolve among the copies Bun sees.
             if (!copies.contains(included))
@@ -1246,8 +1425,6 @@ JITCACHE_TEST(imageExportedHeadersIncludeOnlyExportedJITCacheHeaders, No)
         }
     }
 }
-
-#endif // ENABLE(JIT)
 
 } // namespace JSC::JITCache::Tests
 

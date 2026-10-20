@@ -27,27 +27,32 @@
 
 #import "BindableResource.h"
 #import "Device.h"
+#import <CoreVideo/CVPixelBuffer.h>
+#import <WebGPU/WebGPUCpp.h>
+#import <simd/vector_types.h>
 #import <wtf/Ref.h>
-#import <wtf/RefCountedAndCanMakeWeakPtr.h>
 #import <wtf/TZoneMalloc.h>
 #import <wtf/WeakHashSet.h>
 #import <wtf/WeakPtr.h>
+#import <wtf/cf/CFTypeTraits.h>
 
 typedef struct CF_BRIDGED_TYPE(id) __CVBuffer* CVPixelBufferRef;
+
+WTF_DECLARE_CF_TYPE_TRAIT(CVPixelBuffer);
 
 struct WGPUExternalTextureImpl {
 };
 
-namespace WebGPU {
+namespace WebGPU::Metal {
 
 class CommandEncoder;
 
-class ExternalTexture : public RefCountedAndCanMakeWeakPtr<ExternalTexture>, public WGPUExternalTextureImpl, public TrackedResource {
+class ExternalTexture final : public WebGPU::ExternalTexture, public WGPUExternalTextureImpl, public TrackedResource {
     WTF_MAKE_TZONE_ALLOCATED(ExternalTexture);
 public:
-    static Ref<ExternalTexture> create(CVPixelBufferRef pixelBuffer, WGPUColorSpace colorSpace, Device& device)
+    static Ref<ExternalTexture> create(CVPixelBufferRef pixelBuffer, WGPUColorSpace colorSpace, simd::uint2 visibleSize, Device& device)
     {
-        return adoptRef(*new ExternalTexture(pixelBuffer, colorSpace, device));
+        return adoptRef(*new ExternalTexture(pixelBuffer, colorSpace, visibleSize, device));
     }
     static Ref<ExternalTexture> createInvalid(Device& device)
     {
@@ -58,28 +63,32 @@ public:
 
     CVPixelBufferRef pixelBuffer() const { return m_pixelBuffer.get(); }
     WGPUColorSpace colorSpace() const { return m_colorSpace; }
+    // The size the source presents the frame at, which is not the size its planes were decoded into.
+    // Zero in either component means the source could not say.
+    simd::uint2 visibleSize() const { return m_visibleSize; }
 
     void destroy();
     void undestroy();
     void setCommandEncoder(CommandEncoder&) const;
     bool NODELETE isDestroyed() const;
 
-    bool NODELETE isValid() const;
+    void setLabel(String&&) final { }
+    bool NODELETE isValid() const final;
     void update(CVPixelBufferRef);
     size_t openCommandEncoderCount() const;
     void updateExternalTextures(id<MTLTexture>, id<MTLTexture>);
 
 private:
-    ExternalTexture(CVPixelBufferRef, WGPUColorSpace, Device&);
+    ExternalTexture(CVPixelBufferRef, WGPUColorSpace, simd::uint2 visibleSize, Device&);
     ExternalTexture(Device&);
 
     RetainPtr<CVPixelBufferRef> m_pixelBuffer;
     WGPUColorSpace m_colorSpace;
+    simd::uint2 m_visibleSize { 0, 0 };
     const Ref<Device> m_device;
     bool m_destroyed { false };
     id<MTLTexture> m_texture0 { nil };
     id<MTLTexture> m_texture1 { nil };
 };
 
-} // namespace WebGPU
-
+} // namespace WebGPU::Metal

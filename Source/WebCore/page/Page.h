@@ -20,6 +20,7 @@
 
 #pragma once
 
+#include <JavaScriptCore/Debugger.h>
 #include <WebCore/ActivityState.h>
 #include <WebCore/AnimationFrameRate.h>
 #include <WebCore/BackForwardFrameItemIdentifier.h>
@@ -34,6 +35,7 @@
 #include <WebCore/IntRectHash.h>
 #include <WebCore/LoadSchedulingMode.h>
 #include <WebCore/MediaSessionGroupIdentifier.h>
+#include <WebCore/NetworkLoadPolicy.h>
 #include <WebCore/PageIdentifier.h>
 #include <WebCore/Pagination.h>
 #include <WebCore/PlaybackTargetClientContextIdentifier.h>
@@ -71,6 +73,13 @@
 
 #if ENABLE(THREADED_ANIMATIONS)
 #include <WebCore/AcceleratedTimelinesUpdater.h>
+#endif
+
+#if __has_include(<WebKitAdditions/PageAdditionsIncludes.h>)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnon-modular-include-in-module"
+#include <WebKitAdditions/PageAdditionsIncludes.h>
+#pragma clang diagnostic pop
 #endif
 
 namespace JSC {
@@ -179,6 +188,7 @@ class ScrollLatchingController;
 class ScrollingCoordinator;
 class ServicesOverlayController;
 class ServiceWorkerGlobalScope;
+class ServiceWorkerThread;
 class Settings;
 class SocketProvider;
 class SpeechRecognitionProvider;
@@ -277,7 +287,6 @@ using MediaProducerMediaStateFlags = OptionSet<MediaProducerMediaState>;
 using MediaProducerMutedStateFlags = OptionSet<MediaProducerMutedState>;
 
 enum class EventThrottlingBehavior : bool { Responsive, Unresponsive };
-enum class MainFrameMainResource : bool { No, Yes };
 
 enum class PageIsEditable : bool { No, Yes };
 
@@ -317,6 +326,7 @@ enum class RenderingUpdateStep : uint32_t {
     PrepareCanvasesForDisplayOrFlush    = 1 << 21,
     CaretAnimation                      = 1 << 22,
     FocusFixup                          = 1 << 23,
+    SyncLocalFrameInfoToRemote          = 1 << 24,
     UpdateValidationMessagePositions    = 1 << 25,
 #if ENABLE(ACCESSIBILITY_ISOLATED_TREE)
     AccessibilityRegionUpdate           = 1 << 26,
@@ -327,6 +337,7 @@ enum class RenderingUpdateStep : uint32_t {
 #if ENABLE(MODEL_ELEMENT_IMMERSIVE)
     Immersive                           = 1 << 30,
 #endif
+    CanvasPaintEvent                    = 1u << 31,
 
 };
 
@@ -365,6 +376,8 @@ constexpr OptionSet<RenderingUpdateStep> updateRenderingSteps = {
     RenderingUpdateStep::UpdateContentRelevancy,
     RenderingUpdateStep::PerformPendingViewTransitions,
     RenderingUpdateStep::AdjustVisibility,
+    RenderingUpdateStep::SyncLocalFrameInfoToRemote,
+    RenderingUpdateStep::CanvasPaintEvent,
 };
 
 constexpr auto perRootFrameRenderingUpdateSteps = OptionSet<RenderingUpdateStep> {
@@ -437,10 +450,6 @@ public:
     Frame& mainFrame() const { return m_mainFrame.get(); }
     WEBCORE_EXPORT void setMainFrame(Ref<Frame>&&);
     WEBCORE_EXPORT const URL& NODELETE mainFrameURL() const LIFETIME_BOUND;
-
-    bool hasRemoteFrames() const;
-    void didAttachRemoteFrame() { ++m_remoteFrameCount; }
-    void didDetachRemoteFrame() { ASSERT(m_remoteFrameCount); --m_remoteFrameCount; }
 
     WEBCORE_EXPORT void didObserveFirstPartyUserGesture();
     SecurityOrigin& mainFrameOrigin() const;
@@ -616,7 +625,7 @@ public:
     WEBCORE_EXPORT void removeSchedulePair(Ref<WTF::SchedulePair>&&);
     WTF::SchedulePairHashSet* scheduledRunLoopPairs() LIFETIME_BOUND { return m_scheduledRunLoopPairs.get(); }
 
-    std::unique_ptr<WTF::SchedulePairHashSet> m_scheduledRunLoopPairs;
+    const std::unique_ptr<WTF::SchedulePairHashSet> m_scheduledRunLoopPairs;
 #endif
 
     WEBCORE_EXPORT const VisibleSelection& selection() const LIFETIME_BOUND;
@@ -647,7 +656,7 @@ public:
     void willChangeLocationInCompletelyLoadedSubframe();
 
     bool delegatesScaling() const { return m_delegatesScaling; }
-    WEBCORE_EXPORT void NODELETE setDelegatesScaling(bool);
+    WEBCORE_EXPORT void setDelegatesScaling(bool);
 
     // The view scale factor is multiplied into the page scale factor by all
     // callers of setPageScaleFactor.
@@ -712,11 +721,9 @@ public:
     bool defaultUseDarkAppearance() const { return m_useDarkAppearance; }
     void setUseDarkAppearanceOverride(std::optional<bool>);
 
-#if ENABLE(TEXT_AUTOSIZING)
     float textAutosizingWidth() const { return m_textAutosizingWidth; }
     void setTextAutosizingWidth(float textAutosizingWidth) { m_textAutosizingWidth = textAutosizingWidth; }
     WEBCORE_EXPORT void recomputeTextAutoSizingInAllFrames();
-#endif
 
     OptionSet<FilterRenderingMode> preferredFilterRenderingModes(const GraphicsContext&) const;
 
@@ -824,6 +831,7 @@ public:
     // Service worker pages have an associated ServiceWorkerGlobalScope on the main thread.
     void setServiceWorkerGlobalScope(ServiceWorkerGlobalScope&);
     WEBCORE_EXPORT JSC::JSGlobalObject* serviceWorkerGlobalObject(DOMWrapperWorld&);
+    WEBCORE_EXPORT RefPtr<ServiceWorkerThread> serviceWorkerThread() const;
 
     // Notifications when the Page starts and stops being presented via a native window.
     WEBCORE_EXPORT void setActivityState(OptionSet<ActivityState>);
@@ -963,6 +971,10 @@ public:
     const FixedContainerEdges& fixedContainerEdges() const LIFETIME_BOUND { return m_fixedContainerEdgesAndElements.first; }
     Element* NODELETE lastFixedContainer(BoxSide) const;
 
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    void invalidateColorsSampledFromPaintedContent();
+#endif
+
 #if HAVE(APP_ACCENT_COLORS) && PLATFORM(MAC)
     WEBCORE_EXPORT void NODELETE setAppUsesCustomAccentColor(bool);
     WEBCORE_EXPORT bool NODELETE appUsesCustomAccentColor() const;
@@ -1084,7 +1096,7 @@ public:
 #if ENABLE(WIRELESS_PLAYBACK_TARGET)
     void addPlaybackTargetPickerClient(PlaybackTargetClientContextIdentifier);
     void removePlaybackTargetPickerClient(PlaybackTargetClientContextIdentifier);
-    void showPlaybackTargetPicker(PlaybackTargetClientContextIdentifier, FrameIdentifier, const IntPoint&, bool, RouteSharingPolicy, const String&);
+    void showPlaybackTargetPicker(PlaybackTargetClientContextIdentifier, const IntPoint& positionInMainFrameView, bool, RouteSharingPolicy, const String&);
     void playbackTargetPickerClientStateDidChange(PlaybackTargetClientContextIdentifier, MediaProducerMediaStateFlags);
     WEBCORE_EXPORT void setMockMediaPlaybackTargetPickerEnabled(bool);
     WEBCORE_EXPORT void setMockMediaPlaybackTargetPickerState(const String&, MediaPlaybackTargetMockState);
@@ -1143,6 +1155,7 @@ public:
     bool isUtilityPage() const { return m_isUtilityPage; }
 
     WEBCORE_EXPORT bool allowsLoadFromURL(const URL&, MainFrameMainResource) const;
+    const NetworkLoadPolicy& networkLoadPolicy() const { return m_networkLoadPolicy; }
     WEBCORE_EXPORT bool hasLocalDataForURL(const URL&);
 
     ShouldRelaxThirdPartyCookieBlocking shouldRelaxThirdPartyCookieBlocking() const { return m_shouldRelaxThirdPartyCookieBlocking; }
@@ -1178,6 +1191,8 @@ public:
     bool shouldBuildInteractionRegions() const;
     WEBCORE_EXPORT void setInteractionRegionsEnabled(bool);
 #endif
+
+    WEBCORE_EXPORT void devicePostureTypeChanged();
 
 #if ENABLE(DEVICE_ORIENTATION) && PLATFORM(IOS_FAMILY)
     DeviceOrientationUpdateProvider* deviceOrientationUpdateProvider() const { return m_deviceOrientationUpdateProvider.get(); }
@@ -1293,6 +1308,9 @@ public:
     std::optional<std::pair<uint16_t, uint16_t>> NODELETE portsForUpgradingInsecureSchemeForTesting() const;
     WEBCORE_EXPORT void NODELETE setPortsForUpgradingInsecureSchemeForTesting(uint16_t upgradeFromInsecurePort, uint16_t upgradeToSecurePort);
 
+    const URL& NODELETE quirksSubframeURLForTesting() const LIFETIME_BOUND { return m_quirksSubframeURLForTesting; }
+    WEBCORE_EXPORT void setQuirksSubframeURLForTesting(URL&&);
+
 #if PLATFORM(IOS_FAMILY) && ENABLE(WEBXR)
     WEBCORE_EXPORT bool hasActiveImmersiveSession() const;
 #endif
@@ -1347,10 +1365,6 @@ public:
 #if ENABLE(WRITING_TOOLS_TEXT_EFFECTS)
     TextEffectController& textEffectController() { return m_textEffectController.get(); }
 #endif
-
-    bool hasActiveNowPlayingSession() const { return m_hasActiveNowPlayingSession; }
-    void hasActiveNowPlayingSessionChanged();
-    void updateActiveNowPlayingSessionNow();
 
 #if PLATFORM(IOS_FAMILY)
     bool canShowWhileLocked() const { return m_canShowWhileLocked; }
@@ -1535,7 +1549,7 @@ private:
     const UniqueRef<PointerLockController> m_pointerLockController;
 #endif
     const UniqueRef<ElementTargetingController> m_elementTargetingController;
-    RefPtr<ScrollingCoordinator> m_scrollingCoordinator;
+    const RefPtr<ScrollingCoordinator> m_scrollingCoordinator;
 
     const RefPtr<Settings> m_settings;
     const UniqueRef<CryptoClient> m_cryptoClient;
@@ -1546,8 +1560,6 @@ private:
     HashSet<WeakRef<LocalFrame>> m_rootFrames;
     const UniqueRef<EditorClient> m_editorClient;
 
-    // Declared before m_mainFrame so a remote main frame can count itself as m_mainFrame is built.
-    unsigned m_remoteFrameCount { 0 };
     Ref<Frame> m_mainFrame;
     String m_mainFrameURLFragment;
 
@@ -1585,6 +1597,7 @@ private:
     bool m_shouldSuppressHDR { false };
 
     float m_pageScaleFactor { 1 };
+    float m_pageScaleFactorViewsWereSizedFor { 1 };
     float m_zoomedOutPageScaleFactor { 0 };
     float m_deviceScaleFactor { 1 };
     float m_viewScaleFactor { 1 };
@@ -1605,11 +1618,10 @@ private:
     bool m_useDarkAppearance { false };
     std::optional<bool> m_useDarkAppearanceOverride;
 
-#if ENABLE(TEXT_AUTOSIZING)
     float m_textAutosizingWidth { 0 };
-#endif
+
     float m_initialScaleIgnoringContentSize { 1.0f };
-    
+
     bool m_suppressScrollbarAnimations { false };
 
 #if HAVE(NSREFRESHCONTROLLER)
@@ -1656,14 +1668,14 @@ private:
     int m_headerHeight { 0 };
     int m_footerHeight { 0 };
 
-    std::unique_ptr<RenderingUpdateScheduler> m_renderingUpdateScheduler;
+    const std::unique_ptr<RenderingUpdateScheduler> m_renderingUpdateScheduler;
     SingleThreadWeakHashSet<const RenderObject> m_relevantUnpaintedRenderObjects;
 
     bool m_isCountingRelevantRepaintedObjects { false };
 #ifndef NDEBUG
     bool m_isPainting { false };
 #endif
-    std::unique_ptr<AlternativeTextClient> m_alternativeTextClient;
+    const std::unique_ptr<AlternativeTextClient> m_alternativeTextClient;
 
     bool m_scriptedAnimationsSuspended { false };
 
@@ -1757,13 +1769,13 @@ private:
 #if PLATFORM(MAC) && (ENABLE(SERVICE_CONTROLS) || ENABLE(TELEPHONE_NUMBER_DETECTION))
     const UniqueRef<ServicesOverlayController> m_servicesOverlayController;
 #endif
-    std::unique_ptr<ImageOverlayController> m_imageOverlayController;
+    const std::unique_ptr<ImageOverlayController> m_imageOverlayController;
 
 #if ENABLE(IMAGE_ANALYSIS)
     RefPtr<ImageAnalysisQueue> m_imageAnalysisQueue;
 #endif
 
-    std::unique_ptr<WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
+    const std::unique_ptr<WheelEventDeltaFilter> m_recentWheelEventDeltaFilter;
     const UniqueRef<PageOverlayController> m_pageOverlayController;
 
 #if ENABLE(APPLE_PAY)
@@ -1786,11 +1798,11 @@ private:
     std::unique_ptr<ViewportArguments> m_overrideViewportArguments;
 
 #if ENABLE(DEVICE_ORIENTATION) && PLATFORM(IOS_FAMILY)
-    RefPtr<DeviceOrientationUpdateProvider> m_deviceOrientationUpdateProvider;
+    const RefPtr<DeviceOrientationUpdateProvider> m_deviceOrientationUpdateProvider;
 #endif
 
 #if ENABLE(DEVICE_ORIENTATION)
-    std::unique_ptr<DeviceOrientationAndMotionAccessController> m_deviceOrientationAndMotionAccessController;
+    const std::unique_ptr<DeviceOrientationAndMotionAccessController> m_deviceOrientationAndMotionAccessController;
 #endif
 
 #if ENABLE(MEDIA_SESSION_COORDINATOR)
@@ -1800,9 +1812,8 @@ private:
     Vector<UserContentURLPattern> m_corsDisablingPatterns;
     const HashSet<String> m_maskedURLSchemes;
     Vector<UserStyleSheet> m_userStyleSheetsPendingInjection;
-    const std::optional<MemoryCompactLookupOnlyRobinHoodHashSet<String>> m_allowedNetworkHosts;
+    const NetworkLoadPolicy m_networkLoadPolicy;
     bool m_isTakingSnapshotsForApplicationSuspension { false };
-    bool m_loadsSubresources { true };
     bool m_canUseCredentialStorage { true };
     ShouldRelaxThirdPartyCookieBlocking m_shouldRelaxThirdPartyCookieBlocking;
     LoadSchedulingMode m_loadSchedulingMode { LoadSchedulingMode::Direct };
@@ -1816,6 +1827,14 @@ private:
 
     Color m_underPageBackgroundColorOverride;
     std::optional<Color> m_sampledPageTopColor;
+
+#if __has_include(<WebKitAdditions/PageAdditions.h>)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wnon-modular-include-in-module"
+#include <WebKitAdditions/PageAdditions.h>
+#pragma clang diagnostic pop
+#endif
+
     std::pair<UniqueRef<FixedContainerEdges>, WeakElementEdges> m_fixedContainerEdgesAndElements;
     bool m_userHasInteractedSinceLastPageLoad { false };
     bool m_userHasInteractedSinceLastPageLoadExcludingForcedUserGestures { false };
@@ -1825,6 +1844,8 @@ private:
 
     std::optional<std::pair<uint16_t, uint16_t>> m_portsForUpgradingInsecureSchemeForTesting;
 
+    URL m_quirksSubframeURLForTesting;
+
     RefPtr<StringCallback> m_consoleMessageListenerForTesting;
 
     const UniqueRef<StorageProvider> m_storageProvider;
@@ -1833,7 +1854,7 @@ private:
     WeakPtr<KeyboardScrollingAnimator> m_currentKeyboardScrollingAnimator;
 
 #if ENABLE(ATTACHMENT_ELEMENT)
-    std::unique_ptr<AttachmentElementClient> m_attachmentElementClient;
+    const std::unique_ptr<AttachmentElementClient> m_attachmentElementClient;
 #endif
 
     bool m_isWaitingForLoadToFinish { false };
@@ -1892,9 +1913,6 @@ private:
 
     HashSet<std::pair<URL, ScriptTrackingPrivacyCategory>> m_scriptTrackingPrivacyReports;
 
-    bool m_hasActiveNowPlayingSession { false };
-    Timer m_activeNowPlayingSessionUpdateTimer;
-
     std::unique_ptr<LoginStatus> m_lastAuthentication;
 
     bool m_shouldDeferResizeEvents { false };
@@ -1917,7 +1935,7 @@ private:
 
     using MediaSessionManagerFactory = Function<RefPtr<MediaSessionManagerInterface> (PageIdentifier)>;
     std::optional<MediaSessionManagerFactory> m_mediaSessionManagerFactory;
-    RefPtr<MediaSessionManagerInterface> m_mediaSessionManager;
+    const RefPtr<MediaSessionManagerInterface> m_mediaSessionManager;
 
 #if ENABLE(MODEL_ELEMENT)
     bool m_modelLoadDelaysDisabledForTesting { false };

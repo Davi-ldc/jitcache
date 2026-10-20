@@ -109,7 +109,8 @@ inline SRGBA<uint8_t> AccessibilityObject::colorValue() const
 
 inline bool AccessibilityObject::isInlineText() const
 {
-    return is<RenderInline>(renderer());
+    auto* renderer = this->renderer();
+    return renderer && renderer->isInlineBox();
 }
 
 inline Element* AccessibilityObject::element() const
@@ -303,7 +304,7 @@ inline std::optional<AXTreeID> AccessibilityObject::treeID() const
 inline void AccessibilityObject::recomputeIsIgnored()
 {
     // isIgnoredWithoutCache will update m_lastKnownIsIgnoredValue and perform any necessary actions if it has changed.
-    isIgnoredWithoutCache(axObjectCache());
+    isIgnoredWithoutCache(protect(axObjectCache()));
 }
 
 } // namespace WebCore

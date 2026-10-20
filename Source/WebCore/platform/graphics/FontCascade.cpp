@@ -386,7 +386,6 @@ NEVER_INLINE float FontCascade::widthForSimpleTextSlow(StringView text, TextDire
 #else
     GlyphBuffer glyphBuffer;
     Ref font = primaryFont();
-    ASSERT(!font->syntheticBoldOffset()); // This function should only be called when RenderText::computeCanUseSimplifiedTextMeasuring() returns true, and that function requires no synthetic bold.
 
     auto addGlyphsFromText = [&](GlyphBuffer& glyphBuffer, const Font& font, auto characters) {
         for (size_t i = 0; i < characters.size(); ++i) {
@@ -400,7 +399,7 @@ NEVER_INLINE float FontCascade::widthForSimpleTextSlow(StringView text, TextDire
     else
         addGlyphsFromText(glyphBuffer, font, text.span16());
 
-    auto initialAdvance = font->applyTransforms(glyphBuffer, 0, 0, enableKerning(), requiresShaping(), fontDescription().computedLocale(), text, textDirection);
+    auto initialAdvance = font->applyTransforms(glyphBuffer, 0, 0, enableKerning(), requiresShaping(), fontDescription().usedLocale(), text, textDirection);
     auto result = 0.f;
     for (size_t i = 0; i < glyphBuffer.size(); ++i)
         result += WebCore::width(glyphBuffer.advanceAt(i));
@@ -1108,7 +1107,7 @@ bool FontCascade::isCJKIdeographOrSymbol(char32_t c)
     if (c >= 0x2672 && c <= 0x267D)
         return true;
 
-    if ((c == 0x26A0) || (c == 0x26BD) || (c == 0x26BE) || (c == 0x2713) || (c == 0x271A) || (c == 0x273F) || (c == 0x2740) || (c == 0x2756))
+    if ((c == 0x26A0) || (c == 0x26BD) || (c == 0x26BE) || (c == checkMarkCharacter) || (c == 0x271A) || (c == 0x273F) || (c == 0x2740) || (c == 0x2756))
         return true;
 
     if (c >= 0x2776 && c <= 0x277F)

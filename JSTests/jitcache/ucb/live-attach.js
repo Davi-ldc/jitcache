@@ -22,8 +22,10 @@
 //   it and a full collection after that: this run gives the release no lease (--codeBlockAgingLeaseMultiplier=0,
 //   Heap::releaseUnusedSharedBaselineCode), and the test drops the realms and collects. A collection can keep a dead
 //   realm alive through a stale stack word, so each release is tried a few times.
-// - A later release and attach at the same commit identifier re-checks nothing: laF computes no digest, and L only its
-//   request key, whose source digest guards against a CodeCache collision.
+// - L's attach computes no source digest, since the CodeCache serves its UCB only to its own text, and a later release
+//   and attach at the same commit identifier re-checks nothing: neither computes a digest.
+// The windows after a release read the statistics around the request alone, since the collection that releases the
+// parked code also kills the CodeBlocks of this script's helpers that compiled, which attach at their next calls.
 // - In twins runs the ConsumerProducer then rewrites laF's body so that its context differs, which commits it under a new
 //   index token: the next request after a release misses Context and stamps that token, and a request at the same token
 //   after the miss reads nothing (statistics misses.BodyUnchanged, and no digest).
@@ -103,6 +105,40 @@ load("./resources/ucb.js", "caller relative");
             gc();
     }
 
+    // Calls fn(a, b), which makes one request, with the statistics and the install count read around that call alone. A
+    // collection that releases the parked code also kills the CodeBlocks of this script's helpers that compiled, whose
+    // bodies this VM committed too, and each helper's next call makes a newborn CodeBlock that attaches. So the readers run
+    // once first, and nothing else runs between the reads: the install count is read before t.delta runs, since t.delta's
+    // difference compiles after enough windows and would install inside the count.
+    function measured(fn, a, b)
+    {
+        t.statistics();
+        installs();
+        const installsBefore = installs();
+        const before = t.statistics();
+        const value = fn(a, b);
+        const after = t.statistics();
+        const installed = installs() - installsBefore;
+        return { value, delta: t.delta(before, after), installed };
+    }
+
+    // laF's request: its first call in a new realm, a request for its filled slot.
+    function laFRequest()
+    {
+        const realm = runString(programText);
+        const result = measured(realm.laF, firstX, idle);
+        t.check(result.value === laF(firstX), () => `laF(${firstX}) gave ${result.value}`);
+        return result;
+    }
+
+    // L's request: its evaluation, a CodeCache hit.
+    function loopRequest()
+    {
+        const result = measured(loadString, loopText);
+        t.check(result.value === loopResult, `the looping program gave ${result.value}`);
+        return result;
+    }
+
     // Runs `request` until it matches its live UCB with the body, which it attaches to unless `misses` is given, the miss
     // the match ends in. Each attempt collects first, so that the code the UCB parked is released; an attempt that met
     // parked code made a CodeBlock that uses it, which the next attempt's collection kills.
@@ -110,18 +146,13 @@ load("./resources/ucb.js", "caller relative");
     {
         for (let attempt = 0; attempt < attempts; ++attempt) {
             collect();
-            const installsBefore = installs();
-            const before = t.statistics();
-            request();
-            const after = t.statistics();
-            const delta = t.delta(before, after);
+            const { delta, installed } = request();
             if (!delta)
                 return;
             const matched = misses ? delta.misses[misses] : delta.attaches;
             if (!matched && attempt + 1 < attempts)
                 continue;
             t.expect(label, delta, expectations);
-            const installed = installs() - installsBefore;
             t.check(installed === (misses ? 0 : 1), `${label}: ${installed} bodies were installed`);
             return;
         }
@@ -151,20 +182,21 @@ load("./resources/ucb.js", "caller relative");
                 runLoopText();
         }, { attaches: 0, sourceDigests: 0, contextDigests: 0, holderDigests: 0 }));
 
-        // Released: the first request of each attaches and installs.
-        afterRelease("laF's first request after the release", () => runInNewRealm(3), {
+        // Released: the first request of each attaches and installs. L's computes no source digest, since the CodeCache
+        // serves its UCB only to its own text.
+        afterRelease("laF's first request after the release", laFRequest, {
             attaches: 1, contextDigests: 1, holderDigests: 1, sourceDigests: 0,
         });
-        afterRelease("the looping program's first request after the release", runLoopText, {
-            attaches: 1, contextDigests: 1, sourceDigests: 1, holderDigests: 0,
+        afterRelease("the looping program's first request after the release", loopRequest, {
+            attaches: 1, contextDigests: 1, sourceDigests: 0, holderDigests: 0,
         });
 
         // Released again: the attach at the matched commit identifier re-checks nothing.
-        afterRelease("laF's attach at the matched commit identifier", () => runInNewRealm(3), {
+        afterRelease("laF's attach at the matched commit identifier", laFRequest, {
             attaches: 1, contextDigests: 0, holderDigests: 0, sourceDigests: 0,
         });
-        afterRelease("the looping program's attach at the matched commit identifier", runLoopText, {
-            attaches: 1, contextDigests: 0, holderDigests: 0, sourceDigests: 1,
+        afterRelease("the looping program's attach at the matched commit identifier", loopRequest, {
+            attaches: 1, contextDigests: 0, holderDigests: 0, sourceDigests: 0,
         });
 
         // A miss, then a request at the index token it was stamped with. In twins runs this VM rewrites the first byte
@@ -180,10 +212,10 @@ load("./resources/ucb.js", "caller relative");
             t.check(identity, "laF has no ucb.identity");
             t.rewriteSection(key, "ucb.identity", 48, [identity[48] ^ 0x5a]);
         }
-        afterRelease("laF's request after its body's context changed", () => runInNewRealm(3), {
+        afterRelease("laF's request after its body's context changed", laFRequest, {
             "misses.Context": 1, attaches: 0, contextDigests: 1, holderDigests: 0, sourceDigests: 0,
         }, "Context");
-        t.window("laF's request at the index token its miss was stamped with", () => runInNewRealm(3), {
+        t.expect("laF's request at the index token its miss was stamped with", laFRequest().delta, {
             "misses.BodyUnchanged": 1, "misses.Context": 0, attaches: 0, contextDigests: 0, holderDigests: 0, sourceDigests: 0,
         });
         done();

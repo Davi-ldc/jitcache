@@ -45,9 +45,9 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ImageBufferIOSurfaceBackend);
 
-IntSize ImageBufferIOSurfaceBackend::calculateSafeBackendSize(const Parameters& parameters)
+IntSize ImageBufferIOSurfaceBackend::calculateSafeBackendSize(const ImageBufferParameters& parameters)
 {
-    IntSize backendSize = parameters.backendSize;
+    IntSize backendSize = parameters.backendSize();
     if (backendSize.isEmpty())
         return { };
 
@@ -65,12 +65,7 @@ unsigned ImageBufferIOSurfaceBackend::calculateBytesPerRow(const IntSize& backen
     return (bytesPerRow + alignmentMask) & ~alignmentMask;
 }
 
-size_t ImageBufferIOSurfaceBackend::calculateMemoryCost(const Parameters& parameters)
-{
-    return ImageBufferBackend::calculateMemoryCost(parameters.backendSize, calculateBytesPerRow(parameters.backendSize, parameters.bufferFormat.pixelFormat));
-}
-
-std::unique_ptr<ImageBufferIOSurfaceBackend> ImageBufferIOSurfaceBackend::create(const Parameters& parameters, const ImageBufferCreationContext& creationContext)
+std::unique_ptr<ImageBufferIOSurfaceBackend> ImageBufferIOSurfaceBackend::create(const ImageBufferParameters& parameters, const ImageBufferCreationContext& creationContext)
 {
     IntSize backendSize = calculateSafeBackendSize(parameters);
     if (backendSize.isEmpty())
@@ -89,7 +84,7 @@ std::unique_ptr<ImageBufferIOSurfaceBackend> ImageBufferIOSurfaceBackend::create
     return std::unique_ptr<ImageBufferIOSurfaceBackend> { new ImageBufferIOSurfaceBackend { parameters, WTF::move(surface), WTF::move(cgContext), creationContext.displayID, creationContext.surfacePool.get() } };
 }
 
-ImageBufferIOSurfaceBackend::ImageBufferIOSurfaceBackend(const Parameters& parameters, std::unique_ptr<IOSurface> surface, RetainPtr<CGContextRef> platformContext, PlatformDisplayID displayID, IOSurfacePool* ioSurfacePool)
+ImageBufferIOSurfaceBackend::ImageBufferIOSurfaceBackend(const ImageBufferParameters& parameters, std::unique_ptr<IOSurface> surface, RetainPtr<CGContextRef> platformContext, PlatformDisplayID displayID, IOSurfacePool* ioSurfacePool)
     : ImageBufferCGBackend(parameters)
     , m_surface(WTF::move(surface))
     , m_platformContext(WTF::move(platformContext))
@@ -107,6 +102,15 @@ ImageBufferIOSurfaceBackend::~ImageBufferIOSurfaceBackend()
     IOSurface::moveToPool(WTF::move(m_surface), m_ioSurfacePool.get());
 }
 
+RenderingMode ImageBufferIOSurfaceBackend::renderingMode() const
+{
+    return RenderingMode::Accelerated;
+}
+
+size_t ImageBufferIOSurfaceBackend::memoryCost() const
+{
+    return ImageBufferBackend::calculateMemoryCost(size(), calculateBytesPerRow(size(), pixelFormat()));
+}
 
 GraphicsContext& ImageBufferIOSurfaceBackend::context()
 {
@@ -125,7 +129,7 @@ void ImageBufferIOSurfaceBackend::flushContext()
 void ImageBufferIOSurfaceBackend::submitDrawingCommands()
 {
     if (PAL::canLoad_CoreGraphics_CGIOSurfaceContextFlushQueue())
-        PAL::softLink_CoreGraphics_CGIOSurfaceContextFlushQueue(ensurePlatformContext());
+        PAL::softLink_CoreGraphics_CGIOSurfaceContextFlushQueue(protect(ensurePlatformContext()));
     else {
         // Creating a snapshot image forces the rendering to commence
         createImage();
@@ -138,7 +142,7 @@ bool ImageBufferIOSurfaceBackend::flushContextDraws()
     if (!contextNeedsFlush && !m_needsFirstFlush)
         return false;
     m_needsFirstFlush = false;
-    CGContextFlush(ensurePlatformContext());
+    CGContextFlush(protect(ensurePlatformContext()));
     return true;
 }
 
@@ -171,11 +175,11 @@ bool ImageBufferIOSurfaceBackend::invalidateCachedNativeImage()
     // current state of the IOSurface.
     // See https://webkit.org/b/157966 and https://webkit.org/b/228682 for more context.
     if (PAL::canLoad_CoreGraphics_CGIOSurfaceContextInvalidateSurface()) {
-        PAL::softLink_CoreGraphics_CGIOSurfaceContextInvalidateSurface(ensurePlatformContext());
+        PAL::softLink_CoreGraphics_CGIOSurfaceContextInvalidateSurface(protect(ensurePlatformContext()));
         return false;
     }
 
-    CGContextFillRect(ensurePlatformContext(), CGRect { });
+    CGContextFillRect(protect(ensurePlatformContext()), CGRect { });
     return true;
 }
 
@@ -311,21 +315,21 @@ void ImageBufferIOSurfaceBackend::prepareForExternalWrite()
     if (flushContextDraws())
         needFlush = false;
     if (needFlush)
-        CGContextFlush(ensurePlatformContext());
+        CGContextFlush(protect(ensurePlatformContext()));
 }
 
 RetainPtr<CGImageRef> ImageBufferIOSurfaceBackend::createImage()
 {
     // Consumers may hold on to the image, so mark external writes needing the invalidation marker.
     m_mayHaveOutstandingBackingStoreReferences = true;
-    return m_surface->createImage(ensurePlatformContext());
+    return m_surface->createImage(protect(ensurePlatformContext()));
 }
 
 RetainPtr<CGImageRef> ImageBufferIOSurfaceBackend::createImageReference()
 {
     // The reference is used only in synchronized manner, so after the use ends, we can update
     // externally without invalidation marker. Thus we do not set m_mayHaveOutstandingBackingStoreReferences.
-    auto image = adoptCF(CGIOSurfaceContextCreateImageReference(ensurePlatformContext()));
+    RetainPtr image = adoptCF(CGIOSurfaceContextCreateImageReference(protect(ensurePlatformContext())));
     // CG has internal caches for some operations related to software bitmap draw.
     // One of these caches are per-image color matching cache. Since these will not get any hits
     // from an image that is recreated every time, mark the image transient to skip these caches.

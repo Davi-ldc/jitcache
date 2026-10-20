@@ -175,8 +175,21 @@ void ModelPlayer::setCurrentTime(NodeIdentifier, Seconds, CompletionHandler<void
 
 #if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
 
-void ModelPlayer::setEnvironmentMap(Ref<SharedBuffer>&&)
+void ModelPlayer::setEnvironmentMap(Ref<SharedBuffer>&&, const URL&)
 {
+}
+
+void ModelPlayer::disableEnvironmentMap()
+{
+}
+
+void ModelPlayer::enableSystemEnvironmentMap()
+{
+}
+
+String ModelPlayer::environmentMapForTesting() const
+{
+    return "auto"_s;
 }
 
 #endif
@@ -191,11 +204,15 @@ void ModelPlayer::setHasPortal(bool)
 
 #if ENABLE(SPATIAL_PORTAL)
 
-void ModelPlayer::setPortalTransform(PortalTransformKind)
+void ModelPlayer::setPortalTransform(const UsedPortalTransform&)
 {
 }
 
 void ModelPlayer::setPortalAction(PortalActionKind)
+{
+}
+
+void ModelPlayer::setAnchor(NodeIdentifier, std::optional<NodeIdentifier>, const String&)
 {
 }
 
@@ -250,6 +267,26 @@ void ModelPlayer::exitImmersivePresentation(CompletionHandler<void()>&& completi
 
 #endif
 
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+
+void ModelPlayer::enterVolumetricPresentation(CompletionHandler<void(std::optional<LayerHostingContextIdentifier>)>&& completion)
+{
+    ASSERT_NOT_REACHED("ModelPlayer cannot provide a layer context identifier");
+    completion(std::nullopt);
+}
+
+void ModelPlayer::exitVolumetricPresentation()
+{
+    ASSERT_NOT_REACHED("ModelPlayer cannot exit a volumetric presentation");
+}
+
+void ModelPlayer::updateVolumetricPresentationSize(const FloatSize&)
+{
+    ASSERT_NOT_REACHED("ModelPlayer cannot be presented in a volumetric scene");
+}
+
+#endif
+
 #if HAVE(SUPPORT_HDR_DISPLAY) && ENABLE(PIXEL_FORMAT_RGBA16F)
 void ModelPlayer::setDynamicRangeLimit(PlatformDynamicRangeLimit, float, bool)
 {
@@ -258,6 +295,13 @@ void ModelPlayer::setDynamicRangeLimit(PlatformDynamicRangeLimit, float, bool)
 std::optional<double> ModelPlayer::getEffectiveDynamicRangeLimitValue() const
 {
     return std::nullopt;
+}
+#endif
+
+#if ENABLE(MODEL_PROCESS)
+void ModelPlayer::sceneGraphAsTextForTesting(std::optional<NodeIdentifier>, Vector<std::pair<NodeIdentifier, String>>&&, const ModelSceneGraphAsTextOptions&, CompletionHandler<void(String&&)>&& completionHandler)
+{
+    completionHandler({ });
 }
 #endif
 

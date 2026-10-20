@@ -50,16 +50,16 @@
     }
     print(totals.join(" "));
 
-    // The case happened (HARNESS.md, Tests): the producer compiled every switch, each called 54 times, so each ran its
-    // import here and met the twin check.
+    // The case happened: the producer compiled every switch, each called 54 times, so each ran its import here and met
+    // the twin check.
     if (role === "Consumer") {
         const sections = load("./resources/image-sections.js", "caller relative");
         const bodies = { };
         sizes.forEach((size, index) => bodies[`the switch of ${size} keys`] = switches[index]);
         sections.expectImports(role, bodies);
         sections.expectTargets(role, { call: bodies }, [
-            { site: "A16", kind: "SwitchStringRankAtom", form: "Pointer" },
-            { site: "C13", kind: "SwitchStringRankCase", form: "Jump" },
+            { site: "an inline string switch's atom compare", kind: "SwitchStringRankAtom", form: "Pointer" },
+            { site: "an inline string switch's case jump", kind: "SwitchStringRankCase", form: "Jump" },
         ]);
     }
 })(...arguments);

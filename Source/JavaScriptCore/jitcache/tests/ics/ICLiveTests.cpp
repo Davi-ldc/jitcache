@@ -2,7 +2,10 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
+#include "ArgList.h"
+#include "ArrayProfile.h"
 #include "BaselineJITCode.h"
+#include "CallData.h"
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "Completion.h"
@@ -14,34 +17,40 @@
 #include "ICSection.h"
 #include "ICSites.h"
 #include "ICTwins.h"
+#include "Instruction.h"
 #include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
+#include "MetadataTable.h"
 #include "PolymorphicCallStubRoutine.h"
 #include "PropertyInlineCache.h"
 #include "Repatch.h"
 #include "SourceCode.h"
 #include "TestVM.h"
 #include "TopExceptionScope.h"
+#include "UnlinkedCodeBlock.h"
 #include <algorithm>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringBuilder.h>
 #include <wtf/text/WTFString.h>
 
 // The live tests of the ICs lane (ics/ICCapture, ICRestore, ICSection, ICSites and ICTwins, .h and .cpp): capture, the
-// polymorphic bit, the newborn check, preparing, seeding and attaching ICs on a newborn CB, the snapshot and the twin
-// check, and the shell function that exposes the snapshot, each on a fresh VM with default options. A test builds its
-// own global object, evaluates its source with JSC::evaluate and reads its functions from the global object. A
-// baseline CB comes from one call through JSC::call, which installs an LLInt CB, and JIT::compileSync, which compiles
-// that CB and runs the finalization that ends a compilation; the later calls run its baseline code. A newborn CB comes
-// from newCodeBlockFor on a function never called, inside a DeferGCForAWhile, and is used only inside that scope. Two
-// functions with the same body text have separate UCBs with the same metadata layout and molds, so one's
-// BaselineJITCode and section pair with the other's newborn CB. The source keeps every object and function the test
-// passes in its globals, and the global object stays reachable from the test's stack, so no collection resets a case
-// or unlinks a callee between two reads of the same state.
+// polymorphic bit, the newborn check, preparing, seeding and attaching ICs on a newborn CB, call sites in each state of
+// their call data and their this profiles, the snapshot and the twin check, and the shell function that exposes the
+// snapshot, each on a fresh VM with default options. A test builds its own global object, evaluates its source with
+// JSC::evaluate and reads its functions from the global object. A baseline CB comes from one call through JSC::call,
+// which installs an LLInt CB, and JIT::compileSync, which compiles that CB and runs the finalization that ends a
+// compilation; the later calls run its baseline code. A newborn CB comes from newCodeBlockFor on a function never
+// called, inside a DeferGCForAWhile, and is used only inside that scope. Two functions with the same body text have
+// separate UCBs with the same metadata layout and molds, so one's BaselineJITCode and section pair with the other's
+// newborn CB. The source keeps every object and function the test passes in its globals, and the global object stays
+// reachable from the test's stack, so no collection resets a case or unlinks a callee between two reads of the same
+// state.
 
 namespace JSC::JITCache::Tests {
 
@@ -72,19 +81,6 @@ static void withNewbornCodeBlock(TestContext& context, JSFunction* function, con
     functor(*codeBlock);
 }
 
-static ASCIILiteral captureCheckName(ICs::CaptureCheck check)
-{
-    switch (check) {
-    case ICs::CaptureCheck::NoBaselineJITData:
-        return "NoBaselineJITData"_s;
-    case ICs::CaptureCheck::OutputSizeMismatch:
-        return "OutputSizeMismatch"_s;
-    case ICs::CaptureCheck::MoldMismatch:
-        return "MoldMismatch"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
 // A strict capture of a live CB, with its section decoded into copies.
 struct LiveCapture {
     Vector<uint8_t> bytes;
@@ -105,7 +101,7 @@ static std::optional<LiveCapture> captureLive(TestContext& context, CodeBlock& c
     Vector<uint8_t> bytes(FillWith { }, ICs::baselineICsSectionSize(codeBlock), 0xcc);
     auto captured = ICs::captureBaselineICs(codeBlock, bytes.mutableSpan(), ICs::StrictChecks::Yes);
     if (!captured) {
-        JITCACHE_FAIL(makeString("captureBaselineICs failed "_s, captureCheckName(captured.error().check), " at site "_s, captured.error().siteIndex));
+        JITCACHE_FAIL(makeString("captureBaselineICs failed "_s, ICs::description(captured.error().check), " at site "_s, captured.error().siteIndex));
         return std::nullopt;
     }
     if (captured->hasPolymorphicSite != summarized.hasPolymorphicSite)
@@ -153,8 +149,9 @@ static unsigned stubSlotCount(CodeBlock& codeBlock)
 {
     ConcurrentJSLocker locker(codeBlock.m_lock);
     unsigned slotCount = 0;
-    ICs::forEachCallLinkSite(codeBlock, [&](unsigned, unsigned, CallLinkInfo& callLinkInfo) {
-        if (auto* stub = callLinkInfo.stub())
+    ICs::forEachCallLinkSite(codeBlock, [&](const ICs::CallLinkSite& site) {
+        CallLinkInfo* callLinkInfo = site.ownCallLinkInfo();
+        if (auto* stub = callLinkInfo ? callLinkInfo->stub() : nullptr)
             stub->forEachDependentCell([&](JSCell*) { ++slotCount; });
     });
     return slotCount;
@@ -196,36 +193,9 @@ static constexpr auto hasWithTwinSource = "function has(o) { return \"x\" in o; 
     "var a2 = { x: 2 };"
     "var b = { y: 1, x: 2 };"_s;
 
-static ASCIILiteral checkName(ICs::Check check)
-{
-    switch (check) {
-    case ICs::Check::SectionSize:
-        return "SectionSize"_s;
-    case ICs::Check::SummaryBound:
-        return "SummaryBound"_s;
-    case ICs::Check::CallLinkGroups:
-        return "CallLinkGroups"_s;
-    case ICs::Check::ReservedBits:
-        return "ReservedBits"_s;
-    case ICs::Check::EnumRange:
-        return "EnumRange"_s;
-    case ICs::Check::SummaryCount:
-        return "SummaryCount"_s;
-    case ICs::Check::MoldPairing:
-        return "MoldPairing"_s;
-    case ICs::Check::MetadataLayout:
-        return "MetadataLayout"_s;
-    case ICs::Check::MoldMegamorphicBit:
-        return "MoldMegamorphicBit"_s;
-    case ICs::Check::NewbornCallLinks:
-        return "NewbornCallLinks"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
 static String describe(const ICs::Invalid& invalid)
 {
-    return makeString(checkName(invalid.check), " at site "_s, invalid.siteIndex);
+    return makeString(ICs::description(invalid.check), " at site "_s, invalid.siteIndex);
 }
 
 static void expectPasses(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& invalid)
@@ -237,11 +207,11 @@ static void expectPasses(TestContext& context, ASCIILiteral what, const std::opt
 static void expectFails(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& invalid, ICs::Check check, uint32_t siteIndex)
 {
     if (!invalid) {
-        JITCACHE_FAIL(makeString(what, " passed, expected "_s, checkName(check), " at site "_s, siteIndex));
+        JITCACHE_FAIL(makeString(what, " passed, expected "_s, ICs::description(check), " at site "_s, siteIndex));
         return;
     }
     if (invalid->check != check || invalid->siteIndex != siteIndex)
-        JITCACHE_FAIL(makeString(what, " failed "_s, describe(*invalid), ", expected "_s, checkName(check), " at site "_s, siteIndex));
+        JITCACHE_FAIL(makeString(what, " failed "_s, describe(*invalid), ", expected "_s, ICs::description(check), " at site "_s, siteIndex));
 }
 
 static unsigned totalSites(const ICs::CallLinkSiteCounts& counts)
@@ -754,7 +724,7 @@ JITCACHE_TEST(icsLiveRestoreWithoutMetadataTable, Yes)
         JITCACHE_CHECK(!prepared->summary().icSitesWithCases);
 
         unsigned visitedSites = 0;
-        ICs::forEachCallLinkSite(newborn, [&](unsigned, unsigned, CallLinkInfo&) {
+        ICs::forEachCallLinkSite(newborn, [&](const ICs::CallLinkSite&) {
             ++visitedSites;
         });
         JITCACHE_CHECK(!visitedSites);
@@ -764,8 +734,8 @@ JITCACHE_TEST(icsLiveRestoreWithoutMetadataTable, Yes)
     });
 }
 
-// A CB that already ran fails NewbornCallLinks, and the newborn CB of a never-called function with the same body
-// passes.
+// A CB that already ran fails NewbornCallLinks on its JIT type, and the newborn CB of a never-called function with the
+// same body passes. icsLiveNewbornCheckPerSite tests the check's clauses on each site, on newborn CBs.
 JITCACHE_TEST(icsLiveNewbornCheck, Yes)
 {
     VM& vm = *context.vm();
@@ -781,18 +751,17 @@ JITCACHE_TEST(icsLiveNewbornCheck, Yes)
     if (!caller || !callerTwin || !callee)
         return;
 
-    for (unsigned callIndex = 0; callIndex < 2; ++callIndex) {
-        if (!callFunction(context, globalObject, caller, { callee }))
-            return;
-    }
+    if (!callFunction(context, globalObject, caller, { callee }))
+        return;
     CodeBlock* codeBlock = caller->jsExecutable()->codeBlockForCall();
     if (!codeBlock) {
         JITCACHE_FAIL("calling caller installed no CB"_s);
         return;
     }
+    JITCACHE_CHECK(codeBlock->jitType() != JITType::None);
     auto invalid = ICs::checkNewbornCodeBlock(*codeBlock);
     if (!invalid || invalid->check != ICs::Check::NewbornCallLinks)
-        JITCACHE_FAIL(makeString("the CB that ran gives "_s, invalid ? describe(*invalid) : String("no failure"_s), " instead of NewbornCallLinks"_s));
+        JITCACHE_FAIL(makeString("the CB that ran gives "_s, invalid ? describe(*invalid) : String("no failure"_s), " instead of "_s, ICs::description(ICs::Check::NewbornCallLinks)));
 
     withNewbornCodeBlock(context, callerTwin, [&](CodeBlock& newborn) {
         JITCACHE_CHECK(totalSites(ICs::callLinkSiteCounts(newborn)) == 1);
@@ -800,21 +769,75 @@ JITCACHE_TEST(icsLiveNewbornCheck, Yes)
     });
 }
 
-// NewbornCallLinks field by field: on newborn CBs of a never-called body with two call sites, each call-link field that
-// seeding writes over, changed at the second site, fails the check at that site's index.
+// NewbornCallLinks site by site, on newborn CBs of never-called bodies with two call sites each: two op_call sites, two
+// op_tail_call sites and two op_call_varargs sites, whose call links are inline. Each untouched newborn CB passes. One
+// change at the second site, on a fresh newborn CB each time, fails the check at that site's index: moving an op_call
+// site to the executed-once data or giving it data of its own, giving an op_tail_call site data of its own, and, at an
+// inline site, each call-link field that seeding writes over.
 JITCACHE_TEST(icsLiveNewbornCheckPerSite, Yes)
 {
     VM& vm = *context.vm();
-    JSGlobalObject* globalObject = createRealm(context, vm, "function twoCalls(f, g) { return f() + g(); }"_s);
+    JSGlobalObject* globalObject = createRealm(context, vm,
+        "function twoCalls(f, g) { return f() + g(); }"
+        "function twoTailCalls(f, g) { \"use strict\"; if (f) return f(); return g(); }"
+        "function twoSpreads(f, g, a) { return f(...a) + g(...a); }"_s);
     if (!globalObject)
         return;
     JSFunction* twoCalls = globalFunction(context, globalObject, "twoCalls"_s);
-    if (!twoCalls)
+    JSFunction* twoTailCalls = globalFunction(context, globalObject, "twoTailCalls"_s);
+    JSFunction* twoSpreads = globalFunction(context, globalObject, "twoSpreads"_s);
+    if (!twoCalls || !twoTailCalls || !twoSpreads)
         return;
 
-    withNewbornCodeBlock(context, twoCalls, [&](CodeBlock& newborn) {
-        JITCACHE_CHECK(totalSites(ICs::callLinkSiteCounts(newborn)) == 2);
-        expectPasses(context, "the untouched newborn CB"_s, ICs::checkNewbornCodeBlock(newborn));
+    struct Body {
+        ASCIILiteral name;
+        JSFunction* function;
+        OpcodeID opcodeID;
+    };
+    const Body bodies[] = {
+        { "twoCalls"_s, twoCalls, OpCall::opcodeID },
+        { "twoTailCalls"_s, twoTailCalls, OpTailCall::opcodeID },
+        { "twoSpreads"_s, twoSpreads, OpCallVarargs::opcodeID },
+    };
+    for (const Body& body : bodies) {
+        withNewbornCodeBlock(context, body.function, [&](CodeBlock& newborn) {
+            unsigned siteCount = 0;
+            ICs::forEachCallLinkSite(newborn, [&](const ICs::CallLinkSite& site) {
+                ++siteCount;
+                if (site.opcode().opcodeID != body.opcodeID)
+                    JITCACHE_FAIL(makeString(body.name, " has a call-link site of "_s, opcodeNames[site.opcode().opcodeID]));
+            });
+            if (siteCount != 2)
+                JITCACHE_FAIL(makeString(body.name, " has "_s, siteCount, " call-link sites instead of two"_s));
+            expectPasses(context, body.name, ICs::checkNewbornCodeBlock(newborn));
+        });
+    }
+
+    // Applies change to the second site of a fresh newborn CB of the function, and checks that NewbornCallLinks fails at
+    // index 1. The change receives the site and its instruction.
+    auto expectChangeFails = [&](ASCIILiteral name, JSFunction* function, const auto& change) {
+        withNewbornCodeBlock(context, function, [&](CodeBlock& newborn) {
+            unsigned siteIndex = 0;
+            ICs::forEachCallLinkInstruction(newborn, [&](const ICs::CallLinkSite& site, const JSInstruction* instruction) {
+                if (siteIndex++ == 1)
+                    change(newborn, site, instruction);
+            });
+            if (siteIndex != 2) {
+                JITCACHE_FAIL(makeString(name, ": the newborn CB has "_s, siteIndex, " call-link instructions instead of two"_s));
+                return;
+            }
+            expectFails(context, name, ICs::checkNewbornCodeBlock(newborn), ICs::Check::NewbornCallLinks, 1);
+        });
+    };
+
+    expectChangeFails("twoCalls with its second site executed once"_s, twoCalls, [&](CodeBlock&, const ICs::CallLinkSite& site, const JSInstruction*) {
+        site.lazyInfo->setExecutedOnce(vm);
+    });
+    expectChangeFails("twoCalls with data of its second site's own"_s, twoCalls, [&](CodeBlock& newborn, const ICs::CallLinkSite&, const JSInstruction* instruction) {
+        newborn.ensureCallLinkInfoAt(instruction);
+    });
+    expectChangeFails("twoTailCalls with data of its second site's own"_s, twoTailCalls, [&](CodeBlock& newborn, const ICs::CallLinkSite&, const JSInstruction* instruction) {
+        newborn.ensureCallLinkInfoAt(instruction);
     });
 
     struct Change {
@@ -822,26 +845,17 @@ JITCACHE_TEST(icsLiveNewbornCheckPerSite, Yes)
         void (*apply)(VM&, CallLinkInfo&);
     };
     const Change changes[] = {
-        { "the seen bit"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setSeen(); } },
-        { "hasSeenClosure"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setHasSeenClosure(); } },
-        { "clearedByGC"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setClearedByGC(); } },
-        { "clearedByVirtual"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setClearedByVirtual(); } },
-        { "a varargs maximum"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.updateMaxArgumentCountIncludingThisForVarargs(3); } },
-        { "the virtual mode"_s, [](VM& siteVM, CallLinkInfo& callLinkInfo) { callLinkInfo.setVirtualCall(siteVM); } },
-        { "another call type"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setCallType(CallLinkInfo::TailCall); } },
+        { "twoSpreads with the seen bit"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setSeen(); } },
+        { "twoSpreads with hasSeenClosure"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setHasSeenClosure(); } },
+        { "twoSpreads with clearedByGC"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setClearedByGC(); } },
+        { "twoSpreads with clearedByVirtual"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setClearedByVirtual(); } },
+        { "twoSpreads with a varargs maximum"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.updateMaxArgumentCountIncludingThisForVarargs(3); } },
+        { "twoSpreads with the virtual mode"_s, [](VM& siteVM, CallLinkInfo& callLinkInfo) { callLinkInfo.setVirtualCall(siteVM); } },
+        { "twoSpreads with another call type"_s, [](VM&, CallLinkInfo& callLinkInfo) { callLinkInfo.setCallType(CallLinkInfo::TailCallVarargs); } },
     };
     for (const Change& change : changes) {
-        withNewbornCodeBlock(context, twoCalls, [&](CodeBlock& newborn) {
-            unsigned siteIndex = 0;
-            ICs::forEachCallLinkSite(newborn, [&](unsigned, unsigned, CallLinkInfo& callLinkInfo) {
-                if (siteIndex++ == 1)
-                    change.apply(vm, callLinkInfo);
-            });
-            if (siteIndex != 2) {
-                JITCACHE_FAIL(makeString("the newborn CB has "_s, siteIndex, " call-link sites instead of two"_s));
-                return;
-            }
-            expectFails(context, change.name, ICs::checkNewbornCodeBlock(newborn), ICs::Check::NewbornCallLinks, 1);
+        expectChangeFails(change.name, twoSpreads, [&](CodeBlock&, const ICs::CallLinkSite& site, const JSInstruction*) {
+            change.apply(vm, *site.inlineInfo);
         });
     }
 }
@@ -905,7 +919,7 @@ JITCACHE_TEST(icsLiveRestoreMoldPairing, Yes)
         if (strict)
             JITCACHE_FAIL("the changed section prepares under strict"_s);
         else if (strict.error().check != ICs::Check::MoldPairing || strict.error().siteIndex)
-            JITCACHE_FAIL(makeString("the changed section fails "_s, describe(strict.error()), " instead of MoldPairing at site 0"_s));
+            JITCACHE_FAIL(makeString("the changed section fails "_s, describe(strict.error()), " instead of "_s, ICs::description(ICs::Check::MoldPairing), " at site 0"_s));
 
         auto normal = ICs::prepareBaselineICs(changed.span(), code.get(), newborn, ICs::StrictChecks::No);
         if (!normal)
@@ -917,22 +931,52 @@ JITCACHE_TEST(icsLiveRestoreMoldPairing, Yes)
     });
 }
 
-// Seeding and attaching on a live CB, in the install function's order: the capture of a warm baseline CB, prepared
-// under strict against its code and the newborn CB of a never-called twin, then seeded, set up with the same code and
-// attached, leaves every call-link site and every property IC of the newborn CB in the state ICRestore derives from its
-// record. The drive leaves a property IC with cases, a linked call site and a construct site gone virtual, so seeding
-// takes both the setVirtualCall and the setSeen branch.
+// The body of icsLiveSeedAndAttach, which its twin repeats. op selects the site a call reaches: three plain call sites,
+// a call site whose this is the array a, a construct site, a varargs site and, since the body is strict, a tail call.
+// Every call reads o.p first.
+static constexpr auto seededBodyText = "(op, o, f, C, a, args) {"
+    "    \"use strict\";"
+    "    var r = o.p;"
+    "    if (op === 1)"
+    "        r = f();"
+    "    else if (op === 2)"
+    "        r = f();"
+    "    else if (op === 3)"
+    "        r = f();"
+    "    else if (op === 4)"
+    "        r = a.push(op);"
+    "    else if (op === 5)"
+    "        r = new C();"
+    "    else if (op === 6)"
+    "        r = f(...args);"
+    "    else if (op === 7)"
+    "        return f();"
+    "    return r;"
+    "}"_s;
+
+// Seeding and attaching on a live CB, in the install function's order. The body is brought to baseline and driven until
+// it holds a property IC with cases, a call site never called, one called once, one called twice as a plain f(), a call
+// site called twice with an array as this, a construct site gone virtual, a tail call run once and a varargs site called
+// once, then put through a full collection that folds the this samples. Its capture, prepared under strict against its
+// code and the newborn CB of a never-called twin, then seeded, set up with the same code and attached, leaves every
+// call-link site and every property IC of the newborn CB in the state ICRestore derives from its record: the tail call,
+// the virtual site and the site with the array as this with data of their own, the plain site called twice and the one
+// called once on the executed-once data, the never-called site as linking left it. Seeding thus takes every branch but
+// setHasSeenClosure and setClearedByGC, which the capture-states script reaches. The newborn CB then owns three
+// CallSiteDatas, CodeBlock::getArrayProfile at the array site finds the record's this profile, and the twin check finds
+// no mismatch. The source's globals keep every callee and every structure the cases name alive.
 JITCACHE_TEST(icsLiveSeedAndAttach, Yes)
 {
     VM& vm = *context.vm();
-    JSGlobalObject* globalObject = createRealm(context, vm,
-        "function body(o, f, C) { var x = o.p; f(); new C(); return x; }"
-        "function bodyTwin(o, f, C) { var x = o.p; f(); new C(); return x; }"
+    JSGlobalObject* globalObject = createRealm(context, vm, makeString("function body"_s, seededBodyText,
+        "function bodyTwin"_s, seededBodyText,
         "function callee() { return 1; }"
         "function C1() { }"
         "function C2() { }"
         "var a = { p: 1 };"
-        "var b = { q: 1, p: 2 };"_s);
+        "var b = { q: 1, p: 2 };"
+        "var array = [1];"
+        "var args = [1, 2];"_s));
     if (!globalObject)
         return;
     JSFunction* body = globalFunction(context, globalObject, "body"_s);
@@ -942,33 +986,58 @@ JITCACHE_TEST(icsLiveSeedAndAttach, Yes)
     JSFunction* c2 = globalFunction(context, globalObject, "C2"_s);
     auto a = globalObjectValue(context, globalObject, "a"_s);
     auto b = globalObjectValue(context, globalObject, "b"_s);
-    if (!body || !bodyTwin || !callee || !c1 || !c2 || !a || !b)
+    auto array = globalObjectValue(context, globalObject, "array"_s);
+    auto args = globalObjectValue(context, globalObject, "args"_s);
+    if (!body || !bodyTwin || !callee || !c1 || !c2 || !a || !b || !array || !args)
         return;
 
-    CodeBlock* codeBlock = bringToBaseline(context, globalObject, body, { *a, callee, c1 });
+    // The call that installs the LLInt CB reaches no call site.
+    CodeBlock* codeBlock = bringToBaseline(context, globalObject, body, { jsNumber(0), *a, callee, c1, *array, *args });
     if (!codeBlock)
         return;
-    for (unsigned callIndex = 0; callIndex < 6; ++callIndex) {
-        bool odd = callIndex % 2;
-        if (!callFunction(context, globalObject, body, { odd ? *b : *a, callee, odd ? c2 : c1 }))
-            return;
-    }
+    auto drive = [&](int op, unsigned callCount) {
+        for (unsigned callIndex = 0; callIndex < callCount; ++callIndex) {
+            bool odd = callIndex % 2;
+            if (!callFunction(context, globalObject, body, { jsNumber(op), odd ? *b : *a, callee, odd ? c2 : c1, *array, *args }))
+                return false;
+        }
+        return true;
+    };
+    if (!drive(2, 1) || !drive(3, 2) || !drive(4, 2) || !drive(5, 4) || !drive(6, 1) || !drive(7, 1))
+        return;
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+
     auto capture = captureLive(context, *codeBlock);
     if (!capture)
         return;
-    bool hasVirtualSite = std::ranges::any_of(capture->callLinks, [](const ICs::CallLinkRecord& record) {
-        return modeOf(record) == ICs::CallLinkModeCode::Virtual;
-    });
-    // Every site the producer did not leave virtual comes back seen once, so a non-virtual record takes the setSeen
-    // branch.
-    bool hasNonVirtualSite = std::ranges::any_of(capture->callLinks, [](const ICs::CallLinkRecord& record) {
-        return modeOf(record) != ICs::CallLinkModeCode::Virtual;
-    });
+
+    // The sites in canonical order: the four op_call sites, the tail call, the construct site and the varargs site, and
+    // the state each comes back in.
+    struct ExpectedSite {
+        OpcodeID opcodeID;
+        ICs::CallSiteDataState data;
+    };
+    const ExpectedSite expectedSites[] = {
+        { OpCall::opcodeID, ICs::CallSiteDataState::NotExecuted },
+        { OpCall::opcodeID, ICs::CallSiteDataState::ExecutedOnce },
+        { OpCall::opcodeID, ICs::CallSiteDataState::ExecutedOnce },
+        { OpCall::opcodeID, ICs::CallSiteDataState::Own },
+        { OpTailCall::opcodeID, ICs::CallSiteDataState::Own },
+        { OpConstruct::opcodeID, ICs::CallSiteDataState::Own },
+        { OpCallVarargs::opcodeID, ICs::CallSiteDataState::Inline },
+    };
+    constexpr size_t arraySiteIndex = 3;
+    constexpr unsigned expectedOwnSites = 3;
+    if (capture->callLinks.size() != std::size(expectedSites)) {
+        JITCACHE_FAIL(makeString("the capture holds "_s, capture->callLinks.size(), " call-link records instead of "_s, std::size(expectedSites)));
+        return;
+    }
+    const ICs::CallLinkRecord& arrayRecord = capture->callLinks[arraySiteIndex];
     bool hasCases = std::ranges::any_of(capture->propertyICs, [](const ICs::PropertyICRecord& record) {
         return record.caseCount > 0;
     });
-    if (!hasVirtualSite || !hasNonVirtualSite || !hasCases) {
-        JITCACHE_FAIL("the drive left no virtual site, no other call-link site or no property IC with cases"_s);
+    if (!ICs::readThisArrayModes(arrayRecord) || modeOf(capture->callLinks[5]) != ICs::CallLinkModeCode::Virtual || !hasCases) {
+        JITCACHE_FAIL("the drive left no this profile at the array site, no virtual construct site or no property IC with cases"_s);
         return;
     }
     Ref<BaselineJITCode> code = baselineCodeOf(*codeBlock);
@@ -981,25 +1050,35 @@ JITCACHE_TEST(icsLiveSeedAndAttach, Yes)
         }
 
         ICs::seedCallLinkHistory(*prepared, newborn);
-        size_t siteIndex = 0;
-        ICs::forEachCallLinkSite(newborn, [&](unsigned, unsigned, CallLinkInfo& callLinkInfo) {
-            size_t index = siteIndex++;
-            if (index >= prepared->callLinks().size())
-                return;
-            ICs::RestoredCallLink expected = ICs::restoredCallLink(prepared->callLinks()[index]);
-            bool matches = callLinkInfo.mode() == (expected.isVirtual ? CallLinkInfo::Mode::Virtual : CallLinkInfo::Mode::Init)
-                && callLinkInfo.seenOnce() == expected.seenOnce
-                && callLinkInfo.hasSeenClosure() == expected.hasSeenClosure
-                && callLinkInfo.clearedByGC() == expected.clearedByGC
-                && callLinkInfo.clearedByVirtual() == expected.clearedByVirtual
-                && callLinkInfo.maxArgumentCountIncludingThisForVarargs() == expected.maxArgumentCountIncludingThisForVarargs
-                && !callLinkInfo.stub()
-                && !callLinkInfo.haveLastSeenCallee()
-                && !callLinkInfo.isOnList();
+        // Before setup the CB has no BaselineJITData, so the snapshot lists only its call-link sites.
+        ICs::BaselineICsSnapshot seeded = ICs::snapshotBaselineICs(newborn);
+        if (seeded.callLinks.size() != std::size(expectedSites)) {
+            JITCACHE_FAIL(makeString("the newborn CB has "_s, seeded.callLinks.size(), " call-link sites instead of "_s, std::size(expectedSites)));
+            return;
+        }
+        for (size_t index = 0; index < seeded.callLinks.size(); ++index) {
+            const ICs::CallLinkSnapshot& site = seeded.callLinks[index];
+            const ExpectedSite& expectedSite = expectedSites[index];
+            const ICs::CallLinkOpcode& opcode = ICs::callLinkOpcodes[*ICs::canonicalCallLinkPosition(site.opcodeID)];
+            ICs::RestoredCallLink expected = ICs::restoredCallLink(opcode, prepared->callLinks()[index]);
+            bool matches = site.opcodeID == expectedSite.opcodeID
+                && expected.data == expectedSite.data
+                && site.data == expected.data
+                && site.mode == (expected.isVirtual ? CallLinkInfo::Mode::Virtual : CallLinkInfo::Mode::Init)
+                && site.seenOnce == expected.seenOnce
+                && site.hasSeenClosure == expected.hasSeenClosure
+                && site.clearedByGC == expected.clearedByGC
+                && site.clearedByVirtual == expected.clearedByVirtual
+                && site.maxArgumentCountIncludingThisForVarargs == expected.maxArgumentCountIncludingThisForVarargs
+                && site.thisArrayModes == expected.thisArrayModes
+                && site.thisArrayProfileFlags == expected.thisArrayProfileFlags
+                && !site.hasStub
+                && !site.hasLastSeenCallee;
             if (!matches)
-                JITCACHE_FAIL(makeString("call-link site "_s, index, " does not hold the state its record derives"_s));
-        });
-        JITCACHE_CHECK(siteIndex == prepared->callLinks().size());
+                JITCACHE_FAIL(makeString("call-link site "_s, index, " ("_s, opcodeNames[site.opcodeID], ") does not hold the state its record derives"_s));
+        }
+        MetadataTable* metadataTable = newborn.metadataTable();
+        JITCACHE_CHECK(metadataTable && metadataTable->numberOfOwnCallSiteDatas() == expectedOwnSites);
 
         newborn.setupWithUnlinkedBaselineCode(code.copyRef());
         ICs::attachPropertyICState(*prepared, newborn);
@@ -1008,25 +1087,223 @@ JITCACHE_TEST(icsLiveSeedAndAttach, Yes)
             JITCACHE_FAIL("setup built another number of property ICs than the section holds"_s);
             return;
         }
-        ConcurrentJSLocker locker(newborn.m_lock);
-        for (size_t index = 0; index < prepared->propertyICs().size(); ++index) {
-            const HandlerPropertyInlineCache& propertyCache = jitData->propertyCache(static_cast<unsigned>(index));
-            ICs::RestoredPropertyIC expected = ICs::restoredPropertyIC(prepared->propertyICs()[index]);
-            bool moldBit = code->m_unlinkedPropertyInlineCaches[index].canBeMegamorphic;
-            bool holdsGaveUp = propertyCache.m_slowOperation == gaveUpOperationFor(propertyCache.accessType);
-            bool matches = propertyCache.everConsidered == expected.everConsidered
-                && propertyCache.sawNonCell == expected.sawNonCell
-                && propertyCache.tookSlowPath == expected.tookSlowPath
-                && propertyCache.resetByGC == expected.resetByGC
-                && propertyCache.canBeMegamorphic == (moldBit || expected.foldsAtFirstCase)
-                && propertyCache.countdown == expected.countdown
-                && propertyCache.repatchCount == expected.repatchCount
-                && propertyCache.numberOfCoolDowns == expected.numberOfCoolDowns
-                && holdsGaveUp == expected.givenUp
-                && !propertyCache.m_inlinedHandler;
-            if (!matches)
-                JITCACHE_FAIL(makeString("property IC "_s, index, " does not hold the state its record derives"_s));
+        {
+            ConcurrentJSLocker locker(newborn.m_lock);
+            for (size_t index = 0; index < prepared->propertyICs().size(); ++index) {
+                const HandlerPropertyInlineCache& propertyCache = jitData->propertyCache(static_cast<unsigned>(index));
+                ICs::RestoredPropertyIC expected = ICs::restoredPropertyIC(prepared->propertyICs()[index]);
+                bool moldBit = code->m_unlinkedPropertyInlineCaches[index].canBeMegamorphic;
+                bool holdsGaveUp = propertyCache.m_slowOperation == gaveUpOperationFor(propertyCache.accessType);
+                bool matches = propertyCache.everConsidered == expected.everConsidered
+                    && propertyCache.sawNonCell == expected.sawNonCell
+                    && propertyCache.tookSlowPath == expected.tookSlowPath
+                    && propertyCache.resetByGC == expected.resetByGC
+                    && propertyCache.canBeMegamorphic == (moldBit || expected.foldsAtFirstCase)
+                    && propertyCache.countdown == expected.countdown
+                    && propertyCache.repatchCount == expected.repatchCount
+                    && propertyCache.numberOfCoolDowns == expected.numberOfCoolDowns
+                    && holdsGaveUp == expected.givenUp
+                    && !propertyCache.m_inlinedHandler;
+                if (!matches)
+                    JITCACHE_FAIL(makeString("property IC "_s, index, " does not hold the state its record derives"_s));
+            }
         }
+
+        // The native reader of a site's this profile finds the restored one: the array site is the fourth op_call site.
+        std::optional<BytecodeIndex> arraySite;
+        ICs::forEachCallLinkInstruction(newborn, [&](const ICs::CallLinkSite& site, const JSInstruction* instruction) {
+            if (site.opcode().opcodeID == OpCall::opcodeID && site.metadataID == arraySiteIndex)
+                arraySite = newborn.bytecodeIndex(instruction);
+        });
+        ArrayProfile* arrayProfile = arraySite ? newborn.getArrayProfile(*arraySite) : nullptr;
+        if (!arrayProfile)
+            JITCACHE_FAIL("CodeBlock::getArrayProfile finds no profile at the array site"_s);
+        else {
+            JITCACHE_CHECK(arrayProfile->observedArrayModes() == ICs::readThisArrayModes(arrayRecord));
+            JITCACHE_CHECK(arrayProfile->arrayProfileFlags().toRaw() == ICs::readThisArrayProfileFlags(arrayRecord));
+        }
+
+        for (const ICs::TwinMismatch& mismatch : ICs::checkRestoredBaselineICs(*prepared, newborn))
+            JITCACHE_FAIL(makeString("the restored CB differs from its twin: "_s, describe(mismatch)));
+    });
+}
+
+// Seeding's report to the heap. A body of 33 call_ignore_result sites a.push(v) is called twice with an array as a, so
+// that each site gets data of its own at its second call, brought to baseline and put through a full collection that
+// folds each site's sample. Its capture, prepared under strict and applied to a newborn twin in the install function's
+// order, inside the test's deferral, gives all 33 sites data of their own, so the 32nd allocation reports to the heap,
+// which under the deferral only records deferred work. The newborn CB then owns 33 CallSiteDatas, and the twin check
+// finds no mismatch.
+JITCACHE_TEST(icsLiveSeedingReportsToTheHeap, Yes)
+{
+    constexpr unsigned siteCount = 33;
+    StringBuilder bodyText;
+    bodyText.append("(a, v) {"_s);
+    for (unsigned site = 0; site < siteCount; ++site)
+        bodyText.append(" a.push(v);"_s);
+    bodyText.append(" }"_s);
+    String text = bodyText.toString();
+
+    VM& vm = *context.vm();
+    JSGlobalObject* globalObject = createRealm(context, vm, makeString("function pushes"_s, text, "function pushesTwin"_s, text, "var array = [1];"_s));
+    if (!globalObject)
+        return;
+    JSFunction* pushes = globalFunction(context, globalObject, "pushes"_s);
+    JSFunction* pushesTwin = globalFunction(context, globalObject, "pushesTwin"_s);
+    auto array = globalObjectValue(context, globalObject, "array"_s);
+    if (!pushes || !pushesTwin || !array)
+        return;
+
+    // The call that installs the LLInt CB moves each site to the executed-once data, and the first call in baseline code
+    // gives each one data of its own.
+    CodeBlock* codeBlock = bringToBaseline(context, globalObject, pushes, { *array, jsNumber(1) });
+    if (!codeBlock || !callFunction(context, globalObject, pushes, { *array, jsNumber(2) }))
+        return;
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+
+    auto capture = captureLive(context, *codeBlock);
+    if (!capture)
+        return;
+    if (capture->callLinks.size() != siteCount) {
+        JITCACHE_FAIL(makeString("the capture holds "_s, capture->callLinks.size(), " call-link records instead of "_s, siteCount));
+        return;
+    }
+    if (!std::ranges::all_of(capture->callLinks, [](const ICs::CallLinkRecord& record) { return ICs::readThisArrayModes(record); })) {
+        JITCACHE_FAIL("a push site holds no this profile"_s);
+        return;
+    }
+    Ref<BaselineJITCode> code = baselineCodeOf(*codeBlock);
+
+    withNewbornCodeBlock(context, pushesTwin, [&](CodeBlock& newborn) {
+        auto prepared = ICs::prepareBaselineICs(capture->bytes.span(), code.get(), newborn, ICs::StrictChecks::Yes);
+        if (!prepared) {
+            JITCACHE_FAIL(makeString("prepareBaselineICs failed "_s, describe(prepared.error())));
+            return;
+        }
+        ICs::seedCallLinkHistory(*prepared, newborn);
+        MetadataTable* metadataTable = newborn.metadataTable();
+        JITCACHE_CHECK(metadataTable && metadataTable->numberOfOwnCallSiteDatas() == siteCount);
+        newborn.setupWithUnlinkedBaselineCode(code.copyRef());
+        ICs::attachPropertyICState(*prepared, newborn);
+        for (const ICs::TwinMismatch& mismatch : ICs::checkRestoredBaselineICs(*prepared, newborn))
+            JITCACHE_FAIL(makeString("the restored CB differs from its twin: "_s, describe(mismatch)));
+    });
+}
+
+// The this profile of a builtin, whose UCB keeps no copy of its profiles for the native merge to fold in, so the site's
+// own CallSiteData is the only place it lives. Array.prototype.forEach of one realm runs, through JSC::call, on a
+// two-element array with a callback and an array as thisArg, so its callback.@call(thisArg, ...) site runs twice and
+// gets data of its own; the builtin's CB is brought to baseline, runs once more, and a full collection folds the site's
+// sample. Its capture, prepared under strict with that CB's code and the newborn CB of Array.prototype.forEach of a
+// second realm, which shares the builtin's UCB or generates it again with the same layout, then seeded, set up and
+// attached in the install function's order, leaves the site with data of its own whose this profile CodeBlock::
+// getArrayProfile finds with the record's modes and flags, and the twin check finds no mismatch. With no sample to
+// fold and no UCB copy to merge, updateAllArrayProfilePredictions then leaves the profile as it is.
+JITCACHE_TEST(icsLiveBuiltinThisProfile, Yes)
+{
+    VM& vm = *context.vm();
+    constexpr auto source = "var forEach = Array.prototype.forEach;"
+        "var visits = 0;"
+        "var callback = function () { ++visits; };"
+        "var elements = [1, 2];"
+        "var thisArgument = [3];"_s;
+    JSGlobalObject* globalObject = createRealm(context, vm, source);
+    JSGlobalObject* secondGlobalObject = createRealm(context, vm, source);
+    if (!globalObject || !secondGlobalObject)
+        return;
+    JSFunction* forEach = globalFunction(context, globalObject, "forEach"_s);
+    JSFunction* secondForEach = globalFunction(context, secondGlobalObject, "forEach"_s);
+    JSFunction* callback = globalFunction(context, globalObject, "callback"_s);
+    auto elements = globalObjectValue(context, globalObject, "elements"_s);
+    auto thisArgument = globalObjectValue(context, globalObject, "thisArgument"_s);
+    if (!forEach || !secondForEach || !callback || !elements || !thisArgument)
+        return;
+    JITCACHE_CHECK(forEach->jsExecutable() != secondForEach->jsExecutable());
+
+    // forEach(callback, thisArgument) on elements: callFunction passes undefined as this, which forEach rejects.
+    auto callForEach = [&] {
+        MarkedArgumentBuffer arguments;
+        arguments.append(callback);
+        arguments.append(*thisArgument);
+        NakedPtr<Exception> exception;
+        JSC::call(globalObject, forEach, getCallData(forEach), *elements, arguments, exception);
+        if (exception) {
+            JITCACHE_FAIL("calling Array.prototype.forEach threw"_s);
+            return false;
+        }
+        return true;
+    };
+    // The call that installs the LLInt CB runs the callback site twice, which gives it data of its own.
+    if (!callForEach())
+        return;
+    CodeBlock* codeBlock = compileToBaseline(context, forEach);
+    if (!codeBlock || !callForEach())
+        return;
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+
+    UnlinkedCodeBlock* unlinkedCodeBlock = codeBlock->unlinkedCodeBlock();
+    JITCACHE_CHECK(unlinkedCodeBlock->isBuiltinFunction());
+    JITCACHE_CHECK(!unlinkedCodeBlock->valueAndArrayProfiles());
+
+    auto capture = captureLive(context, *codeBlock);
+    if (!capture)
+        return;
+    // The callback site is the only one whose this is a cell.
+    std::optional<size_t> callbackRecordIndex;
+    for (size_t index = 0; index < capture->callLinks.size(); ++index) {
+        if (!ICs::readThisArrayModes(capture->callLinks[index]))
+            continue;
+        if (callbackRecordIndex) {
+            JITCACHE_FAIL("two call-link records of forEach hold this modes"_s);
+            return;
+        }
+        callbackRecordIndex = index;
+    }
+    if (!callbackRecordIndex) {
+        JITCACHE_FAIL("no call-link record of forEach holds this modes"_s);
+        return;
+    }
+    const ICs::CallLinkRecord& callbackRecord = capture->callLinks[*callbackRecordIndex];
+    Ref<BaselineJITCode> code = baselineCodeOf(*codeBlock);
+
+    withNewbornCodeBlock(context, secondForEach, [&](CodeBlock& newborn) {
+        JITCACHE_CHECK(newborn.unlinkedCodeBlock()->isBuiltinFunction());
+        auto prepared = ICs::prepareBaselineICs(capture->bytes.span(), code.get(), newborn, ICs::StrictChecks::Yes);
+        if (!prepared) {
+            JITCACHE_FAIL(makeString("prepareBaselineICs failed "_s, describe(prepared.error())));
+            return;
+        }
+        ICs::seedCallLinkHistory(*prepared, newborn);
+        newborn.setupWithUnlinkedBaselineCode(code.copyRef());
+        ICs::attachPropertyICState(*prepared, newborn);
+
+        ICs::BaselineICsSnapshot restored = ICs::snapshotBaselineICs(newborn);
+        if (restored.callLinks.size() != capture->callLinks.size()) {
+            JITCACHE_FAIL(makeString("the newborn CB has "_s, restored.callLinks.size(), " call-link sites instead of "_s, capture->callLinks.size()));
+            return;
+        }
+        JITCACHE_CHECK(restored.callLinks[*callbackRecordIndex].data == ICs::CallSiteDataState::Own);
+
+        // The callback site's instruction: its record's index is its group's start plus its metadata ID.
+        std::optional<BytecodeIndex> callbackSite;
+        ICs::forEachCallLinkInstruction(newborn, [&](const ICs::CallLinkSite& site, const JSInstruction* instruction) {
+            if (prepared->callLinkGroupStarts()[site.canonicalPosition] + site.metadataID == *callbackRecordIndex)
+                callbackSite = newborn.bytecodeIndex(instruction);
+        });
+        ArrayProfile* profile = callbackSite ? newborn.getArrayProfile(*callbackSite) : nullptr;
+        if (!profile) {
+            JITCACHE_FAIL("CodeBlock::getArrayProfile finds no profile at the callback site"_s);
+            return;
+        }
+        JITCACHE_CHECK(profile->observedArrayModes() == ICs::readThisArrayModes(callbackRecord));
+        JITCACHE_CHECK(profile->arrayProfileFlags().toRaw() == ICs::readThisArrayProfileFlags(callbackRecord));
+
+        for (const ICs::TwinMismatch& mismatch : ICs::checkRestoredBaselineICs(*prepared, newborn))
+            JITCACHE_FAIL(makeString("the restored CB differs from its twin: "_s, describe(mismatch)));
+
+        newborn.updateAllArrayProfilePredictions();
+        JITCACHE_CHECK(profile->observedArrayModes() == ICs::readThisArrayModes(callbackRecord));
+        JITCACHE_CHECK(profile->arrayProfileFlags().toRaw() == ICs::readThisArrayProfileFlags(callbackRecord));
     });
 }
 
@@ -1134,6 +1411,8 @@ JITCACHE_TEST(icsLiveSnapshotAgreesWithCapture, Yes)
         expectAgrees("clearedByGC"_s, site.clearedByGC, hasBit(record.bits, ICs::CallLinkBit::clearedByGC));
         expectAgrees("clearedByVirtual"_s, site.clearedByVirtual, hasBit(record.bits, ICs::CallLinkBit::clearedByVirtual));
         expectAgrees("maxArgumentCountIncludingThisForVarargs"_s, site.maxArgumentCountIncludingThisForVarargs, record.maxArgumentCountIncludingThisForVarargs);
+        expectAgrees("thisArrayModes"_s, site.thisArrayModes, ICs::readThisArrayModes(record));
+        expectAgrees("thisArrayProfileFlags"_s, site.thisArrayProfileFlags, ICs::readThisArrayProfileFlags(record));
     }
 }
 
@@ -1280,13 +1559,15 @@ JITCACHE_TEST(icsLiveShellSnapshot, Yes)
         "    if (derived.callLinks.length !== 1 || derived.superConstructs.length !== 1)"
         "        return 'Derived does not hold exactly one call-link site and one super_construct cache';"
         "    var site = derived.callLinks[0];"
-        "    missing = lacks(site, ['opcode', 'mode'], 'string')"
-        "        || lacks(site, ['metadataID', 'maxArgumentCountIncludingThisForVarargs'], 'number')"
+        "    missing = lacks(site, ['opcode', 'data', 'mode'], 'string')"
+        "        || lacks(site, ['metadataID', 'maxArgumentCountIncludingThisForVarargs', 'thisArrayModes', 'thisArrayProfileFlags'], 'number')"
         "        || lacks(site, ['seenOnce', 'hasSeenClosure', 'clearedByGC', 'clearedByVirtual', 'hasStub', 'hasLastSeenCallee'], 'boolean');"
         "    if (missing)"
         "        return 'the call-link site lacks ' + missing;"
         "    if (site.opcode !== 'op_super_construct' || site.metadataID !== 0)"
         "        return 'the call-link site is ' + site.opcode + ' ' + site.metadataID;"
+        "    if (['Inline', 'NotExecuted', 'ExecutedOnce', 'Own'].indexOf(site.data) < 0)"
+        "        return 'the call-link site has data ' + site.data;"
         "    if (['Init', 'Monomorphic', 'Polymorphic', 'Virtual'].indexOf(site.mode) < 0)"
         "        return 'the call-link site has mode ' + site.mode;"
         "    var cache = derived.superConstructs[0];"

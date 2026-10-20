@@ -98,7 +98,7 @@ void PathCache::clear()
 }
 
 inline SVGPathElement::SVGPathElement(const QualifiedName& tagName, Document& document)
-    : SVGGeometryElement(tagName, document, makeUniqueRef<PropertyRegistry>(*this))
+    : SVGGeometryElement(tagName, document, PropertyRegistry::singleton())
 {
     ASSERT(hasTagName(SVGNames::pathTag));
 
@@ -118,12 +118,13 @@ void SVGPathElement::attributeChanged(const QualifiedName& name, const AtomStrin
 {
     if (name == SVGNames::dAttr) {
         auto& cache = PathCache::singleton();
+        Ref pathBaseVal = protect(m_path)->baseVal();
         if (newValue.isEmpty())
-            protect(m_path)->baseVal()->clearByteStreamData();
+            pathBaseVal->clearByteStreamData();
         else if (auto data = cache.get(newValue))
-            protect(m_path)->baseVal()->updateByteStreamData(WTF::move(data.value()));
-        else if (protect(m_path)->baseVal()->parse(newValue))
-            cache.add(newValue, protect(m_path)->baseVal()->existingPathByteStream().data());
+            pathBaseVal->updateByteStreamData(WTF::move(data.value()));
+        else if (pathBaseVal->parse(newValue))
+            cache.add(newValue, pathBaseVal->existingPathByteStream().data());
         else
             protect(protect(document())->svgExtensions())->reportError(makeString("Problem parsing d=\""_s, newValue, "\""_s));
     }

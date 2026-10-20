@@ -59,8 +59,8 @@ public:
     TextSpacingTrim textSpacingTrim() const { return m_textSpacingTrim; }
     TextAutospace textAutospace() const { return m_textAutospace; }
     UScriptCode script() const { return static_cast<UScriptCode>(m_script); }
-    const AtomString& computedLocale() const { return m_locale; } // This is what you should be using for things like text shaping and font fallback
-    const AtomString& specifiedLocale() const { return m_specifiedLocale; } // This is what you should be using for web-exposed things like -webkit-locale
+    const AtomString& usedLocale() const { return m_usedLocale; } // This is what you should be using for things like text shaping and font fallback
+    const AtomString& computedLocale() const { return m_computedLocale; } // This is what you should be using for web-exposed things like -webkit-locale
 
     FontOrientation orientation() const { return static_cast<FontOrientation>(m_orientation); }
     NonCJKGlyphOrientation nonCJKGlyphOrientation() const { return static_cast<NonCJKGlyphOrientation>(m_nonCJKGlyphOrientation); }
@@ -119,7 +119,7 @@ public:
     void setOrientation(FontOrientation orientation) { m_orientation = std::to_underlying(orientation); }
     void setNonCJKGlyphOrientation(NonCJKGlyphOrientation orientation) { m_nonCJKGlyphOrientation = std::to_underlying(orientation); }
     void setWidthVariant(FontWidthVariant widthVariant) { m_widthVariant = std::to_underlying(widthVariant); } // Make sure new callers of this sync with FontPlatformData::isForTextCombine()!
-    void setSpecifiedLocale(const AtomString&);
+    void setComputedLocale(const AtomString&);
     void setFeatureSettings(FontFeatureSettings&& settings) { m_featureSettings = WTF::move(settings); }
     void setVariationSettings(FontVariationSettings&& settings) { m_variationSettings = WTF::move(settings); }
     void setFontSynthesisWeight(FontSynthesisLonghandValue value) { m_fontSynthesisWeight =  std::to_underlying(value); }
@@ -165,8 +165,8 @@ private:
     FontVariantAlternates m_variantAlternates;
     FontPalette m_fontPalette;
     FontSizeAdjust m_sizeAdjust;
-    AtomString m_locale;
-    AtomString m_specifiedLocale;
+    AtomString m_usedLocale;
+    AtomString m_computedLocale;
 
     FontSelectionRequest m_fontSelectionRequest;
     TextSpacingTrim m_textSpacingTrim;

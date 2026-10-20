@@ -95,6 +95,7 @@ static uint8_t tierOf(SectionKind kind)
     case SectionKind::UCBIdentity:
     case SectionKind::UCBCore:
     case SectionKind::UCBFeedback:
+    case SectionKind::UCBAnalysis:
         return 0;
     case SectionKind::ImageBaseline:
     case SectionKind::BakedFactsBaseline:
@@ -190,6 +191,30 @@ auto BodyLookup::kind() const -> Kind
 RefPtr<ValidatedBody> BodyLookup::body() const
 {
     return m_body;
+}
+
+SectionLookup::SectionLookup(Kind kind, RefPtr<MappedPack>&& pack, RefPtr<ValidatedBody>&& body, std::span<const uint8_t> bytes)
+    : m_kind(kind)
+    , m_pack(WTF::move(pack))
+    , m_body(WTF::move(body))
+    , m_bytes(bytes)
+{
+    // Found keeps the bytes readable through the mapping or the body they lie in; the other kinds hold nothing.
+    ASSERT(m_kind == Kind::Found ? (!!m_pack != !!m_body) : (!m_pack && !m_body && m_bytes.empty()));
+}
+
+SectionLookup::SectionLookup(SectionLookup&&) = default;
+SectionLookup& SectionLookup::operator=(SectionLookup&&) = default;
+SectionLookup::~SectionLookup() = default;
+
+auto SectionLookup::kind() const -> Kind
+{
+    return m_kind;
+}
+
+std::span<const uint8_t> SectionLookup::bytes() const
+{
+    return m_bytes;
 }
 
 } // namespace JSC::JITCache

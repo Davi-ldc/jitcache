@@ -65,6 +65,10 @@ private:
     void setTracksRepaints(bool, CompletionHandler<void()>&&);
     void displayAndTrackRepaints(CompletionHandler<void()>&&);
 
+#if PLATFORM(IOS_FAMILY)
+    void screenIsBeingCaptured(CompletionHandler<void(bool)>&&);
+#endif
+
 #if ENABLE(NOTIFICATIONS)
     void clearNotificationPermissionState();
 #endif
@@ -73,7 +77,7 @@ private:
 
     void clearWheelEventTestMonitor();
     void startMonitoringWheelEventsForTesting(CompletionHandler<void()>&&);
-    void waitForWheelEventsToCompleteForTesting(CompletionHandler<void()>&&);
+    void waitForWheelEventsToCompleteForTesting(bool expectMomentumEnd, CompletionHandler<void()>&&);
 
     WeakPtr<WebPage> m_page;
     WebCore::PageIdentifier m_pageIdentifier;

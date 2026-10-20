@@ -97,7 +97,7 @@ public:
     // Style resolvers are shared between shadow trees with identical styles. That's why we don't simply provide a Style::Scope.
     enum class ScopeType : bool { Document, ShadowTree };
     static Ref<Resolver> create(Document&, ScopeType);
-    ~Resolver();
+    WEBCORE_EXPORT ~Resolver();
 
     UnadjustedStyle unadjustedStyleForElement(Element&, const ResolutionContext&, RuleMatchingBehavior = RuleMatchingBehavior::MatchAllRules);
     UnadjustedStyle unadjustedStyleForCachedMatchResult(Element&, const ResolutionContext&, CachedMatchResult&&);
@@ -189,7 +189,7 @@ private:
 
     KeyframesRuleMap m_keyframesRuleMap;
 
-    std::unique_ptr<Style::CustomFunctionRegistry> m_customFunctionRegistry;
+    const std::unique_ptr<Style::CustomFunctionRegistry> m_customFunctionRegistry;
 
     MQ::MediaQueryEvaluator m_mediaQueryEvaluator;
 

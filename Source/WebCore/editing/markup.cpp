@@ -154,7 +154,7 @@ public:
     }
 
 private:
-    RefPtr<Element> m_element;
+    const RefPtr<Element> m_element;
     QualifiedName m_name;
     AtomString m_value;
 };
@@ -217,7 +217,7 @@ void removeSubresourceURLAttributes(Ref<DocumentFragment>&& fragment, Function<b
         }
     }
     for (auto& [element, attribute] : attributesToRemove)
-        element->removeAttribute(attribute);
+        protect(element)->removeAttribute(attribute);
 }
 
 Ref<Page> createPageForSanitizingWebContent(Document* destinationDocument, std::optional<PageConfiguration>&& overrideConfiguration)
@@ -344,7 +344,7 @@ String sanitizeSVG(const String& svg, Document* destinationDocument)
             }
         }
         for (auto& item : attributesToRemove)
-            item.first->removeAttribute(item.second);
+            protect(item.first)->removeAttribute(item.second);
     };
 
     auto sanitizeElements = [&](Element& stagingBody) {
@@ -365,7 +365,7 @@ UserSelectNoneStateCache::UserSelectNoneStateCache(TreeType treeType)
 ContainerNode* UserSelectNoneStateCache::parentNode(Node& node)
 {
     if (m_useComposedTree)
-        return node.parentInComposedTree();
+        return parentInComposedTreeIgnoringUserAgentShadow(node);
     return node.parentOrShadowHostNode();
 }
 
@@ -492,7 +492,7 @@ public:
     ContainerNode* parentNode(Node& node)
     {
         if (m_useComposedTree) [[unlikely]]
-            return node.parentInComposedTree();
+            return parentInComposedTreeIgnoringUserAgentShadow(node);
         return node.parentOrShadowHostNode();
     }
 
@@ -623,7 +623,7 @@ private:
     Vector<String> m_reversedPrecedingMarkup;
     const AnnotateForInterchange m_annotate;
     RefPtr<Node> m_highestNodeToBeSerialized;
-    RefPtr<EditingStyle> m_wrappingStyle;
+    const RefPtr<EditingStyle> m_wrappingStyle;
     bool m_useComposedTree;
     bool m_ignoresUserSelectNone;
     bool m_needsPositionStyleConversion;
@@ -646,7 +646,7 @@ inline StyledMarkupAccumulator::StyledMarkupAccumulator(const Position& start, c
     , m_annotate(annotate)
     , m_highestNodeToBeSerialized(highestNodeToBeSerialized)
     , m_useComposedTree(serializeComposedTree == SerializeComposedTree::Yes)
-    , m_ignoresUserSelectNone(ignoreUserSelectNone == IgnoreUserSelectNone::Yes && !start.document()->quirks().needsToCopyUserSelectNoneQuirk())
+    , m_ignoresUserSelectNone(ignoreUserSelectNone == IgnoreUserSelectNone::Yes && !protect(start.document())->quirks().needsToCopyUserSelectNoneQuirk())
     , m_needsPositionStyleConversion(needsPositionStyleConversion)
     , m_standardFontFamilySerializationMode(standardFontFamilySerializationMode)
     , m_shouldPreserveMSOList(msoListMode == MSOListMode::Preserve)
@@ -893,7 +893,7 @@ void StyledMarkupAccumulator::appendStartTag(StringBuilder& out, const Element& 
             newInlineStyle->addDisplayContents();
 
         if (RefPtr styledElement = dynamicDowncast<StyledElement>(element); styledElement && styledElement->inlineStyle())
-            newInlineStyle->overrideWithStyle(*styledElement->inlineStyle());
+            newInlineStyle->overrideWithStyle(protect(*styledElement->inlineStyle()));
 
 #if ENABLE(DATA_DETECTION)
         if (replacementType == SpanReplacementType::DataDetector && newInlineStyle->style())
@@ -950,7 +950,7 @@ RefPtr<Node> StyledMarkupAccumulator::serializeNodes(const Position& start, cons
         m_highestNodeToBeSerialized = traverseNodesForSerialization(*startNode, pastEnd.get(), NodeTraversalMode::DoNotEmitString);
 
     if (m_highestNodeToBeSerialized && m_highestNodeToBeSerialized->parentNode())
-        m_wrappingStyle = EditingStyle::wrappingStyleForSerialization(*protect(m_highestNodeToBeSerialized->parentNode()), shouldAnnotate(), m_standardFontFamilySerializationMode);
+        lazyInitialize(m_wrappingStyle, EditingStyle::wrappingStyleForSerialization(*protect(m_highestNodeToBeSerialized->parentNode()), shouldAnnotate(), m_standardFontFamilySerializationMode));
 
     return traverseNodesForSerialization(*startNode, pastEnd.get(), NodeTraversalMode::EmitString);
 }
@@ -976,7 +976,7 @@ RefPtr<Node> StyledMarkupAccumulator::traverseNodesForSerialization(Node& startN
         if (!node.renderer() && !isDisplayContents && !enclosingElementWithTag(firstPositionInOrBeforeNode(&node), selectTag))
             return false;
 
-        if (node.renderer() && node.renderer()->isSkippedContent())
+        if (CheckedPtr renderer = node.renderer(); renderer && renderer->isSkippedContent())
             return false;
 
         if (m_ignoresUserSelectNone && userSelectNoneStateCache.nodeOnlyContainsUserSelectNone(node))
@@ -1161,7 +1161,7 @@ static RefPtr<EditingStyle> styleFromMatchedRulesAndInlineDecl(Node& node)
     if (!element)
         return nullptr;
 
-    Ref style = EditingStyle::create(element->inlineStyle());
+    Ref style = EditingStyle::create(protect(element->inlineStyle()));
     style->mergeStyleFromRules(*element);
     return style;
 }
@@ -1194,8 +1194,8 @@ static RefPtr<Node> highestAncestorToWrapMarkup(const Position& start, const Pos
     }
 
     RefPtr checkAncestor = specialCommonAncestor ? specialCommonAncestor : protect(commonAncestor);
-    if (checkAncestor->renderer() && checkAncestor->renderer()->containingBlock()) {
-        RefPtr newSpecialCommonAncestor = highestEnclosingNodeOfType(firstPositionInNode(*checkAncestor), &isElementPresentational, CanCrossEditingBoundary, protect(checkAncestor->renderer()->containingBlock()->element()).get());
+    if (CheckedPtr renderer = checkAncestor->renderer(); renderer && renderer->containingBlock()) {
+        RefPtr newSpecialCommonAncestor = highestEnclosingNodeOfType(firstPositionInNode(*checkAncestor), &isElementPresentational, CanCrossEditingBoundary, protect(protect(renderer->containingBlock())->element()));
         if (newSpecialCommonAncestor)
             specialCommonAncestor = WTF::move(newSpecialCommonAncestor);
     }
@@ -1273,7 +1273,7 @@ static String serializePreservingVisualAppearanceInternal(const Position& start,
 
                 // Bring the background attribute over, but not as an attribute because a background attribute on a div
                 // appears to have no effect.
-                if ((!fullySelectedRootStyle || !fullySelectedRootStyle->style() || !fullySelectedRootStyle->style()->getPropertyCSSValue(CSSPropertyBackgroundImage))
+                if ((!fullySelectedRootStyle || !fullySelectedRootStyle->style() || !protect(fullySelectedRootStyle->style())->getPropertyCSSValue(CSSPropertyBackgroundImage))
                     && fullySelectedRoot->hasAttributeWithoutSynchronization(backgroundAttr))
                     protect(fullySelectedRootStyle->style())->setProperty(CSSPropertyBackgroundImage, makeString("url('"_s, fullySelectedRoot->getAttribute(backgroundAttr), "')"_s));
 

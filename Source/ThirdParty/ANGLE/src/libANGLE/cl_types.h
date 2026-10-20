@@ -13,11 +13,21 @@
 #    include "libANGLE/CLBitField.h"
 #    include "libANGLE/CLRefPointer.h"
 #    include "libANGLE/Debug.h"
+#    include "libANGLE/Error.h"
 #    include "libANGLE/angletypes.h"
 
+#    include "common/MemoryBuffer.h"
 #    include "common/PackedCLEnums_autogen.h"
+#    include "common/PackedEnums.h"
+#    include "common/SimpleMutex.h"
+#    include "common/SynchronizedValue.h"
 #    include "common/WorkerThread.h"
 #    include "common/angleutils.h"
+#    include "common/hash_containers.h"
+#    include "common/log_utils.h"
+#    include "common/mathutil.h"
+#    include "common/string_utils.h"
+#    include "common/system_utils.h"
 #    include "common/unsafe_buffers.h"
 
 // Include frequently used standard headers
@@ -53,6 +63,7 @@ using DevicePtr       = RefPointer<Device>;
 using EventPtr        = RefPointer<Event>;
 using KernelPtr       = RefPointer<Kernel>;
 using MemoryPtr       = RefPointer<Memory>;
+using ConstMemoryPtr  = RefPointer<const Memory>;
 using PlatformPtr     = RefPointer<Platform>;
 using ProgramPtr      = RefPointer<Program>;
 using SamplerPtr      = RefPointer<Sampler>;
@@ -62,6 +73,7 @@ using DevicePtrs   = std::vector<DevicePtr>;
 using EventPtrs    = std::vector<EventPtr>;
 using KernelPtrs   = std::vector<KernelPtr>;
 using MemoryPtrs   = std::vector<MemoryPtr>;
+using ConstMemoryPtrs = std::vector<ConstMemoryPtr>;
 using PlatformPtrs = std::vector<PlatformPtr>;
 using ProgramPtrs  = std::vector<ProgramPtr>;
 using SamplerPtrs  = std::vector<SamplerPtr>;
@@ -406,6 +418,8 @@ class Defer : public angle::Closure
   private:
     F mFunc;
 };
+
+constexpr cl_ulong kMaxAllocSentinel = 0;
 
 }  // namespace cl
 

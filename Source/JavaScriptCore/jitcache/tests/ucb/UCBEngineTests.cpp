@@ -3,24 +3,25 @@
 #if ENABLE(JITCACHE_TWINS)
 
 #include "BaselineJITCode.h"
+#include "BuiltinExecutables.h"
 #include "CachedBytecode.h"
 #include "CachedTypes.h"
-#include "CodeBlock.h"
+#include "CodeCache.h"
 #include "DeferGC.h"
 #include "DirectEvalExecutable.h"
 #include "DirectEvalSite.h"
-#include "FunctionExecutable.h"
 #include "JITCacheAPI.h"
 #include "JITCacheSHA256.h"
 #include "JITCacheTest.h"
 #include "JITCacheVMState.h"
 #include "JSCInlines.h"
-#include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "LLIntData.h"
+#include "ModuleProgramExecutable.h"
 #include "ProgramExecutable.h"
 #include "SourceCodeKey.h"
 #include "StrongInlines.h"
+#include "SymbolTable.h"
 #include "TestArtifact.h"
 #include "TestFiles.h"
 #include "TwinReport.h"
@@ -36,16 +37,15 @@
 #include "UCBTwins.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
+#include "UnlinkedModuleProgramCodeBlock.h"
 #include "UnlinkedProgramCodeBlock.h"
 #include "ValidatedBody.h"
-#include <algorithm>
 #include <array>
 #include <limits>
 #include <optional>
 #include <span>
 #include <utility>
 #include <wtf/FileSystem.h>
-#include <wtf/Function.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Variant.h>
@@ -53,12 +53,14 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
 
-// The tests of the UCB engine in UCBImport, with the integrator's body lookup stubbed: attaches, imports and seeds, the
-// misses and stamps of each, provenance and butterfly maps, decoded slots, supplied digests and the invalid material a wrong
-// one raises. The parts act on the VM's own registry and statistics, as the engine does; their UCBs are unpublished or
-// test-held, so no CodeBlock installs what they attach. Each test starts JITCache on its VM in one configuration, with a
-// twin report in a temporary file, and checks what a run in that configuration must leave: a fault only where the test
-// expects one, a registry verifyRegistry finds sound, and no twin difference but the ones the test expects.
+// The tests of the UCB engine in UCBImport, with the integrator's body lookup stubbed: attaches and imports with the misses
+// and stamps of each, the copies an attach or an import leaves, an attach with strict off to a UCB whose encoding is not
+// the body's coreDigest, code a native decode makes, which nothing imports or records, a private module's request,
+// supplied digests and the invalid material a wrong one raises. The parts act on the VM's own registry
+// and statistics, as the engine does; their UCBs are unpublished or test-held, so no CodeBlock installs what they attach.
+// Each test starts JITCache on its VM in one configuration, with a twin report in a temporary file, and checks what a run
+// in that configuration must leave: a fault only where the test expects one, a registry verifyRegistry finds sound, and no
+// twin difference but the ones the test expects.
 
 namespace JSC::JITCache::Tests {
 
@@ -155,12 +157,14 @@ private:
     VMState& m_state;
 };
 
-// The three sections a capture of a UCB writes, in a body with an image: an empty image section gives it highest tier 1,
-// so its imports and attaches leave pending imports, which no test here installs.
+// The three sections a capture of a UCB writes, and for a body with an image an empty image section, which gives it highest
+// tier 1, so its imports and attaches leave pending imports, which no test here installs. A body without one has highest
+// tier 0: its import leaves no pending import.
 struct TestBody {
     Vector<uint8_t> identity;
     Vector<uint8_t> core;
     Vector<uint8_t> feedback;
+    BodyImage image { BodyImage::Present };
 
     Ref<ValidatedBody> validated(const BodyKey& key, uint64_t version) const
     {
@@ -170,27 +174,32 @@ struct TestBody {
             { SectionKind::UCBFeedback, feedback.span() },
             { SectionKind::ImageBaseline, { } },
         } };
-        return ValidatedBody::createForTesting(key, version, sections);
+        std::span<const ValidatedBody::TestSection> given { sections };
+        return ValidatedBody::createForTesting(key, version, image == BodyImage::Present ? given : given.first(3));
     }
 };
 
-// The sections a capture of `producer` would write under the given key, context and provenance, with a function body's
-// parse fields and holder, as buildSections writes them.
-static std::optional<TestBody> buildTestBody(VM& vm, UnlinkedCodeBlock& producer, const UnlinkedFunctionExecutable* holder, const BodyKey& key, const Digest256& context, CoreProvenance provenance,
-    const std::optional<FunctionParseFields>& parseFields = std::nullopt)
+// The sections a capture of `producer` would write under the given key and context, with a function body's parse fields
+// and holder, as buildSections writes them. A body with an image comes from a UCB that a baseline compilation reached,
+// which allocated its value and array copies, so the producer gets them first; its feedback section then carries them.
+static std::optional<TestBody> buildTestBody(VM& vm, UnlinkedCodeBlock& producer, const UnlinkedFunctionExecutable* holder, const BodyKey& key, const Digest256& context,
+    const std::optional<FunctionParseFields>& parseFields = std::nullopt, BodyImage image = BodyImage::Present)
 {
+    if (image == BodyImage::Present)
+        producer.ensureValueAndArrayProfiles();
     auto core = encodeCoreBytes(vm, producer, holder);
     if (!core)
         return std::nullopt;
     TestBody body;
     body.core = WTF::move(*core);
-    FeedbackCounts counts = liveFeedbackCounts(producer);
+    body.image = image;
+    FeedbackCounts counts = liveFeedbackCounts(producer, image);
     body.feedback = Vector<uint8_t>(feedbackSectionSize(counts));
     writeFeedbackSection(body.feedback.mutableSpan(), producer, counts);
     std::optional<Digest256> holderDigestValue = holder ? holderDigest(vm, *holder) : std::nullopt;
     auto constantCount = static_cast<uint32_t>(producer.constantRegisters().size());
     body.identity = Vector<uint8_t>(identitySectionSize(constantCount));
-    writeIdentitySection(body.identity.mutableSpan(), vm, key, context, provenance, SHA256::hash(body.core.span()), holderDigestValue, coreKindFor(key.identityKind()), parseFields, producer);
+    writeIdentitySection(body.identity.mutableSpan(), vm, key, context, SHA256::hash(body.core.span()), holderDigestValue, coreKindFor(key.identityKind()), parseFields, producer);
     return body;
 }
 
@@ -199,10 +208,9 @@ static FunctionParseFields parseFieldsOf(const TwinParseResults& results)
     return FunctionParseFields { results.features, results.lexicallyScopedFeatures, results.hasCapturedVariables };
 }
 
-static std::span<const uint8_t> butterflyMapOf(const TestBody& body)
+static FunctionParseFields parseFieldsOf(const UnlinkedFunctionExecutable& executable)
 {
-    auto identity = parseIdentitySection(body.identity.span(), false);
-    return identity ? identity->butterflyMap : std::span<const uint8_t> { };
+    return FunctionParseFields { executable.features(), executable.lexicallyScopedFeatures(), executable.hasCapturedVariables() };
 }
 
 struct ProgramRequestFixture {
@@ -231,7 +239,19 @@ static BodyKey programKey(const SourceCode& source, LexicallyScopedFeatures snap
 
 static Digest256 programContext(const SourceCode& source, ProgramExecutable& executable)
 {
-    return globalContextDigest(IdentityKind::Program, source.startOffset(), source.firstLine().oneBasedInt(), JSParserScriptMode::Classic, executable.derivedContextType(), EvalContextType::None, executable.isArrowFunctionContext());
+    return globalContextDigest(IdentityKind::Program, source.startOffset(), JSParserScriptMode::Classic, executable.derivedContextType(), EvalContextType::None, executable.isArrowFunctionContext());
+}
+
+// The key and context a module request computes, from the inputs alone: a module's code is strict, and its executable
+// derives no context.
+static BodyKey moduleKey(const SourceCode& source)
+{
+    return BodyKey::make(IdentityKind::Module, CodeSpecializationKind::CodeForCall, { }, rootIdentityDigest(IdentityKind::Module, rootSourceDigest(source).digest, StrictModeLexicallyScopedFeature, std::nullopt));
+}
+
+static Digest256 moduleContext(const SourceCode& source)
+{
+    return globalContextDigest(IdentityKind::Module, source.startOffset(), JSParserScriptMode::Module, DerivedContextType::None, EvalContextType::None, false);
 }
 
 static Strong<UnlinkedCodeBlock> generateProgramFor(VM& vm, ProgramRequestFixture& fixture)
@@ -272,7 +292,7 @@ static ChildInputs childInputs(const UnlinkedFunctionExecutable& child, const So
 {
     SourceCode source = child.linkedSourceCode(parentSource);
     BodyKey key = BodyKey::make(IdentityKind::Child, kind, { }, childIdentityDigest(parentKey, table, index));
-    Digest256 context = executableBodyContextDigest(IdentityKind::Child, source.startOffset(), source.firstLine().oneBasedInt(), std::nullopt);
+    Digest256 context = executableBodyContextDigest(IdentityKind::Child, source.startOffset(), std::nullopt);
     return ChildInputs { WTF::move(source), key, context };
 }
 
@@ -340,8 +360,8 @@ static bool testAttachToGeneratedProgram(VM& vm, VMState& state, JSGlobalObject*
     };
     if (!part.check(record() && record()->key == key && record()->origin == UCBOrigin::Generated, "recordGenerated did not record the program under its request's key"_s))
         return false;
-    auto body = buildTestBody(vm, *live.get(), nullptr, key, context, CoreProvenance::Generated);
-    auto wrongContext = buildTestBody(vm, *live.get(), nullptr, key, filledDigest(0x99), CoreProvenance::Generated);
+    auto body = buildTestBody(vm, *live.get(), nullptr, key, context);
+    auto wrongContext = buildTestBody(vm, *live.get(), nullptr, key, filledDigest(0x99));
     if (!part.check(body && wrongContext, "the attach program's body could not be built"_s))
         return false;
     auto attach = [&](UnlinkedCodeBlock& codeBlock) {
@@ -408,7 +428,7 @@ static bool testAttachToGeneratedProgram(VM& vm, VMState& state, JSGlobalObject*
     // and of this feedback section a wrong magic, both invalid material.
     RefPtr<PendingImport> attached = registry.pendingImport(*live.get());
     registry.resolvePendingImport(*live.get(), *attached, ImportResolution::Installed);
-    TestBody unparsable { identityUnderAnotherKey(body->identity), body->core, brokenMagic(body->feedback) };
+    TestBody unparsable { identityUnderAnotherKey(body->identity), body->core, brokenMagic(body->feedback), BodyImage::Present };
     artifact.list(key, 7, unparsable.validated(key, 1000));
     before = statistics;
     attach(*live.get());
@@ -429,149 +449,81 @@ static bool testAttachToGeneratedProgram(VM& vm, VMState& state, JSGlobalObject*
     return part.check(goneOnce && thenNothing, "a listed body whose file is gone did not cost one stamped open and then nothing"_s);
 }
 
-// A decoded UCB that misses AtomMap is not stamped, computes no digest at its next request, and attaches once its marked
-// constants are atoms, without parsing more than the identity section; in a VM whose production is active the attach keeps
-// the Generated body's butterfly map.
-static bool testAtomMapAttach(VM& vm, VMState& state, TestPart& part)
+// An attach leaves a live UCB that had no value and array copies with copies allocated and nothing seeded into them, and,
+// with strict off, attaches to a live UCB whose core encoding differs from the body's coreDigest, since only strict holds a
+// reused UCB to it. The body comes from another generation of the same program, which carries a prediction in its copies,
+// so the live UCB has no copies of its own before the attach.
+static bool testAttachCopies(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
     UCBStatistics& statistics = registry.statistics();
     StubbedArtifact artifact;
     StubbedBodyLookup lookup { state, artifact };
 
-    auto parent = recordedParent(vm, registry, "function jitcacheU8AtomMap() { return 'jitcache-u8-atom-map-constant-0123456789abcdef'; }\n"_s, 0x82);
-    if (!part.check(!!parent, "the AtomMap parent could not be generated and recorded"_s))
-        return false;
-    UnlinkedFunctionExecutable& child = *parent->program.codeBlock.get()->functionDecl(0);
-    ChildInputs inputs = childInputs(child, parent->program.source, parent->key, ChildTable::Declarations, 0);
-    TwinParseResults results;
-    Strong<UnlinkedFunctionCodeBlock> producer = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall, &results);
-    Strong<UnlinkedFunctionCodeBlock> decoded = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall);
-    if (!part.check(producer && decoded, "the AtomMap function failed to generate"_s))
-        return false;
-
-    // The long constant as a native decode leaves it: a plain string with the same characters.
-    auto index = stringConstantIndex(*decoded.get(), "jitcache-u8-atom-map-constant-0123456789abcdef"_s);
-    JSString* plain = jsString(vm, makeString("jitcache-u8-atom-map-constant-"_s, "0123456789abcdef"_s));
-    if (!part.check(index && !plain->tryGetValueImpl()->isAtom(), "the AtomMap function lacks its constant, or the runtime string is an atom already"_s))
-        return false;
-    decoded.get()->constantRegister(constantRegisterFor(*index)).set(vm, decoded.get(), plain);
-    BodyContextInputs contextInputs { static_cast<unsigned>(inputs.source.startOffset()), static_cast<unsigned>(inputs.source.firstLine().oneBasedInt()) };
-    UCBRecord decodedRecord { inputs.key, contextInputs, UCBOrigin::Decoded, NoLexicallyScopedFeatures, std::nullopt, std::nullopt, nullptr, nullptr, std::nullopt };
-    if (!part.check(registry.recordCodeBlock(*decoded.get(), WTF::move(decodedRecord)), "the decoded function could not be recorded"_s))
-        return false;
-    auto body = buildTestBody(vm, *producer.get(), &child, inputs.key, inputs.context, CoreProvenance::Generated, parseFieldsOf(results));
-    if (!part.check(!!body, "the AtomMap function's body could not be built"_s))
-        return false;
-    artifact.list(inputs.key, 11, body->validated(inputs.key, 2000));
-    auto attach = [&] {
-        RequestState request(vm, RequestKind::FunctionBody, inputs.source, { }, NoLexicallyScopedFeatures);
-        prepareBodyRequest(request, child);
-        attachLive(request, *decoded.get());
-    };
-    auto record = [&] {
-        return registry.recordOf(*decoded.get());
-    };
-
-    UCBStatistics before = statistics;
-    attach();
-    bool firstMiss = missesOf(statistics, MissReason::AtomMap) == missesOf(before, MissReason::AtomMap) + 1 && record() && !record()->missedBodyVersion && record()->matchedBodyVersion == 2000
-        && !record()->hasPendingImport && statistics.holderDigests == before.holderDigests;
-    if (!part.check(firstMiss, "a decoded UCB whose marked constant is not an atom did not miss AtomMap unstamped at the file's commit identifier"_s))
-        return false;
-    before = statistics;
-    attach();
-    if (!part.check(missesOf(statistics, MissReason::AtomMap) == missesOf(before, MissReason::AtomMap) + 1 && computedNoDigest(before, statistics), "the request after an AtomMap miss computed a digest"_s))
-        return false;
-
-    // Once the constant is an atom, the next request attaches; the feedback section, here broken, is never parsed.
-    atomizeStringConstant(vm, *plain);
-    TestBody identityOnly { body->identity, body->core, brokenMagic(body->feedback) };
-    artifact.list(inputs.key, 11, identityOnly.validated(inputs.key, 2000));
-    before = statistics;
-    attach();
-    if (!part.check(state.tracksKeys() && statistics.attaches == before.attaches + 1 && record()->hasPendingImport && computedNoDigest(before, statistics), "a decoded UCB whose marked constants became atoms did not attach at the matched commit identifier"_s))
-        return false;
-    std::span<const uint8_t> bodyMap = butterflyMapOf(*body);
-    Vector<uint8_t> kept(FillWith { }, bodyMap.size(), 0);
-    bool keeps = registry.copyGeneratedButterflyMap(*decoded.get(), kept.mutableSpan());
-    return part.check(keeps == state.productionActive() && (!keeps || equalSpans(kept.span(), bodyMap)), "an attach from a Generated body did not keep its butterfly map exactly when production is active"_s);
-}
-
-// A decoded program in the case above computes only its request key at its next requests: sourceDigests grows by one per
-// request while contextDigests and holderDigests stay as they are, and no core digest runs, which the last attach shows
-// against a body whose identity section names another core digest and whose feedback section is broken.
-static bool testAtomMapAttachToProgram(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
-{
-    UCBRegistry& registry = state.registry();
-    UCBStatistics& statistics = registry.statistics();
-    StubbedArtifact artifact;
-    StubbedBodyLookup lookup { state, artifact };
-
-    ProgramRequestFixture fixture = programRequestFixture(globalObject, plainProvider("var jitcacheU8AtomMapProgram = 'jitcache-u8-atom-map-program-0123456789';\n"_s));
+    String text = "var jitcacheU8AttachCopies = Math.max(1, 2); function jitcacheU8AttachCopiesChild(a) { return a.x; }\n"_s;
+    ProgramRequestFixture fixture = programRequestFixture(globalObject, plainProvider(text));
     ProgramExecutable& executable = *fixture.executable.get();
     BodyKey key = programKey(fixture.source, NoLexicallyScopedFeatures);
+    Digest256 context = programContext(fixture.source, executable);
+
+    // The producer's generation, with a prediction in its copies, which its body's feedback carries.
     Strong<UnlinkedCodeBlock> producer = generateProgramFor(vm, fixture);
-    Strong<UnlinkedCodeBlock> decoded = generateProgramFor(vm, fixture);
-    if (!part.check(producer && decoded, "the AtomMap program failed to generate"_s))
+    if (!part.check(producer && producer.get()->numberOfValueProfiles(), "the attach-copies program failed to generate with a value profile"_s))
+        return false;
+    producer.get()->ensureValueAndArrayProfiles();
+    producer.get()->valueAndArrayProfiles()->valueProfiles()[0].restorePrediction(SpecInt32Only);
+    auto body = buildTestBody(vm, *producer.get(), nullptr, key, context);
+    if (!part.check(!!body, "the attach-copies program's body could not be built"_s))
         return false;
 
-    // The long constant as a native decode leaves it: a plain string with the same characters.
-    auto index = stringConstantIndex(*decoded.get(), "jitcache-u8-atom-map-program-0123456789"_s);
-    JSString* plain = jsString(vm, makeString("jitcache-u8-atom-map-program-"_s, "0123456789"_s));
-    if (!part.check(index && !plain->tryGetValueImpl()->isAtom(), "the AtomMap program lacks its constant, or the runtime string is an atom already"_s))
-        return false;
-    decoded.get()->constantRegister(constantRegisterFor(*index)).set(vm, decoded.get(), plain);
-    GlobalContextInputs contextInputs { static_cast<unsigned>(fixture.source.startOffset()), static_cast<unsigned>(fixture.source.firstLine().oneBasedInt()), JSParserScriptMode::Classic,
-        executable.derivedContextType(), EvalContextType::None, executable.isArrowFunctionContext() };
-    UCBRecord decodedRecord { key, contextInputs, UCBOrigin::Decoded, NoLexicallyScopedFeatures, std::nullopt, std::nullopt, nullptr, nullptr, std::nullopt };
-    if (!part.check(registry.recordCodeBlock(*decoded.get(), WTF::move(decodedRecord)), "the decoded program could not be recorded"_s))
-        return false;
-    auto body = buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, executable), CoreProvenance::Generated);
-    if (!part.check(!!body, "the AtomMap program's body could not be built"_s))
-        return false;
-    artifact.list(key, 12, body->validated(key, 2100));
-    auto attach = [&] {
+    // A live UCB of its own generation, recorded at its request.
+    auto generateLive = [&] {
+        Strong<UnlinkedCodeBlock> live = generateProgramFor(vm, fixture);
+        if (!live)
+            return live;
         RequestState request(vm, RequestKind::Program, fixture.source, { }, executable.lexicallyScopedFeatures());
         prepareProgramRequest(request, executable);
-        attachLive(request, *decoded.get());
+        recordGenerated(request, *live.get());
+        return live;
     };
-    auto record = [&] {
-        return registry.recordOf(*decoded.get());
-    };
-    // What a request at the matched commit identifier computes: its request key, whose root source digest is computed
-    // from the text, and nothing else.
-    auto computedOnlyItsKey = [&](const UCBStatistics& before) {
-        return statistics.sourceDigests == before.sourceDigests + 1 && statistics.suppliedSourceDigests == before.suppliedSourceDigests
-            && statistics.contextDigests == before.contextDigests && statistics.holderDigests == before.holderDigests;
+    auto attach = [&](UnlinkedCodeBlock& codeBlock) {
+        RequestState request(vm, RequestKind::Program, fixture.source, { }, executable.lexicallyScopedFeatures());
+        prepareProgramRequest(request, executable);
+        attachLive(request, codeBlock);
     };
 
+    Strong<UnlinkedCodeBlock> live = generateLive();
+    if (!part.check(live && registry.recordOf(*live.get()) && !live.get()->valueAndArrayProfiles(), "the live UCB is not recorded, or has copies before any attach"_s))
+        return false;
+    artifact.list(key, 31, body->validated(key, 3100));
     UCBStatistics before = statistics;
-    attach();
-    bool firstMiss = missesOf(statistics, MissReason::AtomMap) == missesOf(before, MissReason::AtomMap) + 1 && record() && !record()->missedBodyVersion && record()->matchedBodyVersion == 2100
-        && !record()->hasPendingImport;
-    if (!part.check(firstMiss, "a decoded program whose marked constant is not an atom did not miss AtomMap unstamped at the file's commit identifier"_s))
+    attach(*live.get());
+    auto view = registry.recordOf(*live.get());
+    auto* copies = live.get()->valueAndArrayProfiles();
+    bool allocatedUnseeded = statistics.attaches == before.attaches + 1 && view && view->hasPendingImport && copies && copies->valueProfiles()[0].prediction() == SpecNone;
+    if (!part.check(allocatedUnseeded, "an attach did not leave the live UCB's copies allocated with nothing seeded into them"_s))
         return false;
-    before = statistics;
-    attach();
-    if (!part.check(missesOf(statistics, MissReason::AtomMap) == missesOf(before, MissReason::AtomMap) + 1 && computedOnlyItsKey(before), "the request after a decoded program's AtomMap miss computed more than its request key"_s))
-        return false;
+    if (state.strict())
+        return true;
 
-    // Once the constant is an atom, the next request attaches without comparing a core digest or parsing the feedback.
-    atomizeStringConstant(vm, *plain);
-    Vector<uint8_t> otherCoreDigest = body->identity;
-    otherCoreDigest[identityCoreDigestOffset] ^= 0xff;
-    TestBody unmatchable { WTF::move(otherCoreDigest), body->core, brokenMagic(body->feedback) };
-    artifact.list(key, 12, unmatchable.validated(key, 2100));
+    // Strict off: the identity section's coreDigest differs from the core encoding of the live UCB, whose core section is
+    // the body's own, and the attach succeeds.
+    TestBody otherDigest = *body;
+    Digest256 wrongDigest = filledDigest(0x5a);
+    memcpySpan(otherDigest.identity.mutableSpan().subspan(identityCoreDigestOffset, wrongDigest.size()), std::span { wrongDigest });
+    Strong<UnlinkedCodeBlock> unchecked = generateLive();
+    if (!part.check(!!unchecked, "the second live UCB failed to generate"_s))
+        return false;
+    artifact.list(key, 32, otherDigest.validated(key, 3200));
     before = statistics;
-    attach();
-    bool attached = state.tracksKeys() && statistics.attaches == before.attaches + 1 && record()->hasPendingImport && computedOnlyItsKey(before);
-    return part.check(attached, "a decoded program whose marked constants became atoms did not attach at the matched commit identifier with its request key alone"_s);
+    attach(*unchecked.get());
+    auto uncheckedView = registry.recordOf(*unchecked.get());
+    return part.check(state.tracksKeys() && statistics.attaches == before.attaches + 1 && uncheckedView && uncheckedView->hasPendingImport,
+        "with strict off, an attach to a live UCB whose core encoding differs from the body's coreDigest did not succeed"_s);
 }
 
-// A root body's import computes no context and no holder digest while its key has no body, or a body of provenance
-// EmbedderDecoded, and neither does seedDecoded for a key with no body; an import that reaches the holder check computes
-// the holder digest once.
+// A root body's import computes no context and no holder digest while its key has no body; an import that reaches the
+// holder check computes the holder digest once.
 static bool testRootImport(VM& vm, VMState& state, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
@@ -588,15 +540,13 @@ static bool testRootImport(VM& vm, VMState& state, TestPart& part)
     BodyKey key = BodyKey::make(rootIdentity->kind, CodeSpecializationKind::CodeForCall, { }, rootIdentity->identityDigest);
     SourceCode bodySource = root.get()->linkedSourceCode(rootSource);
     auto rootHolder = holderDigest(vm, *root.get());
-    Digest256 context = executableBodyContextDigest(IdentityKind::FunctionConstructor, bodySource.startOffset(), bodySource.firstLine().oneBasedInt(), rootHolder);
+    Digest256 context = executableBodyContextDigest(IdentityKind::FunctionConstructor, bodySource.startOffset(), rootHolder);
     TwinParseResults results;
     Strong<UnlinkedFunctionCodeBlock> producer = generateBodyOf(vm, *root.get(), bodySource, CodeSpecializationKind::CodeForCall, &results);
-    Strong<UnlinkedFunctionCodeBlock> unpublished = generateBodyOf(vm, *root.get(), bodySource, CodeSpecializationKind::CodeForCall);
-    if (!part.check(producer && unpublished, "the root's body failed to generate"_s))
+    if (!part.check(!!producer, "the root's body failed to generate"_s))
         return false;
-    auto generatedBody = buildTestBody(vm, *producer.get(), root.get(), key, context, CoreProvenance::Generated, parseFieldsOf(results));
-    auto embedderBody = buildTestBody(vm, *producer.get(), root.get(), key, context, CoreProvenance::EmbedderDecoded, parseFieldsOf(results));
-    if (!part.check(generatedBody && embedderBody, "the root's bodies could not be built"_s))
+    auto body = buildTestBody(vm, *producer.get(), root.get(), key, context, parseFieldsOf(results));
+    if (!part.check(!!body, "the root's body could not be built"_s))
         return false;
     auto importRootBody = [&] {
         RequestState request(vm, RequestKind::FunctionBody, bodySource, { }, NoLexicallyScopedFeatures);
@@ -608,234 +558,260 @@ static bool testRootImport(VM& vm, VMState& state, TestPart& part)
     bool noBody = !importRootBody() && missesOf(statistics, MissReason::NoBody) == missesOf(before, MissReason::NoBody) + 1 && computedNoDigest(before, statistics);
     if (!part.check(noBody, "a root body's import with no body computed a context or holder digest"_s))
         return false;
-    before = statistics;
-    {
-        RequestState request(vm, RequestKind::FunctionBody, bodySource, { }, NoLexicallyScopedFeatures);
-        prepareBodyRequest(request, *root.get());
-        seedDecoded(request, *unpublished.get());
-    }
-    auto seededRecord = registry.recordOf(*unpublished.get());
-    bool seedNoBody = missesOf(statistics, MissReason::NoBody) == missesOf(before, MissReason::NoBody) + 1 && computedNoDigest(before, statistics)
-        && seededRecord && seededRecord->origin == UCBOrigin::Decoded && !seededRecord->hasPendingImport && !seededRecord->missedBodyVersion;
-    if (!part.check(seedNoBody, "seedDecoded for a key with no body computed a digest, stamped, or did not record the UCB as decoded"_s))
-        return false;
-    artifact.list(key, 21, embedderBody->validated(key, 3000));
-    before = statistics;
-    bool provenanceMiss = !importRootBody() && missesOf(statistics, MissReason::Provenance) == missesOf(before, MissReason::Provenance) + 1 && computedNoDigest(before, statistics);
-    if (!part.check(provenanceMiss, "a root body's import of an EmbedderDecoded body computed a context or holder digest, or missed otherwise than Provenance"_s))
-        return false;
-    artifact.list(key, 22, generatedBody->validated(key, 3001));
+    artifact.list(key, 22, body->validated(key, 3001));
     before = statistics;
     Strong<UnlinkedCodeBlock> imported = importRootBody();
     bool importedOnce = imported && statistics.imports == before.imports + 1 && statistics.holderDigests == before.holderDigests + 1 && statistics.contextDigests == before.contextDigests + 1;
     return part.check(importedOnce, "a root body's import did not compute its holder digest exactly once"_s);
 }
 
-// A body of provenance EmbedderDecoded misses Provenance for a program import, a function import and an attach to a
-// generated function UCB, and seeds a decoded function whose core matches; so does a body of provenance Generated, and only
-// a seed from that one keeps its butterfly map, in a VM whose production is active.
-static bool testProvenance(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
+// An import of a child body with an image leaves the imported UCB's value and array copies allocated and seeded with the
+// producer's, and an import of one without an image leaves it none.
+static bool testImportCopies(VM& vm, VMState& state, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
     UCBStatistics& statistics = registry.statistics();
     StubbedArtifact artifact;
     StubbedBodyLookup lookup { state, artifact };
 
-    // A program import.
-    ProgramRequestFixture fixture = programRequestFixture(globalObject, plainProvider("var jitcacheU8Provenance = 1;\n"_s));
-    BodyKey programBodyKey = programKey(fixture.source, NoLexicallyScopedFeatures);
-    Strong<UnlinkedCodeBlock> programProducer = generateProgramFor(vm, fixture);
-    auto programBody = programProducer ? buildTestBody(vm, *programProducer.get(), nullptr, programBodyKey, programContext(fixture.source, *fixture.executable.get()), CoreProvenance::EmbedderDecoded) : std::nullopt;
-    if (!part.check(!!programBody, "the provenance program's body could not be built"_s))
+    auto parent = recordedParent(vm, registry, "function jitcacheU8CopiesWith(a) { return a + 1; }\nfunction jitcacheU8CopiesWithout(a) { return a + 2; }\n"_s, 0x85);
+    if (!part.check(parent && parent->program.codeBlock.get()->numberOfFunctionDecls() == 2, "the copies parent could not be generated and recorded"_s))
         return false;
-    artifact.list(programBodyKey, 31, programBody->validated(programBodyKey, 4000));
-    UCBStatistics before = statistics;
-    {
-        RequestState request(vm, RequestKind::Program, fixture.source, { }, fixture.executable.get()->lexicallyScopedFeatures());
-        prepareProgramRequest(request, *fixture.executable.get());
-        Strong<UnlinkedCodeBlock> imported { vm, importBody(request) };
-        if (!part.check(!imported && missesOf(statistics, MissReason::Provenance) == missesOf(before, MissReason::Provenance) + 1 && statistics.contextDigests == before.contextDigests, "a program import of an EmbedderDecoded body did not miss Provenance before its context"_s))
-            return false;
-    }
-
-    // A function import, an attach to a generated function UCB, and seeds of decoded functions.
-    auto parent = recordedParent(vm, registry, "function jitcacheU8Provenance(a) { return [\"jitcache-u8-p-one\", \"jitcache-u8-p-two\"].indexOf(a); }\n"_s, 0x83);
-    if (!part.check(!!parent, "the provenance parent could not be generated and recorded"_s))
-        return false;
-    UnlinkedFunctionExecutable& child = *parent->program.codeBlock.get()->functionDecl(0);
-    ChildInputs inputs = childInputs(child, parent->program.source, parent->key, ChildTable::Declarations, 0);
-    TwinParseResults results;
-    Strong<UnlinkedFunctionCodeBlock> producer = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall, &results);
-    auto embedderBody = producer ? buildTestBody(vm, *producer.get(), &child, inputs.key, inputs.context, CoreProvenance::EmbedderDecoded, parseFieldsOf(results)) : std::nullopt;
-    auto generatedBody = producer ? buildTestBody(vm, *producer.get(), &child, inputs.key, inputs.context, CoreProvenance::Generated, parseFieldsOf(results)) : std::nullopt;
-    if (!part.check(embedderBody && generatedBody, "the provenance function's bodies could not be built"_s))
-        return false;
-    auto withChildRequest = [&](const auto& act) {
+    auto importChild = [&](unsigned index, BodyImage image, uint64_t token) -> Strong<UnlinkedCodeBlock> {
+        UnlinkedFunctionExecutable& child = *parent->program.codeBlock.get()->functionDecl(index);
+        ChildInputs inputs = childInputs(child, parent->program.source, parent->key, ChildTable::Declarations, index);
+        TwinParseResults results;
+        Strong<UnlinkedFunctionCodeBlock> producer = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall, &results);
+        if (!producer)
+            return { };
+        // A prediction in the producer's copies, which only a body that carries them seeds.
+        producer.get()->ensureValueAndArrayProfiles();
+        producer.get()->valueAndArrayProfiles()->valueProfiles()[0].restorePrediction(SpecInt32Only);
+        auto body = buildTestBody(vm, *producer.get(), &child, inputs.key, inputs.context, parseFieldsOf(results), image);
+        if (!body)
+            return { };
+        artifact.list(inputs.key, token, body->validated(inputs.key, 9100 + token));
         RequestState request(vm, RequestKind::FunctionBody, inputs.source, { }, NoLexicallyScopedFeatures);
         prepareBodyRequest(request, child);
-        return act(request);
+        return Strong<UnlinkedCodeBlock> { vm, importBody(request) };
     };
-    artifact.list(inputs.key, 32, embedderBody->validated(inputs.key, 4001));
-    before = statistics;
-    Strong<UnlinkedCodeBlock> importedFunction { vm, withChildRequest([&](RequestState& request) {
-        return importBody(request);
-    }) };
-    if (!part.check(!importedFunction && missesOf(statistics, MissReason::Provenance) == missesOf(before, MissReason::Provenance) + 1, "a function import of an EmbedderDecoded body did not miss Provenance"_s))
-        return false;
 
-    Strong<UnlinkedFunctionCodeBlock> generatedFunction = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall);
-    if (!part.check(!!generatedFunction, "the provenance function failed to generate"_s))
+    UCBStatistics before = statistics;
+    Strong<UnlinkedCodeBlock> withImage = importChild(0, BodyImage::Present, 91);
+    auto* copies = withImage ? withImage.get()->valueAndArrayProfiles() : nullptr;
+    bool seeded = copies && copies->valueProfiles()[0].prediction() == SpecInt32Only && statistics.imports == before.imports + 1;
+    if (!part.check(seeded, "the import of a body with an image did not leave the UCB's copies allocated and seeded"_s))
         return false;
-    withChildRequest([&](RequestState& request) {
-        recordGenerated(request, *generatedFunction.get());
-        return true;
-    });
-    artifact.list(inputs.key, 33, embedderBody->validated(inputs.key, 4002));
     before = statistics;
-    withChildRequest([&](RequestState& request) {
-        attachLive(request, *generatedFunction.get());
-        return true;
-    });
-    auto generatedRecord = registry.recordOf(*generatedFunction.get());
-    bool attachMiss = missesOf(statistics, MissReason::Provenance) == missesOf(before, MissReason::Provenance) + 1 && generatedRecord && generatedRecord->missedBodyVersion == 33 && !generatedRecord->hasPendingImport;
-    if (!part.check(attachMiss, "an attach of an EmbedderDecoded body to a generated function UCB did not miss Provenance, stamped"_s))
-        return false;
-
-    auto seed = [&](const TestBody& body, uint64_t token, CoreProvenance provenance) {
-        Strong<UnlinkedFunctionCodeBlock> decoded = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall);
-        if (!decoded)
-            return false;
-        artifact.list(inputs.key, token, body.validated(inputs.key, 4000 + token));
-        UCBStatistics seedBefore = statistics;
-        withChildRequest([&](RequestState& request) {
-            seedDecoded(request, *decoded.get());
-            return true;
-        });
-        auto view = registry.recordOf(*decoded.get());
-        std::span<const uint8_t> bodyMap = butterflyMapOf(body);
-        Vector<uint8_t> kept(FillWith { }, bodyMap.size(), 0);
-        bool keeps = registry.copyGeneratedButterflyMap(*decoded.get(), kept.mutableSpan());
-        bool expectsMap = provenance == CoreProvenance::Generated && state.productionActive();
-        return statistics.seededDecodes == seedBefore.seededDecodes + 1 && view && view->origin == UCBOrigin::Decoded && view->hasPendingImport
-            && keeps == expectsMap && (!keeps || equalSpans(kept.span(), bodyMap));
-    };
-    if (!part.check(seed(*embedderBody, 34, CoreProvenance::EmbedderDecoded), "an EmbedderDecoded body did not seed a decoded function whose core matches, or left it a butterfly map"_s))
-        return false;
-    return part.check(seed(*generatedBody, 35, CoreProvenance::Generated), "a Generated body did not seed a decoded function whose core matches, or kept its butterfly map otherwise than while production is active"_s);
+    Strong<UnlinkedCodeBlock> withoutImage = importChild(1, BodyImage::Absent, 92);
+    auto view = withoutImage ? registry.recordOf(*withoutImage.get()) : std::nullopt;
+    bool none = view && !view->hasPendingImport && !withoutImage.get()->valueAndArrayProfiles() && statistics.imports == before.imports + 1;
+    return part.check(none, "the import of a body without an image left the UCB copies or a pending import"_s);
 }
 
-// didDecodeCachedSlots with the requested slot empty and the other decoded records the other slot and leaves the request
-// unsettled, so didGenerate records the generated slot. Any role that tracks keys.
-static bool testDecodedSlotRecords(VM& vm, VMState& state, TestPart& part)
+// A provider that hands the CodeCache a bytecode payload for its text, as an embedder's provider of precompiled code does:
+// the payload itself, or a persistent view of its bytes, which the decode borrows instead of copying. The view's bytes are
+// the payload's, which lives as long as this provider, and whatever is decoded from the view keeps the provider.
+class CachedBytecodeProvider final : public StringSourceProvider {
+public:
+    static Ref<CachedBytecodeProvider> create(const String& text, Ref<CachedBytecode>&& payload, bool persistent)
+    {
+        return adoptRef(*new CachedBytecodeProvider(text, WTF::move(payload), persistent));
+    }
+
+    RefPtr<CachedBytecode> cachedBytecode() const final { return m_served.copyRef(); }
+
+private:
+    CachedBytecodeProvider(const String& text, Ref<CachedBytecode>&& payload, bool persistent)
+        : StringSourceProvider(text, SourceOrigin { }, SourceTaintedOrigin::Untainted, String { }, TextPosition { }, SourceProviderSourceType::Program)
+        , m_owned(WTF::move(payload))
+        , m_served(persistent ? persistentView(m_owned.get()) : m_owned.copyRef())
+    {
+    }
+
+    static Ref<CachedBytecode> persistentView(CachedBytecode& owned)
+    {
+        Ref<CachedBytecode> view = CachedBytecode::create(spanConstCast<uint8_t>(owned.span()), nullptr, { });
+        view->setPayloadIsPersistent();
+        return view;
+    }
+
+    const Ref<CachedBytecode> m_owned;
+    const Ref<CachedBytecode> m_served;
+};
+
+static bool sameCounts(const UCBRegistry::Counts& a, const UCBRegistry::Counts& b)
+{
+    return a.children == b.children && a.roots == b.roots && a.codeBlocks == b.codeBlocks && a.pendingImports == b.pendingImports;
+}
+
+// Code a native decode makes, with bodies in the artifact at every key it would have: nothing in it imports, records or is
+// captured. A program generated with its functions' code, encoded with encodeCodeBlock and handed back by its provider as
+// its cached bytecode, once owned and once persistent, is decoded by the CodeCache: the decode gets no record, and serving
+// it counts no miss and computes no digest. Its functions' first requests decode their slots and record and import
+// nothing; the construct slot the decode left empty generates and misses NoKey. A builtin that encodeBuiltinFunction
+// encoded and decodeBuiltinFunction decodes has no identity, and its body misses NoKey. These requests leave the
+// registry's counts as they were, and no decoded UCB has a record a capture could use. A full collection runs first and
+// none after it, so that no record of an earlier part goes while the counts are compared.
+static bool testDecodedCode(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
+    UCBStatistics& statistics = registry.statistics();
     StubbedArtifact artifact;
     StubbedBodyLookup lookup { state, artifact };
-    auto parent = recordedParent(vm, registry, "function jitcacheU8Slots(a) { this.a = a; }\n"_s, 0x84);
-    if (!part.check(!!parent, "the slots parent could not be generated and recorded"_s))
-        return false;
-    UnlinkedFunctionExecutable& child = *parent->program.codeBlock.get()->functionDecl(0);
-    SourceCode source = child.linkedSourceCode(parent->program.source);
-    Strong<UnlinkedFunctionCodeBlock> forCall = generateBodyOf(vm, child, source, CodeSpecializationKind::CodeForCall);
-    Strong<UnlinkedFunctionCodeBlock> forConstruct = generateBodyOf(vm, child, source, CodeSpecializationKind::CodeForConstruct);
-    if (!part.check(forCall && forConstruct, "the slots function failed to generate"_s))
-        return false;
-    {
-        FunctionBodyRequest request(vm, child, source, CodeSpecializationKind::CodeForConstruct, { });
-        request.didDecodeCachedSlots(forCall.get(), nullptr);
-        request.didGenerate(*forConstruct.get());
-    }
-    Digest256 identityDigest = childIdentityDigest(parent->key, ChildTable::Declarations, 0);
-    auto callRecord = registry.recordOf(*forCall.get());
-    auto constructRecord = registry.recordOf(*forConstruct.get());
-    bool recorded = callRecord && callRecord->origin == UCBOrigin::Decoded && callRecord->key == BodyKey::make(IdentityKind::Child, CodeSpecializationKind::CodeForCall, { }, identityDigest)
-        && constructRecord && constructRecord->origin == UCBOrigin::Generated && constructRecord->key == BodyKey::make(IdentityKind::Child, CodeSpecializationKind::CodeForConstruct, { }, identityDigest);
-    return part.check(recorded, "didDecodeCachedSlots did not record the other slot as decoded while leaving the request to record its generated slot"_s);
-}
 
-// A decoded function, seeded or attached through the native decode of a bytecode-cache payload, keeps the butterfly map of
-// a Generated body in a VM whose production is active, and buildSections writes it with provenance Generated; seeded from
-// an EmbedderDecoded body, or in a Consumer, it keeps none and is written EmbedderDecoded.
-static bool testDecodedButterflyProvenance(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
-{
-    UCBRegistry& registry = state.registry();
-    String text = "function jitcacheU8Literal(s) { return [\"jitcache-u8-literal-alpha\", \"jitcache-u8-literal-beta\"].indexOf(s); }\n"_s;
-    ProgramFixture generated = generateProgramFixture(vm, text, std::numeric_limits<unsigned>::max());
-    if (!part.check(generated.codeBlock && generated.codeBlock.get()->numberOfFunctionDecls() == 1, "the butterfly-provenance program failed to generate"_s))
-        return false;
-    SourceCodeKey cacheKey = programCacheKey(generated.source);
-    RefPtr<CachedBytecode> payload = encodeCodeBlock(vm, cacheKey, generated.codeBlock.get());
-    UnlinkedFunctionExecutable& generatedFunction = *generated.codeBlock.get()->functionDecl(0);
-    Strong<UnlinkedFunctionCodeBlock> producer { vm, decodedBody(vm, generatedFunction, generated.source) };
-    if (!part.check(payload && producer, "the butterfly-provenance program did not encode to a bytecode cache"_s))
-        return false;
-    FunctionParseFields parseFields { generatedFunction.features(), generatedFunction.lexicallyScopedFeatures(), generatedFunction.hasCapturedVariables() };
+    auto decodedProgram = [&](bool persistent) {
+        // The text differs per run, so that the second run misses the CodeCache's map, where the first run's decode went.
+        String text = makeString("function jitcacheU8DecodedA(x) { return x + "_s, persistent ? 2 : 1, "; }\nfunction jitcacheU8DecodedB(x) { this.x = x; }\n"_s);
+        ProgramFixture generated = generateProgramFixture(vm, text, std::numeric_limits<unsigned>::max());
+        if (!part.check(generated.codeBlock && generated.codeBlock.get()->numberOfFunctionDecls() == 2, "the decoded program failed to generate"_s))
+            return false;
+        RefPtr<CachedBytecode> payload = encodeCodeBlock(vm, programCacheKey(generated.source), generated.codeBlock.get());
+        if (!part.check(!!payload, "the decoded program did not encode to a bytecode cache"_s))
+            return false;
+        ProgramRequestFixture fixture = programRequestFixture(globalObject, CachedBytecodeProvider::create(text, payload.releaseNonNull(), persistent));
 
-    auto scenario = [&](uint8_t parentFill, CoreProvenance provenance, bool attachInstead, bool expectsMap) {
-        Strong<UnlinkedProgramCodeBlock> decoded { vm, decodeCodeBlock<UnlinkedProgramCodeBlock>(vm, cacheKey, Ref<CachedBytecode> { *payload }) };
-        BodyKey parentKey = testKey(parentFill);
-        if (!decoded || !registry.recordCodeBlock(*decoded.get(), testRecord(parentKey, UCBOrigin::Decoded)))
+        // The bodies, at the program's key, at A's call key and at B's construct key.
+        UnlinkedFunctionExecutable& generatedA = *generated.codeBlock.get()->functionDecl(0);
+        UnlinkedFunctionExecutable& generatedB = *generated.codeBlock.get()->functionDecl(1);
+        BodyKey key = programKey(fixture.source, NoLexicallyScopedFeatures);
+        ChildInputs inputsA = childInputs(generatedA, fixture.source, key, ChildTable::Declarations, 0);
+        ChildInputs inputsB = childInputs(generatedB, fixture.source, key, ChildTable::Declarations, 1, CodeSpecializationKind::CodeForConstruct);
+        Strong<UnlinkedFunctionCodeBlock> producerA { vm, decodedBody(vm, generatedA, generated.source) };
+        Strong<UnlinkedFunctionCodeBlock> producerB = generateBodyOf(vm, generatedB, inputsB.source, CodeSpecializationKind::CodeForConstruct);
+        auto body = buildTestBody(vm, *generated.codeBlock.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get()));
+        auto bodyA = producerA ? buildTestBody(vm, *producerA.get(), &generatedA, inputsA.key, inputsA.context, parseFieldsOf(generatedA)) : std::nullopt;
+        auto bodyB = producerB ? buildTestBody(vm, *producerB.get(), &generatedB, inputsB.key, inputsB.context, parseFieldsOf(generatedB)) : std::nullopt;
+        if (!part.check(body && bodyA && bodyB, "the decoded program's bodies could not be built"_s))
             return false;
-        UnlinkedFunctionExecutable& function = *decoded.get()->functionDecl(0);
-        ChildInputs inputs = childInputs(function, generated.source, parentKey, ChildTable::Declarations, 0);
-        auto body = buildTestBody(vm, *producer.get(), &generatedFunction, inputs.key, inputs.context, provenance, parseFields);
-        if (!body)
+        artifact.list(key, 101, body->validated(key, 10000));
+        artifact.list(inputsA.key, 102, bodyA->validated(inputsA.key, 10001));
+        artifact.list(inputsB.key, 103, bodyB->validated(inputsB.key, 10002));
+        auto readNothing = [&] {
+            return !artifact.opens(key) && !artifact.opens(inputsA.key) && !artifact.opens(inputsB.key);
+        };
+
+        // The program.
+        UCBStatistics before = statistics;
+        UCBRegistry::Counts counts = registry.counts();
+        ParserError error;
+        Strong<UnlinkedProgramCodeBlock> decoded { vm, vm.codeCache()->getUnlinkedProgramCodeBlock(vm, fixture.executable.get(), fixture.source, { }, error) };
+        bool servedLive = decoded && decoded.get() != generated.codeBlock.get() && !registry.recordOf(*decoded.get()) && statistics.misses == before.misses
+            && statistics.imports == before.imports && statistics.attaches == before.attaches && computedNoDigest(before, statistics) && readNothing();
+        if (!part.check(servedLive, "a program the CodeCache decoded got a record, counted a miss, computed a digest or read a body"_s))
             return false;
-        StubbedArtifact artifact;
-        StubbedBodyLookup lookup { state, artifact };
-        UnlinkedFunctionCodeBlock* slot = nullptr;
-        if (attachInstead) {
-            slot = decodedBody(vm, function, generated.source); // no body: the decode is recorded as Decoded
-            if (!slot)
-                return false;
-            // A live decoded UCB attaches only once the constants its atom map marks are atoms, which the native decode
-            // leaves plain; a property-key use of each would atomize it in place.
-            for (auto& constant : slot->constantRegisters()) {
-                if (JSValue value = constant.get(); value && value.isString())
-                    atomizeStringConstant(vm, *asString(value));
-            }
-            artifact.list(inputs.key, 41, body->validated(inputs.key, 5000));
-            if (decodedBody(vm, function, generated.source) != slot) // the filled slot: an attach
-                return false;
-        } else {
-            artifact.list(inputs.key, 41, body->validated(inputs.key, 5000));
-            slot = decodedBody(vm, function, generated.source); // the decode: a seed
-        }
-        auto view = slot ? registry.recordOf(*slot) : std::nullopt;
-        if (!view || view->origin != UCBOrigin::Decoded || !view->hasPendingImport || view->matchedBodyVersion != 5000)
-            return false;
-        std::span<const uint8_t> bodyMap = butterflyMapOf(*body);
-        Vector<uint8_t> kept(FillWith { }, bodyMap.size(), 0);
-        if (registry.copyGeneratedButterflyMap(*slot, kept.mutableSpan()) != expectsMap)
+        UnlinkedFunctionExecutable& decodedA = *decoded.get()->functionDecl(0);
+        UnlinkedFunctionExecutable& decodedB = *decoded.get()->functionDecl(1);
+        if (!part.check(!registry.identityOf(decodedA) && !registry.identityOf(decodedB), "a function the decode made has an identity"_s))
             return false;
 
-        // A CodeBlock of the decoded function, which buildSections captures from.
-        FunctionExecutable* functionExecutable = function.link(vm, nullptr, generated.source);
-        JSFunction* jsFunction = JSFunction::create(vm, globalObject, functionExecutable, globalObject->globalScope());
-        DeferGC deferGC(vm);
-        CodeBlock* codeBlock = functionExecutable->newCodeBlockFor(CodeSpecializationKind::CodeForCall, jsFunction, globalObject->globalScope());
-        if (!codeBlock || codeBlock->unlinkedCodeBlock() != slot)
+        // A's call slot, which the decode filled.
+        Strong<UnlinkedFunctionCodeBlock> slotA { vm, decodedBody(vm, decodedA, fixture.source) };
+        bool decodedSlot = slotA && !registry.recordOf(*slotA.get()) && statistics.misses == before.misses && statistics.imports == before.imports && computedNoDigest(before, statistics)
+            && readNothing();
+        if (!part.check(decodedSlot, "a decoded function's call slot got a record, counted a miss, computed a digest or read a body"_s))
             return false;
-        auto sections = buildSections(vm, *codeBlock->unlinkedCodeBlock(), holderOf(*codeBlock), state.twinBudget().get());
-        if (!sections)
+
+        // B first constructed: the decode left the construct slot empty, so the request generates it, without a key.
+        SourceCode sourceB = decodedB.linkedSourceCode(fixture.source);
+        Strong<UnlinkedFunctionCodeBlock> constructB { vm, decodedB.unlinkedCodeBlockFor(vm, sourceB, CodeSpecializationKind::CodeForConstruct, { }, error, decodedB.parseMode()) };
+        Strong<UnlinkedFunctionCodeBlock> callB { vm, decodedBody(vm, decodedB, fixture.source) };
+        bool generatedWithoutKey = constructB && callB && !registry.recordOf(*constructB.get()) && !registry.recordOf(*callB.get())
+            && missesOf(statistics, MissReason::NoKey) == missesOf(before, MissReason::NoKey) + 1 && statistics.imports == before.imports && computedNoDigest(before, statistics) && readNothing();
+        if (!part.check(generatedWithoutKey, "a decoded function's empty construct slot did not generate with exactly one NoKey miss and no record"_s))
             return false;
-        auto identity = parseIdentitySection(sections->identity.span(), true);
-        if (!identity)
-            return false;
-        bool anyMarked = std::ranges::any_of(identity->butterflyMap, [](uint8_t byte) {
-            return !!byte;
-        });
-        if (expectsMap)
-            return identity->provenance == CoreProvenance::Generated && equalSpans(identity->butterflyMap, bodyMap) && anyMarked;
-        return identity->provenance == CoreProvenance::EmbedderDecoded && !anyMarked;
+        bool noCapture = !captureRecord(vm, *decoded.get()) && !captureRecord(vm, *slotA.get()) && !captureRecord(vm, *callB.get()) && !captureRecord(vm, *constructB.get());
+        return part.check(noCapture && sameCounts(registry.counts(), counts), "a UCB of decoded code has a record a capture would use, or the registry's counts changed"_s);
     };
 
-    if (state.productionActive()) {
-        return part.check(scenario(0x91, CoreProvenance::Generated, false, true), "a function seeded from a Generated body did not keep its butterfly map or was not written Generated with it"_s)
-            && part.check(scenario(0x92, CoreProvenance::Generated, true, true), "a function attached from a Generated body did not keep its butterfly map or was not written Generated with it"_s)
-            && part.check(scenario(0x93, CoreProvenance::EmbedderDecoded, false, false), "a function seeded from an EmbedderDecoded body kept a map or was not written EmbedderDecoded"_s);
-    }
-    return part.check(scenario(0x94, CoreProvenance::Generated, false, false), "a function seeded in a Consumer kept a map or was not written EmbedderDecoded"_s);
+    auto decodedBuiltin = [&] {
+        SourceCode source = makeSource("(function (a) { return a + 'jitcache-u8-decoded-builtin'; })"_s, SourceOrigin { }, SourceTaintedOrigin::Untainted);
+        Strong<UnlinkedFunctionExecutable> builtin { vm, BuiltinExecutables::createExecutable(vm, source, Identifier { }, ImplementationVisibility::Public, ConstructorKind::None, ConstructAbility::CannotConstruct, InlineAttribute::None, NeedsClassFieldInitializer::No) };
+        std::optional<ExecutableIdentity> identity = builtin ? registry.identityOf(*builtin.get()) : std::nullopt;
+        auto* rootIdentity = identity ? std::get_if<RootIdentity>(&*identity) : nullptr;
+        if (!part.check(!!rootIdentity, "the builtin has no identity at its creation"_s))
+            return false;
+        // Encoded before any of its bodies exists, so the decoded executable's call slot is empty.
+        constexpr unsigned embedderStamp = 0x55380008;
+        RefPtr<CachedBytecode> payload = encodeBuiltinFunction(vm, builtin.get(), source, embedderStamp);
+        if (!part.check(!!payload, "the builtin did not encode"_s))
+            return false;
+
+        // The body at the builtin's key.
+        BodyKey key = BodyKey::make(IdentityKind::Builtin, CodeSpecializationKind::CodeForCall, { }, rootIdentity->identityDigest);
+        SourceCode bodySource = builtin.get()->linkedSourceCode(source);
+        TwinParseResults results;
+        Strong<UnlinkedFunctionCodeBlock> producer = generateBodyOf(vm, *builtin.get(), bodySource, CodeSpecializationKind::CodeForCall, &results);
+        auto body = producer ? buildTestBody(vm, *producer.get(), builtin.get(), key, executableBodyContextDigest(IdentityKind::Builtin, bodySource.startOffset(), holderDigest(vm, *builtin.get())), parseFieldsOf(results)) : std::nullopt;
+        if (!part.check(!!body, "the builtin's body could not be built"_s))
+            return false;
+        artifact.list(key, 104, body->validated(key, 10003));
+
+        UCBStatistics before = statistics;
+        UCBRegistry::Counts counts = registry.counts();
+        Strong<UnlinkedFunctionExecutable> decoded { vm, decodeBuiltinFunction(vm, payload.releaseNonNull(), *source.provider(), embedderStamp) };
+        if (!part.check(decoded && !registry.identityOf(*decoded.get()), "a builtin decodeBuiltinFunction decoded is missing or has an identity"_s))
+            return false;
+        Strong<UnlinkedFunctionCodeBlock> decodedCall { vm, decodedBody(vm, *decoded.get(), source) };
+        bool noKey = decodedCall && !registry.recordOf(*decodedCall.get()) && !captureRecord(vm, *decodedCall.get()) && missesOf(statistics, MissReason::NoKey) == missesOf(before, MissReason::NoKey) + 1
+            && statistics.imports == before.imports && computedNoDigest(before, statistics) && !artifact.opens(key) && sameCounts(registry.counts(), counts);
+        return part.check(noKey, "a decoded builtin's body did not miss NoKey without a record, or the registry's counts changed"_s);
+    };
+
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+    DeferGC deferGC(vm);
+    return decodedProgram(false) && decodedProgram(true) && decodedBuiltin();
+}
+
+// A private module's request, for a module whose loader has a module scope of its own, records and imports under the
+// shared module's key, and nothing it generates or imports enters the CodeCache: a later request of the shared module for
+// the same source gets a UCB of its own.
+static bool testPrivateModule(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
+{
+    UCBRegistry& registry = state.registry();
+    UCBStatistics& statistics = registry.statistics();
+    StubbedArtifact artifact;
+    StubbedBodyLookup lookup { state, artifact };
+
+    SourceCode source = makeSource("export function jitcacheU8Private(a) { return [a, 'jitcache-u8-private-module']; }\n"_s, SourceOrigin { }, SourceTaintedOrigin::Untainted, String { }, TextPosition { },
+        SourceProviderSourceType::Module);
+    BodyKey key = moduleKey(source);
+    Strong<SymbolTable> moduleScope { vm, SymbolTable::create(vm) };
+    auto privateModule = [&] {
+        return Strong<ModuleProgramExecutable> { vm, ModuleProgramExecutable::tryCreate(globalObject, source, nullptr, { moduleScope.get() }) };
+    };
+    auto codeBlockOf = [](const Strong<ModuleProgramExecutable>& executable) -> UnlinkedCodeBlock* {
+        return executable ? executable.get()->unlinkedCodeBlock() : nullptr;
+    };
+
+    // No body yet: the request generates and records.
+    UCBStatistics before = statistics;
+    Strong<ModuleProgramExecutable> generated = privateModule();
+    UnlinkedCodeBlock* generatedCodeBlock = codeBlockOf(generated);
+    auto generatedView = generatedCodeBlock ? registry.recordOf(*generatedCodeBlock) : std::nullopt;
+    bool recorded = generated && !generated.get()->resolvesInGlobalScope() && generatedView && generatedView->key == key && generatedView->origin == UCBOrigin::Generated
+        && missesOf(statistics, MissReason::NoBody) == missesOf(before, MissReason::NoBody) + 1;
+    if (!part.check(recorded, "a private module's request did not miss NoBody and record its generated block under the shared module's key"_s))
+        return false;
+
+    // A body at the key: the request imports.
+    auto body = buildTestBody(vm, *generatedCodeBlock, nullptr, key, moduleContext(source));
+    if (!part.check(!!body, "the private module's body could not be built"_s))
+        return false;
+    artifact.list(key, 111, body->validated(key, 11000));
+    before = statistics;
+    Strong<ModuleProgramExecutable> imported = privateModule();
+    UnlinkedCodeBlock* importedCodeBlock = codeBlockOf(imported);
+    auto importedView = importedCodeBlock ? registry.recordOf(*importedCodeBlock) : std::nullopt;
+    bool importedUnderKey = importedCodeBlock && importedCodeBlock != generatedCodeBlock && importedView && importedView->key == key && importedView->origin == UCBOrigin::Imported
+        && importedView->hasPendingImport && statistics.imports == before.imports + 1;
+    if (!part.check(importedUnderKey, "a private module's request did not import and record under the shared module's key"_s))
+        return false;
+
+    // The shared module: a CodeCache that held either block would serve it here.
+    Strong<ModuleProgramExecutable> shared { vm, ModuleProgramExecutable::tryCreate(globalObject, source) };
+    UnlinkedCodeBlock* sharedCodeBlock = codeBlockOf(shared);
+    return part.check(sharedCodeBlock && sharedCodeBlock != generatedCodeBlock && sharedCodeBlock != importedCodeBlock, "a private module's block entered the CodeCache"_s);
 }
 
 // A direct eval inside `caller`, whose record has `callerKey`, imported from a body the test serves: it relies on no
@@ -854,9 +830,9 @@ static bool importDirectEval(VM& vm, JSGlobalObject* globalObject, VMState& stat
     BytecodeIndex siteIndex(7);
     DirectEvalSite site { &caller, siteIndex };
     BodyKey key = BodyKey::make(IdentityKind::DirectEval, CodeSpecializationKind::CodeForCall, { }, directEvalIdentityDigest(callerKey, siteIndex, sourceDigest(evalSource.view())));
-    Digest256 context = directEvalContextDigest(evalSource.startOffset(), evalSource.firstLine().oneBasedInt(), NoLexicallyScopedFeatures, DerivedContextType::None, NeedsClassFieldInitializer::No,
-        PrivateBrandRequirement::None, false, true, EvalContextType::None, tdz, privateNames);
-    auto body = buildTestBody(vm, *executable.get()->unlinkedCodeBlock(), nullptr, key, context, CoreProvenance::Generated);
+    Digest256 context = directEvalContextDigest(evalSource.startOffset(), NoLexicallyScopedFeatures, DerivedContextType::None, NeedsClassFieldInitializer::No, PrivateBrandRequirement::None, false,
+        true, EvalContextType::None, tdz, privateNames);
+    auto body = buildTestBody(vm, *executable.get()->unlinkedCodeBlock(), nullptr, key, context);
     if (!body)
         return false;
     artifact.list(key, 51, body->validated(key, 6000 + salt));
@@ -873,9 +849,9 @@ static bool importDirectEval(VM& vm, JSGlobalObject* globalObject, VMState& stat
 
 // Supplied digests. With strict on, an import of a program whose provider supplies its digest and an import of one of its
 // functions verify the provider once in all, and their records keep it; with strict off they verify nothing and keep
-// none; a direct eval inside the function imports without a verification, also when the program and the function were
-// seeded, and keeps no provider. Every digest here is its text's: the cases of a digest that differs from its text, which
-// the twin check reports wherever a request takes one, are the invalid-material test's.
+// none; a direct eval inside the function imports without a verification and keeps no provider. Every digest here is its
+// text's: the case of a digest that differs from its text, which the twin check reports wherever a request takes one, is
+// the invalid-material test's.
 static bool testSuppliedDigestImports(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
@@ -884,32 +860,22 @@ static bool testSuppliedDigestImports(VM& vm, VMState& state, JSGlobalObject* gl
     StubbedArtifact artifact;
     StubbedBodyLookup lookup { state, artifact };
 
-    // Each chain makes a provider of its own over this text, so both chains compute the same keys. An import verifies a
-    // supplied digest once per provider: had the seeded chain reused the provider the import chain verified, a direct eval
-    // import that wrongly relied on it would find it verified and count nothing. Seeding verifies nothing, so the seeded
-    // chain's provider is still unverified when its direct eval imports, and such an import would verify it there.
     String text = "function jitcacheU8Supplied(a) { return eval('a + 1'); }\n"_s;
-
-    auto importChain = [&](bool seed) {
+    auto importChain = [&] {
         Ref<SuppliedDigestProvider> provider = SuppliedDigestProvider::create(text, sourceDigest(text));
         SourceProvider* expectedProvider = strict ? provider.ptr() : nullptr;
         ProgramRequestFixture fixture = programRequestFixture(globalObject, Ref<SourceProvider> { provider.get() });
         BodyKey key = programKey(fixture.source, NoLexicallyScopedFeatures);
         Strong<UnlinkedCodeBlock> producer = generateProgramFor(vm, fixture);
-        auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get()), CoreProvenance::Generated) : std::nullopt;
+        auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get())) : std::nullopt;
         if (!body)
             return false;
-        artifact.list(key, seed ? 61 : 62, body->validated(key, seed ? 7000 : 7001));
+        artifact.list(key, 62, body->validated(key, 7001));
         Strong<UnlinkedCodeBlock> program;
         {
             RequestState request(vm, RequestKind::Program, fixture.source, { }, fixture.executable.get()->lexicallyScopedFeatures());
             prepareProgramRequest(request, *fixture.executable.get());
-            if (seed) {
-                program = generateProgramFor(vm, fixture);
-                if (program)
-                    seedDecoded(request, *program.get());
-            } else
-                program = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
+            program = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
         }
         auto programView = program ? registry.recordOf(*program.get()) : std::nullopt;
         if (!programView || !programView->hasPendingImport || programView->suppliedDigestProvider != expectedProvider)
@@ -919,42 +885,32 @@ static bool testSuppliedDigestImports(VM& vm, VMState& state, JSGlobalObject* gl
         ChildInputs inputs = childInputs(child, fixture.source, key, ChildTable::Declarations, 0);
         TwinParseResults results;
         Strong<UnlinkedFunctionCodeBlock> childProducer = generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall, &results);
-        auto childBody = childProducer ? buildTestBody(vm, *childProducer.get(), &child, inputs.key, inputs.context, CoreProvenance::Generated, parseFieldsOf(results)) : std::nullopt;
+        auto childBody = childProducer ? buildTestBody(vm, *childProducer.get(), &child, inputs.key, inputs.context, parseFieldsOf(results)) : std::nullopt;
         if (!childBody)
             return false;
-        artifact.list(inputs.key, seed ? 63 : 64, childBody->validated(inputs.key, seed ? 7002 : 7003));
+        artifact.list(inputs.key, 64, childBody->validated(inputs.key, 7003));
         Strong<UnlinkedCodeBlock> function;
         {
             RequestState request(vm, RequestKind::FunctionBody, inputs.source, { }, NoLexicallyScopedFeatures);
             prepareBodyRequest(request, child);
-            if (seed) {
-                function = Strong<UnlinkedCodeBlock> { vm, generateBodyOf(vm, child, inputs.source, CodeSpecializationKind::CodeForCall).get() };
-                if (function)
-                    seedDecoded(request, *function.get());
-            } else
-                function = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
+            function = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
         }
         auto functionView = function ? registry.recordOf(*function.get()) : std::nullopt;
         if (!functionView || !functionView->hasPendingImport || functionView->suppliedDigestProvider != expectedProvider)
             return false;
-        // Verified now exactly when the program was imported with strict on; the direct eval's import leaves that as it is.
+        // Verified now exactly with strict on; the direct eval's import leaves that as it is.
         bool verified = registry.suppliedDigestVerified(provider->asID());
-        if (verified != (strict && !seed))
+        if (verified != strict)
             return false;
-        if (!importDirectEval(vm, globalObject, state, artifact, *function.get(), functionView->key, seed ? 1 : 2))
+        if (!importDirectEval(vm, globalObject, state, artifact, *function.get(), functionView->key, 2))
             return false;
         return registry.suppliedDigestVerified(provider->asID()) == verified;
     };
 
     UCBStatistics before = statistics;
-    if (!part.check(importChain(false), "the import of a program, of its function and of a direct eval inside it did not succeed with the records the registry gives them, or did not leave the provider verified exactly with strict on"_s))
+    if (!part.check(importChain(), "the import of a program, of its function and of a direct eval inside it did not succeed with the records the registry gives them, or did not leave the provider verified exactly with strict on"_s))
         return false;
-    if (!part.check(statistics.suppliedDigestVerifications == before.suppliedDigestVerifications + (strict ? 1 : 0), "the imports of a program and its function did not verify its provider exactly once with strict on, and never with it off"_s))
-        return false;
-    before = statistics;
-    if (!part.check(importChain(true), "the seeds of a program and its function, then the import of a direct eval inside it, did not succeed, or the direct eval verified the provider the seeds left unverified"_s))
-        return false;
-    return part.check(statistics.suppliedDigestVerifications == before.suppliedDigestVerifications, "seeding or a direct eval's import verified a supplied digest"_s);
+    return part.check(statistics.suppliedDigestVerifications == before.suppliedDigestVerifications + (strict ? 1 : 0), "the imports of a program, its function and a direct eval inside it did not verify the provider exactly once with strict on, and never with it off"_s);
 }
 
 // In a Producer no record keeps a provider, since only a VM that imports with strict on keeps one.
@@ -978,35 +934,32 @@ static bool testProducerRecordsKeepNoProvider(VM& vm, VMState& state, JSGlobalOb
     return part.check(keepsNone, "a Producer's record or its children's identities keep a supplied digest's provider"_s);
 }
 
-// The engine's parts the VM's configuration allows: the decoded slots in every role; the records of a Producer; and in a
-// role that imports, the attaches, imports, seeds and supplied digests.
+// The engine's parts the VM's configuration allows: the records of a Producer; and in a role that imports, the attaches
+// and imports with the copies they leave, an attach that strict off does not hold to the body's coreDigest, decoded code,
+// a private module's request and supplied digests.
 static bool testEngine(VM& vm, JSGlobalObject* globalObject, TestPart& part)
 {
     VMState* state = vm.jitCacheState();
     if (!part.check(state && state->tracksKeys() && globalObject, "the test's VM does not track keys, or the test has no global object"_s))
-        return false;
-    if (!testDecodedSlotRecords(vm, *state, part))
         return false;
     if (state->role() == Role::Producer)
         return testProducerRecordsKeepNoProvider(vm, *state, globalObject, part);
     if (!part.check(state->importsEnabled(), "a Consumer or ConsumerProducer does not import"_s))
         return false;
     return testAttachToGeneratedProgram(vm, *state, globalObject, part)
-        && testAtomMapAttach(vm, *state, part)
-        && testAtomMapAttachToProgram(vm, *state, globalObject, part)
+        && testAttachCopies(vm, *state, globalObject, part)
         && testRootImport(vm, *state, part)
-        && testProvenance(vm, *state, globalObject, part)
-        && testDecodedButterflyProvenance(vm, *state, globalObject, part)
+        && testImportCopies(vm, *state, part)
+        && testDecodedCode(vm, *state, globalObject, part)
+        && testPrivateModule(vm, *state, globalObject, part)
         && testSuppliedDigestImports(vm, *state, globalObject, part);
 }
 
-// The two cases of a supplied digest that differs from its text, alone in their test: the twin check reports such a digest
-// wherever a request takes it, and the second case turns cache activity off for good. In a Consumer with strict on, a
-// decoded program under a wrong supplied digest is first matched by its core, which no digest enters, and seeded with no
-// verification, since only an import verifies a supplied digest. Then a program whose import relies on a wrong supplied
-// digest is invalid material at ucb.supplied-digest before anything is decoded: its body's core and feedback sections are
-// broken, so a decode or a feedback parse would raise another step. With a twin report open, each case adds exactly one
-// difference.
+// The case of a supplied digest that differs from its text, alone in its test: the twin check reports such a digest
+// wherever a request takes it, and the case turns cache activity off for good. In a Consumer with strict on, a program
+// whose import relies on a wrong supplied digest is invalid material at ucb.supplied-digest before anything is decoded:
+// its body's core and feedback sections are broken, so a decode or a feedback parse would raise another step. With a twin
+// report open, the case adds exactly one difference.
 static bool testSuppliedDigestInvalidMaterial(VM& vm, JSGlobalObject* globalObject, TestPart& part)
 {
     VMState* state = vm.jitCacheState();
@@ -1021,39 +974,14 @@ static bool testSuppliedDigestInvalidMaterial(VM& vm, JSGlobalObject* globalObje
     StubbedArtifact artifact;
     StubbedBodyLookup lookup { *state, artifact };
 
-    // The decoded program.
-    Ref<SuppliedDigestProvider> decodedProvider = SuppliedDigestProvider::create("var jitcacheU8WrongDecoded = 'jitcache-u8-wrong-decoded';\n"_s, filledDigest(0xde));
-    ProgramRequestFixture decodedFixture = programRequestFixture(globalObject, Ref<SourceProvider> { decodedProvider.get() });
-    BodyKey decodedKey = programKey(decodedFixture.source, NoLexicallyScopedFeatures);
-    Strong<UnlinkedCodeBlock> decodedProducer = generateProgramFor(vm, decodedFixture);
-    Strong<UnlinkedCodeBlock> decoded = generateProgramFor(vm, decodedFixture);
-    auto seededBody = decodedProducer ? buildTestBody(vm, *decodedProducer.get(), nullptr, decodedKey, programContext(decodedFixture.source, *decodedFixture.executable.get()), CoreProvenance::Generated) : std::nullopt;
-    if (!part.check(decoded && seededBody, "the wrong-digest decoded program could not be built"_s))
-        return false;
-    artifact.list(decodedKey, 65, seededBody->validated(decodedKey, 7004));
-    UCBStatistics beforeSeed = statistics;
-    unsigned differencesBeforeSeed = differences();
-    {
-        RequestState request(vm, RequestKind::Program, decodedFixture.source, { }, decodedFixture.executable.get()->lexicallyScopedFeatures());
-        prepareProgramRequest(request, *decodedFixture.executable.get());
-        seedDecoded(request, *decoded.get());
-    }
-    bool matchedByCore = state->tracksKeys() && statistics.seededDecodes == beforeSeed.seededDecodes + 1 && statistics.suppliedDigestVerifications == beforeSeed.suppliedDigestVerifications
-        && !registry.suppliedDigestVerified(decodedProvider->asID());
-    if (!part.check(matchedByCore, "a decoded program under a wrong supplied digest was verified, or not matched by its core"_s))
-        return false;
-    if (!part.check(!sink || differences() == differencesBeforeSeed + 1, "the seed under a wrong supplied digest did not add exactly one difference to the twin report"_s))
-        return false;
-
-    // The import.
     String text = "var jitcacheU8WrongSupplied = 'jitcache-u8-wrong-supplied-digest';\n"_s;
     ProgramRequestFixture fixture = programRequestFixture(globalObject, SuppliedDigestProvider::create(text, filledDigest(0xee)));
     BodyKey key = programKey(fixture.source, NoLexicallyScopedFeatures);
     Strong<UnlinkedCodeBlock> producer = generateProgramFor(vm, fixture);
-    auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get()), CoreProvenance::Generated) : std::nullopt;
+    auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get())) : std::nullopt;
     if (!part.check(!!body, "the wrong-digest program's body could not be built"_s))
         return false;
-    TestBody undecodable { body->identity, Vector<uint8_t>(FillWith { }, body->core.size(), 0), brokenMagic(body->feedback) };
+    TestBody undecodable { body->identity, Vector<uint8_t>(FillWith { }, body->core.size(), 0), brokenMagic(body->feedback), BodyImage::Present };
     artifact.list(key, 71, undecodable.validated(key, 8000));
     UCBStatistics before = statistics;
     unsigned differencesBeforeImport = differences();
@@ -1141,6 +1069,8 @@ JITCACHE_TEST(ucbEngineInAStrictConsumer, Yes)
     runEngineIn(context, Role::Consumer, true);
 }
 
+// Strict off on purpose, the one engine test that is: every run the test runner starts has strict on, so normal mode's
+// paths, such as an import that verifies no supplied digest, run only here.
 JITCACHE_TEST(ucbEngineInANonStrictConsumer, Yes)
 {
     runEngineIn(context, Role::Consumer, false);
@@ -1151,8 +1081,8 @@ JITCACHE_TEST(ucbEngineInAConsumerProducer, Yes)
     runEngineIn(context, Role::ConsumerProducer, true);
 }
 
-// A Consumer with strict on runs the two cases of a wrong supplied digest, and is left with cache activity off at
-// ucb.supplied-digest, a registry verifyRegistry finds sound, and exactly the two differences the cases report.
+// A Consumer with strict on runs the case of a wrong supplied digest, and is left with cache activity off at
+// ucb.supplied-digest, a registry verifyRegistry finds sound, and exactly the one difference the case reports.
 JITCACHE_TEST(ucbEngineSuppliedDigestInvalidMaterial, Yes)
 {
     VM& vm = *context.vm();
@@ -1175,8 +1105,8 @@ JITCACHE_TEST(ucbEngineSuppliedDigestInvalidMaterial, Yes)
         JITCACHE_FAIL(makeString("the invalid material left the fault at "_s, fault ? fault->stepName() : String { "none"_s }, ", not at ucb.supplied-digest"_s));
     checkRegistry(context, vm);
     Vector<String> lines = twinDifferenceLines(context, *vm.jitCacheState(), twinReportPath);
-    if (lines.size() != 2)
-        JITCACHE_FAIL(makeString("the twin report holds "_s, lines.size(), " differences, not the two of a wrong supplied digest"_s));
+    if (lines.size() != 1)
+        JITCACHE_FAIL(makeString("the twin report holds "_s, lines.size(), " differences, not the one of a wrong supplied digest"_s));
     for (const String& line : lines) {
         if (!line.startsWith("{\"kind\":\"difference\",\"part\":\"ucb\",\"check\":\"T7\","_s))
             JITCACHE_FAIL(makeString("the twin report holds a difference other than a wrong supplied digest's: "_s, line));

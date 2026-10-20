@@ -345,8 +345,11 @@ void RenderView::paint(PaintInfo& paintInfo, const LayoutPoint& paintOffset)
 {
     // If we ever require layout but receive a paint anyway, something has gone horribly wrong.
     ASSERT(!needsLayout());
-    // RenderViews should never be called to paint with an offset not on device pixels.
-    ASSERT(LayoutPoint(IntPoint(paintOffset.x(), paintOffset.y())) == paintOffset);
+    // RenderViews should never be called to paint with an offset not on device pixels. Where the page scale joins
+    // the layer rather than the layout, the backing store grid is the device scale times the page scale, so
+    // snapping an integral position to it can land a fraction of a CSS pixel.
+    ASSERT(LayoutPoint(IntPoint(paintOffset.x(), paintOffset.y())) == paintOffset
+        || (document().pixelSnappingScaleFactor() != document().deviceScaleFactor() && paintOffset.x().abs() < 1 && paintOffset.y().abs() < 1));
 
     // This avoids painting garbage between columns if there is a column gap.
     Ref frameView = this->frameView();
@@ -663,10 +666,10 @@ bool RenderView::isScrollableOrRubberbandableBox() const
     return frameView().isScrollable(defineScrollable);
 }
 
-void RenderView::boundingRects(Vector<LayoutRect>& rects, const LayoutPoint& accumulatedOffset) const
+Vector<FloatRect> RenderView::localBorderBoxRects() const
 {
     // FIXME: It's weird that this gets is size from the layer.
-    rects.append(LayoutRect { accumulatedOffset, layer()->size() });
+    return { FloatRect { { }, layer()->size() } };
 }
 
 void RenderView::absoluteQuads(Vector<FloatQuad>& quads, bool* wasFixed) const
@@ -913,7 +916,7 @@ bool RenderView::usesCompositing() const
 RenderLayerCompositor& RenderView::compositor()
 {
     if (!m_compositor)
-        m_compositor = makeUnique<RenderLayerCompositor>(*this);
+        lazyInitialize(m_compositor, makeUnique<RenderLayerCompositor>(*this));
 
     return *m_compositor;
 }
@@ -927,7 +930,7 @@ void RenderView::setIsInWindow(bool isInWindow)
 ImageQualityController& RenderView::imageQualityController()
 {
     if (!m_imageQualityController)
-        m_imageQualityController = makeUnique<ImageQualityController>(*this);
+        lazyInitialize(m_imageQualityController, makeUnique<ImageQualityController>(*this));
     return *m_imageQualityController;
 }
 
@@ -1037,7 +1040,7 @@ void RenderView::updatePlayStateForAllAnimations(const IntRect& visibleRect)
             RefPtr image = cachedImage->image();
             if (RefPtr svgImage = dynamicDowncast<SVGImage>(image.get())) {
                 if (shouldAnimate && hasPausedAnimation) {
-                    svgImage->resumeAnimation();
+                    svgImage->startAnimation();
                     removeRendererWithPausedImageAnimations(renderElement, *cachedImage);
                 } else if (!hasPausedAnimation) {
                     svgImage->stopAnimation();
@@ -1160,6 +1163,16 @@ void RenderView::registerContainerQueryBox(const RenderBox& box)
 void RenderView::unregisterContainerQueryBox(const RenderBox& box)
 {
     m_containerQueryBoxes.remove(box);
+}
+
+void RenderView::registerScrollStateQueryBox(const RenderBox& box)
+{
+    m_scrollStateQueryBoxes.add(box);
+}
+
+void RenderView::unregisterScrollStateQueryBox(const RenderBox& box)
+{
+    m_scrollStateQueryBoxes.remove(box);
 }
 
 void RenderView::registerAnchor(const RenderBoxModelObject& renderer)

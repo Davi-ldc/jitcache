@@ -7,12 +7,14 @@
 #include "CachedBytecode.h"
 #include "CachedTypes.h"
 #include "CodeCache.h"
+#include "DeferGC.h"
 #include "DirectEvalExecutable.h"
+#include "HeapIterationScope.h"
 #include "IndirectEvalExecutable.h"
 #include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSCellButterfly.h"
-#include "Options.h"
+#include "MarkedSpaceInlines.h"
 #include "RegExp.h"
 #include "RegExpCache.h"
 #include "SourceCodeKey.h"
@@ -37,7 +39,6 @@
 #include <utility>
 #include <wtf/ASCIICType.h>
 #include <wtf/InlineMap.h>
-#include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/WeakRandom.h>
@@ -47,7 +48,8 @@
 
 // The tests of the core codec runtime/CachedTypes.cpp gives the UCB lane: the InlineMap transport of declaration maps; the
 // round trip of every root record and function core, decoded without and with validation; chunked encodes and encoding
-// budgets; what the native bytecode cache's decodes encode to; RegExp constants and the ordered-hash-table sentinel; TDZ
+// budgets; encodes that allocate no cell; string constants that decode as atoms; a decode that leaves nothing in its
+// payload; line starts, which a core leaves to the provider; RegExp constants and the ordered-hash-table sentinel; TDZ
 // chains against the holder's; descriptors; the payload header's failures; and, through runCoreCodecSelfTest, the cases that
 // alter a core's records.
 
@@ -64,14 +66,15 @@ static std::optional<Vector<uint8_t>> encodeDescriptorBytes(VM& vm, const Unlink
     return Vector<uint8_t> { descriptor->span() };
 }
 
-// Decodes a copy of `bytes`, which starts 8-byte aligned in a buffer the payload owns, as the import's body does.
-static UnlinkedCodeBlock* decodeCoreBytes(VM& vm, std::span<const uint8_t> bytes, SourceProvider& provider, UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder, bool validate, CoreDecodeFailure& failure)
+// Decodes a copy of `bytes`, which starts 8-byte aligned in a buffer the payload owns, as the import's body does, against
+// `source`, the source the core's root was generated from, as the import decodes against the request's.
+static UnlinkedCodeBlock* decodeCoreBytes(VM& vm, std::span<const uint8_t> bytes, const SourceCode& source, UnlinkedCodeBlockCoreKind kind, const UnlinkedFunctionExecutable* holder, bool validate, CoreDecodeFailure& failure)
 {
     Vector<uint8_t> copy { bytes };
     std::span<uint8_t> data = copy.mutableSpan();
     Ref<CachedBytecode> payload = CachedBytecode::create(data, [copy = WTF::move(copy)](const void*) { }, { });
     failure = CoreDecodeFailure::None;
-    return decodeUnlinkedCodeBlockCore(vm, WTF::move(payload), provider, kind, holder, validate, failure);
+    return decodeUnlinkedCodeBlockCore(vm, WTF::move(payload), source, kind, holder, validate, failure);
 }
 
 // The map a VariableEnvironment keeps its declarations in, which the codec transports. VariableEnvironment names it Map
@@ -310,13 +313,15 @@ static bool testInlineMapTransport(VM& vm, TestPart& part)
                 movedEntries.append(base.entries[*bucket.second]);
         }
     }
-    // Load and minimum load, from layouts whose keys each sit where their probe starts, so that nothing else is wrong with
-    // them: one with the same occupancy restores, while thirteen live buckets in sixteen pass the most a map built by add()
-    // holds, and 128 buckets for eleven entries pass minLoadInverse (6) times the entries, which a removal would shrink.
+    // Load, minimum load and the inline capacity, from layouts whose keys each sit where their probe starts, so that nothing
+    // else is wrong with them: one with the same occupancy restores, while thirteen live buckets in sixteen pass the most a
+    // map built by add() holds, 128 buckets for eleven entries pass minLoadInverse (6) times the entries, which a removal
+    // would shrink, and eight buckets for three entries meet both loads but are no more than the nine the map keeps inline.
     auto loadControl = directLayout(keys, 1000, 64, 11);
     auto crowded = directLayout(keys, 1000, 16, 13);
     auto sparse = directLayout(keys, 1000, 128, 11);
-    if (!part.check(loadControl && crowded && sparse, "the load test layouts could not be built from the test keys"_s))
+    auto inlineSized = directLayout(keys, 1000, 8, 3);
+    if (!part.check(loadControl && crowded && sparse && inlineSized, "the load test layouts could not be built from the test keys"_s))
         return false;
     {
         RemovableMap map;
@@ -339,7 +344,7 @@ static bool testInlineMapTransport(VM& vm, TestPart& part)
         return false;
 
     return refuses("a capacity that is not a power of two"_s, base.capacity + 1, base.slots, base.entries)
-        && refuses("a capacity no larger than the inline capacity"_s, 8, base.slots, base.entries)
+        && refuses("a capacity no larger than the inline capacity"_s, inlineSized->capacity, inlineSized->slots, inlineSized->entries)
         && refuses("slot indices out of order"_s, base.capacity, swapped, base.entries)
         && refuses("a slot index at the capacity"_s, base.capacity, pastCapacity, base.entries)
         && refuses("fewer entries than live slots"_s, base.capacity, base.slots, fewer)
@@ -352,9 +357,10 @@ static bool testInlineMapTransport(VM& vm, TestPart& part)
 
 // Programs in the manner of JSTests/stress, together covering the forms a core encodes: closures and loops, integer,
 // character and string switches, exception handlers, classes with fields, private names, static blocks and super, generators
-// and async functions, destructuring and spread, regular expressions, big integers, doubles, templates, butterflies, a literal
-// whose elements the parser folds to NaNs of both signs, more than nine global declarations, with and eval, accessors and
-// computed keys, and nested block scopes.
+// and async functions, destructuring with an object rest, whose excluded names make an identifier set, and spread,
+// regular expressions, big integers, doubles, templates, butterflies of strings, int32s and doubles, a literal whose
+// elements the parser folds to NaNs of both signs, more than nine global declarations, with and eval, accessors and computed
+// keys, and nested block scopes.
 static constexpr std::array<ASCIILiteral, 7> codecCorpus { {
     "function jitcacheU7Switch(x, s) {\n"
     "  var total = 0;\n"
@@ -373,9 +379,10 @@ static constexpr std::array<ASCIILiteral, 7> codecCorpus { {
     "function* jitcacheU7Gen(n) { for (let i = 0; i < n; i++) yield i; }\n"
     "async function jitcacheU7Async(a, { b, c = 2 } = {}, ...rest) { const [d, ...e] = await Promise.resolve([a, b, c]); return d?.toString() ?? e.length + rest.length; }\n"
     "async function* jitcacheU7AsyncGen() { yield* jitcacheU7Gen(3); }\n"
-    "const jitcacheU7Spread = [...jitcacheU7Gen(4), ...\"xyz\"];\n"_s,
+    "const jitcacheU7Spread = [...jitcacheU7Gen(4), ...\"xyz\"];\n"
+    "const { jitcacheU7Kept, ...jitcacheU7Others } = { jitcacheU7Kept: 1, jitcacheU7Other: 2 };\n"_s,
     "var jitcacheU7Literals = { re: /jit(cache)+\\d*/gi, big: 12345678901234567890123n, d: 1.5, n: NaN, z: -0, inf: Infinity, words: [\"one\", \"two\", \"three\"], mixed: [\"one\", 2], hole: [1, , 3],\n"
-    "  nans: [1e400 * 0, -(1e400 * 0)] };\n"
+    "  fractions: [1.5, 2.5], nans: [1e400 * 0, -(1e400 * 0)] };\n"
     "function jitcacheU7Tag(strings, ...values) { return strings.raw.join('|') + values.join(','); }\n"
     "var jitcacheU7Template = jitcacheU7Tag`a${1}b${2}c` + `plain ${jitcacheU7Literals.d}`;\n"_s,
     "var v0 = 0, v1 = 1, v2 = 2, v3 = 3, v4 = 4, v5 = 5, v6 = 6, v7 = 7, v8 = 8, v9 = 9, v10 = 10, v11 = 11, v12 = 12;\n"
@@ -502,7 +509,7 @@ static bool sameAsDecoded(VM& vm, TestPart& part, UnlinkedCodeBlock& original, U
         return false;
     if (!part.check(allStringConstantsAreAtoms(decoded), makeString("a string constant register of decoded "_s, what, " is not an atom"_s)))
         return false;
-    if (!part.check(liveFeedbackCounts(original) == liveFeedbackCounts(decoded), makeString("decoded "_s, what, " has other profile, child or constant counts"_s)))
+    if (!part.check(liveFeedbackCounts(original, BodyImage::Absent) == liveFeedbackCounts(decoded, BodyImage::Absent), makeString("decoded "_s, what, " has other profile, child or constant counts"_s)))
         return false;
     // UnlinkedGlobalCodeBlock declares no ClassInfo, so a dynamic cast to it accepts a function UCB, whose cell lacks these
     // fields. A function body's parse fields are its UFE's; they travel in the identity section, and both sides share the
@@ -511,8 +518,7 @@ static bool sameAsDecoded(VM& vm, TestPart& part, UnlinkedCodeBlock& original, U
         auto& originalGlobal = uncheckedDowncast<UnlinkedGlobalCodeBlock>(original);
         auto& decodedGlobal = uncheckedDowncast<UnlinkedGlobalCodeBlock>(decoded);
         bool sameParse = originalGlobal.codeFeatures() == decodedGlobal.codeFeatures() && originalGlobal.lexicallyScopedFeatures() == decodedGlobal.lexicallyScopedFeatures()
-            && originalGlobal.hasCapturedVariables() == decodedGlobal.hasCapturedVariables() && originalGlobal.lineCount() == decodedGlobal.lineCount()
-            && originalGlobal.endColumn() == decodedGlobal.endColumn() && WTF::equal(originalGlobal.sourceURLDirective(), decodedGlobal.sourceURLDirective())
+            && originalGlobal.hasCapturedVariables() == decodedGlobal.hasCapturedVariables() && WTF::equal(originalGlobal.sourceURLDirective(), decodedGlobal.sourceURLDirective())
             && WTF::equal(originalGlobal.sourceMappingURLDirective(), decodedGlobal.sourceMappingURLDirective());
         if (!part.check(sameParse, makeString("decoded "_s, what, " has other global parse fields"_s)))
             return false;
@@ -558,7 +564,7 @@ static bool sameAsDecoded(VM& vm, TestPart& part, UnlinkedCodeBlock& original, U
 }
 
 // Encodes twice, decodes without and with validation, and compares each decode with the original.
-static bool roundTripsCore(VM& vm, TestPart& part, UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder, SourceProvider& provider, UnlinkedCodeBlockCoreKind kind, ASCIILiteral what)
+static bool roundTripsCore(VM& vm, TestPart& part, UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder, const SourceCode& source, UnlinkedCodeBlockCoreKind kind, ASCIILiteral what)
 {
     auto core = encodeCoreBytes(vm, codeBlock, holder);
     auto again = encodeCoreBytes(vm, codeBlock, holder);
@@ -566,7 +572,7 @@ static bool roundTripsCore(VM& vm, TestPart& part, UnlinkedCodeBlock& codeBlock,
         return false;
     for (bool validate : { false, true }) {
         CoreDecodeFailure failure = CoreDecodeFailure::None;
-        Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, core->span(), provider, kind, holder, validate, failure) };
+        Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, core->span(), source, kind, holder, validate, failure) };
         if (!part.check(decoded && failure == CoreDecodeFailure::None, makeString("the core of "_s, what, validate ? " does not decode with validation"_s : " does not decode"_s)))
             return false;
         if (!sameAsDecoded(vm, part, codeBlock, *decoded.get(), holder, core->span(), what))
@@ -589,7 +595,7 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, TestPart& part
             return false;
         if (!part.check(!holdsSymbolKey(module.get()->variableDeclarations()), "the corpus module declares a symbol, whose per-process hash would make its hashed layout differ between processes"_s))
             return false;
-        if (!roundTripsCore(vm, part, *module.get(), nullptr, *moduleSource.provider(), UnlinkedCodeBlockCoreKind::Module, "the corpus module"_s))
+        if (!roundTripsCore(vm, part, *module.get(), nullptr, moduleSource, UnlinkedCodeBlockCoreKind::Module, "the corpus module"_s))
             return false;
     }
     {
@@ -599,7 +605,7 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, TestPart& part
         bool namesDeclarations = codeBlock && codeBlock.get()->numVariables() && codeBlock.get()->numFunctionHoistingCandidates();
         if (!part.check(namesDeclarations, "the corpus indirect eval failed to generate, or lacks its variables or its hoisting candidate"_s))
             return false;
-        if (!roundTripsCore(vm, part, *codeBlock.get(), nullptr, *evalSource.provider(), UnlinkedCodeBlockCoreKind::Eval, "the corpus indirect eval"_s))
+        if (!roundTripsCore(vm, part, *codeBlock.get(), nullptr, evalSource, UnlinkedCodeBlockCoreKind::Eval, "the corpus indirect eval"_s))
             return false;
     }
     {
@@ -617,7 +623,7 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, TestPart& part
         }
         if (!part.check(function && function->parentScopeTDZVariables(), "the corpus direct eval failed to generate, or its function holds no TDZ chain"_s))
             return false;
-        if (!roundTripsCore(vm, part, *codeBlock.get(), nullptr, *evalSource.provider(), UnlinkedCodeBlockCoreKind::Eval, "the corpus direct eval"_s))
+        if (!roundTripsCore(vm, part, *codeBlock.get(), nullptr, evalSource, UnlinkedCodeBlockCoreKind::Eval, "the corpus direct eval"_s))
             return false;
     }
 
@@ -631,7 +637,6 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, TestPart& part
         if (!part.check(!!fixture.codeBlock, "a corpus program failed to generate"_s))
             return false;
         UnlinkedProgramCodeBlock& program = *fixture.codeBlock.get();
-        SourceProvider& provider = *fixture.source.provider();
         bool declaresSymbol = holdsSymbolKey(program.variableDeclarations()) || holdsSymbolKey(program.lexicalDeclarations());
         if (!part.check(!declaresSymbol, "a corpus program declares a symbol, whose per-process hash would make its hashed layout differ between processes"_s))
             return false;
@@ -647,10 +652,12 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, TestPart& part
                 return true;
             CodeSpecializationKind kind = child->isClassConstructorFunction() ? CodeSpecializationKind::CodeForConstruct : CodeSpecializationKind::CodeForCall;
             ParserError error;
-            Strong<UnlinkedFunctionCodeBlock> body { vm, child->unlinkedCodeBlockFor(vm, child->linkedSourceCode(fixture.source), kind, { }, error, child->parseMode()) };
+            // The core decodes against the child's own source, which its children's offsets count from.
+            SourceCode childSource = child->linkedSourceCode(fixture.source);
+            Strong<UnlinkedFunctionCodeBlock> body { vm, child->unlinkedCodeBlockFor(vm, childSource, kind, { }, error, child->parseMode()) };
             if (!body)
                 return true; // a body that does not generate on its own
-            return roundTripsCore(vm, part, *body.get(), child, provider, UnlinkedCodeBlockCoreKind::Function, "a corpus function"_s);
+            return roundTripsCore(vm, part, *body.get(), child, childSource, UnlinkedCodeBlockCoreKind::Function, "a corpus function"_s);
         };
         for (unsigned i = 0; i < std::min<size_t>(program.numberOfFunctionDecls(), 8); ++i) {
             if (!roundTripsChild(program.functionDecl(i)))
@@ -662,7 +669,7 @@ static bool testCodecCorpus(VM& vm, JSGlobalObject* globalObject, TestPart& part
         }
         // After the children's round trips, whose generation parsed them and filled their slots: the program's decoded
         // children must still come back unparsed, with the lexically scoped features generation gave them.
-        if (!roundTripsCore(vm, part, program, nullptr, provider, UnlinkedCodeBlockCoreKind::Program, "a corpus program"_s))
+        if (!roundTripsCore(vm, part, program, nullptr, fixture.source, UnlinkedCodeBlockCoreKind::Program, "a corpus program"_s))
             return false;
     }
     return true;
@@ -813,12 +820,53 @@ static bool testCodecChunksAndBudgets(VM& vm, TestPart& part)
     return true;
 }
 
-// Bytecode-cache payloads a test marks persistent. The blocks decoded from them borrow their bytes, so the bytes live for
-// the process, as an embedder's mapped executable section does.
-static Vector<Vector<uint8_t>>& persistentPayloads()
+// The cells the heap holds now, the ones allocated since the last collection included: the HeapIterationScope stops
+// allocation, which records each new cell, so forEachLiveCell walks those too. Heap::objectCount() counts only marked cells,
+// so a new cell does not show in it.
+static size_t liveCellCount(VM& vm)
 {
-    static NeverDestroyed<Vector<Vector<uint8_t>>> payloads;
-    return payloads.get();
+    size_t count = 0;
+    HeapIterationScope iterationScope(vm.heap);
+    vm.heap.objectSpace().forEachLiveCell(iterationScope, [&](HeapCell*, HeapCell::Kind) {
+        ++count;
+        return IterationStatus::Continue;
+    });
+    return count;
+}
+
+// Encoding cores and descriptors allocates no cell: under one DeferGC, so that no collection frees a cell meanwhile, the heap
+// holds as many live cells after two program cores, the cores of their functions with their UFEs as holders and those
+// UFEs' descriptors were encoded as before. The functions are generated first. None is a class field initializer, whose
+// generation leaks with JITCache off too (see testCodecCorpus).
+static bool testCodecAllocatesNoCell(VM& vm, TestPart& part)
+{
+    ProgramFixture switches = generateProgramFixture(vm, String { codecCorpus[0] }, std::numeric_limits<unsigned>::max());
+    ProgramFixture scopes = generateProgramFixture(vm, String { codecCorpus[nestedScopesCorpusIndex] }, std::numeric_limits<unsigned>::max());
+    if (!part.check(switches.codeBlock && scopes.codeBlock, "a program of the allocation test failed to generate"_s))
+        return false;
+    Vector<std::pair<UnlinkedFunctionExecutable*, Strong<UnlinkedFunctionCodeBlock>>> functions;
+    for (auto* fixture : { &switches, &scopes }) {
+        allChildren(*fixture->codeBlock.get(), [&](UnlinkedFunctionExecutable& child, ChildTable, uint32_t) {
+            functions.append({ &child, Strong<UnlinkedFunctionCodeBlock> { vm, decodedBody(vm, child, fixture->source) } });
+            return true;
+        });
+    }
+
+    bool encoded = functions.size() >= 3;
+    size_t before = 0;
+    size_t after = 0;
+    {
+        DeferGC deferGC(vm);
+        before = liveCellCount(vm);
+        for (auto* fixture : { &switches, &scopes })
+            encoded &= !!encodeCoreBytes(vm, *fixture->codeBlock.get(), nullptr);
+        for (auto& [function, body] : functions)
+            encoded &= body && encodeCoreBytes(vm, *body.get(), function) && encodeDescriptorBytes(vm, *function);
+        after = liveCellCount(vm);
+    }
+    if (!part.check(encoded, "a core or descriptor of the allocation test failed to encode, or the programs have fewer than three functions"_s))
+        return false;
+    return part.check(before == after, makeString("encoding cores and descriptors changed the heap's live cells from "_s, before, " to "_s, after));
 }
 
 static std::optional<uint32_t> butterflyConstant(UnlinkedCodeBlock& codeBlock)
@@ -830,94 +878,163 @@ static std::optional<uint32_t> butterflyConstant(UnlinkedCodeBlock& codeBlock)
     return std::nullopt;
 }
 
-// What the native bytecode cache produces encodes as generation's twin would: a decoded function with plain string
-// constants and a plain butterfly encodes to its generated twin's bytes and decodes with atoms; two decodes of one payload
-// whose functions run in different orders encode alike; a decoded parent whose children are still cached encodes twice
-// alike and leaves their decoders usable; a borrowed stream encodes as its copy.
-static bool testCodecNativeDecodes(VM& vm, TestPart& part)
+// A function whose generated UCB holds a long string constant and an all-string literal in the atom form decodes from its
+// core, without and with validation, with every string constant register an atom, while the literal's butterfly keeps
+// what the butterfly decode gives it: the plain structure, and string elements that are fresh strings of the same
+// characters, not the VM's canonical strings generation put there.
+static bool testCodecStringConstants(VM& vm, TestPart& part)
 {
-    String text = "function jitcacheU7Atoms(s) { var long = 'jitcache-u7-a-long-string-constant-that-is-no-inline-string'; return ['jitcache-u7-word-one', 'jitcache-u7-word-two'].indexOf(s) + long.length; }\n"
-        "function jitcacheU7Second(s) { return 'jitcache-u7-a-long-string-constant-that-is-no-inline-string' + s + 'jitcache-u7-second-only-string'; }\n"_s;
+    static constexpr ASCIILiteral longConstant = "jitcache-u7-a-long-string-constant-that-is-no-inline-string"_s;
+    String text = makeString("function jitcacheU7Atoms(s) { var long = '"_s, longConstant, "'; return ['jitcache-u7-word-one', 'jitcache-u7-word-two'].indexOf(s) + long.length; }\n"_s);
     ProgramFixture generated = generateProgramFixture(vm, text, std::numeric_limits<unsigned>::max());
-    if (!part.check(!!generated.codeBlock && generated.codeBlock.get()->numberOfFunctionDecls() == 2, "the native-decode program failed to generate"_s))
+    if (!part.check(generated.codeBlock && generated.codeBlock.get()->numberOfFunctionDecls() == 1, "the string-constant program failed to generate"_s))
         return false;
-    SourceCodeKey key = programCacheKey(generated.source);
-    RefPtr<CachedBytecode> payload = encodeCodeBlock(vm, key, generated.codeBlock.get());
-    if (!part.check(!!payload, "the native bytecode cache did not encode the program"_s))
+    UnlinkedFunctionExecutable& function = *generated.codeBlock.get()->functionDecl(0);
+    Strong<UnlinkedFunctionCodeBlock> body { vm, decodedBody(vm, function, generated.source) };
+    std::optional<uint32_t> literal = body ? butterflyConstant(*body.get()) : std::nullopt;
+    auto* generatedLiteral = literal ? constantCell<JSCellButterfly>(*body.get(), *literal) : nullptr;
+    bool generatedForms = generatedLiteral && generatedLiteral->structure() == vm.cellButterflyOnlyAtomStringsStructure.get()
+        && stringConstantIndex(*body.get(), longConstant) && allStringConstantsAreAtoms(*body.get());
+    if (!part.check(generatedForms, "the generated function lacks its long string constant or its all-string literal in the atom form"_s))
         return false;
-    auto decode = [&](Ref<CachedBytecode>&& bytes) {
-        return Strong<UnlinkedProgramCodeBlock> { vm, decodeCodeBlock<UnlinkedProgramCodeBlock>(vm, key, WTF::move(bytes)) };
+    auto core = encodeCoreBytes(vm, *body.get(), &function);
+    if (!part.check(!!core, "the string-constant function's core failed to encode"_s))
+        return false;
+    for (bool validate : { false, true }) {
+        CoreDecodeFailure failure = CoreDecodeFailure::None;
+        Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, core->span(), function.linkedSourceCode(generated.source), UnlinkedCodeBlockCoreKind::Function, &function, validate, failure) };
+        if (!part.check(decoded && allStringConstantsAreAtoms(*decoded.get()), "a string constant register of a decoded core is not an atom"_s))
+            return false;
+        auto* decodedLiteral = constantCell<JSCellButterfly>(*decoded.get(), *literal);
+        bool keepsDecode = decodedLiteral && decodedLiteral->structure() == vm.cellButterflyStructure(decodedLiteral->indexingMode())
+            && decodedLiteral->length() == generatedLiteral->length();
+        for (unsigned i = 0; keepsDecode && i < decodedLiteral->length(); ++i) {
+            JSValue element = decodedLiteral->get(i);
+            JSValue generatedElement = generatedLiteral->get(i);
+            keepsDecode = element.isString() && element != generatedElement && asString(element)->tryGetValueImpl()
+                && String { asString(element)->tryGetValueImpl() } == String { asString(generatedElement)->tryGetValueImpl() };
+        }
+        if (!part.check(keepsDecode, "a decoded core's butterfly does not keep the plain structure and the string elements its decode gives"_s))
+            return false;
+    }
+    return true;
+}
+
+// Decodes a copy of `bytes`, as decodeCoreBytes does, from a payload whose destructor sets `destroyed`.
+static UnlinkedCodeBlock* decodeCoreBytesNotingRelease(VM& vm, std::span<const uint8_t> bytes, const SourceCode& source, UnlinkedCodeBlockCoreKind kind, bool& destroyed)
+{
+    Vector<uint8_t> copy { bytes };
+    std::span<uint8_t> data = copy.mutableSpan();
+    destroyed = false;
+    auto destructor = [copy = WTF::move(copy), &destroyed](const void*) {
+        destroyed = true;
+    };
+    Ref<CachedBytecode> payload = CachedBytecode::create(data, WTF::move(destructor), { });
+    CoreDecodeFailure failure = CoreDecodeFailure::None;
+    UnlinkedCodeBlock* codeBlock = decodeUnlinkedCodeBlockCore(vm, WTF::move(payload), source, kind, nullptr, false, failure);
+    return failure == CoreDecodeFailure::None ? codeBlock : nullptr;
+}
+
+// A program and a module whose cores hold named children with TDZ chains and rare data, symbol tables and, in the module,
+// heap-allocated function declarations.
+static constexpr ASCIILiteral payloadProgramText = "class JitcacheU7Payload { #secret = 1; static jitcacheU7Count = 0; reveal() { return this.#secret; } }\n"
+    "{ let jitcacheU7Captured = 'jitcache-u7-captured'; globalThis.jitcacheU7Reader = () => jitcacheU7Captured; }\n"
+    "function jitcacheU7Named(a, { b } = { }) { return a + b; }\n"_s;
+
+// A core decoded from a payload whose CachedBytecode has a destructor, which the native decoder counts as owned and would
+// leave parts in, decodes everything at once: the destructor runs before the decode returns, since nothing decoded keeps the
+// decoder, no child UFE keeps its name in the payload, no symbol table its entries, a module decodes every function
+// declaration, and the code block decodes its expression info.
+static bool testCodecDecodesEverything(VM& vm, TestPart& part)
+{
+    ProgramFixture program = generateFixture(vm, String { payloadProgramText });
+    SourceCode moduleSource = makeSource(String { moduleCorpusText }, SourceOrigin { }, SourceTaintedOrigin::Untainted, String { }, TextPosition { }, SourceProviderSourceType::Module);
+    ParserError error;
+    Strong<UnlinkedModuleProgramCodeBlock> module { vm, recursivelyGenerateUnlinkedCodeBlockForModuleProgram(vm, moduleSource, StrictModeLexicallyScopedFeature, JSParserScriptMode::Module, { }, error, EvalContextType::None, 0) };
+    if (!part.check(program.codeBlock && module && module.get()->numberOfHeapAllocatedFunctionDecls(), "a payload fixture failed to generate, or the module has no heap-allocated function declaration"_s))
+        return false;
+
+    unsigned symbolTables = 0;
+    unsigned namedChildren = 0;
+    auto decodesEverything = [&](UnlinkedCodeBlock& generated, const SourceCode& source, UnlinkedCodeBlockCoreKind kind, ASCIILiteral what) {
+        auto core = encodeCoreBytes(vm, generated, nullptr);
+        if (!part.check(!!core, makeString("the core of "_s, what, " failed to encode"_s)))
+            return false;
+        bool destroyed = false;
+        Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytesNotingRelease(vm, core->span(), source, kind, destroyed) };
+        if (!part.check(!!decoded, makeString("the core of "_s, what, " does not decode"_s)))
+            return false;
+        if (!part.check(destroyed, makeString("something decoded from the core of "_s, what, " keeps its payload after the decode returns"_s)))
+            return false;
+        UnlinkedCodeBlock& codeBlock = *decoded.get();
+        bool keepsNothing = !!codeBlock.expressionInfoIfDecoded();
+        auto childKeepsNothing = [&](UnlinkedFunctionExecutable* child) {
+            if (!child || child->isCached())
+                return false;
+            if (child->ecmaNameWithoutGC().isNull())
+                return true;
+            ++namedChildren;
+            return !!child->tryGetEcmaNameConcurrently();
+        };
+        for (unsigned i = 0; keepsNothing && i < codeBlock.numberOfFunctionDecls(); ++i)
+            keepsNothing = childKeepsNothing(codeBlock.functionDeclIfDecoded(i));
+        for (unsigned i = 0; keepsNothing && i < codeBlock.numberOfFunctionExprs(); ++i)
+            keepsNothing = childKeepsNothing(codeBlock.functionExpr(i));
+        for (uint32_t i = 0; keepsNothing && i < codeBlock.constantRegisters().size(); ++i) {
+            if (auto* symbolTable = constantCell<SymbolTable>(codeBlock, i)) {
+                ++symbolTables;
+                keepsNothing = !symbolTable->hasCachedEntriesPending();
+            }
+        }
+        if (auto* moduleBlock = dynamicDowncast<UnlinkedModuleProgramCodeBlock>(codeBlock))
+            keepsNothing = keepsNothing && !moduleBlock->heapAllocatedFunctionDeclSlots()->hasDecodeSource();
+        return part.check(keepsNothing, makeString("a part of "_s, what, " was left in its core's payload"_s));
+    };
+    if (!decodesEverything(*program.codeBlock.get(), program.source, UnlinkedCodeBlockCoreKind::Program, "the payload program"_s)
+        || !decodesEverything(*module.get(), moduleSource, UnlinkedCodeBlockCoreKind::Module, "the corpus module"_s))
+        return false;
+    return part.check(symbolTables >= 2 && namedChildren >= 2, "the payload fixtures hold too few symbol tables or named children to show that nothing stays in a payload"_s);
+}
+
+// A program generated after something built its provider's line-start table holds the table, and its native encoding
+// writes it, while its core leaves the table out: the core equals the core of the same text generated with no table built,
+// and decodes with no line starts.
+static bool testCodecLineStarts(VM& vm, TestPart& part)
+{
+    // Shorter than SourceProvider::minimumLengthToHaveLineStartsWithTheCode, so that generation's own parse builds no table.
+    String text = "var jitcacheU7Lines = 1;\nfunction jitcacheU7LineFunction() {\n    return jitcacheU7Lines;\n}\n"_s;
+    auto generate = [&](const SourceCode& source) {
+        ParserError error;
+        return Strong<UnlinkedProgramCodeBlock> { vm, recursivelyGenerateUnlinkedCodeBlockForProgram(vm, source, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None, 0) };
     };
 
-    // A decoded function against its generated twin.
-    auto decoded = decode(Ref<CachedBytecode> { *payload });
-    if (!part.check(!!decoded, "the native bytecode cache did not decode the program"_s))
+    SourceCode withTable = makeSource(text, SourceOrigin { }, SourceTaintedOrigin::Untainted);
+    withTable.provider()->positionInfoForOffset(text.length() - 1);
+    Strong<UnlinkedProgramCodeBlock> holder = generate(withTable);
+    if (!part.check(holder && withTable.provider()->lineStartTableIsBuilt() && holder.get()->lineStarts(), "a program generated after its provider's line-start table was built does not hold the table"_s))
         return false;
-    UnlinkedFunctionExecutable& generatedFunction = *generated.codeBlock.get()->functionDecl(0);
-    UnlinkedFunctionExecutable& decodedFunction = *decoded.get()->functionDecl(0);
-    Strong<UnlinkedFunctionCodeBlock> generatedBody { vm, decodedBody(vm, generatedFunction, generated.source) };
-    Strong<UnlinkedFunctionCodeBlock> nativeBody { vm, decodedBody(vm, decodedFunction, generated.source) };
-    if (!part.check(generatedBody && nativeBody, "a function body of the native-decode program is missing"_s))
+    SourceCodeKey key = programCacheKey(withTable);
+    RefPtr<CachedBytecode> native = encodeCodeBlock(vm, key, holder.get());
+    Strong<UnlinkedProgramCodeBlock> nativeDecode { vm, native ? decodeCodeBlock<UnlinkedProgramCodeBlock>(vm, key, Ref<CachedBytecode> { *native }) : nullptr };
+    bool nativeWritesTable = nativeDecode && equalSpans(nativeDecode.get()->lineStarts().bytes, holder.get()->lineStarts().bytes);
+    if (!part.check(nativeWritesTable, "the native bytecode cache does not write a program's line-start table"_s))
         return false;
-    auto literal = butterflyConstant(*nativeBody.get());
-    bool nativeForms = !allStringConstantsAreAtoms(*nativeBody.get()) && literal && constantCell<JSCellButterfly>(*nativeBody.get(), *literal)->structure() != vm.cellButterflyOnlyAtomStringsStructure.get();
-    if (!part.check(nativeForms, "the native decode made every string constant an atom or gave the literal the atom form, so the case is untested"_s))
+
+    SourceCode withoutTable = makeSource(text, SourceOrigin { }, SourceTaintedOrigin::Untainted);
+    Strong<UnlinkedProgramCodeBlock> plain = generate(withoutTable);
+    if (!part.check(plain && !plain.get()->lineStarts() && !withoutTable.provider()->lineStartTableIsBuilt(), "a program generated with no line-start table built holds one"_s))
         return false;
-    auto generatedCore = encodeCoreBytes(vm, *generatedBody.get(), &generatedFunction);
-    auto nativeCore = encodeCoreBytes(vm, *nativeBody.get(), &decodedFunction);
-    if (!part.check(generatedCore && nativeCore && *generatedCore == *nativeCore, "a natively decoded function does not encode to its generated twin's bytes"_s))
+    auto core = encodeCoreBytes(vm, *holder.get(), nullptr);
+    if (!part.check(core && core == encodeCoreBytes(vm, *plain.get(), nullptr), "a program's core depends on whether its provider's line-start table was built before generation"_s))
         return false;
-    CoreDecodeFailure failure = CoreDecodeFailure::None;
-    Strong<UnlinkedCodeBlock> fromCore { vm, decodeCoreBytes(vm, nativeCore->span(), *generated.source.provider(), UnlinkedCodeBlockCoreKind::Function, &decodedFunction, false, failure) };
-    if (!part.check(fromCore && allStringConstantsAreAtoms(*fromCore.get()), "a core decoded from a natively decoded function does not make every string constant register an atom"_s))
-        return false;
-    auto* nativeLiteral = constantCell<JSCellButterfly>(*nativeBody.get(), *literal);
-    auto* coreLiteral = constantCell<JSCellButterfly>(*fromCore.get(), *literal);
-    bool literalKeepsDecode = coreLiteral && coreLiteral->structure() == vm.cellButterflyStructure(coreLiteral->indexingMode()) && coreLiteral->length() == nativeLiteral->length();
-    for (unsigned i = 0; literalKeepsDecode && i < coreLiteral->length(); ++i) {
-        JSValue element = coreLiteral->get(i);
-        literalKeepsDecode = element.isString() && asString(element)->tryGetValueImpl() && String { asString(element)->tryGetValueImpl() } == String { asString(nativeLiteral->get(i))->tryGetValueImpl() };
+    for (bool validate : { false, true }) {
+        CoreDecodeFailure failure = CoreDecodeFailure::None;
+        Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, core->span(), withTable, UnlinkedCodeBlockCoreKind::Program, nullptr, validate, failure) };
+        auto* program = decoded ? dynamicDowncast<UnlinkedProgramCodeBlock>(decoded.get()) : nullptr;
+        if (!part.check(program && !program->lineStarts(), "a program's core decodes with line starts"_s))
+            return false;
     }
-    if (!part.check(literalKeepsDecode, "a decoded core's butterfly does not keep the plain structure and the string elements its decode gives"_s))
-        return false;
-
-    // Two decodes of one payload whose functions are first requested in different orders.
-    auto first = decode(Ref<CachedBytecode> { *payload });
-    auto second = decode(Ref<CachedBytecode> { *payload });
-    if (!part.check(first && second, "a second native decode of the payload failed"_s))
-        return false;
-    Strong<UnlinkedFunctionCodeBlock> firstA { vm, decodedBody(vm, *first.get()->functionDecl(0), generated.source) };
-    Strong<UnlinkedFunctionCodeBlock> firstB { vm, decodedBody(vm, *first.get()->functionDecl(1), generated.source) };
-    Strong<UnlinkedFunctionCodeBlock> secondB { vm, decodedBody(vm, *second.get()->functionDecl(1), generated.source) };
-    Strong<UnlinkedFunctionCodeBlock> secondA { vm, decodedBody(vm, *second.get()->functionDecl(0), generated.source) };
-    bool sameAcrossOrders = firstA && firstB && secondA && secondB
-        && encodeCoreBytes(vm, *first.get(), nullptr) == encodeCoreBytes(vm, *second.get(), nullptr)
-        && encodeCoreBytes(vm, *firstA.get(), first.get()->functionDecl(0)) == encodeCoreBytes(vm, *secondA.get(), second.get()->functionDecl(0))
-        && encodeCoreBytes(vm, *firstB.get(), first.get()->functionDecl(1)) == encodeCoreBytes(vm, *secondB.get(), second.get()->functionDecl(1));
-    if (!part.check(sameAcrossOrders, "two native decodes of one payload encode differently after their functions ran in different orders"_s))
-        return false;
-
-    // A decoded parent whose children still hold their lazily cached slots.
-    auto lazy = decode(Ref<CachedBytecode> { *payload });
-    auto lazyOnce = lazy ? encodeCoreBytes(vm, *lazy.get(), nullptr) : std::nullopt;
-    auto lazyTwice = lazy ? encodeCoreBytes(vm, *lazy.get(), nullptr) : std::nullopt;
-    if (!part.check(lazyOnce && lazyOnce == lazyTwice && lazyOnce == encodeCoreBytes(vm, *generated.codeBlock.get(), nullptr), "a decoded parent with lazily cached children does not encode twice to its generated twin's bytes"_s))
-        return false;
-    Strong<UnlinkedFunctionCodeBlock> lazyChild { vm, decodedBody(vm, *lazy.get()->functionDecl(1), generated.source) };
-    if (!part.check(!!lazyChild, "encoding a decoded parent spoiled a child's lazily cached slot"_s))
-        return false;
-
-    // A persistent payload: the decoded stream borrows the payload's bytes.
-    Vector<Vector<uint8_t>>& payloads = persistentPayloads();
-    payloads.append(Vector<uint8_t> { payload->span() });
-    Ref<CachedBytecode> persistent = CachedBytecode::create(payloads.last().mutableSpan(), [](const void*) { }, { });
-    persistent->setPayloadIsPersistent();
-    auto borrowed = decode(WTF::move(persistent));
-    if (!part.check(!!borrowed, "the native bytecode cache did not decode a persistent payload"_s))
-        return false;
-    if (!part.check(!Options::useBorrowedBytecodeFromCache() || borrowed.get()->instructions().isBorrowed(), "a block decoded from a persistent payload does not borrow its stream"_s))
-        return false;
-    return part.check(encodeCoreBytes(vm, *borrowed.get(), nullptr) == encodeCoreBytes(vm, *generated.codeBlock.get(), nullptr), "a borrowed-stream UCB does not encode to its copied twin's bytes"_s);
+    return true;
 }
 
 static std::optional<uint32_t> regExpConstant(UnlinkedCodeBlock& codeBlock)
@@ -957,7 +1074,7 @@ static bool testCodecRegExps(VM& vm, TestPart& part)
         return false;
     vm.regExpCache()->deleteAllCode();
     CoreDecodeFailure failure = CoreDecodeFailure::None;
-    Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, encoded->span(), *generated.source.provider(), UnlinkedCodeBlockCoreKind::Program, nullptr, true, failure) };
+    Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, encoded->span(), generated.source, UnlinkedCodeBlockCoreKind::Program, nullptr, true, failure) };
     bool sameCell = decoded && constantCell<RegExp>(*decoded.get(), *index) == regExp && encodeCoreBytes(vm, *decoded.get(), nullptr) == encoded;
     return part.check(sameCell, "a core's RegExp constant does not decode to the cell the VM holds with its code cleared, or does not re-encode to the core"_s);
 }
@@ -1054,13 +1171,13 @@ static Vector<unsigned> childLinkNumbering(UnlinkedCodeBlock& codeBlock, unsigne
 }
 
 // Walks a generated tree and the native bytecode cache's decode of it in step, one function at a time. Each decoded child
-// must hold its generated twin's TDZ chain whole, link by link (the same number of links and the same chain digest), the
-// decoded children must share their links where the generated ones do, and each decoded body must encode, with its own UFE
-// as the holder, to its generated twin's core. Along the way the generated child goes through each JITCacheCore operation
-// that writes a chain against a holder's: its holder digest, which keeps its environments' digests, its descriptor, whose
-// chain becomes a start record, and its body's core with it as the holder, whose children's chains end in a start record
-// too. `multiLinkChains` counts the chains of more than one link the walk compared, and `sharedLinks` the links siblings
-// share.
+// must hold its generated twin's TDZ chain whole, link by link (the same number of links and the same chain digest), and the
+// decoded children must share their links where the generated ones do. The decoded side only goes through the native
+// cache, since a JITCacheCore encoder never meets a UCB a native decode made. Along the way the generated child goes
+// through each JITCacheCore operation that writes a chain against a holder's: its holder digest, which keeps its
+// environments' digests, its descriptor, whose chain becomes a start record, and its body's core with it as the holder,
+// whose children's chains end in a start record too. `multiLinkChains` counts the chains of more than one link the walk
+// compared, and `sharedLinks` the links siblings share.
 static bool nativeDecodeKeepsChains(VM& vm, TestPart& part, UnlinkedCodeBlock& generated, UnlinkedCodeBlock& decoded, const SourceCode& source, unsigned& multiLinkChains, unsigned& sharedLinks)
 {
     bool sameTables = generated.numberOfFunctionDecls() == decoded.numberOfFunctionDecls() && generated.numberOfFunctionExprs() == decoded.numberOfFunctionExprs();
@@ -1088,8 +1205,7 @@ static bool nativeDecodeKeepsChains(VM& vm, TestPart& part, UnlinkedCodeBlock& g
         Strong<UnlinkedFunctionCodeBlock> decodedChildBody { vm, decodedBody(vm, *decodedChild, source) };
         if (!part.check(body && decodedChildBody, "a body of the native round trip is missing"_s))
             return false;
-        auto core = encodeCoreBytes(vm, *body.get(), child);
-        if (!part.check(core && core == encodeCoreBytes(vm, *decodedChildBody.get(), decodedChild), "a function the native bytecode cache decoded does not encode, with its holder, to its generated twin's core"_s))
+        if (!part.check(!!encodeCoreBytes(vm, *body.get(), child), "a generated function's core with its holder failed to encode"_s))
             return false;
         return nativeDecodeKeepsChains(vm, part, *body.get(), *decodedChildBody.get(), child->linkedSourceCode(source), multiLinkChains, sharedLinks);
     };
@@ -1137,7 +1253,8 @@ static bool testCodecTDZChains(VM& vm, TestPart& part)
 
     // Decoded with the holder, the children's chains end in its chain object and equal the generated children's.
     CoreDecodeFailure failure = CoreDecodeFailure::None;
-    Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, largeOuterCore->span(), *large.source.provider(), UnlinkedCodeBlockCoreKind::Function, large.outer, true, failure) };
+    SourceCode largeOuterSource = large.outer->linkedSourceCode(large.source);
+    Strong<UnlinkedCodeBlock> decoded { vm, decodeCoreBytes(vm, largeOuterCore->span(), largeOuterSource, UnlinkedCodeBlockCoreKind::Function, large.outer, true, failure) };
     if (!part.check(decoded && decoded.get()->numberOfFunctionExprs() == 1, "a function core of the chain test does not decode with its holder"_s))
         return false;
     UnlinkedFunctionExecutable& decodedInner = *decoded.get()->functionExpr(0);
@@ -1158,7 +1275,7 @@ static bool testCodecTDZChains(VM& vm, TestPart& part)
     Strong<UnlinkedFunctionExecutable> chainless = functionConstructorRoot(vm, "return 'jitcache-u7-chainless';"_s, rootSource);
     if (!part.check(chainless && !chainless.get()->parentScopeTDZVariables(), "the chainless holder has a TDZ chain"_s))
         return false;
-    Strong<UnlinkedCodeBlock> withoutStartChain { vm, decodeCoreBytes(vm, largeOuterCore->span(), *large.source.provider(), UnlinkedCodeBlockCoreKind::Function, chainless.get(), false, failure) };
+    Strong<UnlinkedCodeBlock> withoutStartChain { vm, decodeCoreBytes(vm, largeOuterCore->span(), largeOuterSource, UnlinkedCodeBlockCoreKind::Function, chainless.get(), false, failure) };
     if (!part.check(!withoutStartChain && failure == CoreDecodeFailure::Malformed, "a start record decoded without a start chain is not Malformed"_s))
         return false;
 
@@ -1218,10 +1335,10 @@ static bool testCodecDescriptors(VM& vm, JSGlobalObject* globalObject, TestPart&
     return true;
 }
 
-static bool failsToDecodeWith(VM& vm, std::span<const uint8_t> bytes, SourceProvider& provider, UnlinkedCodeBlockCoreKind kind, bool validate, CoreDecodeFailure expected)
+static bool failsToDecodeWith(VM& vm, std::span<const uint8_t> bytes, const SourceCode& source, UnlinkedCodeBlockCoreKind kind, bool validate, CoreDecodeFailure expected)
 {
     CoreDecodeFailure failure = CoreDecodeFailure::None;
-    UnlinkedCodeBlock* codeBlock = decodeCoreBytes(vm, bytes, provider, kind, nullptr, validate, failure);
+    UnlinkedCodeBlock* codeBlock = decodeCoreBytes(vm, bytes, source, kind, nullptr, validate, failure);
     return !codeBlock && failure == expected;
 }
 
@@ -1235,7 +1352,7 @@ static bool testCodecHeader(VM& vm, TestPart& part)
     auto core = encodeCoreBytes(vm, *fixture.codeBlock.get(), nullptr);
     if (!part.check(core && core->size() > 16, "the malformed-payload program does not encode"_s))
         return false;
-    SourceProvider& provider = *fixture.source.provider();
+    const SourceCode& source = fixture.source;
     const Vector<uint8_t>& valid = *core;
     auto altered = [&](const auto& mutate) {
         Vector<uint8_t> bytes = valid;
@@ -1247,16 +1364,16 @@ static bool testCodecHeader(VM& vm, TestPart& part)
     Vector<uint8_t> misaligned(FillWith { }, valid.size() + 8, 0);
     memcpySpan(misaligned.mutableSpan().subspan(1, valid.size()), valid.span());
     CoreDecodeFailure failure = CoreDecodeFailure::None;
-    bool misalignedFails = !decodeUnlinkedCodeBlockCore(vm, CachedBytecode::create(misaligned.mutableSpan().subspan(1, valid.size()), [](const void*) { }, { }), provider, UnlinkedCodeBlockCoreKind::Program, nullptr, false, failure)
+    bool misalignedFails = !decodeUnlinkedCodeBlockCore(vm, CachedBytecode::create(misaligned.mutableSpan().subspan(1, valid.size()), [](const void*) { }, { }), source, UnlinkedCodeBlockCoreKind::Program, nullptr, false, failure)
         && failure == CoreDecodeFailure::Malformed;
-    bool headerConditions = failsToDecodeWith(vm, valid.span().first(15), provider, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
+    bool headerConditions = failsToDecodeWith(vm, valid.span().first(15), source, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
         && misalignedFails
-        && failsToDecodeWith(vm, altered([](auto& bytes) { bytes[0] ^= 0xff; }).span(), provider, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
-        && failsToDecodeWith(vm, altered([](auto& bytes) { bytes[5] = 1; }).span(), provider, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
-        && failsToDecodeWith(vm, altered([](auto& bytes) { bytes[12] = 1; }).span(), provider, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
-        && failsToDecodeWith(vm, altered([&](auto& bytes) { writeField<uint32_t>(bytes.mutableSpan(), 8, rootOffset + 1); }).span(), provider, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
-        && failsToDecodeWith(vm, altered([&](auto& bytes) { writeField<uint32_t>(bytes.mutableSpan(), 8, static_cast<uint32_t>(bytes.size())); }).span(), provider, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
-        && failsToDecodeWith(vm, valid.span(), provider, UnlinkedCodeBlockCoreKind::Module, false, CoreDecodeFailure::KindMismatch);
+        && failsToDecodeWith(vm, altered([](auto& bytes) { bytes[0] ^= 0xff; }).span(), source, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
+        && failsToDecodeWith(vm, altered([](auto& bytes) { bytes[5] = 1; }).span(), source, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
+        && failsToDecodeWith(vm, altered([](auto& bytes) { bytes[12] = 1; }).span(), source, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
+        && failsToDecodeWith(vm, altered([&](auto& bytes) { writeField<uint32_t>(bytes.mutableSpan(), 8, rootOffset + 1); }).span(), source, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
+        && failsToDecodeWith(vm, altered([&](auto& bytes) { writeField<uint32_t>(bytes.mutableSpan(), 8, static_cast<uint32_t>(bytes.size())); }).span(), source, UnlinkedCodeBlockCoreKind::Program, false, CoreDecodeFailure::Malformed)
+        && failsToDecodeWith(vm, valid.span(), source, UnlinkedCodeBlockCoreKind::Module, false, CoreDecodeFailure::KindMismatch);
     return part.check(headerConditions, "a payload breaking a condition of its header does not decode to Malformed or KindMismatch"_s);
 }
 
@@ -1286,14 +1403,14 @@ static bool testCodecSentinel(VM& vm, TestPart& part)
 
     auto core = encodeCoreBytes(vm, *body.get(), executable.get());
     CoreDecodeFailure failure = CoreDecodeFailure::None;
-    Strong<UnlinkedCodeBlock> decoded { vm, core ? decodeCoreBytes(vm, core->span(), *source.provider(), UnlinkedCodeBlockCoreKind::Function, executable.get(), true, failure) : nullptr };
+    Strong<UnlinkedCodeBlock> decoded { vm, core ? decodeCoreBytes(vm, core->span(), executable.get()->linkedSourceCode(source), UnlinkedCodeBlockCoreKind::Function, executable.get(), true, failure) : nullptr };
     bool keepsSentinel = decoded && decoded.get()->constantRegisters()[*index].get() == JSValue(sentinel) && encodeCoreBytes(vm, *decoded.get(), executable.get()) == core;
     if (!part.check(keepsSentinel, "Map.prototype.forEach's core does not decode to this VM's sentinel, or does not re-encode to its bytes"_s))
         return false;
 
     // The native builtin cache: the encode holds the body the call slot keeps, and the decoded root decodes it at its first
     // request.
-    RefPtr<CachedBytecode> native = encodeBuiltinFunction(vm, executable.get(), text.length(), 0);
+    RefPtr<CachedBytecode> native = encodeBuiltinFunction(vm, executable.get(), source, 0);
     Strong<UnlinkedFunctionExecutable> nativeExecutable { vm, native ? decodeBuiltinFunction(vm, Ref<CachedBytecode> { *native }, *source.provider(), 0) : nullptr };
     Strong<UnlinkedFunctionCodeBlock> nativeBody { vm, nativeExecutable ? decodedBody(vm, *nativeExecutable.get(), source) : nullptr };
     JSValue nativeConstant = nativeBody && *index < nativeBody.get()->constantRegisters().size() ? nativeBody.get()->constantRegisters()[*index].get() : JSValue();
@@ -1312,7 +1429,7 @@ static bool testCodecDefaultConstructors(VM& vm, TestPart& part)
     UnlinkedCodeBlock& generated = *fixture.codeBlock.get();
     auto core = encodeCoreBytes(vm, generated, nullptr);
     CoreDecodeFailure failure = CoreDecodeFailure::None;
-    Strong<UnlinkedCodeBlock> decoded { vm, core ? decodeCoreBytes(vm, core->span(), *fixture.source.provider(), UnlinkedCodeBlockCoreKind::Program, nullptr, false, failure) : nullptr };
+    Strong<UnlinkedCodeBlock> decoded { vm, core ? decodeCoreBytes(vm, core->span(), fixture.source, UnlinkedCodeBlockCoreKind::Program, nullptr, false, failure) : nullptr };
     bool sameTables = decoded && decoded.get()->numberOfFunctionDecls() == generated.numberOfFunctionDecls() && decoded.get()->numberOfFunctionExprs() == generated.numberOfFunctionExprs();
     if (!part.check(sameTables, "the default-constructor program's core does not decode to its child tables"_s))
         return false;
@@ -1355,10 +1472,28 @@ JITCACHE_TEST(ucbCodecChunksAndBudgets, Yes)
     testCodecChunksAndBudgets(*context.vm(), part);
 }
 
-JITCACHE_TEST(ucbCodecNativeDecodes, Yes)
+JITCACHE_TEST(ucbCodecAllocatesNoCell, Yes)
 {
     TestPart part { context };
-    testCodecNativeDecodes(*context.vm(), part);
+    testCodecAllocatesNoCell(*context.vm(), part);
+}
+
+JITCACHE_TEST(ucbCodecStringConstants, Yes)
+{
+    TestPart part { context };
+    testCodecStringConstants(*context.vm(), part);
+}
+
+JITCACHE_TEST(ucbCodecDecodesEverything, Yes)
+{
+    TestPart part { context };
+    testCodecDecodesEverything(*context.vm(), part);
+}
+
+JITCACHE_TEST(ucbCodecLineStarts, Yes)
+{
+    TestPart part { context };
+    testCodecLineStarts(*context.vm(), part);
 }
 
 JITCACHE_TEST(ucbCodecRegExpConstants, Yes)

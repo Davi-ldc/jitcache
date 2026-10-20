@@ -23,8 +23,8 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
 
-// Tests of JITCacheContainer (store/JITCacheContainer.h and .cpp) and of the CRC-32C JITCachePlatform provides: the
-// artifact header, and the body format with its validation. None needs a VM. The tests write both formats byte by byte
+// Tests of JITCacheContainer (store/JITCacheContainer.h and .cpp): the artifact header, and the body format with its
+// validation. None needs a VM. The tests write both formats byte by byte
 // at the offsets the formats define, independently of the container's encoders, so every parse also checks the layout.
 // Validation runs over buffers of exactly the input's size from the system allocator, so ASan reports any read past the
 // end.
@@ -39,18 +39,6 @@ static constexpr unsigned randomSeed = 0x4a495443;
 static uint32_t crc32cOf(std::span<const uint8_t> bytes)
 {
     return ~crc32cExtend(~0u, bytes);
-}
-
-// CRC-32C of RFC 3720 bit by bit: the reflected Castagnoli polynomial, initial value and final XOR 0xFFFFFFFF.
-static uint32_t bitwiseCRC32C(std::span<const uint8_t> bytes)
-{
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint8_t byte : bytes) {
-        crc ^= byte;
-        for (unsigned bit = 0; bit < 8; ++bit)
-            crc = (crc & 1) ? (crc >> 1) ^ 0x82F63B78 : crc >> 1;
-    }
-    return ~crc;
 }
 
 // Little-endian fields, written and read byte by byte.
@@ -98,6 +86,7 @@ static constexpr std::array<KindRow, numberOfSectionKinds> kindRows { {
     { SectionKind::UCBIdentity, 0x0101, 0, "ucb.identity"_s },
     { SectionKind::UCBCore, 0x0102, 0, "ucb.core"_s },
     { SectionKind::UCBFeedback, 0x0103, 0, "ucb.feedback"_s },
+    { SectionKind::UCBAnalysis, 0x0104, 0, "ucb.analysis"_s },
     { SectionKind::ImageBaseline, 0x0201, 1, "image.baseline"_s },
     { SectionKind::BakedFactsBaseline, 0x0202, 1, "baked-facts.baseline"_s },
     { SectionKind::ImageTwinsBaseline, 0x0203, 1, "image-twins.baseline"_s },
@@ -134,13 +123,15 @@ struct RawOptionRecord {
 
 struct RawHeader {
     std::array<uint8_t, 8> tag { 'J', 'I', 'T', 'C', 'H', 'E', 'A', 'D' };
-    uint16_t version { 1 };
+    uint16_t version { 2 };
     uint8_t architecture { 1 };
     std::optional<uint8_t> buildIDCount; // B; the number of records when absent
     std::optional<uint32_t> size; // H; the file's size when absent
     uint64_t cpuFeatures { 0 };
     std::optional<uint32_t> optionCount; // M; the number of option records when absent
-    uint32_t reserved { 0 }; // bytes 28 to 31
+    uint8_t appFlag { 0 }; // byte 28
+    std::array<uint8_t, 3> appZero { }; // bytes 29 to 31
+    uint64_t appDigest { 0 }; // bytes 32 to 39
     Vector<RawBuildIDRecord> buildIDs;
     Vector<RawOptionRecord> options;
     size_t extraBytes { 0 }; // zero bytes between the option records and the CRC
@@ -159,7 +150,10 @@ static Vector<uint8_t> encodeRawHeader(const RawHeader& header)
     appendField(bytes, 0, 4); // H, set below
     appendField(bytes, header.cpuFeatures, 8);
     appendField(bytes, header.optionCount.value_or(static_cast<uint32_t>(header.options.size())), 4);
-    appendField(bytes, header.reserved, 4);
+    bytes.append(header.appFlag);
+    for (uint8_t byte : header.appZero)
+        bytes.append(byte);
+    appendField(bytes, header.appDigest, 8);
     for (auto& record : header.buildIDs) {
         bytes.append(record.role);
         bytes.append(record.length);
@@ -197,6 +191,8 @@ static RawHeader rawHeaderFor(const ArtifactHeader& contents)
     RawHeader header;
     header.architecture = contents.architecture;
     header.cpuFeatures = contents.facts.cpuFeatures;
+    header.appFlag = contents.app ? 1 : 0;
+    header.appDigest = contents.app.value_or(0);
     header.buildIDs.append(rawBuildIDRecord(1, contents.facts.mainExecutable));
     if (contents.facts.engineObject)
         header.buildIDs.append(rawBuildIDRecord(2, *contents.facts.engineObject));
@@ -236,7 +232,7 @@ static bool equalBuildIDs(const BuildID& a, const BuildID& b)
 
 static bool equalContents(const ArtifactHeader& a, const ArtifactHeader& b)
 {
-    if (a.architecture != b.architecture || a.facts.cpuFeatures != b.facts.cpuFeatures || a.facts.mustMatch != b.facts.mustMatch)
+    if (a.architecture != b.architecture || a.facts.cpuFeatures != b.facts.cpuFeatures || a.facts.mustMatch != b.facts.mustMatch || a.app != b.app)
         return false;
     if (!equalBuildIDs(a.facts.mainExecutable, b.facts.mainExecutable))
         return false;
@@ -263,6 +259,8 @@ static ASCIILiteral verdictName(HeaderVerdict verdict)
         return "Incompatible"_s;
     case HeaderVerdict::Corrupt:
         return "Corrupt"_s;
+    case HeaderVerdict::AnotherApp:
+        return "AnotherApp"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -274,9 +272,9 @@ struct TestSection {
     Vector<uint8_t> bytes;
 };
 
-// Sizes that leave padding after ucb.core, baked-facts.baseline, image-twins.baseline and cb.summary, and an empty
-// ucb.feedback.
-static constexpr std::array<size_t, numberOfSectionKinds> sectionSizes { 40, 13, 0, 64, 7, 9, 24, 3, 17 };
+// Sizes that leave padding after ucb.core, ucb.analysis, baked-facts.baseline, image-twins.baseline and cb.summary, and an
+// empty ucb.feedback. A body of every kind holds ucb.analysis, so it is a module's body.
+static constexpr std::array<size_t, numberOfSectionKinds> sectionSizes { 40, 13, 0, 11, 64, 7, 9, 24, 3, 17 };
 
 static Vector<TestSection> sectionsWithout(std::optional<SectionKind> omitted = std::nullopt)
 {
@@ -380,11 +378,11 @@ static RawBody canonicalBody(const BodyKey& key, const HeaderDigest& headerDiges
     return body;
 }
 
-static BodyKey testKey(uint8_t seed)
+static BodyKey testKey(uint8_t seed, IdentityKind kind = IdentityKind::Program)
 {
     std::array<uint8_t, BodyKey::byteSize> bytes { };
     bytes[0] = 1; // version
-    bytes[1] = static_cast<uint8_t>(IdentityKind::Program);
+    bytes[1] = static_cast<uint8_t>(kind);
     for (size_t index = 8; index < bytes.size(); ++index)
         bytes[index] = static_cast<uint8_t>(seed + 5 * index);
     return std::bit_cast<BodyKey>(bytes);
@@ -434,9 +432,10 @@ struct Fixture {
     Vector<uint8_t> file;
 };
 
+// A module's body, which may hold every kind.
 static Fixture makeFixture(const Vector<TestSection>& sections)
 {
-    Fixture fixture { testKey(0x20), testDigest(0xa0), { }, { } };
+    Fixture fixture { testKey(0x20, IdentityKind::Module), testDigest(0xa0), { }, { } };
     fixture.body = canonicalBody(fixture.key, fixture.headerDigest, sections);
     fixture.file = encodeRawBody(fixture.body);
     return fixture;
@@ -521,61 +520,6 @@ static const Outcome checksumCheck { ContainerChecks::checksum };
 
 using namespace ContainerTestsInternal;
 
-// The RFC 3720 vectors, and agreement with the bitwise reference over random buffers, lengths and alignments, fed whole
-// and in random pieces.
-JITCACHE_TEST(containerCRC32C, No)
-{
-    WeakRandom random(randomSeed);
-    auto checkVector = [&](ASCIILiteral name, std::span<const uint8_t> bytes, uint32_t expected) {
-        if (crc32cOf(bytes) != expected)
-            JITCACHE_FAIL(makeString("crc32c of "_s, name, " is "_s, hex(crc32cOf(bytes)), ", expected "_s, hex(expected)));
-        if (bitwiseCRC32C(bytes) != expected)
-            JITCACHE_FAIL(makeString("the bitwise reference of "_s, name, " is "_s, hex(bitwiseCRC32C(bytes))));
-        uint32_t state = ~0u;
-        for (size_t index = 0; index < bytes.size(); ++index)
-            state = crc32cExtend(state, bytes.subspan(index, 1));
-        if (~state != expected)
-            JITCACHE_FAIL(makeString("crc32c of "_s, name, " fed byte by byte is "_s, hex(~state)));
-    };
-
-    static constexpr std::array<uint8_t, 9> checkString { '1', '2', '3', '4', '5', '6', '7', '8', '9' };
-    checkVector("\"123456789\""_s, std::span { checkString }, 0xE3069283);
-    std::array<uint8_t, 32> pattern { };
-    checkVector("32 zero bytes"_s, std::span { pattern }, 0x8A9136AA);
-    pattern.fill(0xFF);
-    checkVector("32 0xFF bytes"_s, std::span { pattern }, 0x62A8AB43);
-    for (size_t index = 0; index < pattern.size(); ++index)
-        pattern[index] = static_cast<uint8_t>(index);
-    checkVector("the bytes 0 to 31"_s, std::span { pattern }, 0x46DD794E);
-    JITCACHE_CHECK(!crc32cOf({ }));
-    JITCACHE_CHECK(crc32cExtend(0x12345678, { }) == 0x12345678);
-
-    static constexpr size_t maximumLength = 2048;
-    static constexpr size_t maximumMisalignment = 16;
-    Vector<uint8_t> storage(FillWith { }, maximumLength + maximumMisalignment, 0);
-    unsigned failures = 0;
-    for (unsigned iteration = 0; iteration < 4096 && failures < 8; ++iteration) {
-        size_t length = random.getUint32(maximumLength + 1);
-        size_t misalignment = random.getUint32(maximumMisalignment);
-        auto bytes = storage.mutableSpan().subspan(misalignment, length);
-        for (auto& byte : bytes)
-            byte = static_cast<uint8_t>(random.getUint32(256));
-        uint32_t expected = bitwiseCRC32C(bytes);
-        uint32_t whole = crc32cOf(bytes);
-        uint32_t state = ~0u;
-        for (size_t offset = 0; offset < length;) {
-            size_t piece = 1 + random.getUint32(static_cast<unsigned>(length - offset));
-            state = crc32cExtend(state, bytes.subspan(offset, piece));
-            offset += piece;
-        }
-        if (whole != expected || ~state != expected) {
-            ++failures;
-            JITCACHE_FAIL(makeString("buffer "_s, iteration, " of length "_s, length, " at misalignment "_s, misalignment, ": reference "_s,
-                hex(expected), ", whole "_s, hex(whole), ", in pieces "_s, hex(~state)));
-        }
-    }
-}
-
 // The section-kind table, which the container, the writer and strict validation read.
 JITCACHE_TEST(containerSectionKinds, No)
 {
@@ -584,20 +528,23 @@ JITCACHE_TEST(containerSectionKinds, No)
         if (description.typeId != row.typeId || description.tier != row.tier || description.name != row.name)
             JITCACHE_FAIL(makeString(row.name, ": the container describes it as "_s, description.name, ", type id "_s, hex(description.typeId), ", tier "_s, static_cast<unsigned>(description.tier)));
         JITCACHE_CHECK(sectionKindFor(row.typeId, row.tier) == row.kind);
-        // Every kind is required in a body of highest tier 1 in a twins build, image-twins.baseline included; a body of
-        // highest tier 0 would hold the shared UCB sections alone.
-        JITCACHE_CHECK(isSectionRequired(row.kind, 1));
-        JITCACHE_CHECK(isSectionRequired(row.kind, 0) == !row.tier);
+        // ucb.analysis is required at no tier. Every other kind is required in a body of highest tier 1 in a twins build,
+        // image-twins.baseline included, and a body of highest tier 0 holds the shared UCB sections alone.
+        bool isAnalysis = row.kind == SectionKind::UCBAnalysis;
+        JITCACHE_CHECK(isSectionRequired(row.kind, 1) == !isAnalysis);
+        JITCACHE_CHECK(isSectionRequired(row.kind, 0) == (!isAnalysis && !row.tier));
     }
     JITCACHE_CHECK(!sectionKindFor(0x0101, 1));
-    JITCACHE_CHECK(!sectionKindFor(0x0104, 0));
+    JITCACHE_CHECK(!sectionKindFor(0x0104, 1));
+    JITCACHE_CHECK(!sectionKindFor(0x0105, 0));
     JITCACHE_CHECK(!sectionKindFor(0x0201, 0));
     JITCACHE_CHECK(!sectionKindFor(0x0201, 2));
     JITCACHE_CHECK(!sectionKindFor(0x0501, 1));
     JITCACHE_CHECK(!sectionKindFor(0, 0));
 }
 
-// A header built from crafted facts parses back to them, and its bytes are the header layout's.
+// A header built from crafted facts parses back to them, with no app and with an app, and its bytes are the header
+// layout's.
 JITCACHE_TEST(containerHeaderRoundTrip, No)
 {
     Vector<ArtifactHeader> headers;
@@ -620,6 +567,12 @@ JITCACHE_TEST(containerHeaderRoundTrip, No)
         header.facts.mustMatch = { true, false, true };
         headers.append(header);
     }
+    // Any 64-bit value names an app, 0 and the largest included.
+    for (uint64_t app : { uint64_t { 0x0123456789abcdef }, uint64_t { 0 }, std::numeric_limits<uint64_t>::max() }) {
+        ArtifactHeader header = craftedHeader(headerX86_64, !!(app & 1));
+        header.app = app;
+        headers.append(header);
+    }
 
     for (size_t index = 0; index < headers.size(); ++index) {
         auto& contents = headers[index];
@@ -628,7 +581,7 @@ JITCACHE_TEST(containerHeaderRoundTrip, No)
             JITCACHE_FAIL(makeString("header "_s, index, " was not encoded"_s));
             continue;
         }
-        JITCACHE_CHECK(encoded->size == (contents.facts.engineObject ? 208u : 136u));
+        JITCACHE_CHECK(encoded->size == (contents.facts.engineObject ? 216u : 144u));
         if (!equalSpans(encoded->span(), encodeRawHeader(rawHeaderFor(contents)).span()))
             JITCACHE_FAIL(makeString("header "_s, index, ": the encoded bytes differ from the header layout"_s));
         auto parsed = readArtifactHeader(encoded->span());
@@ -636,7 +589,7 @@ JITCACHE_TEST(containerHeaderRoundTrip, No)
             JITCACHE_FAIL(makeString("header "_s, index, " does not parse: "_s, parsed.error().reason));
         else if (!equalContents(*parsed, contents))
             JITCACHE_FAIL(makeString("header "_s, index, " parses to other contents"_s));
-        auto check = checkArtifactHeader(encoded->span(), encoded->span());
+        auto check = checkArtifactHeader(encoded->span(), encoded->span(), contents.app);
         JITCACHE_CHECK(check.verdict == HeaderVerdict::Compatible && check.detail.isEmpty());
     }
 
@@ -662,7 +615,7 @@ JITCACHE_TEST(containerHeaderCorrupt, No)
 
     auto expectVerdict = [&](ASCIILiteral label, std::span<const uint8_t> file, HeaderVerdict expected) {
         auto copy = exactCopy(file);
-        auto check = checkArtifactHeader(copy.span(), processHeader.span());
+        auto check = checkArtifactHeader(copy.span(), processHeader.span(), std::nullopt);
         if (check.verdict != expected)
             JITCACHE_FAIL(makeString(label, ": "_s, verdictName(check.verdict), " ("_s, check.detail, "), expected "_s, verdictName(expected)));
         auto read = readArtifactHeader(copy.span());
@@ -680,7 +633,7 @@ JITCACHE_TEST(containerHeaderCorrupt, No)
 
     expectVerdict("the base header"_s, processHeader.span(), HeaderVerdict::Compatible);
     expectVerdict("an empty file"_s, { }, HeaderVerdict::Corrupt);
-    expectVerdict("39 bytes"_s, processHeader.span().first(39), HeaderVerdict::Corrupt);
+    expectVerdict("47 bytes"_s, processHeader.span().first(47), HeaderVerdict::Corrupt);
     {
         Vector<uint8_t> large = processHeader;
         large.grow(maximumArtifactHeaderFileBytes + 1);
@@ -689,8 +642,8 @@ JITCACHE_TEST(containerHeaderCorrupt, No)
         expectVerdict("a file larger than 4 KiB"_s, large.span(), HeaderVerdict::Corrupt);
     }
     expectCorrupt("another tag"_s, mutated([](RawHeader& header) { header.tag[3] = 'X'; }));
-    expectCorrupt("H larger than the file"_s, mutated([](RawHeader& header) { header.size = 136 + 8; }));
-    expectCorrupt("H smaller than the file"_s, mutated([](RawHeader& header) { header.size = 136 - 8; }));
+    expectCorrupt("H larger than the file"_s, mutated([](RawHeader& header) { header.size = 144 + 8; }));
+    expectCorrupt("H smaller than the file"_s, mutated([](RawHeader& header) { header.size = 144 - 8; }));
     expectCorrupt("H equal to the file's size but not to the formula"_s, mutated([](RawHeader& header) { header.extraBytes = 8; }));
     expectCorrupt("B of 0"_s, mutated([](RawHeader& header) { header.buildIDs.clear(); }));
     expectCorrupt("B of 3"_s, mutated([&](RawHeader& header) {
@@ -718,31 +671,61 @@ JITCACHE_TEST(containerHeaderCorrupt, No)
     expectCorrupt("an option type of 2"_s, mutated([](RawHeader& header) { header.options[1].type = 2; }));
     expectCorrupt("an option value of 2"_s, mutated([](RawHeader& header) { header.options[2].value = 2; }));
     expectCorrupt("an option record's u32 not zero"_s, mutated([](RawHeader& header) { header.options[1].reserved = 1; }));
-    expectCorrupt("bytes 28 to 31 not zero"_s, mutated([](RawHeader& header) { header.reserved = 0x1000000; }));
+    expectCorrupt("an app record's flag of 2"_s, mutated([](RawHeader& header) {
+        header.appFlag = 2;
+        header.appDigest = 5;
+    }));
+    expectCorrupt("a flag of 0 beside a digest other than 0"_s, mutated([](RawHeader& header) { header.appDigest = 5; }));
+    for (size_t index = 0; index < 3; ++index) {
+        expectCorrupt("a nonzero byte among 29 to 31"_s, mutated([&](RawHeader& header) {
+            header.appFlag = 1;
+            header.appZero[index] = 1;
+        }));
+    }
     expectCorrupt("the last four bytes not zero"_s, mutated([](RawHeader& header) { header.trailer = 1; }));
-    expectCorrupt("another CRC"_s, mutated([&](RawHeader& header) { header.crc = static_cast<uint32_t>(getField(processHeader.span(), 128, 4)) ^ 1; }));
+    expectCorrupt("another CRC"_s, mutated([&](RawHeader& header) { header.crc = static_cast<uint32_t>(getField(processHeader.span(), 136, 4)) ^ 1; }));
     {
         Vector<uint8_t> flipped = processHeader;
-        flipped[40] ^= 0x01; // a byte of the main executable's ID, covered by the CRC alone
+        flipped[48] ^= 0x01; // a byte of the main executable's ID, covered by the CRC alone
         expectVerdict("a flipped ID byte"_s, flipped.span(), HeaderVerdict::Corrupt);
+        ArtifactHeader namingApp = processContents;
+        namingApp.app = 0x0123456789abcdef;
+        Vector<uint8_t> flippedApp = encodedHeader(namingApp);
+        flippedApp[35] ^= 0x01; // a byte of the app record's digest, covered by the CRC alone
+        expectVerdict("a flipped app digest byte"_s, flippedApp.span(), HeaderVerdict::Corrupt);
     }
 
-    expectVerdict("layout version 2"_s, encodeRawHeader(mutated([](RawHeader& header) { header.version = 2; })).span(), HeaderVerdict::Incompatible);
+    expectVerdict("layout version 1"_s, encodeRawHeader(mutated([](RawHeader& header) { header.version = 1; })).span(), HeaderVerdict::Incompatible);
+    expectVerdict("layout version 3"_s, encodeRawHeader(mutated([](RawHeader& header) { header.version = 3; })).span(), HeaderVerdict::Incompatible);
     expectVerdict("layout version 0"_s, encodeRawHeader(mutated([](RawHeader& header) { header.version = 0; })).span(), HeaderVerdict::Incompatible);
     RawHeader otherVersionWithBadFields = mutated([](RawHeader& header) {
-        header.version = 2;
+        header.version = 1;
         header.buildIDs.clear();
         header.optionCount = 9;
+        header.appFlag = 7;
         header.crc = 0;
     });
-    expectVerdict("layout version 2 with fields this version rejects"_s, encodeRawHeader(otherVersionWithBadFields).span(), HeaderVerdict::Incompatible);
+    expectVerdict("layout version 1 with fields this version rejects"_s, encodeRawHeader(otherVersionWithBadFields).span(), HeaderVerdict::Incompatible);
     RawHeader otherVersionWithoutTag = mutated([](RawHeader& header) {
-        header.version = 2;
+        header.version = 1;
         header.tag[0] = 'X';
     });
-    expectVerdict("layout version 2 without the tag"_s, encodeRawHeader(otherVersionWithoutTag).span(), HeaderVerdict::Corrupt);
-    auto otherVersion = checkArtifactHeader(encodeRawHeader(mutated([](RawHeader& header) { header.version = 2; })).span(), processHeader.span());
+    expectVerdict("layout version 1 without the tag"_s, encodeRawHeader(otherVersionWithoutTag).span(), HeaderVerdict::Corrupt);
+    auto otherVersion = checkArtifactHeader(encodeRawHeader(mutated([](RawHeader& header) { header.version = 1; })).span(), processHeader.span(), std::nullopt);
     JITCACHE_CHECK(otherVersion.detail == "layout version"_s);
+
+    // A header as layout version 1 laid it out, without the app record, records from offset 32 and H = 32 + 72 B + 8 M + 8,
+    // is another layout, not damage, whether or not its config names an app.
+    {
+        Vector<uint8_t> older = processHeader;
+        older.removeAt(32, 8);
+        putField(older, 8, 1, 2);
+        putField(older, 12, older.size(), 4);
+        putField(older, older.size() - 8, crc32cOf(older.span().first(older.size() - 8)), 4);
+        expectVerdict("a header of layout version 1"_s, older.span(), HeaderVerdict::Incompatible);
+        auto copy = exactCopy(older.span());
+        JITCACHE_CHECK(checkArtifactHeader(copy.span(), processHeader.span(), 0x0123456789abcdef).verdict == HeaderVerdict::Incompatible);
+    }
 }
 
 // Each differing field makes the header incompatible, with the detail naming that field.
@@ -751,7 +734,7 @@ JITCACHE_TEST(containerHeaderIncompatible, No)
     auto expectField = [&](ASCIILiteral label, const ArtifactHeader& artifact, const ArtifactHeader& process, const String& field) {
         auto artifactBytes = encodedHeader(artifact);
         auto copy = exactCopy(artifactBytes.span());
-        auto check = checkArtifactHeader(copy.span(), encodedHeader(process).span());
+        auto check = checkArtifactHeader(copy.span(), encodedHeader(process).span(), std::nullopt);
         if (check.verdict != HeaderVerdict::Incompatible || check.detail != field) {
             JITCACHE_FAIL(makeString(label, ": "_s, verdictName(check.verdict), " naming \""_s, check.detail, "\", expected Incompatible naming \""_s,
                 field, '"'));
@@ -760,7 +743,7 @@ JITCACHE_TEST(containerHeaderIncompatible, No)
 
     ArtifactHeader process = craftedHeader(headerX86_64, false);
     {
-        auto check = checkArtifactHeader(encodedHeader(process).span(), encodedHeader(process).span());
+        auto check = checkArtifactHeader(encodedHeader(process).span(), encodedHeader(process).span(), std::nullopt);
         JITCACHE_CHECK(check.verdict == HeaderVerdict::Compatible && check.detail.isEmpty());
     }
 
@@ -848,6 +831,84 @@ JITCACHE_TEST(containerHeaderIncompatible, No)
     expectField("two CPU features"_s, artifact, process, "supportsSSE4_1"_s);
 }
 
+// The app record gates only when both the header and the config name an app. A header is compatible whatever its app
+// record when the config names none, and when the config names the header's app or the header names none; it is made for
+// another app, with both digests in the detail, when both name apps that differ; and a header that also differs in a field
+// is incompatible. headerNamingApp gives the process's header with an app record and a CRC computed again.
+JITCACHE_TEST(containerHeaderApps, No)
+{
+    ArtifactHeader process = craftedHeader(headerX86_64, true);
+    Vector<uint8_t> processHeader = encodedHeader(process);
+    constexpr uint64_t appX = 0x0123456789abcdef;
+    constexpr uint64_t appY = 0xfedcba9876543210;
+    auto namingApp = [&](ArtifactHeader contents, std::optional<uint64_t> app) {
+        contents.app = app;
+        return encodedHeader(contents);
+    };
+    auto checkWith = [&](const Vector<uint8_t>& header, std::optional<uint64_t> config) {
+        auto copy = exactCopy(header.span());
+        return checkArtifactHeader(copy.span(), processHeader.span(), config);
+    };
+    auto appText = [](std::optional<uint64_t> app) -> String {
+        if (!app)
+            return "none"_s;
+        return makeString(hex(*app, 16, Lowercase));
+    };
+    auto expectCompatible = [&](std::optional<uint64_t> header, std::optional<uint64_t> config) {
+        auto check = checkWith(namingApp(process, header), config);
+        if (check.verdict != HeaderVerdict::Compatible || !check.detail.isEmpty())
+            JITCACHE_FAIL(makeString("a header naming "_s, appText(header), " for a config naming "_s, appText(config), ": "_s, verdictName(check.verdict), " ("_s, check.detail, ')'));
+    };
+    auto expectAnotherApp = [&](std::optional<uint64_t> header, std::optional<uint64_t> config, const String& detail) {
+        auto check = checkWith(namingApp(process, header), config);
+        if (check.verdict != HeaderVerdict::AnotherApp || check.detail != detail)
+            JITCACHE_FAIL(makeString("a header naming "_s, appText(header), " for a config naming "_s, appText(config), ": "_s, verdictName(check.verdict), " ("_s, check.detail, "), expected AnotherApp ("_s, detail, ')'));
+    };
+
+    constexpr uint64_t appZero = 0; // an app like any other
+    for (std::optional<uint64_t> header : { std::optional<uint64_t> { }, std::optional<uint64_t> { appX }, std::optional<uint64_t> { appZero } })
+        expectCompatible(header, std::nullopt);
+    expectCompatible(appX, appX);
+    expectCompatible(appZero, appZero);
+    expectCompatible(std::nullopt, appX);
+    expectAnotherApp(appX, appY, "app 0123456789abcdef in the cache, fedcba9876543210 in this run"_s);
+    expectAnotherApp(appY, appX, "app fedcba9876543210 in the cache, 0123456789abcdef in this run"_s);
+    expectAnotherApp(appZero, appX, "app 0000000000000000 in the cache, 0123456789abcdef in this run"_s);
+
+    // A field that differs makes the header incompatible whatever the apps.
+    ArtifactHeader otherOption = process;
+    otherOption.facts.mustMatch[2] = !otherOption.facts.mustMatch[2];
+    for (std::optional<uint64_t> config : { std::optional<uint64_t> { }, std::optional<uint64_t> { appX }, std::optional<uint64_t> { appY } }) {
+        auto check = checkWith(namingApp(otherOption, appX), config);
+        JITCACHE_CHECK(check.verdict == HeaderVerdict::Incompatible && check.detail == "useImportDefer"_s);
+    }
+
+    // integratorBuildIDOfTestExecutable checks that the test executable has a build ID; without one, start never
+    // computes the process's header.
+    ProcessFacts facts = processFacts();
+    if (!facts.mainExecutable.size || (facts.engineObject && !facts.engineObject->size))
+        return;
+    auto& expected = expectedHeader();
+    JITCACHE_CHECK(equalSpans(headerNamingApp(std::nullopt).span(), expected.span()));
+    ArtifactHeaderBytes named = headerNamingApp(appX);
+    JITCACHE_CHECK(named.size == expected.size);
+    if (named.size != expected.size)
+        return;
+    for (size_t index = 0; index < named.size; ++index) {
+        bool appRecord = index >= 28 && index < 40;
+        bool crc = index >= named.size - 8 && index < named.size - 4;
+        if (!appRecord && !crc && named.bytes[index] != expected.bytes[index])
+            JITCACHE_FAIL(makeString("headerNamingApp changes byte "_s, index, " outside the app record and the CRC"_s));
+    }
+    auto parsed = readArtifactHeader(named.span());
+    JITCACHE_CHECK(parsed && parsed->app == appX);
+    JITCACHE_CHECK(named.bytes[28] == 1 && getField(named.span(), 32, 8) == appX);
+    JITCACHE_CHECK(checkArtifactHeader(named.span(), expected.span(), std::nullopt).verdict == HeaderVerdict::Compatible);
+    JITCACHE_CHECK(checkArtifactHeader(named.span(), expected.span(), appX).verdict == HeaderVerdict::Compatible);
+    JITCACHE_CHECK(checkArtifactHeader(named.span(), expected.span(), appY).verdict == HeaderVerdict::AnotherApp);
+    JITCACHE_CHECK(checkArtifactHeader(expected.span(), named.span(), appY).verdict == HeaderVerdict::Compatible);
+}
+
 // The header digest, and the process's own header.
 JITCACHE_TEST(containerHeaderDigest, No)
 {
@@ -859,6 +920,19 @@ JITCACHE_TEST(containerHeaderDigest, No)
     Vector<uint8_t> other = encodedHeader(craftedHeader(headerX86_64, false));
     JITCACHE_CHECK(artifactHeaderDigest(other.span()) != digest);
     JITCACHE_CHECK(artifactHeaderDigest(encodedHeader(craftedHeader(headerX86_64, true)).span()) == digest);
+
+    // Headers that differ only in their apps have different digests, so a pack moves only between artifacts of one app.
+    ArtifactHeader namingX = craftedHeader(headerX86_64, true);
+    namingX.app = 0x0123456789abcdef;
+    ArtifactHeader namingY = namingX;
+    namingY.app = 0xfedcba9876543210;
+    ArtifactHeader namingZero = namingX;
+    namingZero.app = 0;
+    HeaderDigest digestX = artifactHeaderDigest(encodedHeader(namingX).span());
+    JITCACHE_CHECK(digestX != digest);
+    JITCACHE_CHECK(artifactHeaderDigest(encodedHeader(namingY).span()) != digestX);
+    JITCACHE_CHECK(artifactHeaderDigest(encodedHeader(namingZero).span()) != digest);
+    JITCACHE_CHECK(artifactHeaderDigest(encodedHeader(namingZero).span()) != digestX);
 
     // integratorBuildIDOfTestExecutable checks that the test executable has a build ID; without one, start never
     // computes the process's header.
@@ -873,8 +947,10 @@ JITCACHE_TEST(containerHeaderDigest, No)
         return;
     }
     JITCACHE_CHECK(parsed->architecture == thisHeaderArchitecture());
-    JITCACHE_CHECK(equalContents(*parsed, ArtifactHeader { thisHeaderArchitecture(), facts }));
-    JITCACHE_CHECK(checkArtifactHeader(expected.span(), expected.span()).verdict == HeaderVerdict::Compatible);
+    // The process's own header names no app: the app is a config's.
+    JITCACHE_CHECK(!parsed->app);
+    JITCACHE_CHECK(equalContents(*parsed, ArtifactHeader { thisHeaderArchitecture(), facts, std::nullopt }));
+    JITCACHE_CHECK(checkArtifactHeader(expected.span(), expected.span(), std::nullopt).verdict == HeaderVerdict::Compatible);
 }
 
 // The body's encoders lay a body out as the body format does: envelope, directory and sections.
@@ -921,26 +997,21 @@ JITCACHE_TEST(containerBodyEncoding, No)
     JITCACHE_CHECK(equalSpans(std::span { directory }, fixture.file.span().subspan(128, directory.size())));
     JITCACHE_CHECK(directoryCRC == getField(fixture.file.span(), 96, 4));
 
-    // The envelope round-trips through its check.
+    // The envelope round-trips: the encoder writes the file's first 128 bytes, and validation reads its fields back.
     BodyEnvelope envelope = stamp;
     envelope.sectionCount = numberOfSectionKinds;
     envelope.fileSize = fixture.body.fileSize;
     envelope.directoryCRC = directoryCRC;
     auto envelopeBytes = encodeBodyEnvelope(envelope);
     JITCACHE_CHECK(equalSpans(std::span { envelopeBytes }, fixture.file.span().first(128)));
-    auto decoded = validateBodyEnvelope(std::span { envelopeBytes }, fixture.body.fileSize, fixture.key, fixture.headerDigest, ValidationMode::Full);
+    auto decoded = validateBody(fixture.file.span(), fixture.key, fixture.headerDigest, ValidationMode::Full);
     if (!decoded)
-        JITCACHE_FAIL(makeString("the encoded envelope fails "_s, decoded.error()));
+        JITCACHE_FAIL(makeString("the encoded body fails "_s, decoded.error()));
     else {
-        JITCACHE_CHECK(decoded->sectionCount == numberOfSectionKinds);
-        JITCACHE_CHECK(decoded->highestTier == 1);
-        JITCACHE_CHECK(decoded->key == fixture.key);
         JITCACHE_CHECK(decoded->version == fixture.body.version);
-        JITCACHE_CHECK(decoded->headerDigest == fixture.headerDigest);
-        JITCACHE_CHECK(decoded->fileSize == fixture.body.fileSize);
+        JITCACHE_CHECK(decoded->highestTier == 1);
         JITCACHE_CHECK(decoded->llintThreshold == fixture.body.llintThreshold);
         JITCACHE_CHECK(decoded->counterProgress == fixture.body.counterProgress);
-        JITCACHE_CHECK(decoded->directoryCRC == directoryCRC);
     }
 
     // Layouts that cannot exist.
@@ -1135,7 +1206,8 @@ JITCACHE_TEST(containerBodyChecks, No)
         resealDirectory(bytes);
     });
     expectChanged("a kind listed twice"_s, directoryCheck, accepted, [](auto& bytes) {
-        putField(bytes, entryAt(5), 0x0202, 2);
+        // image-twins.baseline's entry names baked-facts.baseline, the entry before it.
+        putField(bytes, entryAt(static_cast<size_t>(SectionKind::ImageTwinsBaseline)), 0x0202, 2);
         resealDirectory(bytes);
     });
     {
@@ -1233,7 +1305,7 @@ JITCACHE_TEST(containerBodyIntegrityEntries, No)
 {
     WeakRandom random(randomSeed);
     Vector<TestSection> sections = sectionsWithout();
-    BodyKey key = testKey(0x30);
+    BodyKey key = testKey(0x30, IdentityKind::Module);
     HeaderDigest digest = testDigest(0xb0);
     static constexpr size_t extraEntries = 4;
     RawBody body = canonicalBody(key, digest, sections, sections.size() + extraEntries);
@@ -1317,8 +1389,8 @@ JITCACHE_TEST(containerBodyTruncation, No)
     }
 }
 
-// The reads that check part of a body: the envelope alone (maintenance) and the scoring read's framing with three
-// sections' checksums.
+// The scoring read, which checks part of a body: the envelope, the directory and three sections' checksums, and no
+// other byte.
 JITCACHE_TEST(containerBodyPartialReads, No)
 {
     Fixture fixture = makeFixture(sectionsWithout());
@@ -1336,13 +1408,6 @@ JITCACHE_TEST(containerBodyPartialReads, No)
     };
     static constexpr std::array<SectionKind, 3> summaries { SectionKind::UCBFeedback, SectionKind::CBSummaryBaseline, SectionKind::ICsBaseline };
 
-    auto envelopeOutcome = [&](std::span<const uint8_t> fileStart, uint64_t fileSize, const BodyKey& expectedKey, const HeaderDigest& expectedDigest, ValidationMode mode) -> Outcome {
-        auto copy = exactCopy(fileStart);
-        auto result = validateBodyEnvelope(copy.span(), fileSize, expectedKey, expectedDigest, mode);
-        if (result)
-            return std::nullopt;
-        return result.error();
-    };
     auto framingOutcome = [&](std::span<const uint8_t> bytes, ValidationMode mode, std::span<const SectionKind> kinds) -> Outcome {
         auto copy = exactCopy(bytes);
         auto result = validateBodyFraming(copy.span(), key, digest, mode, kinds);
@@ -1351,38 +1416,6 @@ JITCACHE_TEST(containerBodyPartialReads, No)
         return result.error();
     };
 
-    // The envelope alone.
-    for (ValidationMode mode : { ValidationMode::Full, ValidationMode::Integrity }) {
-        auto envelope = validateBodyEnvelope(file.span().first(128), file.size(), key, digest, mode);
-        JITCACHE_CHECK(envelope && envelope->version == body.version && envelope->llintThreshold == body.llintThreshold
-            && envelope->counterProgress == body.counterProgress && envelope->fileSize == file.size() && envelope->sectionCount == numberOfSectionKinds);
-        JITCACHE_CHECK(envelopeOutcome(file.span(), file.size(), key, digest, mode) == accepted);
-        JITCACHE_CHECK(envelopeOutcome(file.span().first(100), file.size(), key, digest, mode) == sizeCheck);
-        JITCACHE_CHECK(envelopeOutcome(file.span().first(100), 100, key, digest, mode) == sizeCheck);
-        JITCACHE_CHECK(envelopeOutcome(file.span().first(128), file.size() + 1, key, digest, mode) == sizeCheck);
-        JITCACHE_CHECK(envelopeOutcome(file.span().first(128), file.size(), testKey(0x23), digest, mode) == keyCheck);
-        JITCACHE_CHECK(envelopeOutcome(file.span().first(128), file.size(), key, testDigest(0xa2), mode) == headerDigestCheck);
-        auto badTag = mutated([](auto& bytes) {
-            bytes[0] ^= 1;
-            resealEnvelope(bytes);
-        });
-        JITCACHE_CHECK(envelopeOutcome(badTag.span().first(128), file.size(), key, digest, mode) == envelopeCheck);
-        auto nonzero = mutated([](auto& bytes) {
-            bytes[15] = 1;
-            resealEnvelope(bytes);
-        });
-        JITCACHE_CHECK(envelopeOutcome(nonzero.span().first(128), file.size(), key, digest, mode) == (mode == ValidationMode::Full ? envelopeCheck : accepted));
-        auto zeroVersion = mutated([](auto& bytes) {
-            putField(bytes, 56, 0, 8);
-            resealEnvelope(bytes);
-        });
-        JITCACHE_CHECK(envelopeOutcome(zeroVersion.span().first(128), file.size(), key, digest, mode) == (mode == ValidationMode::Full ? versionCheck : accepted));
-        // The directory is not the envelope's to check.
-        auto badDirectory = mutated([](auto& bytes) { bytes[entryAt(0) + 4] ^= 1; });
-        JITCACHE_CHECK(envelopeOutcome(badDirectory.span().first(128), file.size(), key, digest, mode) == accepted);
-    }
-
-    // The framing and three sections' checksums.
     for (ValidationMode mode : { ValidationMode::Full, ValidationMode::Integrity }) {
         auto layout = validateBodyFraming(file.span(), key, digest, mode, std::span { summaries });
         auto full = validateBody(file.span(), key, digest, mode);
@@ -1482,7 +1515,6 @@ JITCACHE_TEST(containerBodyFuzz, No)
         for (ValidationMode mode : { ValidationMode::Full, ValidationMode::Integrity }) {
             validateEveryWay(context, label, bytes.span(), fixture.key, fixture.headerDigest, mode, random);
             auto copy = exactCopy(bytes.span());
-            (void)validateBodyEnvelope(copy.span(), copy.span().size(), fixture.key, fixture.headerDigest, mode);
             (void)validateBodyFraming(copy.span(), fixture.key, fixture.headerDigest, mode, std::span { summaries });
         }
     }
@@ -1540,6 +1572,61 @@ JITCACHE_TEST(runOnceContainerAcceptsTierZero, No)
 
     auto imageAtTierZero = validate(0, withImage, ValidationMode::Full);
     JITCACHE_CHECK(!imageAtTierZero && imageAtTierZero.error() == ContainerChecks::required);
+}
+
+// ucb.analysis is a section no tier requires: a module's body validates with it and without it, at tier 0 and at tier 1,
+// while in Full mode a body of any other identity kind that holds one fails container.required. Integrity mode leaves
+// the question to the structure checks.
+JITCACHE_TEST(containerAnalysisSectionOnlyInModules, No)
+{
+    WeakRandom random(randomSeed);
+    HeaderDigest digest = testDigest(0xc0);
+    // A body of the highest tier with every kind that tier holds, ucb.analysis when asked.
+    auto bodyOf = [&](const BodyKey& key, uint8_t tier, bool withAnalysis) {
+        Vector<TestSection> sections;
+        for (auto& section : sectionsWithout()) {
+            if (section.kind == SectionKind::UCBAnalysis ? !withAnalysis : rowOf(section.kind).tier > tier)
+                continue;
+            sections.append(section);
+        }
+        RawBody body = canonicalBody(key, digest, sections);
+        body.highestTier = tier;
+        return encodeRawBody(body);
+    };
+    static constexpr std::array<std::pair<IdentityKind, ASCIILiteral>, 6> otherKinds { {
+        { IdentityKind::Program, "program"_s },
+        { IdentityKind::IndirectEval, "indirect eval"_s },
+        { IdentityKind::FunctionConstructor, "Function-constructor"_s },
+        { IdentityKind::Builtin, "builtin"_s },
+        { IdentityKind::Child, "child"_s },
+        { IdentityKind::DirectEval, "direct eval"_s },
+    } };
+
+    for (uint8_t tier : { 0, 1 }) {
+        BodyKey module = testKey(static_cast<uint8_t>(0x40 + tier), IdentityKind::Module);
+        unsigned tierNumber = tier;
+        for (bool withAnalysis : { false, true }) {
+            String label = makeString("a module's body of tier "_s, tierNumber, withAnalysis ? " with"_s : " without"_s, " ucb.analysis"_s);
+            expectOutcomes(context, label, bodyOf(module, tier, withAnalysis).span(), module, digest, accepted, accepted, random);
+        }
+        for (size_t index = 0; index < otherKinds.size(); ++index) {
+            auto& [kind, kindName] = otherKinds[index];
+            BodyKey key = testKey(static_cast<uint8_t>(0x50 + 2 * index + tier), kind);
+            expectOutcomes(context, makeString("a "_s, kindName, " body of tier "_s, tierNumber, " with ucb.analysis"_s), bodyOf(key, tier, true).span(),
+                key, digest, requiredCheck, accepted, random);
+            expectOutcomes(context, makeString("a "_s, kindName, " body of tier "_s, tierNumber, " without ucb.analysis"_s), bodyOf(key, tier, false).span(),
+                key, digest, accepted, accepted, random);
+        }
+    }
+
+    // The scoring read's framing checks apply the same rule.
+    BodyKey program = testKey(0x60);
+    Vector<uint8_t> programWithAnalysis = bodyOf(program, 1, true);
+    auto copy = exactCopy(programWithAnalysis.span());
+    static constexpr std::array<SectionKind, 1> analysis { SectionKind::UCBAnalysis };
+    auto framing = validateBodyFraming(copy.span(), program, digest, ValidationMode::Full, std::span { analysis });
+    JITCACHE_CHECK(!framing && framing.error() == ContainerChecks::required);
+    JITCACHE_CHECK(validateBodyFraming(copy.span(), program, digest, ValidationMode::Integrity, std::span { analysis }).has_value());
 }
 
 } // namespace JSC::JITCache::Tests
