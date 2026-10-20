@@ -13,13 +13,13 @@ JITCache ships as a Bun (1.4.2 :) build for Linux, x86_64 and ARM64:
 ARM64:
 
 ```sh
-curl -fsSLO https://github.com/Davi-ldc/bun/releases/download/v1.4.2-jitcache-beta.1/bun-linux-aarch64.zip && unzip bun-linux-aarch64.zip && export PATH="$PWD/bun-linux-aarch64:$PATH"
+curl -fsSLO https://github.com/Davi-ldc/bun/releases/download/v1.4.3-jitcache-beta/bun-linux-aarch64.zip && unzip bun-linux-aarch64.zip && export PATH="$PWD/bun-linux-aarch64:$PATH"
 ```
 
 x86_64:
 
 ```sh
-curl -fsSLO https://github.com/Davi-ldc/bun/releases/download/v1.4.2-jitcache-beta.1/bun-linux-x64.zip && unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
+curl -fsSLO https://github.com/Davi-ldc/bun/releases/download/v1.4.3-jitcache-beta/bun-linux-x64.zip && unzip bun-linux-x64.zip && export PATH="$PWD/bun-linux-x64:$PATH"
 ```
 
 To generate a cache, run:
@@ -36,7 +36,7 @@ bun --jitcache[=<dir>] --jitcache-mode=c|p-c run server.ts
 
 `c` (default) just uses the cache. `p-c` also writes, updating when it learns more [^1]. Every write is atomic, so N processes can read a cache while one is writing. A second process that asks to write (`p` or `p-c`) while another is writing runs with JITCache off and prints one warning line, `warn: JITCache is off: another process is writing <path>`; a worker whose main thread is writing just uses the cache.
 
-To avoid crashes `--jitcache-strict` adds validation for the full structure of everything we read and the assumptions we make about the current process, costing TODO
+To avoid crashes `--jitcache-strict` adds validation for the full structure of everything we read and the assumptions we make about the current process.
 
 ```sh
 bun --jitcache --jitcache-strict run server.ts
