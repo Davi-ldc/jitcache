@@ -110,7 +110,11 @@ BenchmarkTemp
 
 # Local workflow reference material.
 /reference/
-/jared.md
+**/drafts/**
+**/node_modules/**
 
 # Internal drafts and the review document, never published.
 /docs/JitCache/drafts/
+
+# The machine this checkout runs on, which CLAUDE.md tells agents to read.
+/specifics.md

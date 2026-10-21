@@ -93,13 +93,13 @@ hono's fixed branch, the first case of every repetition, does not measure JITCac
 
 Two cases port benches from Bun's `bench/` directory, measured like the others: a fresh process per run, its calls timed one by one, with JITCache against without.
 
-First results, bundled, warm page cache, from the first two repetitions of one run (18 processes per mode); five full runs follow. Times in ms, without → with JITCache:
+Bundled, warm page cache, five runs (150 processes per mode); each run alone lands within three points of these. Times in ms, without → with JITCache:
 
 | case | branch | startup + request 1 | faster | saved | requests 2-35 | faster | requests 2-500 | faster |
 |---|---|---|---|---|---|---|---|---|
-| express | fixed | 99.0 → 64.4 | 35% | 34.6 ms | 32.9 → 25.0 | 24% | 220 → 195 | 11% |
-| express | varied | 98.9 → 65.9 | 33% | 33.0 ms | 37.7 → 25.3 | 33% | 249 → 222 | 11% |
-| postgres | fixed | 45.0 → 39.9 | 11% | 5.1 ms | 368 → 335 | 9% | 4789 → 4787 | same |
+| express | fixed | 98.4 → 64.8 | 34% | 33.6 ms | 33.1 → 24.8 | 25% | 217 → 195 | 10% |
+| express | varied | 98.0 → 64.9 | 34% | 33.1 ms | 37.5 → 25.1 | 33% | 248 → 219 | 12% |
+| postgres | fixed | 44.3 → 39.4 | 11% | 4.9 ms | 367 → 337 | 8% | 4790 → 4794 | same |
 
 Over 500 calls postgres mostly waits on the database, so JITCache's gain there is at startup and in the early calls.
 

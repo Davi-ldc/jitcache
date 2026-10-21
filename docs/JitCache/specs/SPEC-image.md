@@ -736,7 +736,7 @@ It reproduces both overloads of `emitMathICFast` exactly, with `P` the profiled 
 
 ### 6.4 The `negate` operations
 
-THREAD Caches has the regenerated `negate` IC's slow operation read its profile through the IC, as `add`, `sub` and `mul` do:
+THREAD Native fixes has the regenerated `negate` IC's slow operation read its profile through the IC, as `add`, `sub` and `mul` do:
 
 - New `operationArithNegateProfiledNoOptimize(JSGlobalObject*, EncodedJSValue, JITNegIC*)`, declared with `JSC_DECLARE_JIT_OPERATION` in `JITOperations.h`, reads `negIC->arithProfile()` and runs the same observation and computation as `operationArithNegateProfiled`; both call one file-static `profiledArithNegate(JSGlobalObject*, JSValue, UnaryArithProfile&)` so they cannot diverge.
 - `operationArithNegateProfiledOptimize` passes `operationArithNegateProfiledNoOptimize` to `generateOutOfLine` instead of `operationArithNegateProfiled`.
@@ -1482,10 +1482,10 @@ Test hooks. Twins builds give the runner four hooks, one per process, set throug
 
 ### 16.2 Bench obligations
 
-No task of section 17 owns these obligations: the bench loop that THREAD Execution runs after the implementation takes them ([history](SPEC-image-history.md#no-task-owns-the-bench-obligations)).
+No task of section 17 owns these obligations: the bench loop that THREAD Verification runs after the implementation takes them ([history](SPEC-image-history.md#no-task-owns-the-bench-obligations)).
 
 - B1. Installation bound: this lane's share of an import (parse, baked-facts comparison, `prepareImage`, `commit`) per body, beside the native compilation cost THREAD defines and the body's code size and fixup count. It runs with strict off (THREAD Verification), so no V, U or W check and no S5 read-back is in it. THREAD's bench sets the fraction and the smallest body the bound covers.
-- B2. Recording: compile time with and without a recorder on the same bodies; provenance bytes per image byte and per fixup; peak recorder memory; the charged bytes of all live records per live body; and, in a ConsumerProducer, the rebuilt record's bytes per import, which the producer limit pays before the VM records anything itself. This measures what the producer limit must cover to stay out of normal runs (THREAD Execution). If live records dominate it, the first change to measure is a record that interns its distinct targets in a per-record table and keeps a small index per fixup, since most fixups repeat a few dozen targets. `kRecordChargeStep` (4 KiB) is tuned here.
+- B2. Recording: compile time with and without a recorder on the same bodies; provenance bytes per image byte and per fixup; peak recorder memory; the charged bytes of all live records per live body; and, in a ConsumerProducer, the rebuilt record's bytes per import, which the producer limit pays before the VM records anything itself. This measures what the producer limit must cover to stay out of normal runs (THREAD Verification). If live records dominate it, the first change to measure is a record that interns its distinct targets in a per-record table and keeps a small index per fixup, since most fixups repeat a few dozen targets. `kRecordChargeStep` (4 KiB) is tuned here.
 - B3. Execution parity of recorded forms: recorded-form code against native-form code (JITCache off) on microbenchmarks dense in exception checks, VM field accesses, structure decodes and inline string switches, on both architectures.
 - B4. Capture pause: `captureImage` plus the writes, per KiB of image, per body.
 - B5. Installation memory: section bytes per image byte, `prepareImage`'s transient memory and, in a ConsumerProducer, the bytes of the record step 14 of section 10.3 rebuilds.

@@ -8,7 +8,7 @@ JITCache lets Bun save JIT code and all its related state to disk resulting in u
 
 ### Bun
 
-JITCache ships as a Bun (1.4.2 :) build for Linux, x86_64 and ARM64:
+JITCache ships as a Bun (1.4.2 or 1.4.3) build for Linux, x86_64 and ARM64:
 
 ARM64:
 

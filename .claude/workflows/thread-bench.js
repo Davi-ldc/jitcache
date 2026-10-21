@@ -11,8 +11,7 @@ export const meta = {
 }
 
 // ---------------------------------------------------------------------------
-// JITCache's bench at a milestone (docs/JitCache/drafts/bench-workflow.md, HARNESS.md's Benches
-// and "Cadence and results"). Microbenchmarks only: every corpus case the release build runs,
+// JITCache's bench at a milestone (HARNESS.md's Benches and "Cadence and results"). Microbenchmarks only: every corpus case the release build runs,
 // through Tools/Scripts/run-jitcache-tests --bench (SPEC-integrator.harness.md section 9.4),
 // which measures each span in fresh copies, holds the build lock and computes the installation
 // bound. Macro benches stay outside; the human defines each one by hand.

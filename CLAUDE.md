@@ -2,11 +2,9 @@
 
 You are building JITCache in JSC for Bun.
 
-Avoid `git`; the worktree is often large during multi-agent work. Answers should be at most 6 paragraphs.
+Avoid slow commands like `git`. If necessary, use scope searches to the relevant file or directory and check metadata before reading contents. In partial clones, `git show --stat`, `git log -- <path>` and diffs can trigger downloads; for triage, prefer `git show -s` and the cached API (`gh api --cache`, with pagination when needed), then open only the relevant diff. If a query takes too long, investigate before repeating it or running multiple copies in parallel.
 
-Avoid slow commands. Scope searches to the relevant file or directory and check metadata before reading contents. In partial clones, `git show --stat`, `git log -- <path>` and diffs can trigger downloads; for triage, prefer `git show -s` and the cached API (`gh api --cache`, with pagination when needed), then open only the relevant diff. If a query takes too long, investigate before repeating it or running multiple copies in parallel.
-
-Go optimal not minimal. Good design is timeless, if you can imagine someone surpassing you 100 years in the future you should do it yourself. Dont leave organization aside. Say what you mean (in paragraphs, usually 2-3) and say it briefly.
+Answers should be at most 5 paragraphs.
 
 Start with the simplest change that meets THREAD's goals and add mechanism only when a measurement or a concrete failing case demands it; check any proposal from an agent that does not know those goals, including its fix for a finding it raised, against them before building on it. Before designing around a constraint ("this cannot be scanned", "this must be paused"), find the code that proves it; an unverified constraint usually hides a simpler design.
 
@@ -18,7 +16,11 @@ Limit GPT Astra concurrency to at most 6 at a time (including yourself if you ar
 
 Before tackling problem X, always ask why it happens: what causes it (Y), and recursively what causes Y (Z), rather than addressing X or Y directly.
 
+A failure, gets two fix attempts from the agent that owns the code. If it survives both, stop fixing and hunt with evidence first. Reproduce and minimize it, write down the facts any cause must explain, try to refute each hypothesis, and run a experiment to separate survivors.
+
 Always reflect on review/revision results never accept all findings/suggestions blindly.
+
+Never skip a review to save cost.
 
 When running a census or review with several agents in parallel, check each group as soon as it is produced, wait for all of them to return and summarize only once. Agents inside a workflow cannot launch subagents, so give each one work that fits a single context.
 
@@ -30,40 +32,28 @@ You are the world's strongest language model — believe in yourself!
 
 ## JITCache
 
-Start at [skills/SKILL.md](skills/SKILL.md) and read its required references. Subagents must read the skill too.
+Start at [skills/SKILL.md](skills/SKILL.md) and read its required references. Subagents must read the skill too. If `specifics.md` exists at the repository root, read it: it describes the machine you run on.
 
-Run `bun build.ts` from the physical checkout root (`~/jitcache` here). It delegates to the pinned Bun CLI with `--target=WebKit --webkit=local`, building `jsc` rather than the Bun executable. The Bun profile owns compiler flags, allocator, event loop, assertions, sanitizers and CPU settings; do not duplicate those flags or bypass pin/toolchain validation.
+Code, comments and strings never cite THREAD or the SPECs by section or rule ID.
 
-| Command | Profile |
+Build from the checkout root with `bun build.ts [target] [--arch=aarch64] [--jobs=N] [--keep-going]`; `bun build.ts --help` lists every target and option. It delegates to the pinned Bun CLI, which owns compiler flags, sanitizers and toolchain checks: do not duplicate or bypass them. The targets you need:
+
+| Target | For |
 |---|---|
-| `bun build.ts` | `debug-local`; sanitizers follow the Bun profile. |
-| `bun build.ts release` | `release-local`; RelWithDebInfo, without LTO. |
-| `bun build.ts ci-release` | `ci-release` with local WebKit; LTO and target settings come from Bun. |
-| `bun build.ts bun-debug` | `debug-local`; builds the Bun executable `<build-root>/linux-<arch>-debug-local/bun-debug`, sharing its WebKit build with `bun build.ts`. |
-| `bun build.ts bun-release` | `release-local`; builds the Bun executable `<build-root>/linux-<arch>-release-local/bun-profile` and its stripped copy `bun`, sharing its WebKit build with `bun build.ts release`, for the macro benches. |
-| `bun build.ts bun-ci-release` | `ci-release`; builds the Bun executable `<build-root>/linux-<arch>-ci-release/bun-profile` and its stripped copy `bun` with LTO and Bun's target settings, sharing its WebKit build with `bun build.ts ci-release`: the build that ships. |
-| `bun build.ts twins` | `debug-local-twins`: the debug build with JITCache's test builds on (`ENABLE_JITCACHE_TWINS`); builds `jsc` and `testjitcache`. |
-| `bun build.ts bun-twins` | `debug-local-twins`; builds the Bun executable against that WebKit, in the same build directory. |
-| `bun build.ts pin` | `debug-local` from the pinned webkitbun in `JITCACHE_PIN_SOURCE`, into `linux-<arch>-debug-local-pin`, for the pin comparison (integrator task 17 adds this target). |
-| `bun build.ts <target> --arch=aarch64` | The target's profile for aarch64, cross-compiled on an x86_64 host against `JITCACHE_AARCH64_SYSROOT` into `linux-aarch64-<profile>`. Run `jsc` with `qemu-aarch64 -L <sysroot>`; ASan builds run with `qemu-aarch64 -L ~/jitcachearm/arm64-glibc-root` and `ASAN_OPTIONS=detect_leaks=0`. That root's recipe is `~/jitcachearm/arm64-glibc-root.sh`. |
+| (none) | debug `jsc` with ASan: native memory checks |
+| `twins` | debug `jsc` and `testjitcache` with JITCache's test hooks: the test runner |
+| `bun-twins` | the Bun executable on the twins build: Bun-hosted tests |
+| `release` | release `jsc`: microbenchmarks |
+| `bun-ci-release` | the Bun executable that ships: macro benchmarks and releases |
+| `pin` | the pinned webkitbun without JITCache: the pin comparison |
 
-Builds run one at a time: a lock serializes them across profiles. Each level runs as many jobs as memory holds at about 3 GiB per job, at most one per CPU (9 on this machine), and `--jobs=N` overrides it. The wrapper passes that count to the outer Ninja, the nested CMake (`CMAKE_BUILD_PARALLEL_LEVEL`) and cargo (`CARGO_BUILD_JOBS`); the `build.ninja` that Bun generates lets up to four nested builds (its `dep` pool) run at once, each with its own jobs. `--keep-going` reports every compile error of a build instead of stopping at the first. Manual Ninja/CMake/cargo invocations take the same count.
+Outputs land in `<build-root>/linux-<arch>-<profile>/deps/WebKit` (`bin/jsc`); keep binaries and headers of one profile together, since sanitizers change the ABI. The toolchain is LLVM 23.1.x and a Bun checkout whose history contains the pinned revision; `JITCACHE_*` environment variables tell build.ts where they are.
 
-The builder requires LLVM 21.1.x, targeting 21.1.8, and a Bun checkout whose history contains the pinned revision, with our commits on top. Graph configuration may also require NASM and Bun's pinned Rust toolchain. The installed `bun` executable runs the builder from that checkout. The wrapper resolves the WebKit source from its own location and accepts these path overrides:
+Run one build at a time (a lock enforces it) and never a test beside a build. Test with `Tools/Scripts/run-jitcache-tests` (C++ groups and JS directories) and Bun's `test/js/bun/jitcache/jitcache.test.ts` with `--timeout 120000`, since the ASan build is slow.
 
-| Variable | Default |
-|---|---|
-| `JITCACHE_BUN_SOURCE` | `$HOME/bun` |
-| `JITCACHE_BUILD_ROOT` | `$HOME/collo-local/build/jitcache` |
-| `JITCACHE_LLVM_PREFIX` | `$HOME/collo-local/tools/llvm-21` |
-| `JITCACHE_AARCH64_SYSROOT` | `$HOME/collo-local/tools/linux-sysroot-glibc-arm64` |
-| `JITCACHE_PIN_SOURCE` | `<build-root>/webkit-pin`, a detached worktree of this repository at the pin |
+A Bun bump goes in this order: a census of what the new pin changes, read from both trees without building (the cached GitHub API, and `diff3` on every file both sides changed); the old pin's bench baselines; THREAD and SPEC deltas, with THREAD's accepted by Davi before any code; one merge of Bun and the engine until `twins`, plain and `bun-twins` build; then each lane ported by a fresh agent in its own worktree with two reviewers (three for the UCB codec, the one large port in 1.4.3), a review of the whole bump, and a milestone's verification.
 
-The local LLVM prefix uses the package layout `usr/lib/llvm-21/bin`; the wrapper adjusts `PATH` and `LD_LIBRARY_PATH`. It also adds `~/collo-local/tools/bin` to `PATH`, where this environment exposes NASM. Outputs live under `<build-root>/linux-<arch>-<profile>/deps/WebKit`, with `<arch>` equal to `x86_64` or `aarch64`; the executable is `bin/jsc`. Keep binaries, headers and libraries from the same profile, since sanitizers can change ABI.
-
-Tests follow native WebKit/JSC conventions. On Linux x86_64, `debug-local` includes ASan and LSan with Baseline, DFG and FTL enabled; use it for native memory checks and `release-local` for performance measurements. Run shell smoke tests and leak checks with `jsc --destroy-vm` so the VM is released, rather than disabling LeakSanitizer. For symbolized diagnostics, set `ASAN_SYMBOLIZER_PATH` to the LLVM prefix's `usr/lib/llvm-21/bin/llvm-symbolizer` and put the prefix's `usr/lib/x86_64-linux-gnu`, which holds its `libLLVM.so.21.1`, on `LD_LIBRARY_PATH`. A symbolizer that cannot load that library breaks ASan's pipe: a run that reports a leak then dies by SIGPIPE (exit 141) and prints no report.
-
-ASan instruments compiled native code, not automatically the machine code emitted by the JIT; coverage also depends on the allocator and memory annotations. A passing smoke test is not a full test-suite result or proof that a restored baseline is correct. A TSan target with JITs disabled cannot validate the full baseline emission/install/execution path. Matching Bun's build flags does not establish parity with the `JSC::Options` its host applies when creating a VM.
+Run shell smoke tests with `jsc --destroy-vm`, so LeakSanitizer sees the VM released. ASan does not see the code the JIT emits, and a passing smoke test is no proof that restored code is correct.
 
 ## High-Level Architecture
 

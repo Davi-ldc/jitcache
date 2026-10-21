@@ -9,7 +9,7 @@ This version covers the baseline tier. When DFG and FTL arrive, the lane also ow
 1. One body-file section per tier, `ICsBaseline` here, holding the property-IC learning state and call-link history of the baseline CB, a call site's `this` profile included (THREAD Execution): a record per property IC and a record per call-link site of its metadata.
 2. Capture of that section from a live baseline CB, with the summary's count of IC sites with cases (THREAD Capture) and the bit that keeps a body with a polymorphic site from carrying baseline counter progress, which it hands to the CB lane (THREAD Restoration; section 5.3).
 3. Restoration as THREAD Caches gives it: seeding of call-link history after linking, which gives a call site its own `CallSiteData` where it holds something and restores the site's `this` profile into it, and attachment of property-IC learning state after native setup, with the section validated first when strict is on.
-4. The `super_construct` store in `JIT::compileOpCall`: the native fix to the baseline `super_construct` and `super_construct_varargs` templates (THREAD Execution and Caches; section 7, E1).
+4. The `super_construct` store in `JIT::compileOpCall`: the native fix to the baseline `super_construct` and `super_construct_varargs` templates (THREAD Execution and Native fixes; section 7, E1).
 5. The executable-allocation fault calls at the three `didFailToAllocate()` branches of `InlineCacheCompiler` (THREAD Execution; section 7, E5), and three small native additions the lane needs (section 7, E2 to E4).
 
 Outside the lane: the IC molds, `doneLocation`s and every other byte of the image (Image lane); the LLInt property caches, `m_cachedCallee`, `m_cachedStructureID` and the scope metadata, which THREAD leaves "as native linking leaves them" (no lane seeds them); value, array and arithmetic profiles (CB and UCB lanes), except a call site's `this` profile, which lives in the site's `CallSiteData` (section 3.2) and whose flags the CB lane's summary only reads (R-CB-1); the container, directory, writer, scoring, fault plumbing and entry points (integrator).
@@ -39,7 +39,7 @@ Every field of the native objects this lane covers, with its fate in the consume
 | `m_inlinedHandler`, `m_inlineAccessBaseStructureID`, `byIdSelfOffset`, `m_inlineHolder` | inline mirror | empty or inert, as installation leaves them | cells |
 | `countdown`, `repatchCount`, `everConsidered`, `sawNonCell`, `tookSlowPath` | learning | restored | THREAD Caches |
 | `numberOfCoolDowns` | learning | restored | THREAD Caches and Restoration (IC cool-down counts) |
-| `resetByGC` | learning | restored ([history](SPEC-ics-history.md#resetbygc-travels)) | THREAD's opening: everything else the baseline phase learned travels |
+| `resetByGC` | learning | restored ([history](SPEC-ics-history.md#resetbygc-travels)) | THREAD "What travels and what stays local": everything else the baseline phase learned travels |
 | `codeOrigin`, `callSiteIndex`, `m_identifier`, `m_globalObject`, `m_icType` | per-CB link data | installation | installation |
 
 `RepatchingPropertyInlineCache` exists only in the FTL (`useHandlerICInFTL` is forced off); its fields belong to the FTL capture of a later version.
@@ -1025,7 +1025,7 @@ Live C++ tests (T11 to T15) build their objects as follows, through the shared h
 
 ## 12. Bench obligations
 
-The lane sets no number for the bench to tune. The bench measures the default, strict off (THREAD Verification), where capture and prepare run no structural check (section 4.5). No task of section 14 owns these obligations: the bench loop that THREAD Execution runs after the implementation takes them ([history](SPEC-ics-history.md#no-task-owns-the-bench-obligations)).
+The lane sets no number for the bench to tune. The bench measures the default, strict off (THREAD Verification), where capture and prepare run no structural check (section 4.5). No task of section 14 owns these obligations: the bench loop that THREAD Verification runs after the implementation takes them ([history](SPEC-ics-history.md#no-task-owns-the-bench-obligations)).
 
 - B1. Capture cost: `captureBaselineICs` time per CB against its IC and call-link counts, at the end of `BaselineJITPlan::finalize` and in `delta`, reported as part of THREAD's capture pause.
 - B2. Install cost: `prepareBaselineICs`, `seedCallLinkHistory` and `attachPropertyICState` per body, reported inside the import cost THREAD's installation bound measures, with the number of own `CallSiteData`s seeding allocates per body beside the number of the body's lazy sites and the number of those the consumer's run calls, and how many of those allocations a `this` profile alone made `Own`.

@@ -8,7 +8,7 @@ Restoring `m_cacheType` to `Stub` for a site that had cases looked faithful to t
 
 ## `resetByGC` travels
 
-Nothing reads `resetByGC` today, so dropping it looked free. It is learned per site, like `clearedByGC` on call links, which THREAD carries, and THREAD's opening says that everything else the baseline phase learned travels too. It costs one bit.
+Nothing reads `resetByGC` today, so dropping it looked free. It is learned per site, like `clearedByGC` on call links, which THREAD carries, and THREAD "What travels and what stays local" says that everything else the baseline phase learned travels too. It costs one bit.
 
 ## Dense records in native index spaces
 
@@ -142,7 +142,7 @@ T9 first brought its body under test to baseline with `toBaseline`, as every pro
 
 ## No task owns the bench obligations
 
-The list first ended with task 9, "B1 to B6 inside the integrator's bench loop", which owned no file. The integrator's events and IB10 already give B1 to B4 and B6, and a lane task with nothing to write left its implementer to invent bench code the glue owns, as an earlier Image lane task did. Giving each lane accessors and one integrator task the reader was weighed and left for the bench loop to ask for, since HARNESS treats benches as alerts and no failing case needs it. The obligations stay in section 12, and THREAD Execution's bench loop takes them after the implementation.
+The list first ended with task 9, "B1 to B6 inside the integrator's bench loop", which owned no file. The integrator's events and IB10 already give B1 to B4 and B6, and a lane task with nothing to write left its implementer to invent bench code the glue owns, as an earlier Image lane task did. Giving each lane accessors and one integrator task the reader was weighed and left for the bench loop to ask for, since HARNESS treats benches as alerts and no failing case needs it. The obligations stay in section 12, and THREAD Verification's bench loop takes them after the implementation.
 
 ## Task 6 lands before the integrator's glue
 

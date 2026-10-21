@@ -138,6 +138,10 @@ The first design made the constructed code reachable only through `commit`, whic
 
 `PreparedImage::code()` now returns the code before `commit` (section 10.1), the record is rebuilt exactly when a budget is passed, and an import whose rebuilt record is refused stays valid without a record (section 10.3, step 14); the install glue raises `budget.limit` once the preparations succeed, and no image fault beside it (R-INT-7).
 
+## Fresh executable pages are not prefaulted
+
+An image's copy and flush looked too slow for their bytes. On the Ampere A1 under Bun 1.4.2, each fresh 4 KiB page an image touched cost about 14 µs of copy and 9 to 13 µs of flush, against 0.24 µs for an image that fit a page already touched, which points at first-touch faults in the executable pool. Prefaulting the allocated range before the copy was built and measured there and saved nothing: the copy and the flush cost the same with or without it. Preparation therefore allocates, copies and flushes as native finalization does. A native compile of the same body writes and flushes fresh pages of the same pool, so the cost falls on both sides of THREAD's installation bound.
+
 ## The twin CB and its inputs
 
 A twin needs a CB of the body, linked natively in the consumer, that has not run. The first design created it through `ScriptExecutable::newCodeBlockFor`; the alternatives were `newReplacementCodeBlockFor`, or a hook between native setup and `installCode` while the executable's slot is still empty. `newCodeBlockFor` `RELEASE_ASSERT`s an empty slot, which `installCode` has just filled, and the `CopyParsedBlock` constructor behind `newReplacementCodeBlockFor` shares the installed CB's metadata (N18), so writing recorded inputs into it would overwrite the live CB's. A hook before `installCode` would interleave the twin's link, compile and exceptions with the install. The twin therefore comes from its class's `create()` after `installCode` (section 11.3, step 1).
@@ -192,7 +196,7 @@ Keying `get_from_scope`'s thunk call by the profiled resolve type seemed right. 
 
 ## No task owns the bench obligations
 
-The task list first ended with a task for "B1 to B5", which named no file. Its implementer found that the lane's figures (the recorder's peak and charges, the live records, `prepareImage`'s transient memory) live where no bench event may be recorded: on a JIT worker, inside the install total THREAD's bound counts, or inside the span the `capture` event times. Accessors that the integrator's glue reads after those spans close, with one integrator task for the reader, would answer that, and were left for the bench loop to ask for, since HARNESS treats benches as alerts and no failing case needs them. The obligations stay in section 16.2, and THREAD Execution's bench loop takes them after the implementation.
+The task list first ended with a task for "B1 to B5", which named no file. Its implementer found that the lane's figures (the recorder's peak and charges, the live records, `prepareImage`'s transient memory) live where no bench event may be recorded: on a JIT worker, inside the install total THREAD's bound counts, or inside the span the `capture` event times. Accessors that the integrator's glue reads after those spans close, with one integrator task for the reader, would answer that, and were left for the bench loop to ask for, since HARNESS treats benches as alerts and no failing case needs them. The obligations stay in section 16.2, and THREAD Verification's bench loop takes them after the implementation.
 
 ## T12 forces each refusal
 

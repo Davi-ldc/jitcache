@@ -17,8 +17,8 @@ Tests and microbenchmarks of single cases are the core of the feedback loop. Whe
 | Failures and their outcomes, failed strict checks (Failures, Session) | fault injection | the outcome THREAD gives, `status` naming the step, twins and oracle clean afterward | every test of a failing step |
 | Commits are process-crash-consistent (Capture) | producer kills | the state harness section 12 gives at each point | every kill test |
 | The same guarantees under concurrent schedules (Capture, Storage) | the concurrency family | no failure in `concurrencyRepetitions` repetitions | one repetition at the end of a task that touches those paths; all of them at each milestone |
-| Importing a body costs at most a fixed fraction of compiling it (opening) | a microbenchmark per body | alerts only, when the ratio exceeds `installationBoundFraction` for a body of at least `installationBoundSmallestBody` | each milestone, in the release build |
-| A consumer's first run matches the producer's warmed run; capture pause, memory and serialization (opening, Execution) | the workloads' startup, first call and catch-up, each beside its memory and pauses | alerts only | each milestone, in the release build |
+| Importing a body costs at most a fixed fraction of compiling it (Verification) | a microbenchmark per body | alerts only, when the ratio exceeds `installationBoundFraction` for a body of at least `installationBoundSmallestBody` | each milestone, in the release build |
+| A consumer's first run matches the producer's warmed run; capture pause, memory and serialization (opening, Verification) | the workloads' startup, first call and catch-up, each beside its memory and pauses | alerts only | each milestone, in the release build |
 
 Every other behavior THREAD states, such as the session's results, identity and its misses, the header's checks, the locks and maintenance, is checked by the lanes' ordinary tests, each with the criterion it states.
 
@@ -57,7 +57,7 @@ THREAD Verification's sentences on native twins, relocation, capture records and
 
 ### The off path emits the pin's code
 
-THREAD Capture: "Other VMs emit unchanged." THREAD Caches allows two exceptions in native code, the `super_construct` store in `JIT::compileOpCall` and the `negate` operations. With no recorder attached, every body of the corpus therefore compiles to the code the pinned engine emits for it, except at those sites (SPEC-image.md I4). The observable compares each body's baseline code from this build and from a build of the pin (`bun build.ts pin`), instruction by instruction, with each address replaced by what it names and the effects of the random draws removed (the entry's `nop`, and constant blinding on x86_64). The pin cannot be instrumented, so both builds describe their code only through what the engine prints, and the comparison names the addresses itself: with the collector off, each address names one object for the whole run, and the two runs agree when they reference the same objects in the same order (harness section 11).
+THREAD Capture: "Other VMs emit unchanged." THREAD Native fixes allows two exceptions in native code, the `super_construct` store in `JIT::compileOpCall` and the `negate` operations. With no recorder attached, every body of the corpus therefore compiles to the code the pinned engine emits for it, except at those sites (SPEC-image.md I4). The observable compares each body's baseline code from this build and from a build of the pin (`bun build.ts pin`), instruction by instruction, with each address replaced by what it names and the effects of the random draws removed (the entry's `nop`, and constant blinding on x86_64). The pin cannot be instrumented, so both builds describe their code only through what the engine prints, and the comparison names the addresses itself: with the collector off, each address names one object for the whole run, and the two runs agree when they reference the same objects in the same order (harness section 11).
 
 ### The skipped warm-up
 
@@ -97,9 +97,9 @@ The bench also proposes the numbers THREAD leaves to it, which the SPECs name as
 
 | parameter | what it sets | value |
 |---|---|---|
-| `installationBoundFraction` | the fraction of the native cost an import may take (THREAD's opening) | unset |
-| `installationBoundSmallestBody` | the smallest body that bound covers (THREAD's opening) | unset |
-| `defaultProducerLimitBytes` | the producer limit when the host passes none, sized so it stays out of normal runs (THREAD Execution) | unset |
+| `installationBoundFraction` | the fraction of the native cost an import may take (THREAD Verification) | unset |
+| `installationBoundSmallestBody` | the smallest body that bound covers (THREAD Verification) | unset |
+| `defaultProducerLimitBytes` | the producer limit when the host passes none, sized so it stays out of normal runs (THREAD Verification) | unset |
 | `writerStagingBytes` | the writer's staging buffer (SPEC-integrator.md IB5) | 64 KiB until tuned |
 | `packDeltaChainBound` | the index deltas a pack's chain holds before a commit writes a full index, which bounds a reader's walk at start (SPEC-integrator.md IB2) | 32 until tuned |
 | `retiredPackReopenIntervalMilliseconds` | the least time between a reader's looks at `cache/pack` once a retired mark has outlived its rename by a second | 100 until tuned |
