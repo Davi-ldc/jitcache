@@ -10,17 +10,17 @@
 #include "CodeBlock.h"
 #include "ExecutableAllocator.h"
 #include "FunctionExecutable.h"
-#include "ImageTwinsSection.h"
-#include "ImageTypes.h"
 #include "JIT.h"
-#include "JITCacheTest.h"
 #include "JITThunks.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
-#include "ProducerBudget.h"
-#include "TestVM.h"
 #include "UnlinkedCodeBlock.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/ImageTwinsSection.h"
+#include "jitcache/image/ImageTypes.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestVM.h"
 #include <optional>
 #include <span>
 #include <wtf/Ref.h>
@@ -37,9 +37,9 @@ namespace JSC::JITCache::Tests {
 // immediate on x86_64) draws the same in both.
 inline constexpr uint32_t assemblerSeed = 0x5eed1234;
 
-inline ImageTarget makeTarget(TargetKind kind, uint32_t a = 0)
+inline ImageTarget makeTarget(TargetKind kind, uint32_t a = 0, uint32_t b = 0, int64_t payload = 0)
 {
-    return ImageTarget { .kind = kind, .a = a, .b = 0, .payload = 0 };
+    return ImageTarget { .kind = kind, .a = a, .b = b, .payload = payload };
 }
 
 inline ImageTarget commonThunkKey(CommonJITThunkID id)

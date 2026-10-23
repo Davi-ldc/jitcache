@@ -17,9 +17,9 @@
 //   executable's replacement. A for-of body costs more bytecode than the DFG inlines at a call
 //   (maximumFunctionForCallInlineCandidateBytecodeCostForDFG, 80), so both runs raise that cap to the FTL's default
 //   of 170, which lazyCallee, at 145, fits. Only the DFG's inlining decisions read the option, so it is free.
-// No native exit records a tmp key, so testjitcache's validation and strict tests of the CB lane cover tmp keys.
-// The Producer commits both CBs with strict on, and in twins builds checks their lazy-operand records; the Consumer
-// installs them, passes their twins, and in twins builds checks that they were imported.
+// No native exit records a tmp key, so the CB lane's testjitcache test cbTwinsCheckEverySeededField seeds one.
+// The Producer commits both CBs, and in twins builds checks their lazy-operand records; the Consumer installs them,
+// passes their twins, and in twins builds checks that they were imported.
 (function main(role) {
     class Countdown {
         constructor(count) {

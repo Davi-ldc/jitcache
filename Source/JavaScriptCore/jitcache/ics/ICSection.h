@@ -9,12 +9,10 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <optional>
 #include <span>
 #include <type_traits>
 #include <wtf/StdLibExtras.h>
-#include <wtf/text/ASCIILiteral.h>
 
 // The ICsBaseline section of a body file: the property-IC learning state and call-link history of one baseline CB, a
 // call site's this profile included, as dense records in native index order, and the pure derivation of the consumer's
@@ -200,45 +198,9 @@ std::optional<size_t> sectionSize(size_t groupCount, size_t propertyICCount, siz
 // Metadata entries per call-link opcode, indexed by canonical position.
 using CallLinkSiteCounts = std::array<uint32_t, numberOfCallLinkOpcodes>;
 
-enum class StrictChecks : bool { No, Yes };
-
 struct Summary {
     uint32_t icSitesWithCases { 0 };
 };
-
-// The strict checks, in the order prepare runs them. The first six read only the section.
-enum class Check : uint8_t {
-    // The span's length is not the size the header's counts give.
-    SectionSize,
-    // More IC sites with cases than property ICs.
-    SummaryBound,
-    // A group's opcode has no call link or breaks canonical order, a group is empty, or the groups' site counts do not
-    // add up to the header's.
-    CallLinkGroups,
-    // A padding byte, a reserved byte or an unused bit is set, or a this field holds a value its opcode or the
-    // array-profile bounds exclude.
-    ReservedBits,
-    // An access type outside the enumeration.
-    EnumRange,
-    // The count of IC sites with cases differs from the records.
-    SummaryCount,
-    // The property-IC records do not pair one to one with the prepared code's molds.
-    MoldPairing,
-    // A group's site count differs from the CB's metadata entries of that opcode.
-    MetadataLayout,
-    // A mold has canBeMegamorphic set.
-    MoldMegamorphicBit,
-    // The CB has run, or a call-link site is not as linking left it.
-    NewbornCallLinks,
-};
-
-struct Invalid {
-    Check check;
-    uint32_t siteIndex; // record index when the check is per site, 0 otherwise
-};
-
-// The check's name in a fault's step, after "ics.": one lowercase token, its words joined by '-'.
-ASCIILiteral description(Check);
 
 // A parsed section, as views into the bytes it was parsed from.
 struct SectionView {
@@ -249,13 +211,12 @@ struct SectionView {
     CallLinkGroup group(unsigned index) const; // read with memcpy
 };
 
-// Slices the section by the counts its header states. With StrictChecks::Yes it first checks the size, the summary, the
-// group table and every record; otherwise it trusts the counts. Reads only its argument and needs no VM.
-std::expected<SectionView, Invalid> parseSection(std::span<const uint8_t>, StrictChecks);
+// Slices the section by the counts its header states, which it trusts. Reads only its argument and needs no VM.
+SectionView parseSection(std::span<const uint8_t>);
 
-// Reads the summary of a saved body from its ICsBaseline section, checking the section's size and the summary's bound
-// under strict and trusting the header otherwise. Takes no lock and needs no VM.
-std::expected<Summary, Invalid> readBaselineICsSummary(std::span<const uint8_t> section, StrictChecks);
+// Reads the summary of a saved body from the header of its ICsBaseline section, which it trusts. Takes no lock and
+// needs no VM.
+Summary readBaselineICsSummary(std::span<const uint8_t> section);
 
 // The property-IC half of the polymorphic bit: two or more cases listed, none of them megamorphic.
 bool isPolymorphicPropertyIC(const PropertyICRecord&);

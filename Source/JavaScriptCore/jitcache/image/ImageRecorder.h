@@ -2,11 +2,11 @@
 
 #if ENABLE(JIT)
 
-#include "BakedFacts.h"
 #include "BytecodeIndex.h"
-#include "ImageTypes.h"
 #include "MacroAssembler.h"
-#include "ProducerBudget.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/BakedFacts.h"
+#include "jitcache/image/ImageTypes.h"
 #include <optional>
 #include <span>
 #include <wtf/Noncopyable.h>
@@ -15,7 +15,7 @@
 #include <wtf/Vector.h>
 
 #if ENABLE(JITCACHE_TWINS)
-#include "ImageTwinsSection.h"
+#include "jitcache/image/ImageTwinsSection.h"
 #endif
 
 // The recorder a recording compilation attaches to its assembler: it collects the fixups, MathICs and baked facts of

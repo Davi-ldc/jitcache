@@ -1,18 +1,19 @@
 #include "config.h"
-#include "ImageRecord.h"
+#include "jitcache/image/ImageRecord.h"
 
 #if ENABLE(JIT)
 
 #include "BaselineJITCode.h"
 #include "CCallHelpers.h"
 #include "CodeBlock.h"
-#include "ImageFootprint.h"
-#include "ImageRecorder.h"
-#include "ImageSection.h"
-#include "ImageSupport.h"
-#include "JITCacheFaults.h"
 #include "JITMathIC.h"
 #include "LinkBuffer.h"
+#include "jitcache/image/ImageFootprint.h"
+#include "jitcache/image/ImageRecorder.h"
+#include "jitcache/image/ImageSection.h"
+#include "jitcache/image/ImageSupport.h"
+#include "jitcache/session/JITCacheFaults.h"
+#include "jitcache/session/ProducerContext.h"
 #include <algorithm>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -407,12 +408,6 @@ void ImageRecord::setTwinRegenerationSeed(size_t entry, std::optional<uint32_t> 
     auto& slots = m_twinData.regenerations[entry].assemblerSeeds;
     RELEASE_ASSERT(!slots.isEmpty());
     slots.last() = seed;
-}
-
-void ImageRecord::setFixupTargetForTesting(size_t index, const ImageTarget& target)
-{
-    RELEASE_ASSERT(index < m_fixups.size());
-    m_fixups[index].target = target;
 }
 #endif
 

@@ -28,41 +28,19 @@
 #if ENABLE(JIT)
 #include "BytecodeOperandsForCheckpoint.h"
 #include "CommonSlowPathsInlines.h"
-#include "ImageEmission.h"
-#include "ImageTypes.h"
 #include "JIT.h"
 #include "JSCInlines.h"
+#include "jitcache/image/ImageEmission.h"
 #include <optional>
 #include <type_traits>
 #include <utility>
 
 namespace JSC {
 
-// JITCache: the support keys the baseline emitters link through the helpers of ImageEmission.h, with every field their
-// kind does not use zero.
-namespace JITCache::SupportKey {
-
-constexpr ImageTarget baselineThunk(BaselineThunk thunk)
+ALWAYS_INLINE void JIT::nearCallInlineCacheSlowPathThunk(AccessType accessType)
 {
-    return ImageTarget { .kind = TargetKind::BaselineThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(accessType));
 }
-
-constexpr ImageTarget commonThunk(CommonJITThunkID thunk)
-{
-    return ImageTarget { .kind = TargetKind::CommonThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
-}
-
-constexpr ImageTarget inlineCacheSlowPathThunk(AccessType accessType)
-{
-    return ImageTarget { .kind = TargetKind::InlineCacheSlowPathThunk, .a = static_cast<uint32_t>(accessType), .b = 0, .payload = 0 };
-}
-
-constexpr ImageTarget processThunk(ProcessThunk thunk)
-{
-    return ImageTarget { .kind = TargetKind::ProcessThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
-}
-
-} // namespace JITCache::SupportKey
 
 ALWAYS_INLINE bool JIT::isOperandConstantDouble(VirtualRegister src)
 {

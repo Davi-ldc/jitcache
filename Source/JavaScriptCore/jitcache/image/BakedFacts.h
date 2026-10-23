@@ -4,8 +4,8 @@
 
 #include "DFGCommon.h"
 #include "GetPutInfo.h"
-#include "ImageTypes.h"
-#include <expected>
+#include "jitcache/image/ImageTypes.h"
+#include <optional>
 #include <span>
 #include <wtf/Noncopyable.h>
 #include <wtf/Vector.h>
@@ -102,10 +102,8 @@ public:
 
     std::span<const uint8_t> bytes() const { return m_bytes; } // the whole section
 
-    friend bool operator==(const BakedFactsView&, const BakedFactsView&);
-
 private:
-    friend std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const uint8_t>, bool strict);
+    friend std::optional<BakedFactsView> parseBakedFactsSection(std::span<const uint8_t>);
     friend class ImageSectionsView; // which holds one, located after its image section
     BakedFactsView() = default;
 
@@ -115,10 +113,8 @@ private:
     uint32_t m_scopeFactCount { 0 };
 };
 
-// Locates the section. A section shorter than its header or its counted entries cannot be located and fails
-// ImageCheck::BakedFacts in either mode. Under strict it runs that check; with strict off, debug builds ASSERT what it
-// checks.
-std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const uint8_t>, bool strict);
+// Locates the section, or nullopt when it is shorter than its header or its counted entries.
+std::optional<BakedFactsView> parseBakedFactsSection(std::span<const uint8_t>);
 
 enum class BakedFactsResult : uint8_t {
     Match,
@@ -132,9 +128,8 @@ enum class BakedFactsResult : uint8_t {
 // when the CB's metadata for its instruction holds the same resolve type, for a resolve_scope of type ClosureVar or
 // ModuleVar the same depth, and for one of type ModuleVar the same import slot. A get_from_scope of type LazyClosureVar
 // matches only LazyClosureVar: linking chooses between it and ClosureVar from the body and a fixed option, so every CB
-// of the body links it alike. Every fact names an instruction of its own opcode, which recording guarantees and
-// ImageCheck::BytecodeIndexes checks under strict. The install glue only branches on the result, so nothing reports
-// which fact differed.
+// of the body links it alike. Every fact names an instruction of its own opcode, which recording guarantees and the
+// comparison asserts. The install glue only branches on the result, so nothing reports which fact differed.
 BakedFactsResult compareBakedFacts(const ImageSectionsView&, CodeBlock& newborn);
 
 } // namespace JSC::JITCache

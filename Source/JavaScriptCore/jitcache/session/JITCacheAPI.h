@@ -32,7 +32,6 @@ struct Config {
     String artifactPath; // the parent directory, which holds cache/ and the producer lock
     Role role { Role::Consumer };
     std::optional<size_t> producerLimitBytes; // producing roles; empty: defaultProducerLimitBytes (JITCacheParameters.h)
-    bool strict { false }; // off unless the host turns it on; strict reads run every check, structure checks included
     DeltaCapture deltaCapture { DeltaCapture::All }; // All unless the host sets Compiled
     // The app the host runs, a value it computes from the code it runs, which JITCache only compares with the app an
     // artifact's header names and writes into the header of an artifact it creates; empty: no app.
@@ -94,7 +93,6 @@ struct BudgetSnapshot {
 struct Status {
     SessionState state { SessionState::Unconfigured };
     std::optional<Role> role;
-    bool strict { false };
     bool activityOn { false };
     std::optional<FaultReport> activityFault;
     ProductionState production { ProductionState::NotProducing };

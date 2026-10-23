@@ -244,11 +244,11 @@ ${runsBlock(commit)}
    milestone, no span is compared, and only the alerts that need no history are raised.
 2. Raise HARNESS.md's alerts:
    - a span whose minimum moved, up or down, by more than microbenchAlertPercent of the previous
-     minimum (Benches). The spans are the CPU-time spans of the bench-run lines, matched by script,
-     sequence, run and side. While HARNESS.md's table leaves microbenchAlertPercent unset, use the
-     value the previous results proposed for it, and say that these alerts rest on a value the
-     human has not approved. Fields, memory and wall times are reported by copy and never alerted,
-     though one that changed can explain an alert;
+     minimum (Benches). The spans are those in each bench-run line's spans object, matched by
+     script, sequence, run and side. While HARNESS.md's table leaves microbenchAlertPercent unset,
+     use the value the previous results proposed for it, and say that these alerts rest on a value
+     the human has not approved. Fields, memory and the process's wall time are reported by copy
+     and never alerted, though one that changed can explain an alert;
    - every run with a problem, which the bench lists by copy, at every milestone the first
      included, since a problem needs no history;
    - once HARNESS.md's table sets both installationBoundSmallestBody and installationBoundFraction,
@@ -286,7 +286,9 @@ ${runsBlock(commit)}
      candidate smallest body (bodies covered, their share of the whole native cost, the share below
      the candidate, the p50, p99 and largest ratio), the bodies set aside by reason and side, the
      bodies the coverage leaves out for their run's options, the bodies whose size varies between
-     copies, and the covered bodies with the highest ratios, each with its install steps;
+     copies, and the covered bodies with the highest ratios, each with its request and install
+     totals; their install steps come only from a rerun of their cases with --bench-breakdowns,
+     whose clock reads raise every import, so that run explains a ratio and sets none;
    - each alert with its explanation or its todo.md entry;
    - a proposal for each parameter of HARNESS.md's table the measurements bear on, with the
      measurement it rests on, marked as awaiting the human's approval. microbenchProcesses and

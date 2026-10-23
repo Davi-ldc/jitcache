@@ -447,7 +447,8 @@ inline CodePtr<CFunctionPtrTag> NODELETE appropriateGetByOptimizeFunction(GetByK
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-inline CodePtr<CFunctionPtrTag> NODELETE appropriateGetByGaveUpFunction(GetByKind kind)
+// JITCache: not inline, so that Repatch.h can declare it for IC capture and restore.
+CodePtr<CFunctionPtrTag> NODELETE appropriateGetByGaveUpFunction(GetByKind kind)
 {
     switch (kind) {
     case GetByKind::ById:
@@ -953,7 +954,8 @@ void repatchArrayGetByVal(JSGlobalObject* globalObject, CodeBlock* codeBlock, JS
     }
 }
 
-static CodePtr<CFunctionPtrTag> NODELETE appropriatePutByGaveUpFunction(PutByKind putByKind)
+// JITCache: not static, so that Repatch.h can declare it for IC capture and restore.
+CodePtr<CFunctionPtrTag> NODELETE appropriatePutByGaveUpFunction(PutByKind putByKind)
 {
     switch (putByKind) {
     case PutByKind::ByIdStrict:
@@ -1613,7 +1615,8 @@ inline CodePtr<CFunctionPtrTag> NODELETE appropriateInByOptimizeFunction(InByKin
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-inline CodePtr<CFunctionPtrTag> NODELETE appropriateInByGaveUpFunction(InByKind kind)
+// JITCache: not inline, so that Repatch.h can declare it for IC capture and restore.
+CodePtr<CFunctionPtrTag> NODELETE appropriateInByGaveUpFunction(InByKind kind)
 {
     switch (kind) {
     case InByKind::ById:
@@ -1624,79 +1627,6 @@ inline CodePtr<CFunctionPtrTag> NODELETE appropriateInByGaveUpFunction(InByKind 
         return operationHasPrivateNameGaveUp;
     }
     RELEASE_ASSERT_NOT_REACHED();
-}
-
-// The operation each repatch* function installs when its access type gives up.
-static CodePtr<CFunctionPtrTag> NODELETE appropriateGaveUpFunction(AccessType accessType)
-{
-    switch (accessType) {
-    case AccessType::GetById:
-        return appropriateGetByGaveUpFunction(GetByKind::ById);
-    case AccessType::GetByIdWithThis:
-        return appropriateGetByGaveUpFunction(GetByKind::ByIdWithThis);
-    case AccessType::GetByIdDirect:
-        return appropriateGetByGaveUpFunction(GetByKind::ByIdDirect);
-    case AccessType::GetByVal:
-        return appropriateGetByGaveUpFunction(GetByKind::ByVal);
-    case AccessType::GetByValWithThis:
-        return appropriateGetByGaveUpFunction(GetByKind::ByValWithThis);
-    case AccessType::GetPrivateName:
-        return appropriateGetByGaveUpFunction(GetByKind::PrivateName);
-    case AccessType::GetPrivateNameById:
-        return appropriateGetByGaveUpFunction(GetByKind::PrivateNameById);
-    case AccessType::PutByIdStrict:
-        return appropriatePutByGaveUpFunction(PutByKind::ByIdStrict);
-    case AccessType::PutByIdSloppy:
-        return appropriatePutByGaveUpFunction(PutByKind::ByIdSloppy);
-    case AccessType::PutByIdDirectStrict:
-        return appropriatePutByGaveUpFunction(PutByKind::ByIdDirectStrict);
-    case AccessType::PutByIdDirectSloppy:
-        return appropriatePutByGaveUpFunction(PutByKind::ByIdDirectSloppy);
-    case AccessType::PutByValStrict:
-        return appropriatePutByGaveUpFunction(PutByKind::ByValStrict);
-    case AccessType::PutByValSloppy:
-        return appropriatePutByGaveUpFunction(PutByKind::ByValSloppy);
-    case AccessType::PutByValDirectStrict:
-        return appropriatePutByGaveUpFunction(PutByKind::ByValDirectStrict);
-    case AccessType::PutByValDirectSloppy:
-        return appropriatePutByGaveUpFunction(PutByKind::ByValDirectSloppy);
-    case AccessType::DefinePrivateNameByVal:
-        return appropriatePutByGaveUpFunction(PutByKind::DefinePrivateNameByVal);
-    case AccessType::DefinePrivateNameById:
-        return appropriatePutByGaveUpFunction(PutByKind::DefinePrivateNameById);
-    case AccessType::SetPrivateNameByVal:
-        return appropriatePutByGaveUpFunction(PutByKind::SetPrivateNameByVal);
-    case AccessType::SetPrivateNameById:
-        return appropriatePutByGaveUpFunction(PutByKind::SetPrivateNameById);
-    case AccessType::InById:
-        return appropriateInByGaveUpFunction(InByKind::ById);
-    case AccessType::InByVal:
-        return appropriateInByGaveUpFunction(InByKind::ByVal);
-    case AccessType::HasPrivateName:
-        return appropriateInByGaveUpFunction(InByKind::PrivateName);
-    case AccessType::HasPrivateBrand:
-        return operationHasPrivateBrandGaveUp;
-    case AccessType::InstanceOf:
-        return operationInstanceOfGaveUp;
-    case AccessType::DeleteByIdStrict:
-        return operationDeleteByIdStrictGaveUp;
-    case AccessType::DeleteByIdSloppy:
-        return operationDeleteByIdSloppyGaveUp;
-    case AccessType::DeleteByValStrict:
-        return operationDeleteByValStrictGaveUp;
-    case AccessType::DeleteByValSloppy:
-        return operationDeleteByValSloppyGaveUp;
-    case AccessType::CheckPrivateBrand:
-        return operationCheckPrivateBrandGaveUp;
-    case AccessType::SetPrivateBrand:
-        return operationSetPrivateBrandGaveUp;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-CodePtr<OperationPtrTag> gaveUpOperationFor(AccessType accessType)
-{
-    return appropriateGaveUpFunction(accessType).retagged<OperationPtrTag>();
 }
 
 // Mainly used to transition from megamorphic case to generic case.

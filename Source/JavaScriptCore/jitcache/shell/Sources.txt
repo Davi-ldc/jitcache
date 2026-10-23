@@ -1,0 +1,3 @@
+jitcache/shell/JITCacheShell.cpp
+jitcache/shell/ShellFunctions.cpp
+jitcache/shell/ShellTestFlags.cpp

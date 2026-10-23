@@ -1,17 +1,23 @@
 #!/usr/bin/env bun
-// JITCache's test runner. It runs every JS script of the test directories as sequences of jsc or Bun processes over one
-// artifact, checks each run (exit, checkers, final status, twin report), and compares every run that configures JITCache
-// with a JITCache-off run of the same script, the oracle, which also tells the engine's leaks from JITCache's. With
-// --pin it compares each oracle option set's code with the pin's, and it runs testjitcache's C++ groups. With --bench it
-// measures instead of testing: every plain-mode script in fresh copies with the bench report on, the minimum and median
-// of each CPU-time span over the copies, and the installation bound per body. This file holds the command line and main;
-// the modules of Tools/Scripts/jitcache/ do the work, and the self-tests import them.
+// JITCache's test runner. It runs every JS script of the corpus as sequences of jsc or Bun processes over one artifact,
+// checks each run (exit, checkers, final status, twin report), and compares every run that configures JITCache with a
+// JITCache-off run of the same script, the oracle, which also tells the engine's leaks from JITCache's. With
+// --pin it compares each oracle option set's code with the pin's, and it runs testjitcache's C++ tests, one process per
+// part and options string. With --ladder it runs a twins build's whole verification and stops after the first rung that
+// fails. With --bench it measures instead of testing: every plain-mode script in fresh copies with the bench report on,
+// the minimum and median of each time span over the copies, and the installation bound per body. Every mode holds
+// the machine lock (jitcache/lock.ts) from its first process on. This file holds the command line and main; the modules
+// of Tools/Scripts/jitcache/ do the work, and the self-tests import them.
 
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { UsageError, loadBuild } from "./jitcache/build.ts";
+import { runCppTests } from "./jitcache/cpp.ts";
+import { bunSource } from "./jitcache/env.ts";
+import { runLadder } from "./jitcache/ladder.ts";
+import { type Build, UsageError, loadBuild } from "./jitcache/launcher.ts";
+import { holdMachineLock } from "./jitcache/lock.ts";
 import { runBench } from "./jitcache/microbench.ts";
-import { CalibrationError, type RunnerOptions, Session, runCppTests, runScripts } from "./jitcache/runs.ts";
+import { CalibrationError, type RunnerOptions, Session, runScripts } from "./jitcache/runs.ts";
 
 // The copies of each sequence the bench runs when --bench-processes names no number.
 const defaultBenchProcesses = 10;
@@ -19,20 +25,41 @@ const defaultBenchProcesses = 10;
 const usage = `Usage: run-jitcache-tests --build=<WebKit build directory> [--bun=<Bun executable>] [--mode=twins|plain]
                          [--pin=<the pin's WebKit build directory>] [--pin-options="<options>"]
                          [--extra-options="<options>"] [--filter=<regex>] [--jobs=<n>] [--timeout=<seconds>]
-                         [--js-only | --cpp-only] [--qemu-cpu=<model>] [<test paths>...]
-       run-jitcache-tests --bench --build=<WebKit build directory> [--bench-processes=<n>] [--filter=<regex>]
-                         [--timeout=<seconds>] [<test paths>...]
---build names <build-root>/linux-<arch>-<profile>/deps/WebKit. A test path is a script, or a directory whose .js and
-.mjs files are scripts; the default paths are JSTests/jitcache/ucb, image, cb, ics and integrator. --pin names the
-build bun build.ts pin made, whose code each jsc-hosted script's off path must emit; --pin-options adds options to this
-build's side of that comparison alone. The runner's own tests, whose fixtures in JSTests/jitcache/integrator/runner/ fail
-on purpose, run through bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins build>.
---bench measures a release-local build instead of testing it: the jsc-hosted scripts plain mode runs, each sequence in
---bench-processes fresh copies (${defaultBenchProcesses} by default), one process at a time under the build lock, with the bench report on.`;
+                         [--js-only | --cpp-only] [--qemu-cpu=<model>] [--milestone] [<test paths>...]
+       run-jitcache-tests --ladder --build=<twins WebKit build directory> [--bun=<Bun executable>]
+                         [--pin=<the pin's WebKit build directory>] [--pin-options="<options>"]
+                         [--plain-build=<plain WebKit build directory>] [--extra-options="<options>"] [--jobs=<n>]
+                         [--timeout=<seconds>] [--qemu-cpu=<model>] [--milestone]
+       run-jitcache-tests --bench --build=<WebKit build directory> [--bench-processes=<n>] [--bench-breakdowns]
+                         [--filter=<regex>] [--timeout=<seconds>] [<test paths>...]
+--build names <build-root>/linux-<arch>-<profile>/deps/WebKit. A test path is a script, or a directory whose scripts
+are the .js and .mjs files below it, at any depth, outside every resources/ directory; the default path is the corpus,
+JSTests/jitcache. A corpus script takes the defaults (its sequence when it declares none, and whether it requires
+twins) of the nearest directory between it and the corpus that holds a defaults.txt. --filter selects scripts by their
+path from JSTests/jitcache and C++ tests as <part>/<name>, where a test's part is the directory under
+Source/JavaScriptCore/jitcache/tests/ that holds its file. --milestone also runs what a jitcache-cadence directive
+leaves to milestones, such as image/budget.js's sweep; a cadence can also keep a script to one kind of build, as
+image/islands.js runs only on release aarch64 builds. --pin names the build bun build.ts pin made, whose code each
+jsc-hosted script's off path must emit; --pin-options adds options to this build's side of that comparison alone. The
+runner's own tests, whose fixtures in JSTests/jitcache/integrator/runner/ fail on purpose and run only when a test path
+names their files, run through bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins build>.
+--ladder runs a twins build's whole verification in rungs and stops after the first rung that fails: the C++ tests;
+the corpus in twins mode, with the Bun-hosted scripts under --bun and the pin comparison under --pin; Bun's own tests
+under --bun; and the corpus in plain mode on the build --plain-build names. It lists each failure of the failing rung
+with its file, and its last line names what did not run. --jobs bounds Bun's tests at once too, at most 4 of them.
+--timeout bounds each process, which for Bun's tests is one bun test run, and a process that runs out of time is
+killed with every process it started.
+--bench measures a release-local build instead of testing it: the jsc-hosted scripts plain mode runs under --milestone,
+each sequence in --bench-processes fresh copies (${defaultBenchProcesses} by default), one process at a time under the machine lock, with the
+bench report on. --bench-breakdowns also times each request's counted parts and each install's steps
+(jitCacheBenchBreakdowns), whose clock reads then raise every import's cost: such a run explains a bound and sets none.`;
 
 // The options the bench mode refuses, since it runs plain mode's jsc-hosted scripts one process at a time with plain
-// mode's command lines and no option added, natively and without C++ tests or the pin.
-const notInBench = ["--mode", "--bun", "--pin", "--pin-options", "--extra-options", "--jobs", "--js-only", "--cpp-only", "--qemu-cpu"];
+// mode's command lines, adding no option but the one --bench-breakdowns names, natively and without C++ tests or the pin.
+const notInBench = ["--mode", "--bun", "--pin", "--pin-options", "--extra-options", "--jobs", "--js-only", "--cpp-only", "--qemu-cpu", "--ladder", "--plain-build"];
+
+// The options the ladder refuses: it runs the whole corpus and every C++ test, in the modes its rungs set.
+const notInLadder = ["--mode", "--filter", "--js-only", "--cpp-only", "--bench", "--bench-processes", "--bench-breakdowns"];
 
 export function parseCommandLine(argv: string[]): RunnerOptions {
   const options: RunnerOptions = {
@@ -49,8 +76,12 @@ export function parseCommandLine(argv: string[]): RunnerOptions {
     cppOnly: false,
     qemuCpu: null,
     testPaths: [],
+    milestone: false,
     bench: false,
     benchProcesses: defaultBenchProcesses,
+    benchBreakdowns: false,
+    ladder: false,
+    plainBuild: null,
   };
   const given = new Set<string>();
   for (const argument of argv) {
@@ -110,12 +141,27 @@ export function parseCommandLine(argv: string[]): RunnerOptions {
       case "--qemu-cpu":
         options.qemuCpu = required();
         break;
+      case "--milestone":
+        if (value !== null) throw new UsageError("--milestone takes no value");
+        options.milestone = true;
+        break;
       case "--bench":
         if (value !== null) throw new UsageError("--bench takes no value");
         options.bench = true;
         break;
       case "--bench-processes":
         options.benchProcesses = positiveInteger(required(), name);
+        break;
+      case "--bench-breakdowns":
+        if (value !== null) throw new UsageError("--bench-breakdowns takes no value");
+        options.benchBreakdowns = true;
+        break;
+      case "--ladder":
+        if (value !== null) throw new UsageError("--ladder takes no value");
+        options.ladder = true;
+        break;
+      case "--plain-build":
+        options.plainBuild = resolve(required());
         break;
       default:
         throw new UsageError(`unknown option ${argument}`);
@@ -127,8 +173,16 @@ export function parseCommandLine(argv: string[]): RunnerOptions {
   if (options.bench) {
     const refused = notInBench.filter(name => given.has(name));
     if (refused.length) throw new UsageError(`--bench takes no ${refused.join(", ")}: it runs plain mode's jsc-hosted scripts one process at a time, with plain mode's command lines`);
-  } else if (given.has("--bench-processes")) {
-    throw new UsageError("--bench-processes needs --bench");
+  } else {
+    for (const name of ["--bench-processes", "--bench-breakdowns"]) {
+      if (given.has(name)) throw new UsageError(`${name} needs --bench`);
+    }
+  }
+  if (options.ladder) {
+    const refused = notInLadder.filter(name => given.has(name));
+    if (refused.length || options.testPaths.length) throw new UsageError(`--ladder takes no ${[...refused, ...(options.testPaths.length ? ["test paths"] : [])].join(", ")}: it runs the whole corpus and every C++ test`);
+  } else if (options.plainBuild) {
+    throw new UsageError("--plain-build needs --ladder");
   }
   return options;
 }
@@ -150,6 +204,7 @@ function optionList(text: string, where: string): string[] {
 
 export async function main(argv: string[]): Promise<number> {
   let session: Session;
+  let plainBuild: Build | null = null;
   try {
     const options = parseCommandLine(argv);
     const build = loadBuild(options.build);
@@ -159,7 +214,18 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (options.bench) {
       if (build.emulated) throw new UsageError("--bench measures native processes, and an aarch64 build on an x86_64 host runs under QEMU");
+      holdMachineLock();
       return await runBench(options, build);
+    }
+    if (options.ladder) {
+      if (!build.twins || !statSync(build.testjitcache, { throwIfNoEntry: false })?.isFile()) throw new UsageError(`--ladder needs a twins build, whose bin/testjitcache its first rung runs, and ${build.directory} is none`);
+      // bun test starts Bun processes of its own, which QEMU user mode does not run.
+      if (options.bun && build.emulated) throw new UsageError("--ladder runs Bun's tests natively, and an aarch64 build on an x86_64 host runs under QEMU");
+      if (options.bun && !statSync(bunSource, { throwIfNoEntry: false })?.isDirectory()) throw new UsageError(`--ladder runs Bun's tests from the Bun checkout ${bunSource}, which is missing; JITCACHE_BUN_SOURCE names another`);
+      if (options.plainBuild) {
+        plainBuild = loadBuild(options.plainBuild);
+        if (plainBuild.twins || plainBuild.architecture !== build.architecture) throw new UsageError(`--plain-build names ${plainBuild.directory}, which is no plain ${build.architecture} build`);
+      }
     }
     session = new Session(options, build);
   } catch (error) {
@@ -167,8 +233,10 @@ export async function main(argv: string[]): Promise<number> {
     console.error(`run-jitcache-tests: ${error.message}\n${usage}`);
     return 2;
   }
+  holdMachineLock();
   console.log(`build ${session.build.directory}: ${session.mode} mode, ${session.build.architecture}${session.build.emulated ? ` under QEMU (${session.options.qemuCpu ?? "max"})` : ""}`);
   if (session.pinSetup) console.log(`pin ${session.pinSetup.pin.directory}${session.pinSetup.pinOptions.length ? `, this build's side with ${session.pinSetup.pinOptions.join(" ")}` : ""}`);
+  if (session.options.ladder) return await runLadder(session, plainBuild);
   try {
     if (!session.options.jsOnly) await runCppTests(session);
     if (!session.options.cppOnly) await runScripts(session);

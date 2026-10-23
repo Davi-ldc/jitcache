@@ -31,16 +31,12 @@
 #include "IndirectEvalExecutable.h"
 #include "ModuleProgramExecutable.h"
 #include "ProgramExecutable.h"
-#include "UCBRequests.h"
-#include "UCBTwinGeneration.h"
 #include "VariableEnvironmentInlines.h"
+#include "jitcache/ucb/UCBRequests.h"
+#include "jitcache/ucb/UCBTwinGeneration.h"
 #include <wtf/TZoneMallocInlines.h>
 
 namespace JSC {
-
-namespace JITCache {
-struct TwinParseResults; // UCBTwinGeneration.h defines it in twins builds, the only ones that pass one.
-}
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(CodeCache);
 
@@ -244,33 +240,24 @@ UnlinkedCodeBlockType* CodeCache::getUnlinkedGlobalCodeBlock(VM& vm, ExecutableT
         return unlinkedCodeBlock;
     }
 
-    // JITCache: an import replaces generation only; the holder publishes it as it publishes a generated block.
-    if (auto* imported = jitCacheRequest.tryImport()) {
-        auto* result = uncheckedDowncast<UnlinkedCodeBlockType>(imported);
-        publishGeneratedCodeBlock(vm, key, result, privateToExecutable);
-        return result;
+    // JITCache: an import replaces generation only, and the block below publishes it as it publishes a generated one.
+    auto* imported = uncheckedDowncast<UnlinkedCodeBlockType>(jitCacheRequest.tryImport());
+    unlinkedCodeBlock = imported ? imported : generateUnlinkedCodeBlock<UnlinkedCodeBlockType, ExecutableType>(vm, executable, source, scriptMode, codeGenerationMode, error, evalContextType);
+    if (unlinkedCodeBlock && !imported)
+        jitCacheRequest.didGenerate(*unlinkedCodeBlock);
+
+    if (unlinkedCodeBlock && Options::useCodeCache() && !privateToExecutable) {
+        m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
+
+        key.source().provider().cacheBytecode([&] {
+            return encodeCodeBlock(vm, key, unlinkedCodeBlock);
+        });
+#if USE(BUN_JSC_ADDITIONS)
+        key.source().provider().didGenerateUnlinkedCodeBlock(vm, key, unlinkedCodeBlock);
+#endif
     }
 
-    unlinkedCodeBlock = generateUnlinkedCodeBlock<UnlinkedCodeBlockType, ExecutableType>(vm, executable, source, scriptMode, codeGenerationMode, error, evalContextType);
-    if (unlinkedCodeBlock)
-        jitCacheRequest.didGenerate(*unlinkedCodeBlock);
-    publishGeneratedCodeBlock(vm, key, unlinkedCodeBlock, privateToExecutable);
     return unlinkedCodeBlock;
-}
-
-void CodeCache::publishGeneratedCodeBlock(VM& vm, const SourceCodeKey& key, UnlinkedCodeBlock* unlinkedCodeBlock, bool privateToExecutable)
-{
-    if (!unlinkedCodeBlock || !Options::useCodeCache() || privateToExecutable)
-        return;
-
-    m_sourceCode.addCache(key, SourceCodeValue(vm, unlinkedCodeBlock, m_sourceCode.age()));
-
-    key.source().provider().cacheBytecode([&] {
-        return encodeCodeBlock(vm, key, unlinkedCodeBlock);
-    });
-#if USE(BUN_JSC_ADDITIONS)
-    key.source().provider().didGenerateUnlinkedCodeBlock(vm, key, unlinkedCodeBlock);
-#endif
 }
 
 UnlinkedProgramCodeBlock* CodeCache::getUnlinkedProgramCodeBlock(VM& vm, ProgramExecutable* executable, const SourceCode& source, OptionSet<CodeGenerationMode> codeGenerationMode, ParserError& error)
@@ -406,47 +393,7 @@ RefPtr<CachedBytecode> serializeBytecode(VM& vm, UnlinkedCodeBlock* codeBlock, c
     return encodeCodeBlock(vm, sourceCodeKeyForSerializedBytecode(vm, source, codeType, lexicallyScopedFeatures, scriptMode, codeGenerationMode), codeBlock, fileHandle, error);
 }
 
-#if ENABLE(JITCACHE_TWINS)
-namespace JITCache {
-
-// The twin of a program, module or eval body: what the request's native generation makes, with the request's
-// snapshot of its features in place of the executable's, which an import has overwritten with the parse's. Every
-// other input comes from the executable, as native generation reads it, since no import changes those fields.
-UnlinkedCodeBlock* generateGlobalTwin(const RequestState& state, TwinParseResults& results, ParserError& error)
-{
-    VM& vm = state.vm;
-    GlobalExecutable* globalExecutable = state.globalExecutable;
-    RELEASE_ASSERT(globalExecutable);
-
-    switch (state.kind) {
-    case RequestKind::Program: {
-        auto* executable = uncheckedDowncast<ProgramExecutable>(globalExecutable);
-        return generateUnlinkedCodeBlockImpl<UnlinkedProgramCodeBlock, ProgramExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, OptimizeBytecode::No, &results);
-    }
-    case RequestKind::Module: {
-        auto* executable = uncheckedDowncast<ModuleProgramExecutable>(globalExecutable);
-        return generateUnlinkedCodeBlockImpl<UnlinkedModuleProgramCodeBlock, ModuleProgramExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, OptimizeBytecode::No, &results);
-    }
-    case RequestKind::IndirectEval: {
-        auto* executable = uncheckedDowncast<IndirectEvalExecutable>(globalExecutable);
-        return generateUnlinkedCodeBlockImpl<UnlinkedEvalCodeBlock, IndirectEvalExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), nullptr, nullptr, executable, OptimizeBytecode::No, &results);
-    }
-    case RequestKind::DirectEval: {
-        auto* executable = uncheckedDowncast<DirectEvalExecutable>(globalExecutable);
-        return generateUnlinkedCodeBlockImpl<UnlinkedEvalCodeBlock, DirectEvalExecutable>(vm, state.source, state.requestFeatures, state.scriptMode, state.requestMode, error,
-            state.evalContextType, executable->derivedContextType(), executable->isArrowFunctionContext(), state.variablesUnderTDZ, state.privateNameEnvironment, executable, OptimizeBytecode::No, &results);
-    }
-    case RequestKind::FunctionBody:
-        break;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return nullptr;
 }
 
-} // namespace JITCache
-#endif // ENABLE(JITCACHE_TWINS)
-
-}
+// JITCache: the twin generation of test builds, which calls generateUnlinkedCodeBlockImpl above.
+#include "jitcache/ucb/generation/UCBGlobalTwin.cpp"

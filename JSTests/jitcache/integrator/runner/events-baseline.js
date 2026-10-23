@@ -1,4 +1,5 @@
 // jitcache-runs: Off
+// jitcache-fixture: passes
 
 // Body events with the baseline JIT on: a function called until it compiles shows baselineCompiles 1, and its
 // later calls add no LLInt instruction. The integrator directory's default turns concurrent JIT off, so the compilation

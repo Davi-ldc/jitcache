@@ -1,0 +1,4 @@
+jitcache/tests/maintenance/MaintenanceCleanupTests.cpp
+jitcache/tests/maintenance/MaintenanceCommandLineTests.cpp
+jitcache/tests/maintenance/MaintenanceDeletionTests.cpp
+jitcache/tests/maintenance/MaintenancePlanTests.cpp

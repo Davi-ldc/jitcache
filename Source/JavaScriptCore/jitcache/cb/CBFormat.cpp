@@ -1,10 +1,15 @@
 #include "config.h"
-#include "CBFormat.h"
+#include "jitcache/cb/CBFormat.h"
 
 #if ENABLE(JIT)
 
+#include "ArrayConventions.h"
 #include "CallLinkInfo.h"
+#include "JSPropertyNameEnumerator.h"
+#include "SpeculatedType.h"
+#include "ToThisStatus.h"
 #include <stdint.h>
+#include <type_traits>
 #include <wtf/CheckedArithmetic.h>
 
 // The family table's static checks, which fail the build when a native macro or metadata field no longer matches what
@@ -102,8 +107,6 @@ static_assert(CBFormatInternal::numberOfFamiliesWithoutRecords() == 3, "the fami
 // The families this table places by hand, and A15 after the macro's opcodes, where
 // CodeBlock::updateAllArrayProfilePredictions merges it.
 static_assert(std::is_same_v<Family<numberOfArrayProfileFamilies - 1>::Op, OpIteratorNext>);
-static_assert(newArrayBufferFamily < firstAllocationHintFamily + numberOfAllocationHintFamilies, "op_new_array_buffer left the allocation-profile macro");
-static_assert(std::is_same_v<Family<newArrayBufferFamily>::Op, OpNewArrayBuffer>);
 static_assert(std::is_same_v<Family<iteratorOpenIterationModesFamily>::Op, OpIteratorOpen>);
 static_assert(std::is_same_v<Family<iteratorNextIterationModesFamily>::Op, OpIteratorNext>);
 static_assert(std::is_same_v<Family<asyncIteratorOpenIterationModesFamily>::Op, OpAsyncIteratorOpen>);
@@ -126,15 +129,6 @@ static_assert(ToThisOK <= UINT8_MAX && ToThisConflicted <= UINT8_MAX && ToThisCl
 // multiples of 8, so every element of a section that starts 8-byte aligned is naturally aligned.
 static_assert(!(sizeof(StateHeader) % sectionAlignment) && !(sizeof(SummaryHeader) % sectionAlignment));
 static_assert(alignof(ArrayProfileRecord) <= sectionAlignment && alignof(LazyOperandRecord) <= sectionAlignment);
-
-// The iteration-mode masks in hexadecimal, and the enumerator flag set. iterator_close_check's byte holds its whole mask.
-static_assert(nativeIterationModes(iteratorOpenIterationModesFamily) == 0x1fff);
-static_assert(nativeIterationModes(iteratorNextIterationModesFamily) == 0x1ff3);
-static_assert(nativeIterationModes(asyncIteratorOpenIterationModesFamily) == 0x6001);
-static_assert(nativeIterationModes(asyncIteratorNextIterationModesFamily) == 0x2001);
-static_assert(nativeIterationModes(iteratorCloseCheckIterationModesFamily) == 0x12);
-static_assert(nativeIterationModes(iteratorCloseCheckIterationModesFamily) <= UINT8_MAX);
-static_assert(allEnumeratorModes == 0x0f);
 
 FamilyEntryCounts familyEntryCounts(CodeBlock& codeBlock)
 {

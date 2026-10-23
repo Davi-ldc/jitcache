@@ -1,21 +1,24 @@
 #!/usr/bin/env bun
 // The installation bound's own bench: each body's import cost against its native compilation's, beside its baseline
 // code size, the curve from which installationBoundFraction and installationBoundSmallestBody are chosen. Each workload
-// runs as fresh jsc processes with strict off and every JSC option at its default, each writing a bench report of its
-// own: one Producer, which commits the workload's bodies at exit, then N Consumers that import them from its artifact,
-// alternating with N Consumers whose artifact holds none of them, where every body compiles natively without recording.
-// A body's import cost is the counted total of its import request plus its install event's total, joined by
-// key; its native cost is its compile event's compilation plus finalization. Each side's value is the minimum over its
-// N samples, with the median beside it. A sample whose compile or install reports supportGenerated does not count, and
-// a body left with no counting sample on a side is set aside. The samples and their tallies are those of the runner's
+// runs as fresh jsc processes with every JSC option at its default, apart from the one --breakdowns sets, each writing
+// a bench report of its own: one Producer, which commits the workload's bodies at exit, then N Consumers that import
+// them from its artifact, alternating with N Consumers whose artifact holds none of them, where every body compiles
+// natively without recording.
+// A body's import cost is the counted total of its import request plus its install event's total, joined by key; its
+// native cost is its compile event's compilation plus finalization. Each side's value is the minimum over its N
+// samples, with the median beside it. A sample whose compile or install reports supportGenerated does not count, and a
+// body left with no counting sample on a side is set aside. The samples and their tallies are those of the runner's
 // bench mode (Tools/Scripts/jitcache/bench-report.ts).
 //
 //   bun PerformanceTests/JITCache/bound.ts --build=<WebKit build directory> [--out=<directory>] [--processes=<n>]
-//       [--workloads=jetstream2,sweep] [--filter=<regex>] [--iterations=<n>]
+//       [--workloads=jetstream2,sweep] [--filter=<regex>] [--iterations=<n>] [--breakdowns]
 //
 // The workloads are JetStream2's JS-only tests, each run alone, and a size sweep of generated functions. --out receives
 // the sweep's scripts, the artifacts, each process's report, standard output and error under reports/, bodies.json and
-// bound.md.
+// bound.md. --breakdowns also times each request's counted parts and each install's steps (jitCacheBenchBreakdowns),
+// whose clock reads then raise every import's cost, so it explains a bound and sets none. The bench holds the machine
+// lock (Tools/Scripts/jitcache/lock.ts) from its first process on.
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { loadavg } from "node:os";
@@ -35,17 +38,9 @@ import {
   readBenchReport,
   smallestBodyCandidates,
 } from "../../Tools/Scripts/jitcache/bench-report.ts";
-import {
-  type Build,
-  Launcher,
-  type ProcessEnd,
-  UsageError,
-  benchEnvironment,
-  describeEnd,
-  loadBuild,
-  readText,
-  repositoryRoot,
-} from "../../Tools/Scripts/jitcache/build.ts";
+import { repositoryRoot } from "../../Tools/Scripts/jitcache/env.ts";
+import { type Build, Launcher, type ProcessEnd, UsageError, benchEnvironment, describeEnd, loadBuild, readText } from "../../Tools/Scripts/jitcache/launcher.ts";
+import { holdMachineLock } from "../../Tools/Scripts/jitcache/lock.ts";
 
 const jetStreamRoot = join(repositoryRoot, "PerformanceTests/JetStream2");
 
@@ -54,12 +49,13 @@ const highestRatioCount = 10;
 const processTimeoutSeconds = 3600;
 
 const usage = `Usage: bound.ts --build=<WebKit build directory> [--out=<directory>] [--processes=<n>]
-                [--workloads=jetstream2,sweep] [--filter=<regex>] [--iterations=<n>]
+                [--workloads=jetstream2,sweep] [--filter=<regex>] [--iterations=<n>] [--breakdowns]
 --build names <build-root>/linux-<arch>-<profile>/deps/WebKit, whose bin/jsc runs every process; the bound is measured
 in a release build. --out defaults to a new directory under the build root's jitcache-results. --processes is N, the
 Consumers on each side of every workload (10 by default). --workloads picks the groups, and --filter, a regular
 expression, picks workloads by name: jetstream2/<test> or sweep/<kind>-<statements>. --iterations replaces every
-JetStream2 test's own iteration count, for a short run.`;
+JetStream2 test's own iteration count, for a short run. --breakdowns also times each install's steps and each
+request's counted parts, whose clock reads then raise every import's cost: it explains a bound and sets none.`;
 
 class BenchError extends Error {}
 
@@ -76,10 +72,11 @@ interface BenchOptions {
   groups: Group[];
   filter: RegExp | null;
   iterations: number | null; // JetStream2's testIterationCount; null keeps each test's own
+  breakdowns: boolean; // every process runs with jitCacheBenchBreakdowns
 }
 
 function parseCommandLine(argv: string[]): BenchOptions {
-  const options: BenchOptions = { build: "", out: null, processes: 10, groups: [...groups], filter: null, iterations: null };
+  const options: BenchOptions = { build: "", out: null, processes: 10, groups: [...groups], filter: null, iterations: null, breakdowns: false };
   for (const argument of argv) {
     const equals = argument.indexOf("=");
     const name = equals < 0 ? argument : argument.slice(0, equals);
@@ -115,6 +112,10 @@ function parseCommandLine(argv: string[]): BenchOptions {
         break;
       case "--iterations":
         options.iterations = positiveInteger(required(), name);
+        break;
+      case "--breakdowns":
+        if (value !== null) throw new UsageError("--breakdowns takes no value");
+        options.breakdowns = true;
         break;
       default:
         throw new UsageError(`unknown option ${argument}`);
@@ -325,6 +326,7 @@ async function runRole(context: Context, workload: Workload | null, role: Role, 
     ...(role === "producer" && workload ? ["--jitcache-delta-at-exit"] : []),
     "--jitcache-log",
     `--jitcache-bench-report=${prefix}.jsonl`,
+    ...(context.options.breakdowns ? ["--jitCacheBenchBreakdowns=true"] : []),
     ...(workload ? workload.scriptArguments : ["-e", ""]),
   ];
   const cwd = workload?.cwd ?? context.out;
@@ -485,6 +487,8 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
   ];
   if (build.twins || build.sanitized || buildProfile(build).includes("debug"))
     lines.push("This build is a debug, sanitized or twins build, whose costs say nothing about the bound a release build meets.", "");
+  if (options.breakdowns)
+    lines.push("The processes ran with `--breakdowns`: the clock reads that time each install's steps and each request's counted parts raise every import's cost, so these ratios explain a bound and set none.", "");
   lines.push(
     "A body's import cost is its import request's bound total (the request event's `counted`) plus its install event's total; its native cost is its compile event's compilation plus finalization, in Consumers whose artifact holds none of the workload's bodies. Each cost is the minimum over the processes that gave the body a counting sample, and the ratio divides the import minimum by the native one; bodies.json also holds the medians. A joined body is covered at S when its image size, the installed image's linked size (the install event's `image.codeSize`), is at least S. The share is the covered bodies' native cost over that of every joined body, and p50 and p99 are nearest-rank percentiles of the covered bodies' ratios.",
     "",
@@ -498,7 +502,9 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
     "",
     "## Highest ratios",
     "",
-    "The covered bodies with the highest ratios, each with its install's steps in the sample that gave the import minimum, longest first.",
+    options.breakdowns
+      ? "The covered bodies with the highest ratios, each with its install's steps in the sample that gave the import minimum, longest first."
+      : "The covered bodies with the highest ratios. A run with `--breakdowns` gives each one's install steps.",
     "",
   );
   const stepsText = (steps: Record<string, number>) =>
@@ -518,10 +524,12 @@ function boundMarkdown(context: Context, results: WorkloadResult[], loads: LoadA
     }
     const rows = highest.map(body => {
       const sample = body.import.minimum!;
-      return [body.workload, `\`${shortKey(body.key)}\``, body.imageCodeSize!, microseconds(body.native.min!), microseconds(body.import.min!), ratioText(body.ratio), microseconds(sample.request), microseconds(sample.install), sample.fixups, stepsText(sample.steps)];
+      const row = [body.workload, `\`${shortKey(body.key)}\``, body.imageCodeSize!, microseconds(body.native.min!), microseconds(body.import.min!), ratioText(body.ratio), microseconds(sample.request), microseconds(sample.install), sample.fixups];
+      return options.breakdowns ? [...row, stepsText(sample.steps)] : row;
     });
-    const header = ["workload", "key", "image size", "native (µs)", "import (µs)", "ratio", "request (µs)", "install (µs)", "fixups", "install steps (µs, wall time)"];
-    lines.push(...markdownTable(header, rows, "llrrrrrrrl"), "");
+    const header = ["workload", "key", "image size", "native (µs)", "import (µs)", "ratio", "request (µs)", "install (µs)", "fixups"];
+    if (options.breakdowns) lines.push(...markdownTable([...header, "install steps (µs, wall time)"], rows, "llrrrrrrrl"), "");
+    else lines.push(...markdownTable(header, rows, "llrrrrrrr"), "");
   }
 
   lines.push(
@@ -568,6 +576,7 @@ export async function main(argv: string[]): Promise<number> {
     console.error(`bound.ts: ${error.message}\n${usage}`);
     return 2;
   }
+  holdMachineLock();
   const out = options.out ?? join(build.resultsDirectory, `bound-${new Date().toISOString().replace(/[:.]/g, "-")}`);
   mkdirSync(join(out, "reports"), { recursive: true });
   const context: Context = { options, build, launcher: new Launcher(build, processTimeoutSeconds, "max"), out, nativeArtifact: join(out, "artifacts", "native") };
@@ -603,6 +612,7 @@ export async function main(argv: string[]): Promise<number> {
     build: profile,
     processes: options.processes,
     iterations: options.iterations,
+    breakdowns: options.breakdowns,
     loadAverage: loads,
     nativeArtifact,
     workloads: results.map(({ bodies, ...result }) => result),

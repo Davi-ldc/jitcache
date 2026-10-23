@@ -4,22 +4,23 @@
 
 #include "ArgList.h"
 #include "ArrayPrototype.h"
-#include "ByteFields.h"
 #include "CachedBytecode.h"
 #include "CachedTypes.h"
 #include "CallData.h"
 #include "CommonSlowPaths.h"
 #include "DeferGC.h"
-#include "JITCacheTest.h"
 #include "JSArray.h"
 #include "JSCInlines.h"
 #include "JSCellButterfly.h"
 #include "JSGlobalObject.h"
 #include "StrongInlines.h"
-#include "UCBSections.h"
-#include "UCBTestSupport.h"
 #include "UnlinkedCodeBlock.h"
 #include "VMEntryScope.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/ucb/UCBTestFixtures.h"
+#include "jitcache/tests/ucb/UCBTestPart.h"
+#include "jitcache/ucb/UCBSections.h"
 #include <optional>
 #include <span>
 #include <wtf/Vector.h>
@@ -28,8 +29,7 @@
 #include <wtf/text/WTFString.h>
 
 // The tests of UCBSections: the ucb.identity section that writeIdentitySection writes and parseIdentitySection reads,
-// field by field and rule by rule; the constant check constantMapsFit; atomizeStringConstant; and
-// rebuildAtomStringButterflies on a UCB decoded from a generated one's core.
+// field by field; atomizeStringConstant; and rebuildAtomStringButterflies on a UCB decoded from a generated one's core.
 
 namespace JSC::JITCache::Tests {
 
@@ -55,13 +55,13 @@ static bool sameParseFields(const std::optional<FunctionParseFields>& a, const s
 
 static bool sameIdentitySection(const IdentitySection& a, const IdentitySection& b)
 {
-    return a.coreKind == b.coreKind && a.key == b.key && a.contextDigest == b.contextDigest && a.coreDigest == b.coreDigest
-        && a.holderDigest == b.holderDigest && sameParseFields(a.functionParseFields, b.functionParseFields) && a.constantCount == b.constantCount
+    return a.coreKind == b.coreKind && a.key == b.key && a.contextDigest == b.contextDigest && a.holderDigest == b.holderDigest
+        && sameParseFields(a.functionParseFields, b.functionParseFields) && a.constantCount == b.constantCount
         && equalSpans(a.butterflyMap, b.butterflyMap) && equalSpans(a.childHolderDigests, b.childHolderDigests);
 }
 
-// Whether `bytes` hold `expected` where the identity section's layout puts each field, with a zero reserved byte, zero
-// padding after the map and the child holder digests at the 8-aligned end of the map.
+// Whether `bytes` hold `expected` where the identity section's layout puts each field, with zero padding after the map
+// and the child holder digests at the 8-aligned end of the map.
 static bool identityBytesMatch(std::span<const uint8_t> bytes, const IdentitySection& expected)
 {
     size_t mapBytes = (static_cast<size_t>(expected.constantCount) + 7) / 8;
@@ -70,27 +70,21 @@ static bool identityBytesMatch(std::span<const uint8_t> bytes, const IdentitySec
     if (bytes.size() != digestsAt + expected.childHolderDigests.size())
         return false;
     FunctionParseFields parseFields = expected.functionParseFields.value_or(FunctionParseFields { NoFeatures, NoLexicallyScopedFeatures, false });
-    return readField<uint32_t>(bytes, 0) == identitySectionMagic
-        && readField<uint16_t>(bytes, identityVersionOffset) == 1
-        && bytes[identityCoreKindOffset] == static_cast<uint8_t>(expected.coreKind)
-        && !bytes[identityReservedOffset]
-        && equalSpans(bytes.subspan(identityKeyOffset, BodyKey::byteSize), expected.key.bytes())
+    return equalSpans(bytes.subspan(identityKeyOffset, BodyKey::byteSize), expected.key.bytes())
         && readField<Digest256>(bytes, identityContextDigestOffset) == expected.contextDigest
-        && readField<Digest256>(bytes, identityCoreDigestOffset) == expected.coreDigest
         && readField<Digest256>(bytes, identityHolderDigestOffset) == expected.holderDigest.value_or(Digest256 { })
         && readField<CodeFeatures>(bytes, identityFeaturesOffset) == parseFields.features
         && bytes[identityLexicallyScopedFeaturesOffset] == parseFields.lexicallyScopedFeatures
         && bytes[identityHasCapturedVariablesOffset] == static_cast<uint8_t>(parseFields.hasCapturedVariables)
         && readField<uint32_t>(bytes, identityConstantCountOffset) == expected.constantCount
+        && bytes[identityCoreKindOffset] == static_cast<uint8_t>(expected.coreKind)
         && equalSpans(bytes.subspan(identityButterflyMapOffset, mapBytes), expected.butterflyMap)
         && isAllZero(bytes.subspan(mapEnd, digestsAt - mapEnd))
         && equalSpans(bytes.subspan(digestsAt), expected.childHolderDigests);
 }
 
-// ucb.identity: a program core, and a function core that lists its children's holder digests, round-trip with strict on
-// and off, laid out at the identity section's offsets with the butterfly map generation's constants give; strict parsing
-// rejects each rule of the layout broken once, and parsing with strict off still answers wherever the layout stays
-// readable.
+// ucb.identity: a program core, and a function core that lists its children's holder digests, are laid out at the
+// identity section's offsets with the butterfly map generation's constants give, and round-trip.
 static bool testIdentitySection(VM& vm, TestPart& part)
 {
     auto fixture = generateSectionFixture(vm);
@@ -135,7 +129,6 @@ static bool testIdentitySection(VM& vm, TestPart& part)
         .coreKind = UnlinkedCodeBlockCoreKind::Program,
         .key = BodyKey::make(IdentityKind::Program, CodeSpecializationKind::CodeForCall, { }, filledDigest(0x41)),
         .contextDigest = filledDigest(0x11),
-        .coreDigest = filledDigest(0x22),
         .holderDigest = std::nullopt,
         .functionParseFields = std::nullopt,
         .constantCount = constantCount,
@@ -146,7 +139,6 @@ static bool testIdentitySection(VM& vm, TestPart& part)
         .coreKind = UnlinkedCodeBlockCoreKind::Function,
         .key = BodyKey::make(IdentityKind::Child, CodeSpecializationKind::CodeForConstruct, { }, filledDigest(0x42)),
         .contextDigest = filledDigest(0x33),
-        .coreDigest = filledDigest(0x44),
         .holderDigest = filledDigest(0x55),
         .functionParseFields = FunctionParseFields { static_cast<CodeFeatures>(ArgumentsFeature | ThisFeature | AsyncFunctionWithoutAwaitFeature), AllLexicallyScopedFeatures, true },
         .constantCount = constantCount,
@@ -159,7 +151,7 @@ static bool testIdentitySection(VM& vm, TestPart& part)
 
     auto write = [&](const IdentitySection& expected, std::span<const Digest256> digests) {
         Vector<uint8_t> bytes(identitySectionSize(constantCount, digests.size()));
-        writeIdentitySection(bytes.mutableSpan(), vm, expected.key, expected.contextDigest, expected.coreDigest, expected.holderDigest,
+        writeIdentitySection(bytes.mutableSpan(), vm, expected.key, expected.contextDigest, expected.holderDigest,
             expected.coreKind, expected.functionParseFields, codeBlock, digests);
         return bytes;
     };
@@ -169,102 +161,22 @@ static bool testIdentitySection(VM& vm, TestPart& part)
         return false;
     if (!part.check(identityBytesMatch(functionSection.span(), functionExpected), "writeIdentitySection did not lay out a function core and its child holder digests at the identity section's offsets"_s))
         return false;
-    for (bool strict : { true, false }) {
-        auto program = parseIdentitySection(programSection.span(), strict);
-        auto function = parseIdentitySection(functionSection.span(), strict);
-        bool roundTrips = program && sameIdentitySection(*program, programExpected) && function && sameIdentitySection(*function, functionExpected);
-        if (!part.check(roundTrips, strict ? "ucb.identity does not round-trip with strict on"_s : "ucb.identity does not round-trip with strict off"_s))
-            return false;
-    }
-
-    auto parseIdentity = [](std::span<const uint8_t> bytes, bool strict) {
-        return parseIdentitySection(bytes, strict);
-    };
-    auto rejects = [&](const Vector<uint8_t>& valid, ASCIILiteral rule, bool keepsLayout, const auto& mutate) {
-        return strictRejects(part, "ucb.identity"_s, parseIdentity, valid, rule, keepsLayout, mutate);
-    };
-    // N % 8 != 0, so the bit at N lies in the map's last byte.
-    size_t lastMapByte = constantCount / 8;
-    uint8_t bitAtN = 1u << (constantCount % 8);
-    size_t mapEnd = identityButterflyMapOffset + mapBytes;
-    return rejects(functionSection, "a wrong magic"_s, true, [](auto& bytes) { bytes[0] ^= 0xff; })
-        && rejects(functionSection, "layout version 2"_s, true, [](auto& bytes) { writeField<uint16_t>(bytes.mutableSpan(), identityVersionOffset, 2); })
-        && rejects(functionSection, "core kind 4"_s, true, [](auto& bytes) { bytes[identityCoreKindOffset] = 4; })
-        && rejects(functionSection, "a program core under a child key"_s, true, [](auto& bytes) { bytes[identityCoreKindOffset] = static_cast<uint8_t>(UnlinkedCodeBlockCoreKind::Program); })
-        && rejects(programSection, "an eval core under a program key"_s, true, [](auto& bytes) { bytes[identityCoreKindOffset] = static_cast<uint8_t>(UnlinkedCodeBlockCoreKind::Eval); })
-        && rejects(functionSection, "a nonzero reserved byte"_s, true, [](auto& bytes) { bytes[identityReservedOffset] = 1; })
-        && rejects(functionSection, "key version 2"_s, true, [](auto& bytes) { bytes[identityKeyOffset] = 2; })
-        && rejects(functionSection, "key identity kind 0"_s, true, [](auto& bytes) { bytes[identityKeyOffset + 1] = 0; })
-        && rejects(functionSection, "key identity kind 8"_s, true, [](auto& bytes) { bytes[identityKeyOffset + 1] = 8; })
-        && rejects(functionSection, "key specialization 2"_s, true, [](auto& bytes) { bytes[identityKeyOffset + 2] = 2; })
-        && rejects(functionSection, "a key mode bit outside CodeGenerationMode"_s, true, [](auto& bytes) { bytes[identityKeyOffset + 3] = 0x80; })
-        && rejects(functionSection, "a nonzero reserved key byte"_s, true, [](auto& bytes) { bytes[identityKeyOffset + 7] = 1; })
-        && rejects(functionSection, "function features at 1 << bitWidthOfCodeFeatures"_s, true, [](auto& bytes) { writeField<CodeFeatures>(bytes.mutableSpan(), identityFeaturesOffset, 1u << bitWidthOfCodeFeatures); })
-        && rejects(functionSection, "lexically scoped features above AllLexicallyScopedFeatures"_s, true, [](auto& bytes) { bytes[identityLexicallyScopedFeaturesOffset] = AllLexicallyScopedFeatures + 1; })
-        && rejects(functionSection, "has-captured-variables 2"_s, true, [](auto& bytes) { bytes[identityHasCapturedVariablesOffset] = 2; })
-        && rejects(programSection, "a nonzero holder digest on a program core"_s, true, [](auto& bytes) { bytes[identityHolderDigestOffset + 31] = 1; })
-        && rejects(programSection, "function features on a program core"_s, true, [](auto& bytes) { writeField<CodeFeatures>(bytes.mutableSpan(), identityFeaturesOffset, ArgumentsFeature); })
-        && rejects(programSection, "lexically scoped features on a program core"_s, true, [](auto& bytes) { bytes[identityLexicallyScopedFeaturesOffset] = StrictModeLexicallyScopedFeature; })
-        && rejects(programSection, "has-captured-variables on a program core"_s, true, [](auto& bytes) { bytes[identityHasCapturedVariablesOffset] = 1; })
-        && rejects(programSection, "a map bit at N"_s, true, [&](auto& bytes) { bytes[identityButterflyMapOffset + lastMapByte] |= bitAtN; })
-        && (baseSize == mapEnd || rejects(programSection, "nonzero padding"_s, true, [&](auto& bytes) { bytes[mapEnd] = 1; }))
-        && rejects(programSection, "a constant count whose map needs eight more bytes"_s, false, [&](auto& bytes) { writeField<uint32_t>(bytes.mutableSpan(), identityConstantCountOffset, constantCount + 64); })
-        && rejects(programSection, "a constant count of 1 << 28"_s, false, [](auto& bytes) { writeField<uint32_t>(bytes.mutableSpan(), identityConstantCountOffset, sectionCountLimit); })
-        && rejects(programSection, "one byte more"_s, true, [](auto& bytes) { bytes.append(static_cast<uint8_t>(0)); })
-        && rejects(functionSection, "a partial child holder digest"_s, true, [](auto& bytes) { bytes.removeLast(); })
-        && rejects(programSection, "one byte fewer"_s, false, [](auto& bytes) {
-            bytes.removeLast();
-        });
+    IdentitySection program = parseIdentitySection(programSection.span());
+    IdentitySection function = parseIdentitySection(functionSection.span());
+    bool roundTrips = sameIdentitySection(program, programExpected) && sameIdentitySection(function, functionExpected);
+    return part.check(roundTrips, "ucb.identity does not round-trip"_s);
 }
 
-// constantMapsFit accepts the butterfly map of the UCB's own constants, and refuses a map that marks a constant of another
-// kind or a butterfly not made of strings alone, and another constant count. atomizeStringConstant turns a plain string, as
-// a decode leaves a long element of a butterfly, into an atom marked as one, leaves an atom as it is, and allocates no
-// cell.
-static bool testConstantMapsAndAtomization(VM& vm, TestPart& part)
+// atomizeStringConstant turns a plain string, as a decode leaves a long element of a butterfly, into an atom marked as
+// one, leaves an atom as it is, and allocates no cell.
+static bool testAtomization(VM& vm, TestPart& part)
 {
     auto fixture = generateSectionFixture(vm);
     if (!part.check(!!fixture, "the section fixture program failed to generate"_s))
         return false;
     UnlinkedCodeBlock& codeBlock = *fixture->codeBlock.get();
-    auto constantCount = static_cast<uint32_t>(codeBlock.constantRegisters().size());
-    size_t mapBytes = (static_cast<size_t>(constantCount) + 7) / 8;
     auto atomIndex = stringConstantIndex(codeBlock, "jitcache-u5-atom-constant"_s);
-    auto symbolTable = symbolTableConstantIndex(codeBlock);
-    auto words = butterflyConstantIndex(codeBlock, "alpha"_s, 3);
-    auto mixed = butterflyConstantIndex(codeBlock, "alpha"_s, 2);
-    if (!part.check(atomIndex && symbolTable && words && mixed, "the fixture program lacks a constant the test reads"_s))
-        return false;
-
-    auto identityWith = [&](std::span<const uint8_t> butterflies, uint32_t count) {
-        return IdentitySection {
-            .coreKind = UnlinkedCodeBlockCoreKind::Program,
-            .key = BodyKey::make(IdentityKind::Program, CodeSpecializationKind::CodeForCall, { }, filledDigest(0x61)),
-            .contextDigest = { },
-            .coreDigest = { },
-            .holderDigest = std::nullopt,
-            .functionParseFields = std::nullopt,
-            .constantCount = count,
-            .butterflyMap = butterflies,
-            .childHolderDigests = { },
-        };
-    };
-    auto mapMarking = [&](uint32_t index) {
-        Vector<uint8_t> map(FillWith { }, mapBytes, 0);
-        setBit(map.mutableSpan(), index);
-        return map;
-    };
-    Vector<uint8_t> wordsMap = mapMarking(*words);
-    if (!part.check(constantMapsFit(codeBlock, identityWith(wordsMap.span(), constantCount)), "constantMapsFit refuses a map that marks the all-string literal"_s))
-        return false;
-    Vector<uint8_t> tableMarked = mapMarking(*symbolTable);
-    Vector<uint8_t> stringMarked = mapMarking(*atomIndex);
-    Vector<uint8_t> mixedMarked = mapMarking(*mixed);
-    bool refusesMisfits = !constantMapsFit(codeBlock, identityWith(tableMarked.span(), constantCount))
-        && !constantMapsFit(codeBlock, identityWith(stringMarked.span(), constantCount))
-        && !constantMapsFit(codeBlock, identityWith(mixedMarked.span(), constantCount))
-        && !constantMapsFit(codeBlock, identityWith(wordsMap.span(), constantCount + 1));
-    if (!part.check(refusesMisfits, "constantMapsFit accepts a map that marks a constant of the wrong kind, or another constant count"_s))
+    if (!part.check(!!atomIndex, "the fixture program lacks a constant the test reads"_s))
         return false;
 
     // A plain string with characters no other string holds, and generation's atom.
@@ -327,9 +239,9 @@ static bool testButterflyRebuild(VM& vm, TestPart& part)
     // The identity section a capture of the generated UCB writes, whose butterfly map marks the literal in the atom form.
     Vector<uint8_t> identityBytes(identitySectionSize(constantCount));
     writeIdentitySection(identityBytes.mutableSpan(), vm, BodyKey::make(IdentityKind::Program, CodeSpecializationKind::CodeForCall, { }, filledDigest(0x71)), filledDigest(0x72),
-        filledDigest(0x73), std::nullopt, UnlinkedCodeBlockCoreKind::Program, std::nullopt, generated);
-    auto identity = parseIdentitySection(identityBytes.span(), true);
-    bool marksAtomForm = identity && bitIsSet(identity->butterflyMap, *words) && !bitIsSet(identity->butterflyMap, *mixed) && !bitIsSet(identity->butterflyMap, *prefix);
+        std::nullopt, UnlinkedCodeBlockCoreKind::Program, std::nullopt, generated);
+    IdentitySection identity = parseIdentitySection(identityBytes.span());
+    bool marksAtomForm = bitIsSet(identity.butterflyMap, *words) && !bitIsSet(identity.butterflyMap, *mixed) && !bitIsSet(identity.butterflyMap, *prefix);
     if (!part.check(marksAtomForm, "the butterfly map of a generated UCB does not mark exactly its literal in the atom form"_s))
         return false;
 
@@ -338,7 +250,7 @@ static bool testButterflyRebuild(VM& vm, TestPart& part)
     if (!part.check(!!core, "encodeUnlinkedCodeBlockCore failed on the fixture program"_s))
         return false;
     CoreDecodeFailure decodeFailure = CoreDecodeFailure::None;
-    UnlinkedCodeBlock* decodedCodeBlock = decodeUnlinkedCodeBlockCore(vm, Ref<CachedBytecode> { *core }, fixture->source, UnlinkedCodeBlockCoreKind::Program, nullptr, false, decodeFailure);
+    UnlinkedCodeBlock* decodedCodeBlock = decodeUnlinkedCodeBlockCore(vm, Ref<CachedBytecode> { *core }, fixture->source, UnlinkedCodeBlockCoreKind::Program, nullptr, decodeFailure);
     Strong<UnlinkedCodeBlock> decoded { vm, decodedCodeBlock };
     if (!part.check(decodedCodeBlock && decodeFailure == CoreDecodeFailure::None, "decodeUnlinkedCodeBlockCore failed on the fixture program's core"_s))
         return false;
@@ -353,15 +265,13 @@ static bool testButterflyRebuild(VM& vm, TestPart& part)
     // The decode gives every butterfly the plain form; otherwise the rebuild would go untested.
     if (!part.check(decodedWords && decodedMixed && decodedPrefix && decodedWords->structure() != atomStringsStructure, "the decode did not leave the all-string literal in the plain form"_s))
         return false;
-    if (!part.check(constantMapsFit(codeBlock, *identity), "constantMapsFit refuses the UCB decoded from the generated one's core"_s))
-        return false;
 
-    Digest256 encodingBefore = coreDigestOf(vm, codeBlock, nullptr);
+    auto encodingBefore = encodeCoreBytes(vm, codeBlock, nullptr);
     {
         DeferGC deferGC(vm);
-        rebuildAtomStringButterflies(vm, codeBlock, *identity);
+        rebuildAtomStringButterflies(vm, codeBlock, identity);
     }
-    if (!part.check(coreDigestOf(vm, codeBlock, nullptr) == encodingBefore, "rebuildAtomStringButterflies changed the core encoding"_s))
+    if (!part.check(encodingBefore && encodeCoreBytes(vm, codeBlock, nullptr) == encodingBefore, "rebuildAtomStringButterflies changed the core encoding"_s))
         return false;
 
     auto* rebuilt = constantCell<JSCellButterfly>(codeBlock, *words);
@@ -380,8 +290,6 @@ static bool testButterflyRebuild(VM& vm, TestPart& part)
     bool unmarkedStayPlain = constantCell<JSCellButterfly>(codeBlock, *mixed) == decodedMixed && decodedMixed->structure() == vm.cellButterflyStructure(decodedMixed->indexingMode())
         && constantCell<JSCellButterfly>(codeBlock, *prefix) == decodedPrefix && decodedPrefix->structure() == vm.cellButterflyStructure(decodedPrefix->indexingMode());
     if (!part.check(unmarkedStayPlain, "rebuildAtomStringButterflies changed an unmarked butterfly"_s))
-        return false;
-    if (!part.check(constantMapsFit(codeBlock, *identity), "constantMapsFit refuses the rebuilt UCB"_s))
         return false;
 
     // The array new_array_buffer makes from the rebuilt butterfly, searched through the atom fast paths of indexOf and
@@ -421,10 +329,10 @@ JITCACHE_TEST(ucbSectionsIdentityLayout, Yes)
     testIdentitySection(*context.vm(), part);
 }
 
-JITCACHE_TEST(ucbSectionsConstantMapsAndAtomization, Yes)
+JITCACHE_TEST(ucbSectionsAtomizeStringConstant, Yes)
 {
     TestPart part { context };
-    testConstantMapsAndAtomization(*context.vm(), part);
+    testAtomization(*context.vm(), part);
 }
 
 JITCACHE_TEST(ucbSectionsRebuildAtomStringButterflies, Yes)

@@ -34,8 +34,6 @@
 #include "GlobalExecutable.h"
 #include "IsoCellSetInlines.h"
 #include "JIT.h"
-#include "JITCacheBench.h"
-#include "JITCacheGlue.h"
 #include "JSCellInlines.h"
 #include "JSGlobalObjectInlines.h"
 #include "JSObjectInlines.h"
@@ -45,6 +43,8 @@
 #include "ParserError.h"
 #include "ProgramCodeBlock.h"
 #include "VMInlines.h"
+#include "jitcache/glue/JITCacheGlue.h"
+#include "jitcache/session/JITCacheBench.h"
 
 namespace JSC {
 

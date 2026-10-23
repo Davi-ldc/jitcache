@@ -2,14 +2,15 @@
 // jitcache-qemu-cpu: 0 max
 // jitcache-qemu-cpu: 1 neoverse-n1
 // jitcache-expect-no-install: 1
-// jitcache-check: 1 resources/rejected-cpu-vector.ts
+// jitcache-check: 1 resources/checker.ts start rejected start.incompatible supportsDoubleToInt32ConversionUsingJavaScriptSemantics supportsRoundFloatToIntegerFloat supportsSHA3
 
 // A Consumer whose CPU lacks a feature the Producer's had, under QEMU only. The Producer runs on QEMU's max model and the
 // Consumer on neoverse-n1, whose CPU feature vectors differ in JSCVT, SHA3 and FRINTTS. The artifact's header records
 // the Producer's vector, so the Consumer's start is
 // Rejected at start.incompatible, with a detail naming the lowest differing predicate, which the checker reads in the
-// start line. The Consumer's VM stays unconfigured and imports nothing, and the runner compares both outputs with the
-// JITCache-off run's.
+// start line: one of the three predicates whose bits differ between the two models, as its directive names them. The
+// Consumer's VM stays unconfigured and imports nothing, and the runner compares both outputs with the JITCache-off
+// run's.
 load("./resources/integrator.js", "caller relative");
 
 (function main(role, scratch, artifact, sequence) {

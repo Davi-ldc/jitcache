@@ -5,17 +5,13 @@
 #if ENABLE(JIT)
 
 #include "ArrayAllocationProfile.h"
-#include "ArrayConventions.h"
 #include "ArrayProfile.h"
 #include "BytecodeStructs.h"
 #include "CodeBlock.h"
 #include "IndexingType.h"
 #include "IterationModeMetadata.h"
-#include "JSPropertyNameEnumerator.h"
 #include "MetadataTable.h"
 #include "Opcode.h"
-#include "SpeculatedType.h"
-#include "ToThisStatus.h"
 #include "ValueProfile.h"
 #include <array>
 #include <bit>
@@ -23,21 +19,18 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tuple>
-#include <type_traits>
 #include <utility>
 
 // The CB lane's two body-file sections, cb.state and cb.summary: their layouts, the family table that fixes the order of
-// the metadata records, the guarded walkers through which the lane reaches a CodeBlock's metadata, and the domain
-// predicates of validation. Integers and floats are stored in native byte order, and no field holds an address, a cell, a
-// StructureID or a time. CBFormat.cpp holds the table's static checks and the size functions; the templates and the
-// constexpr predicates live here, where their callers can instantiate and evaluate them.
+// the metadata records, the guarded walkers through which the lane reaches a CodeBlock's metadata, and the encoding of
+// the fields cb.state does not store as the engine does. Integers and floats are stored in native byte order, and no
+// field holds an address, a cell, a StructureID or a time. CBFormat.cpp holds the table's static checks and the size
+// functions; the templates and the constexpr helpers live here, where their callers can instantiate and evaluate them.
 
 namespace JSC::JITCache::CBFormat {
 
 static_assert(std::endian::native == std::endian::little, "cb.state and cb.summary store integers and floats in native byte order");
 
-static constexpr uint16_t stateLayoutVersion = 1;
-static constexpr uint16_t summaryLayoutVersion = 1;
 enum class Tier : uint8_t { Baseline = 1 };
 // Whether the baseline counter travels. NotCarried marks a body with a polymorphic site, whose consumer keeps the counter
 // native setup arms.
@@ -51,9 +44,9 @@ static constexpr size_t sectionAlignment = 8;
 using FamilyEntryCounts = std::array<uint32_t, numberOfFamilies>;
 
 struct StateHeader {
-    uint16_t layoutVersion; // stateLayoutVersion
     uint8_t tier; // Tier::Baseline
     uint8_t counterMode; // CounterMode
+    uint16_t reserved; // 0, so that the header has no implicit padding
     uint32_t numArguments; // CodeBlock::numParameters()
     uint32_t numValueProfiles; // UnlinkedMetadataTable::numValueProfiles(), 0 without metadata
     uint32_t numLazyOperandProfiles;
@@ -82,9 +75,9 @@ struct LazyOperandRecord { // one lazy-operand profile's key and prediction
 static_assert(sizeof(LazyOperandRecord) == 24);
 
 struct SummaryHeader {
-    uint16_t layoutVersion; // summaryLayoutVersion
     uint8_t tier; // Tier::Baseline
     uint8_t counterMode; // CounterMode, the same as cb.state's
+    uint16_t reserved; // 0, so that the header has no implicit padding
     uint32_t numArguments;
     uint32_t numValueProfiles;
     uint32_t numArrayProfiles; // the entries of every array-profile family, call sites included
@@ -188,17 +181,6 @@ using AllocationHintOps = OpListAfterFirst<void FOR_EACH_OPCODE_WITH_ARRAY_ALLOC
 #undef JITCACHE_CB_OP_LIST_ENTRY
 using IterationModesOps = OpList<OpIteratorOpen, OpIteratorNext, OpAsyncIteratorOpen, OpAsyncIteratorNext>;
 using EnumeratorModesOps = OpList<OpEnumeratorNext, OpEnumeratorInByVal, OpEnumeratorHasOwnProperty, OpEnumeratorPutByVal, OpEnumeratorGetByVal>;
-
-template<typename T, typename... Ops>
-consteval unsigned indexOf(OpList<Ops...>)
-{
-    constexpr std::array<bool, sizeof...(Ops)> matches { std::is_same_v<T, Ops>... };
-    for (unsigned index = 0; index < matches.size(); ++index) {
-        if (matches[index])
-            return index;
-    }
-    return matches.size();
-}
 
 // One descriptor per field: the opcode whose metadata holds it, its kind, and field(metadata), the field itself, which
 // exists when hasField is true. Three opcodes of FOR_EACH_OPCODE_WITH_SIMPLE_ARRAY_PROFILE, OpCall, OpCallIgnoreResult
@@ -381,10 +363,6 @@ void forEachFamily(const Functor& functor)
     Internal::forEachFamily(functor, std::make_integer_sequence<unsigned, numberOfFamilies>());
 }
 
-// F19, the allocation profile of op_new_array_buffer, found by opcode so that allocationHintFits's literal rule follows
-// the macro's order.
-static constexpr unsigned newArrayBufferFamily = firstAllocationHintFamily + Internal::indexOf<OpNewArrayBuffer>(Internal::AllocationHintOps { });
-
 // The guarded walkers. A CodeBlock whose bytecode adds no metadata entry and no value profile has no metadata table, and
 // MetadataTable's own walkers read through their this pointer, so each walker here reads codeBlock.metadataTable() once
 // and visits nothing when it is null. The lane reaches a CodeBlock's metadata only through them.
@@ -426,22 +404,8 @@ void forEachFamilyField(CodeBlock& codeBlock, const Functor& functor)
 }
 
 // The entries forEachFamilyEntry visits for each family's opcode, all zero without a metadata table. Capture records
-// them, and validateState compares the recorded counts with the CodeBlock's.
+// them.
 FamilyEntryCounts familyEntryCounts(CodeBlock&);
-
-// Calls functor(unsigned metadataID, IndexingType recommendedIndexingType) for each op_new_array_buffer instruction of the
-// CodeBlock, in stream order. It reads only the instructions and allocates nothing, so validateState and prepare's
-// link-state check can bound each literal's allocation hint by its own instruction.
-template<typename Functor>
-void forEachNewArrayBufferLiteral(CodeBlock& codeBlock, NOESCAPE const Functor& functor)
-{
-    for (const auto& instruction : codeBlock.instructions()) {
-        if (!instruction->is<OpNewArrayBuffer>())
-            continue;
-        auto bytecode = instruction->as<OpNewArrayBuffer>();
-        functor(bytecode.m_metadataID, bytecode.m_recommendedIndexingType);
-    }
-}
 
 // The arrays of cb.state, in section order. The zero padding follows the last one.
 enum class StateArray : uint8_t {
@@ -545,22 +509,7 @@ std::optional<SummaryLayout> summaryLayout(const SummaryHeader&);
 std::optional<size_t> stateSectionSize(const StateHeader&);
 std::optional<size_t> summarySectionSize(const SummaryHeader&);
 
-// The domain predicates validateState and validateSummary apply. Each bounds a value to what native code produces at its
-// site, or to a superset the engine handles safely.
-
-// The counter mode, in both sections' headers.
-constexpr bool counterModeFits(uint8_t counterMode)
-{
-    return counterMode == static_cast<uint8_t>(CounterMode::NotCarried) || counterMode == static_cast<uint8_t>(CounterMode::Carried);
-}
-
-// A prediction, or a summary category: a subset of SpecBytecodeTop.
-constexpr bool predictionFits(SpeculatedType prediction)
-{
-    return !(prediction & ~SpecBytecodeTop);
-}
-
-// An array profile: modes within ALL_ARRAY_MODES and flags within the eight ArrayProfileFlag bits.
+// The eight ArrayProfileFlag bits, which fit the byte cb.summary keeps for each array position.
 static constexpr uint32_t allArrayProfileFlags = static_cast<uint32_t>(ArrayProfileFlag::MayStoreHole)
     | static_cast<uint32_t>(ArrayProfileFlag::OutOfBounds)
     | static_cast<uint32_t>(ArrayProfileFlag::MayBeLargeTypedArray)
@@ -570,16 +519,6 @@ static constexpr uint32_t allArrayProfileFlags = static_cast<uint32_t>(ArrayProf
     | static_cast<uint32_t>(ArrayProfileFlag::DidPerformFirstRunPruning)
     | static_cast<uint32_t>(ArrayProfileFlag::MayBeRegExpMatchesArray);
 static_assert(allArrayProfileFlags == 0xff);
-
-constexpr bool arrayModesFit(uint32_t observedArrayModes)
-{
-    return !(observedArrayModes & ~static_cast<uint32_t>(ALL_ARRAY_MODES));
-}
-
-constexpr bool arrayProfileFlagsFit(uint32_t flags)
-{
-    return !(flags & ~allArrayProfileFlags);
-}
 
 // An allocation hint is stored as ArrayAllocationProfile stores it, (IndexingType << 8) | vectorLength.
 constexpr uint16_t encodeAllocationHint(IndexingType indexingType, unsigned vectorLength)
@@ -595,92 +534,6 @@ constexpr IndexingType allocationHintIndexingType(uint16_t hint)
 constexpr unsigned allocationHintVectorLength(uint16_t hint)
 {
     return hint & 0xff;
-}
-
-constexpr bool allocationHintVectorLengthFits(unsigned vectorLength)
-{
-    return vectorLength <= BASE_CONTIGUOUS_VECTOR_LEN_MAX;
-}
-
-// The rank of an array literal's type in the order CopyOnWriteArrayWithInt32 < CopyOnWriteArrayWithDouble <
-// CopyOnWriteArrayWithContiguous, the only types linking gives an op_new_array_buffer entry and updateProfile leaves
-// there. updateProfile only raises a hint, so a native hint never ranks below its instruction's type.
-constexpr std::optional<unsigned> copyOnWriteLiteralRank(IndexingType indexingType)
-{
-    switch (indexingType) {
-    case CopyOnWriteArrayWithInt32:
-        return 0;
-    case CopyOnWriteArrayWithDouble:
-        return 1;
-    case CopyOnWriteArrayWithContiguous:
-        return 2;
-    default:
-        return std::nullopt;
-    }
-}
-
-// The indexing types linking and ArrayAllocationProfile::updateProfile leave at a site of the family. A copy-on-write
-// hint at any other allocation site would give a mutable array a copy-on-write structure.
-constexpr bool allocationHintTypeFits(unsigned family, IndexingType hint)
-{
-    if (family == newArrayBufferFamily)
-        return !!copyOnWriteLiteralRank(hint);
-    if (familyKind(family) != FamilyKind::AllocationHint)
-        return false;
-    switch (hint) {
-    case ArrayWithUndecided:
-    case ArrayWithInt32:
-    case ArrayWithDouble:
-    case ArrayWithContiguous:
-    case ArrayWithArrayStorage:
-    case ArrayWithSlowPutArrayStorage:
-        return true;
-    default:
-        return false;
-    }
-}
-
-// An allocation hint's type: the family's set and, in F19, at least `recommended`, the m_recommendedIndexingType of the
-// literal whose entry holds the hint. A lower F19 hint makes the slow path copy the literal into a butterfly that
-// misrepresents its elements. A hint below the elements' type is safe in F16..F18, which ignore `recommended`.
-constexpr bool allocationHintFits(unsigned family, IndexingType hint, IndexingType recommended)
-{
-    if (!allocationHintTypeFits(family, hint))
-        return false;
-    if (family != newArrayBufferFamily)
-        return true;
-    auto recommendedRank = copyOnWriteLiteralRank(recommended);
-    return recommendedRank && *copyOnWriteLiteralRank(hint) >= *recommendedRank;
-}
-
-// Iteration modes: each opcode's native bits, the bits its writers record and its DFG handler has a case for or keeps.
-// A set bit the handler has no case for leaves a reachable block without a terminal.
-template<typename... Modes>
-constexpr uint16_t iterationModeBits(Modes... modes)
-{
-    return static_cast<uint16_t>((0u | ... | static_cast<unsigned>(modes)));
-}
-
-constexpr uint16_t nativeIterationModes(unsigned family)
-{
-    switch (family) {
-    case iteratorOpenIterationModesFamily:
-        return iterationModeBits(IterationMode::Generic, IterationMode::FastArray, IterationMode::FastMap, IterationMode::FastSet, IterationMode::FastString,
-            IterationMode::FastArrayValues, IterationMode::FastArrayKeys, IterationMode::FastArrayEntries, IterationMode::FastMapKeys, IterationMode::FastMapValues,
-            IterationMode::FastMapEntries, IterationMode::FastSetValues, IterationMode::FastSetEntries);
-    case iteratorNextIterationModesFamily:
-        return iterationModeBits(IterationMode::Generic, IterationMode::FastArray, IterationMode::FastString,
-            IterationMode::FastArrayValues, IterationMode::FastArrayKeys, IterationMode::FastArrayEntries, IterationMode::FastMapKeys, IterationMode::FastMapValues,
-            IterationMode::FastMapEntries, IterationMode::FastSetValues, IterationMode::FastSetEntries);
-    case asyncIteratorOpenIterationModesFamily:
-        return iterationModeBits(IterationMode::Generic, IterationMode::FastAsyncGenerator, IterationMode::AsyncFromSync);
-    case asyncIteratorNextIterationModesFamily:
-        return iterationModeBits(IterationMode::Generic, IterationMode::FastAsyncGenerator);
-    case iteratorCloseCheckIterationModesFamily:
-        return iterationModeBits(IterationMode::FastArray, IterationMode::FastString);
-    default:
-        return 0;
-    }
 }
 
 // An iteration-mode field's bits as cb.state stores them: IterationModeMetadata::seenModes, or the byte
@@ -705,32 +558,6 @@ constexpr void setIterationModes(IterationModeMetadata& field, uint16_t modes)
 constexpr void setIterationModes(uint8_t& field, uint16_t modes)
 {
     field = static_cast<uint8_t>(modes);
-}
-
-constexpr bool iterationModesFit(unsigned family, uint16_t seenModes)
-{
-    return !(seenModes & ~nativeIterationModes(family));
-}
-
-// Enumerator modes: within JSPropertyNameEnumerator::Flag.
-static constexpr uint8_t allEnumeratorModes = static_cast<uint8_t>(JSPropertyNameEnumerator::IndexedMode | JSPropertyNameEnumerator::OwnStructureMode
-    | JSPropertyNameEnumerator::GenericMode | JSPropertyNameEnumerator::HasSeenOwnStructureModeStructureMismatch);
-
-constexpr bool enumeratorModesFit(uint8_t modes)
-{
-    return !(modes & ~allEnumeratorModes);
-}
-
-// A to_this status: one of the three, since merge(ToThisStatus, ToThisStatus) crashes on any other value.
-constexpr bool toThisStatusFits(uint8_t status)
-{
-    return status == static_cast<uint8_t>(ToThisOK) || status == static_cast<uint8_t>(ToThisConflicted) || status == static_cast<uint8_t>(ToThisClearedByGC);
-}
-
-// The jneq_ptr bit of F31.
-constexpr bool branchBitFits(uint8_t bit)
-{
-    return bit <= 1;
 }
 
 } // namespace JSC::JITCache::CBFormat

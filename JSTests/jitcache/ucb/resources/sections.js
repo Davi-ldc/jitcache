@@ -13,77 +13,6 @@ var ucbSections = (function () {
     // The shared byte reader. Its file defines no global, so ucbSections stays the one global this file adds.
     const { byteReader } = load("../../resources/jitcache.js", "caller relative");
 
-    const roundConstants = new Uint32Array([
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ]);
-
-    function rotateRight(value, count)
-    {
-        return (value >>> count) | (value << (32 - count));
-    }
-
-    // FIPS 180-4 SHA-256 of a Uint8Array.
-    function sha256(message)
-    {
-        const blockCount = Math.ceil((message.length + 9) / 64);
-        const padded = new Uint8Array(blockCount * 64);
-        padded.set(message);
-        padded[message.length] = 0x80;
-        const view = new DataView(padded.buffer);
-        const bitLength = message.length * 8;
-        view.setUint32(padded.length - 8, Math.floor(bitLength / 0x100000000));
-        view.setUint32(padded.length - 4, bitLength >>> 0);
-
-        const state = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
-        const schedule = new Uint32Array(64);
-        for (let block = 0; block < blockCount; ++block) {
-            for (let i = 0; i < 16; ++i)
-                schedule[i] = view.getUint32(block * 64 + i * 4);
-            for (let i = 16; i < 64; ++i) {
-                const s0 = rotateRight(schedule[i - 15], 7) ^ rotateRight(schedule[i - 15], 18) ^ (schedule[i - 15] >>> 3);
-                const s1 = rotateRight(schedule[i - 2], 17) ^ rotateRight(schedule[i - 2], 19) ^ (schedule[i - 2] >>> 10);
-                schedule[i] = (schedule[i - 16] + s0 + schedule[i - 7] + s1) >>> 0;
-            }
-            let [a, b, c, d, e, f, g, h] = state;
-            for (let i = 0; i < 64; ++i) {
-                const s1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25);
-                const choice = (e & f) ^ (~e & g);
-                const t1 = (h + s1 + choice + roundConstants[i] + schedule[i]) >>> 0;
-                const s0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22);
-                const majority = (a & b) ^ (a & c) ^ (b & c);
-                const t2 = (s0 + majority) >>> 0;
-                h = g;
-                g = f;
-                f = e;
-                e = (d + t1) >>> 0;
-                d = c;
-                c = b;
-                b = a;
-                a = (t1 + t2) >>> 0;
-            }
-            state[0] = (state[0] + a) >>> 0;
-            state[1] = (state[1] + b) >>> 0;
-            state[2] = (state[2] + c) >>> 0;
-            state[3] = (state[3] + d) >>> 0;
-            state[4] = (state[4] + e) >>> 0;
-            state[5] = (state[5] + f) >>> 0;
-            state[6] = (state[6] + g) >>> 0;
-            state[7] = (state[7] + h) >>> 0;
-        }
-        const digest = new Uint8Array(32);
-        const digestView = new DataView(digest.buffer);
-        for (let i = 0; i < 8; ++i)
-            digestView.setUint32(i * 4, state[i]);
-        return digest;
-    }
-
     function hex(bytes)
     {
         let text = "";
@@ -98,54 +27,6 @@ var ucbSections = (function () {
         for (let i = 0; i < text.length; ++i)
             bytes[i] = text.charCodeAt(i);
         return bytes;
-    }
-
-    // The source digest of text the provider supplies no digest for: SHA-256 over one encoding byte, 1 for Latin-1 when
-    // every unit is at most 0xFF and 2 for UTF-16LE otherwise, then the code units.
-    function sourceDigest(text)
-    {
-        let latin1 = true;
-        for (let i = 0; i < text.length; ++i) {
-            if (text.charCodeAt(i) > 0xff) {
-                latin1 = false;
-                break;
-            }
-        }
-        const unitSize = latin1 ? 1 : 2;
-        const bytes = new Uint8Array(1 + text.length * unitSize);
-        bytes[0] = latin1 ? 1 : 2;
-        for (let i = 0; i < text.length; ++i) {
-            const unit = text.charCodeAt(i);
-            if (latin1)
-                bytes[1 + i] = unit;
-            else {
-                bytes[1 + 2 * i] = unit & 0xff;
-                bytes[2 + 2 * i] = unit >> 8;
-            }
-        }
-        return sha256(bytes);
-    }
-
-    // The key of a program body whose source is the whole of `text`, as the jsc shell's loadString evaluates it: kind
-    // Program, call, the empty code-generation mode, and a root identity record whose snapshot has the strict and
-    // with-scope bits clear, since a ProgramExecutable starts with no features. The shell's providers supply no digest,
-    // so the root's source digest is the one sourceDigest computes from the text.
-    function programKeyHex(text)
-    {
-        const record = new Uint8Array(56);
-        record.set(ascii("JITCache.root.v1"), 0);
-        record[16] = 1; // IdentityKind::Program
-        record.set(sourceDigest(text), 24);
-        const key = new Uint8Array(40);
-        key[0] = 1; // version
-        key[1] = 1; // IdentityKind::Program
-        key.set(sha256(record), 8);
-        return hex(key);
-    }
-
-    function le16(value)
-    {
-        return [value & 0xff, (value >>> 8) & 0xff];
     }
 
     function le32(value)
@@ -184,50 +65,47 @@ var ucbSections = (function () {
     function identity(bytes)
     {
         const read = byteReader(bytes);
-        const constantCount = read.u32(148);
+        const constantCount = read.u32(108);
         const section = {
             bytes,
-            magic: read.u32(0),
-            version: read.u16(4),
-            coreKind: bytes[6],
-            reserved: bytes[7],
-            key: hex(bytes.subarray(8, 48)),
-            holderDigest: hex(bytes.subarray(112, 144)),
-            features: read.u16(144),
-            lexicallyScopedFeatures: bytes[146],
-            hasCapturedVariables: bytes[147],
+            key: hex(bytes.subarray(0, 40)),
+            holderDigest: hex(bytes.subarray(72, 104)),
+            features: read.u16(104),
+            lexicallyScopedFeatures: bytes[106],
+            hasCapturedVariables: bytes[107],
             constantCount,
-            butterflyMap: 152,
-            end: 152 + Math.ceil(constantCount / 8),
+            coreKind: bytes[112],
+            butterflyMap: 113,
+            end: 113 + Math.ceil(constantCount / 8),
         };
         section.butterfly = index => bit(bytes, section.butterflyMap, index);
         // The child holder digests, 32 bytes each, follow the map's padding: declarations, then expressions.
         section.childHolderDigests = align(section.end, 8);
         section.childHolderDigestCount = (bytes.length - section.childHolderDigests) / 32;
         section.childHolderDigest = index => hex(bytes.subarray(section.childHolderDigests + 32 * index, section.childHolderDigests + 32 * (index + 1)));
-        if (section.magic !== 0x49424355 || section.version !== 1 || !Number.isInteger(section.childHolderDigestCount) || section.childHolderDigestCount < 0)
+        if (!Number.isInteger(section.childHolderDigestCount) || section.childHolderDigestCount < 0)
             throw failure("ucb.identity does not have the lane's identity layout", bytes);
         return section;
     }
 
     // ucb.feedback, with the LLInt counter its header carries: the active threshold, and the progress, the float total
     // count plus the int32 counter, as FeedbackSection::llintProgress adds them. The UCB's value predictions and array
-    // profiles are there only when the copies byte, byte 39, is 1; V and A count the UCB's profiles either way.
+    // profiles are there only when the copies byte, byte 31, is 1; V and A count the UCB's profiles either way.
     function feedback(bytes)
     {
         const read = byteReader(bytes);
         const counts = {
-            valueProfiles: read.u32(8),
-            arrayProfiles: read.u32(12),
-            binaryArithProfiles: read.u32(16),
-            unaryArithProfiles: read.u32(20),
-            exitSites: read.u32(24),
-            functionDecls: read.u32(28),
-            functionExprs: read.u32(32),
-            constants: read.u32(52),
+            valueProfiles: read.u32(0),
+            arrayProfiles: read.u32(4),
+            binaryArithProfiles: read.u32(8),
+            unaryArithProfiles: read.u32(12),
+            exitSites: read.u32(16),
+            functionDecls: read.u32(20),
+            functionExprs: read.u32(24),
+            constants: read.u32(44),
         };
-        const copies = bytes[39];
-        const predictions = 56;
+        const copies = bytes[31];
+        const predictions = 48;
         const arrays = predictions + (copies ? 8 * counts.valueProfiles : 0);
         const binary = arrays + (copies ? 8 * counts.arrayProfiles : 0);
         const unary = binary + 2 * counts.binaryArithProfiles;
@@ -236,10 +114,10 @@ var ucbSections = (function () {
         const constants = children + counts.functionDecls + counts.functionExprs;
         const end = constants + Math.ceil(counts.constants / 8);
         const section = { bytes, counts, copies, predictions, arrays, binary, unary, exits, children, constants, end };
-        if (read.u32(0) !== 0x46424355 || read.u16(4) !== 1 || copies > 1 || align(end, 8) !== bytes.length)
+        if (copies > 1 || align(end, 8) !== bytes.length)
             throw failure("ucb.feedback does not have the lane's feedback layout", bytes);
-        section.llintActiveThreshold = read.i32(40);
-        section.llintProgress = read.f32(44) + read.i32(48);
+        section.llintActiveThreshold = read.i32(32);
+        section.llintProgress = read.f32(36) + read.i32(40);
         return section;
     }
 
@@ -260,26 +138,12 @@ var ucbSections = (function () {
         return { value, offset: start, length: cursor.at - start };
     }
 
-    function varintBytes(value)
-    {
-        const bytes = [];
-        while (value >= 0x80) {
-            bytes.push((value & 0x7f) | 0x80);
-            value = Math.floor(value / 128);
-        }
-        bytes.push(value);
-        return bytes;
-    }
-
     const zigzag = encoded => (encoded % 2 ? -(encoded + 1) / 2 : encoded / 2);
 
-    // CachedJSValue::Kind and SourceCodeRepresentation, as runtime/CachedTypes.cpp and runtime/JSCJSValue.h number them.
-    const constantKind = { Int32: 5, Double: 6, SymbolTable: 7, String: 8, ImmutableButterfly: 9, RegExp: 10, OrderedHashTableSentinel: 13 };
+    // The number of CachedJSValue::Kind values runtime/CachedTypes.cpp defines.
     const kindCount = 14;
-    const linkTimeConstantRepresentation = 3;
 
-    // A function's ucb.core (CachedCodeBlock::packLayout in runtime/CachedTypes.cpp). The parsed core keeps its byte
-    // reader as `read`, which a test uses to read a constant's slot.
+    // A function's ucb.core (CachedCodeBlock::packLayout in runtime/CachedTypes.cpp).
     function functionCore(bytes)
     {
         const read = byteReader(bytes);
@@ -304,15 +168,12 @@ var ucbSections = (function () {
         const representations = array();
         const regionBegin = rootOffset - recordOffsetInRegion.value;
 
-        const core = { bytes, read, rootOffset, flags, regionBegin, steps, instructions, constants, representations };
+        const core = { bytes, rootOffset, flags, regionBegin, steps, instructions, constants, representations };
         core.instructionsStart = regionBegin + instructions.at;
         core.poolStart = regionBegin + constants.at;
         core.constantCount = constants.count.value;
-        core.slotsStart = core.poolStart + align(core.constantCount, 4);
         core.representationsStart = regionBegin + representations.at;
         core.kind = index => bytes[core.poolStart + index];
-        core.slot = index => core.slotsStart + 4 * index;
-        core.representation = index => (representations.count.value ? bytes[core.representationsStart + index] : 0);
 
         const inside = (start, length) => start >= 16 && start + length <= bytes.length;
         let consistent = regionBegin >= 16 && regionBegin <= rootOffset
@@ -330,8 +191,7 @@ var ucbSections = (function () {
     }
 
     return {
-        sha256, hex, ascii, sourceDigest, programKeyHex,
-        le16, le32, align, bit, find, varintBytes,
-        identity, feedback, functionCore, constantKind, linkTimeConstantRepresentation,
+        hex, ascii, le32, align, bit, find,
+        identity, feedback, functionCore,
     };
 })();

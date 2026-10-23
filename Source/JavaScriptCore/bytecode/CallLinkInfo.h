@@ -196,7 +196,8 @@ public:
     {
         return m_clearedByGC;
     }
-
+    
+    // JITCache: seeding sets the bit on a newborn CB's call site whose captured history has it.
     void setClearedByGC()
     {
         m_clearedByGC = true;

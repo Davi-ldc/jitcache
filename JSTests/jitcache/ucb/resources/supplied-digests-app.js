@@ -1,5 +1,5 @@
 // The app of supplied-digests.js, built with `bun build --compile` together with supplied-digests-module.js and
-// warm-module.js, which it loads at run time. supplied-digests.js runs it as a JITCache VM of its own with the run's role and strict on
+// warm-module.js, which it loads at run time. supplied-digests.js runs it as a JITCache VM of its own with the run's role
 // (resources/ucb-bun.js, runApp); the sequence index, which runApp passes on, picks the case: 0, an ES build; 1, the same
 // with the digest record removed; 2 and 3, built as CommonJS, with the module wrapper overridden in the Producer or in the
 // Consumer before the module loads. The checks are listed in supplied-digests.js.
@@ -10,10 +10,7 @@
 // statement therefore do not single out the entry module, and those checks are made over the windows below, around the
 // loads they name.
 
-// The statistics at the entry module's first statement, read before the app loads any other module. A Consumer that
-// imports a function of an internal module verifies that module's own supplied digest with strict on, since its
-// provider supplies it, so after the requires below the verification count would no longer single out the entry
-// module's import.
+// The statistics at the entry module's first statement, read before the app loads any other module.
 // bun:jsc is native, so loading it runs no internal module's code.
 const atFirstStatement = require("bun:jsc").jitcacheUCBStatistics?.();
 const path = require("node:path");
@@ -27,20 +24,13 @@ const overrides = (t.sequence === 2 && t.role === "Producer") || (t.sequence ===
 // `module.exports` (`export default require_...()`), and require of an ES module returns its namespace.
 const esBuild = t.sequence <= 1;
 
-// At its first statement, the entry module has been imported: its body was captured, so the Consumer imported it, and
-// with strict on that import verified the digest its key rests on. In an ES build, Bun's provider of the module looked
-// up its analysis when Bun created it, which hashed the text once before: with the record, to check the recorded
-// digest, a verification of its own; without it, to compute the digest the provider then supplies, which the import
-// verifies as it verifies a recorded one.
+// At its first statement, the entry module has been imported: its body was captured, so the Consumer imported it.
 const atStart = t.observes ? atFirstStatement : null;
-if (atStart && t.imports) {
+if (atStart && t.imports)
     t.check(atStart.imports >= 1, "the entry module did not import");
-    const verifications = esBuild && hasRecord ? 2 : 1;
-    t.check(atStart.suppliedDigestVerifications === verifications, () => `the entry module's import made ${atStart.suppliedDigestVerifications} verifications, expected ${verifications}`);
-}
 
-// What a function's first call in the Consumer does: it imports, and verifies nothing more.
-const firstCall = { imports: [">=", 1], suppliedDigestVerifications: 0 };
+// What a function's first call in the Consumer does: it imports.
+const firstCall = { imports: [">=", 1] };
 
 // The overriding wrapper. JSCommonJSModule::evaluate keeps a module's text from its first newline, which in a CommonJS
 // build ends the `// @bun @bun-cjs` comment, and drops its last four characters, which hold the `})` closing the bundled
@@ -91,8 +81,7 @@ function sdEval(n)
     return eval("{ let sdEvalTotal = n; for (let i = 0; i < 300; ++i) sdEvalTotal = (sdEvalTotal + i) | 0; sdEvalTotal; }");
 }
 
-// An ES5 constructor: `new` requests its construct body, which imports with no further verification, since the entry
-// module's import verified the digest its key rests on.
+// An ES5 constructor: `new` requests its construct body, which imports.
 function SdPoint(x)
 {
     this.x = x;
@@ -108,26 +97,26 @@ for (let i = 0; i < 400; ++i)
     total = (total + sdHot(i)) | 0;
 lines.push(`sdHot ${total}`);
 
-// The direct eval's key ends in its own text's digest, so its import verifies nothing.
-total = t.window("sdEval's first call", () => sdEval(1), t.imports ? { suppliedDigestVerifications: 0, imports: [">=", 1] } : { });
+// The direct eval's key ends in its own text's digest, and it imports too.
+total = t.window("sdEval's first call", () => sdEval(1), t.imports ? { imports: [">=", 1] } : { });
 for (let i = 0; i < 40; ++i)
     total = (total + sdEval(i)) | 0;
 lines.push(`sdEval ${total}`);
 
-const pointExpectations = t.imports ? { imports: 1, suppliedDigestVerifications: 0 } : { };
+const pointExpectations = t.imports ? { imports: 1 } : { };
 total = t.window("new SdPoint()'s first construction", () => new SdPoint(2).x, pointExpectations);
 for (let i = 0; i < 400; ++i)
     total = (total + new SdPoint(i).scaled(3)) | 0;
 lines.push(`SdPoint ${total}`);
 
-// The embedded module's root never reaches the baseline, so it is never imported: its function's import is the first to
-// rest on its provider's digest, the recorded one or, without the record, the one its analysis lookup computed, and
-// verifies it, with strict on. Under the other run's wrapper the function's key has no body at all.
+// The embedded module's root never reaches the baseline, so it is never imported, but its function's key rests on its
+// provider's digest: the recorded one or, without the record, the one its analysis lookup computed. Under the other
+// run's wrapper the function's key has no body at all.
 let moduleExpectations = { };
 if (t.imports && t.sequence >= 2)
     moduleExpectations = { imports: 0, "misses.NoBody": [">=", 1] };
 else if (t.imports)
-    moduleExpectations = { imports: [">=", 1], suppliedDigestVerifications: 1 };
+    moduleExpectations = { imports: [">=", 1] };
 total = t.window("the embedded module's function's first call", () => loaded.module.sdModuleHot(1), moduleExpectations);
 for (let i = 0; i < 400; ++i)
     total = (total + loaded.module.sdModuleHot(i)) | 0;

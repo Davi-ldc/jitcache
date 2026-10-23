@@ -2,15 +2,15 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
-#include "JITCacheParameters.h"
-#include "TestArtifact.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/tests/support/TestPack.h"
 #include <atomic>
 #include <wtf/DataLog.h>
 #include <wtf/Threading.h>
 
 // Tests of ArtifactWriter (store/ArtifactWriter.h and .cpp): commits appended to the pack and published by their root,
-// faults that leave nothing published, tombstones, full indexes once the delta chain is long, and compactions, with a
-// consumer reading on another thread meanwhile. None needs a VM. A kill point ends its process, so producer-kill.js and
+// faults that leave nothing published, full indexes once the delta chain is long, and compactions, with a consumer
+// reading on another thread meanwhile. None needs a VM. A kill point ends its process, so producer-kill.js and
 // kill-points.js test each point instead.
 
 namespace JSC::JITCache::Tests {
@@ -68,7 +68,7 @@ JITCACHE_TEST(writerCommitPublishesTheSources, No)
     JITCACHE_CHECK(after == pack->packFileSize());
     JITCACHE_CHECK(after && pack->latestBlock() == *after - packIndexBlockBytes(1));
     JITCACHE_CHECK(pack->artifact().token(testKey(1)) == committed->version);
-    BodyOpen opened = pack->artifact().open(testKey(1), ValidationMode::Full);
+    BodyOpen opened = pack->artifact().open(testKey(1));
     JITCACHE_CHECK(opened.body && holdsSections(*opened.body, 3) && opened.body->version() == committed->version);
     JITCACHE_CHECK(opened.body && opened.body->llintThreshold() == 500 && opened.body->counterProgress() == 3 && opened.body->highestTier() == 1);
     JITCACHE_CHECK(packHoldsBodies(pack->cacheFd()));
@@ -91,7 +91,7 @@ JITCACHE_TEST(writerStreamsThroughSmallStagingBuffers, No)
         }
         auto committed = pack->writer().commit({ testKey(2), 500, 9, 1 }, CommitSections { sources.span() });
         JITCACHE_CHECK(!!committed);
-        BodyOpen opened = pack->artifact().open(testKey(2), ValidationMode::Full);
+        BodyOpen opened = pack->artifact().open(testKey(2));
         JITCACHE_CHECK(opened.body && holdsSections(*opened.body, 9, 5));
     }
 }
@@ -147,26 +147,6 @@ JITCACHE_TEST(writerRefusedStagingChargeWritesNothing, No)
     JITCACHE_CHECK(pack->validEnd() == before);
 }
 
-JITCACHE_TEST(writerTombstoneRemovesTheKey, No)
-{
-    HookScope hooks;
-    auto pack = PackArtifact::create(context);
-    if (!pack)
-        return;
-    RefPtr<OpenedArtifact> other = pack->takeAnother(context);
-    if (!other)
-        return;
-    JITCACHE_CHECK(!!commitBody(pack->writer(), testKey(1), 1));
-    JITCACHE_CHECK(!!commitBody(pack->writer(), testKey(2), 2));
-    JITCACHE_CHECK(other->token(testKey(1)));
-    JITCACHE_CHECK(!pack->writer().remove(testKey(1)));
-    JITCACHE_CHECK(!pack->writer().remove(testKey(3))); // a key without a body is left alone
-    JITCACHE_CHECK(!other->token(testKey(1)) && other->token(testKey(2)));
-    JITCACHE_CHECK(other->open(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Absent);
-    RefPtr<OpenedArtifact> fresh = pack->takeAnother(context);
-    JITCACHE_CHECK(fresh && fresh->indexedBodies() == 1);
-}
-
 // Any byte past the live records and one full index compacts, so the index blocks that new keys' commits appended are
 // enough. The compacted pack is dense and the next call leaves it alone, until superseded versions make it compact again.
 JITCACHE_TEST(writerCompactsUnlessThePackIsDense, No)
@@ -196,7 +176,7 @@ JITCACHE_TEST(writerCompactsUnlessThePackIsDense, No)
     JITCACHE_CHECK(recompacted && *recompacted && (*recompacted)->bodies == 3 && (*recompacted)->packBytes < (*recompacted)->replacedPackBytes);
     for (uint16_t seed = 1; seed <= 3; ++seed) {
         JITCACHE_CHECK(pack->artifact().token(testKey(seed)) == tokens[seed - 1]);
-        BodyOpen opened = pack->artifact().open(testKey(seed), ValidationMode::Full);
+        BodyOpen opened = pack->artifact().open(testKey(seed));
         JITCACHE_CHECK(opened.body && holdsSections(*opened.body, static_cast<uint8_t>(seed + 40)));
     }
     // The next commit appends to the new pack.
@@ -259,7 +239,7 @@ JITCACHE_TEST(writerChainGrowsDeadBytesAndCompacts, No)
     if (!fresh)
         return;
     for (uint16_t seed = 1; seed <= 12; ++seed) {
-        BodyOpen opened = fresh->open(testKey(seed), ValidationMode::Full);
+        BodyOpen opened = fresh->open(testKey(seed));
         JITCACHE_CHECK(opened.body && holdsSections(*opened.body, static_cast<uint8_t>(seed + 7)));
     }
 }
@@ -282,7 +262,7 @@ JITCACHE_TEST(writerConsumerReadsWhileProducerCommitsAndCompacts, No)
     RefPtr<Thread> reader = Thread::create("jitcache reader"_s, [&] {
         while (!done.load()) {
             for (uint16_t seed = 1; seed <= keys; ++seed) {
-                BodyOpen body = consumer->open(testKey(seed), ValidationMode::Full);
+                BodyOpen body = consumer->open(testKey(seed));
                 if (body.outcome == StoreOutcome::Found) {
                     opened.fetch_add(1);
                     // Every committed version of a key holds the sections of one seed congruent to the key's.
@@ -309,7 +289,7 @@ JITCACHE_TEST(writerConsumerReadsWhileProducerCommitsAndCompacts, No)
     JITCACHE_CHECK(!broken.load());
     JITCACHE_CHECK(opened.load() > 0);
     for (uint16_t seed = 1; seed <= keys; ++seed) {
-        BodyOpen body = consumer->open(testKey(seed), ValidationMode::Full);
+        BodyOpen body = consumer->open(testKey(seed));
         JITCACHE_CHECK(body.body && holdsSections(*body.body, static_cast<uint8_t>(seed + keys * 31)));
     }
 }
@@ -384,7 +364,7 @@ JITCACHE_TEST(writerRewriteSectionResealsTheBody, No)
     std::array<uint8_t, 2> bytes { 0xAB, 0xCD };
     auto rewritten = pack->writer().rewriteSection(testKey(1), SectionKind::UCBCore, 3, bytes);
     JITCACHE_CHECK(rewritten && committed && rewritten->version != committed->version);
-    BodyOpen opened = pack->artifact().open(testKey(1), ValidationMode::Full);
+    BodyOpen opened = pack->artifact().open(testKey(1));
     if (!opened.body) {
         JITCACHE_FAIL("the rewritten body does not open"_s);
         return;
@@ -450,7 +430,7 @@ JITCACHE_TEST(writerRewriteSectionCopiesEverySectionTheBodyHolds, No)
             JITCACHE_CHECK(rewritten->version != version);
             version = rewritten->version;
             memcpySpan(expected[static_cast<size_t>(kind)].mutableSpan().subspan(offset, bytes.size()), std::span { bytes });
-            BodyOpen opened = pack->artifact().open(moduleKey, ValidationMode::Full);
+            BodyOpen opened = pack->artifact().open(moduleKey);
             if (!opened.body) {
                 JITCACHE_FAIL(makeString("tier "_s, static_cast<unsigned>(tier), ": the body does not open after the rewrite of "_s, sectionName));
                 return false;

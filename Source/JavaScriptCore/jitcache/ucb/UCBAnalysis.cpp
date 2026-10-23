@@ -1,28 +1,27 @@
 #include "config.h"
-#include "UCBAnalysis.h"
+#include "jitcache/ucb/UCBAnalysis.h"
 
 #include "AbstractModuleRecord.h"
-#include "BodyKey.h"
-#include "JITCacheBench.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "JSGlobalObject.h"
 #include "JSModuleRecord.h"
 #include "Options.h"
-#include "ProducerBudget.h"
 #include "ScriptFetchParameters.h"
-#include "UCBKeys.h"
-#include "UCBRegistry.h"
 #include "VM.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/BenchClock.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/session/JITCacheBench.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/ucb/UCBKeys.h"
+#include "jitcache/ucb/UCBRegistry.h"
 #include <algorithm>
 #include <compare>
 #include <limits>
 #include <numeric>
 #include <optional>
 #include <utility>
-#include <wtf/HashSet.h>
-#include <wtf/HashTraits.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringView.h>
@@ -83,14 +82,6 @@ static void writeAnalysisInteger(std::span<uint8_t> out, uint64_t value, unsigne
 {
     for (unsigned i = 0; i < width; ++i)
         out[i] = static_cast<uint8_t>(value >> (8 * i));
-}
-
-static uint32_t readAnalysisInteger(std::span<const uint8_t> bytes, unsigned width)
-{
-    uint32_t value = 0;
-    for (unsigned i = 0; i < width; ++i)
-        value |= static_cast<uint32_t>(bytes[i]) << (8 * i);
-    return value;
 }
 
 // What a slot may hold: a name that exists and is no symbol.
@@ -427,13 +418,6 @@ private:
     size_t m_bytes { 0 };
 };
 
-// Invalid material from the analysis import, counted by its step, with the key of the body that holds it.
-static void raiseAnalysisInvalidMaterial(VMState& state, InvalidMaterialStep step, ASCIILiteral stepName, const String& what, const BodyKey& key)
-{
-    ++state.registry().statistics().invalidMaterial[static_cast<size_t>(step)];
-    state.raiseInvalidMaterial(stepName, makeString(what, "; body "_s, bodyKeyHex(key)));
-}
-
 // The module-analysis event, from the key's step to the return, while a bench report is open.
 static void recordModuleAnalysisEvent(BenchReport* report, uint64_t startNanoseconds, const BodyKey& key, ASCIILiteral outcome, size_t sectionBytes)
 {
@@ -447,46 +431,6 @@ static void recordModuleAnalysisEvent(BenchReport* report, uint64_t startNanosec
         { "nanoseconds"_s, nanoseconds },
     });
 }
-
-// Reads the ids of a body in order.
-class AnalysisIdCursor {
-public:
-    AnalysisIdCursor(std::span<const uint8_t> ids, unsigned width)
-        : m_ids(ids)
-        , m_width(width)
-    {
-    }
-
-    std::optional<uint32_t> next()
-    {
-        if (m_ids.size() < m_width)
-            return std::nullopt;
-        uint32_t id = readAnalysisInteger(m_ids, m_width);
-        m_ids = m_ids.subspan(m_width);
-        return id;
-    }
-
-    bool atEnd() const { return m_ids.empty(); }
-
-private:
-    std::span<const uint8_t> m_ids;
-    unsigned m_width;
-};
-
-static bool isAnalysisFetchKind(uint8_t fetch)
-{
-    return fetch == static_cast<uint8_t>(AnalysisFetchKind::None) || fetch == static_cast<uint8_t>(AnalysisFetchKind::WebAssembly)
-        || fetch == static_cast<uint8_t>(AnalysisFetchKind::JSON) || fetch == static_cast<uint8_t>(AnalysisFetchKind::HostDefined);
-}
-
-// A requested module's identity for the duplicate and reference checks: its specifier, its type and its phase. Fetch
-// kind None counts as JavaScript, which no other kind a valid section holds can be.
-static uint64_t requestedModuleKey(uint32_t specifier, uint8_t fetch, bool deferred)
-{
-    return static_cast<uint64_t>(specifier) | (static_cast<uint64_t>(fetch) << 32) | (static_cast<uint64_t>(deferred) << 40);
-}
-
-using AnalysisKeySet = HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
 
 } // namespace UCBAnalysisInternal
 
@@ -621,227 +565,6 @@ std::expected<Vector<uint8_t>, AnalysisEncodeFailure> encodeModuleAnalysis(VM& v
     return bytes;
 }
 
-bool validateModuleAnalysis(std::span<const uint8_t> bytes, String& failure)
-{
-    using namespace UCBAnalysisInternal;
-
-    auto fail = [&](ASCIILiteral what) {
-        failure = what;
-        return false;
-    };
-
-    // The string table's header and offsets.
-    if (bytes.size() < analysisTableHeaderSize)
-        return fail("the section ends inside the string table's header"_s);
-    unsigned offsetWidth = bytes[0];
-    if (offsetWidth != 1 && offsetWidth != 2 && offsetWidth != 4)
-        return fail("the string table's offset width is not 1, 2 or 4"_s);
-    if (bytes[1] || bytes[2] || bytes[3])
-        return fail("the three bytes after the string table's offset width are not zero"_s);
-    uint32_t stringCount = readAnalysisInteger(bytes.subspan(4), 4);
-    uint64_t offsetsBytes = static_cast<uint64_t>(offsetWidth) * (static_cast<uint64_t>(stringCount) + 1);
-    uint64_t blobStart = analysisTableHeaderSize + offsetsBytes + (offsetsBytes & 1);
-    if (blobStart > bytes.size())
-        return fail("the section ends inside the string offsets"_s);
-    if ((offsetsBytes & 1) && bytes[analysisTableHeaderSize + offsetsBytes])
-        return fail("the padding byte after the string offsets is not zero"_s);
-    auto offsetAt = [&](uint64_t index) {
-        return readAnalysisInteger(bytes.subspan(analysisTableHeaderSize + offsetWidth * index), offsetWidth);
-    };
-    uint32_t blobLength = offsetAt(stringCount);
-    if (analysisWidth(blobLength) != offsetWidth)
-        return fail("the string table's offset width is not the width of the blob's length"_s);
-    if (blobLength > bytes.size() - blobStart)
-        return fail("the blob ends past the section's end"_s);
-    std::span<const uint8_t> blob = bytes.subspan(blobStart, blobLength);
-
-    // The strings. Each takes at least its tag byte, so the count is bounded by the blob, which bounds what the duplicate
-    // check allocates.
-    if (offsetAt(0))
-        return fail("the first string does not start the blob"_s);
-    struct AnalysisString {
-        uint8_t tag;
-        std::span<const uint8_t> units;
-    };
-    Vector<AnalysisString> strings;
-    for (uint32_t index = 0; index < stringCount; ++index) {
-        uint32_t start = offsetAt(index);
-        uint32_t end = offsetAt(index + 1);
-        if (end < start || end > blobLength)
-            return fail("the string offsets decrease"_s);
-        if (end == start)
-            return fail("a string has no tag byte"_s);
-        uint8_t tag = blob[start];
-        if (tag == 1) {
-            strings.append(AnalysisString { tag, blob.subspan(start + 1, end - start - 1) });
-            continue;
-        }
-        if (tag)
-            return fail("a string's tag is neither 0 nor 1"_s);
-        uint32_t unitsStart = start + 1;
-        if (unitsStart & 1) {
-            if (unitsStart == end || blob[unitsStart])
-                return fail("a UTF-16 string's padding byte is missing or not zero"_s);
-            ++unitsStart;
-        }
-        std::span<const uint8_t> units = blob.subspan(unitsStart, end - unitsStart);
-        if (units.size() & 1)
-            return fail("a UTF-16 string's units take an odd number of bytes"_s);
-        bool aboveLatin1 = false;
-        for (size_t i = 0; i < units.size() && !aboveLatin1; i += 2)
-            aboveLatin1 = units[i + 1];
-        if (!aboveLatin1)
-            return fail("a UTF-16 string has no unit above 0xFF"_s);
-        strings.append(AnalysisString { tag, units });
-    }
-    std::ranges::sort(strings, [](const AnalysisString& a, const AnalysisString& b) {
-        if (a.tag != b.tag)
-            return a.tag < b.tag;
-        return std::ranges::lexicographical_compare(a.units, b.units);
-    });
-    for (size_t i = 1; i < strings.size(); ++i) {
-        if (strings[i - 1].tag == strings[i].tag && std::ranges::equal(strings[i - 1].units, strings[i].units))
-            return fail("two strings are equal"_s);
-    }
-
-    // The body's header.
-    std::span<const uint8_t> body = bytes.subspan(blobStart + blobLength);
-    if (body.size() < analysisBodyHeaderSize)
-        return fail("the section ends inside the body's header"_s);
-    if (body[0] & ~(analysisImportMetaFlag | analysisTopLevelAwaitFlag))
-        return fail("the flags set a bit other than import.meta and top-level await"_s);
-    unsigned idWidth = body[1];
-    if (idWidth != analysisWidth(static_cast<uint64_t>(stringCount) + 1))
-        return fail("the id width is not the width of the string count plus one"_s);
-    if (body[2] || body[3])
-        return fail("the two bytes after the id width are not zero"_s);
-    uint32_t requestedCount = readAnalysisInteger(body.subspan(4), 4);
-    uint32_t recordCount = readAnalysisInteger(body.subspan(8), 4);
-    if (static_cast<uint64_t>(recordCount) + requestedCount > body.size() - analysisBodyHeaderSize)
-        return fail("the record and requested-module tags run past the section's end"_s);
-    std::span<const uint8_t> recordTags = body.subspan(analysisBodyHeaderSize, recordCount);
-    std::span<const uint8_t> requestedTags = body.subspan(analysisBodyHeaderSize + recordCount, requestedCount);
-    AnalysisIdCursor ids(body.subspan(analysisBodyHeaderSize + recordCount + requestedCount), idWidth);
-
-    // The tags.
-    for (uint8_t tag : recordTags) {
-        auto kind = static_cast<AnalysisRecordKind>(tag & 7);
-        uint8_t fetch = (tag >> 3) & 7;
-        if (kind == AnalysisRecordKind::SingleTypeScriptImport)
-            return fail("a record has kind 1, which the analysis parse never produces"_s);
-        if (tag & 0x80)
-            return fail("a record's tag sets bit 7"_s);
-        if ((tag & analysisSameNameBit) && kind != AnalysisRecordKind::SingleImport)
-            return fail("a record that is no single import sets the same-name bit"_s);
-        if (!isAnalysisFetchKind(fetch))
-            return fail("a record's fetch kind is not 0, 2, 3 or 4"_s);
-        if (kind == AnalysisRecordKind::LocalExport && fetch)
-            return fail("a local export has a fetch kind other than 0"_s);
-    }
-    for (uint8_t tag : requestedTags) {
-        if (!isAnalysisFetchKind((tag >> 1) & 7))
-            return fail("a requested module's fetch kind is not 0, 2, 3 or 4"_s);
-        if (tag & 0xF0)
-            return fail("a requested module's tag sets a bit above its fetch kind"_s);
-    }
-
-    // The ids, and the records' references and duplicates.
-    std::optional<ASCIILiteral> idFailure;
-    auto stringId = [&]() -> std::optional<uint32_t> {
-        std::optional<uint32_t> id = ids.next();
-        if (!id)
-            idFailure = "the ids end before the records do"_s;
-        else if (*id >= stringCount)
-            idFailure = "an id names no string"_s;
-        return idFailure ? std::nullopt : id;
-    };
-    AnalysisKeySet requestedModules;
-    for (uint8_t tag : requestedTags) {
-        uint8_t fetch = (tag >> 1) & 7;
-        std::optional<uint32_t> specifier = stringId();
-        if (!specifier || (fetch == static_cast<uint8_t>(AnalysisFetchKind::HostDefined) && !stringId()))
-            return fail(*idFailure);
-        if (!requestedModules.add(requestedModuleKey(*specifier, fetch, tag & 1)).isNewEntry)
-            return fail("two requested modules share a specifier, a type and a phase"_s);
-    }
-    AnalysisKeySet importLocalNames;
-    AnalysisKeySet exportNames;
-    AnalysisKeySet starExports;
-    auto namesRequestedModule = [&](uint32_t moduleName, uint8_t fetch, bool deferred) {
-        return requestedModules.contains(requestedModuleKey(moduleName, fetch, deferred));
-    };
-    for (uint8_t tag : recordTags) {
-        auto kind = static_cast<AnalysisRecordKind>(tag & 7);
-        uint8_t fetch = (tag >> 3) & 7;
-        std::optional<uint32_t> moduleName;
-        switch (kind) {
-        case AnalysisRecordKind::SingleImport:
-        case AnalysisRecordKind::NamespaceImport:
-        case AnalysisRecordKind::DeferredNamespaceImport: {
-            moduleName = stringId();
-            std::optional<uint32_t> localName;
-            if (moduleName && kind == AnalysisRecordKind::SingleImport) {
-                std::optional<uint32_t> importName = stringId();
-                localName = (!importName || (tag & analysisSameNameBit)) ? importName : stringId();
-            } else if (moduleName)
-                localName = stringId();
-            if (!localName)
-                return fail(*idFailure);
-            if (!importLocalNames.add(*localName).isNewEntry)
-                return fail("two import entries share a local name"_s);
-            if (!namesRequestedModule(*moduleName, fetch, kind == AnalysisRecordKind::DeferredNamespaceImport))
-                return fail("an import entry names no requested module with its type and phase"_s);
-            break;
-        }
-        case AnalysisRecordKind::IndirectExport:
-        case AnalysisRecordKind::NamespaceExport: {
-            std::optional<uint32_t> exportName = stringId();
-            if (exportName && kind == AnalysisRecordKind::IndirectExport && !stringId())
-                return fail(*idFailure);
-            if (exportName)
-                moduleName = stringId();
-            if (!moduleName)
-                return fail(*idFailure);
-            if (!exportNames.add(*exportName).isNewEntry)
-                return fail("two export entries share an export name"_s);
-            if (!namesRequestedModule(*moduleName, fetch, false))
-                return fail("an indirect or namespace export names no requested module with its type in the evaluation phase"_s);
-            break;
-        }
-        case AnalysisRecordKind::LocalExport: {
-            std::optional<uint32_t> exportName = stringId();
-            if (!exportName)
-                return fail(*idFailure);
-            // The local name may also be the anonymous default export's private name, n + 1.
-            std::optional<uint32_t> localName = ids.next();
-            if (!localName)
-                return fail("the ids end before the records do"_s);
-            if (*localName >= stringCount && *localName != stringCount + 1)
-                return fail("a local export's local name is no string and not the default export's name"_s);
-            if (!exportNames.add(*exportName).isNewEntry)
-                return fail("two export entries share an export name"_s);
-            break;
-        }
-        case AnalysisRecordKind::StarExport:
-            moduleName = stringId();
-            if (!moduleName)
-                return fail(*idFailure);
-            if (!starExports.add(requestedModuleKey(*moduleName, fetch, false)).isNewEntry)
-                return fail("two star exports share a module name and a type"_s);
-            if (!namesRequestedModule(*moduleName, fetch, false))
-                return fail("a star export names no requested module with its type in the evaluation phase"_s);
-            break;
-        case AnalysisRecordKind::SingleTypeScriptImport:
-            RELEASE_ASSERT_NOT_REACHED();
-        }
-        if (fetch == static_cast<uint8_t>(AnalysisFetchKind::HostDefined) && !stringId())
-            return fail(*idFailure);
-    }
-    if (!ids.atEnd())
-        return fail("the ids do not end at the section's end"_s);
-    return true;
-}
-
 std::optional<ModuleAnalysisImport> importModuleAnalysis(JSGlobalObject& globalObject, StringView source, const std::array<uint8_t, 32>* suppliedDigest)
 {
     using namespace UCBAnalysisInternal;
@@ -851,35 +574,22 @@ std::optional<ModuleAnalysisImport> importModuleAnalysis(JSGlobalObject& globalO
     if (!state || !state->importsEnabled())
         return std::nullopt;
     UCBStatistics& statistics = state->registry().statistics();
-    bool strict = state->strict();
 
-    // The key, from the digest of the module's text: with strict off a supplied digest stands for it; with strict on the
-    // text is hashed and a supplied digest held to it, before the provider that would supply it exists.
-    auto keyFor = [&](const Digest256& digest) {
-        return BodyKey::make(IdentityKind::Module, CodeSpecializationKind::CodeForCall, globalObject.defaultCodeGenerationMode(),
-            rootIdentityDigest(IdentityKind::Module, digest, StrictModeLexicallyScopedFeature, std::nullopt));
-    };
+    // The key, from the digest of the module's text, for which a supplied digest stands.
     Digest256 digest;
-    if (suppliedDigest && !strict)
+    if (suppliedDigest)
         digest = *suppliedDigest;
     else {
         digest = sourceDigest(source);
-        if (!suppliedDigest)
-            ++statistics.sourceDigests;
-        else {
-            ++statistics.suppliedDigestVerifications;
-            if (digest != *suppliedDigest) {
-                raiseAnalysisInvalidMaterial(*state, InvalidMaterialStep::SuppliedDigest, "ucb.supplied-digest"_s, "a module's supplied digest is not the digest of its text"_s, keyFor(digest));
-                return std::nullopt;
-            }
-        }
+        ++statistics.sourceDigests;
     }
 
     // The module's request computes the same key: a module is code for call, strict, with no with-scope bit, and an
     // executable without a symbol table generates in its global object's default mode.
     BenchReport* report = state->benchReport();
     uint64_t startNanoseconds = report ? benchThreadCPUNanoseconds() : 0;
-    BodyKey key = keyFor(digest);
+    BodyKey key = BodyKey::make(IdentityKind::Module, CodeSpecializationKind::CodeForCall, globalObject.defaultCodeGenerationMode(),
+        rootIdentityDigest(IdentityKind::Module, digest, StrictModeLexicallyScopedFeature, std::nullopt));
     ModuleAnalysisImport result { digest, { } };
 
     if (!Options::jitCacheImportModuleAnalysis()) {
@@ -906,14 +616,6 @@ std::optional<ModuleAnalysisImport> importModuleAnalysis(JSGlobalObject& globalO
         ++statistics.analysisAbsent;
         recordModuleAnalysisEvent(report, startNanoseconds, key, "absent"_s, 0);
         return result;
-    }
-
-    // With strict on, the bytes are an analysis the parse can produce before Bun builds a record from them.
-    String failure;
-    if (strict && !validateModuleAnalysis(section, failure)) {
-        raiseAnalysisInvalidMaterial(*state, InvalidMaterialStep::Analysis, "ucb.analysis"_s, makeString("ucb.analysis is no analysis the parse can produce: "_s, failure), key);
-        recordModuleAnalysisEvent(report, startNanoseconds, key, "invalid"_s, section.size());
-        return std::nullopt;
     }
 
     result.moduleInfo = Vector<uint8_t> { section };

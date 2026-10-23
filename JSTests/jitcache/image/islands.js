@@ -1,19 +1,19 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false --useRandomizingExecutableIslandAllocation=true; Consumer --useConcurrentJIT=false --useRandomizingExecutableIslandAllocation=true
+// jitcache-cadence: release aarch64
 
 // Jump islands between processes, where the allocator allows it. useRandomizingExecutableIslandAllocation picks a
 // random region of the pool for each allocation only where the pool is FixedVMPoolExecutableAllocator's region
 // allocator, as in the ARM64 builds that link mimalloc, the release profile. There, images, snippets and the thunks
 // generated on first use land more than a bl or b can reach apart. Recording keeps each external conditional branch
 // behind a veneer, so only a b or bl carries a fixup, and the consumer patches through the islands the assembler's own
-// writers place. The producer's decode of every fixup at capture and the consumer's read-back after patching follow
-// those islands, and a failed strict check is a fault the runner reports. Twenty-four bodies, each calling thunks and
-// operations from code that branches to the HandleException thunk, give both checks islands to follow. Under the
-// libpas JIT heap of the ASan builds, debug and twins, the option only allocates and frees a few blocks of the
-// requested size before each allocation, and on x86_64 a call reaches the whole pool, so there the script is an
-// ordinary round trip.
+// writers place. Twenty-four bodies, each calling thunks and operations from code that branches to the HandleException
+// thunk, give the patches islands to go through, and a patch that missed its target would change the consumer's output.
+// Under the libpas JIT heap of the ASan builds, debug and twins, the option only allocates and frees a few blocks of the
+// requested size before each allocation, and on x86_64 a call reaches the whole pool, so there the script would be an
+// ordinary round trip, and its cadence runs it only on release aarch64 builds.
 // ImageInstallTests.cpp's imageImportPatchesThroughIslandsToFarSupport forces the distance in the twins build and
-// checks that every support branch goes through an island while both of those checks and the twin check pass. The
-// consumer checks that the images carry the operations' pointers and the jumps to HandleException.
+// checks that every support branch goes through an island while the twin check, which decodes both sides through their
+// islands, passes. The consumer checks that the images carry the operations' pointers and the jumps to HandleException.
 (function main(role, scratch, artifact, sequence) {
     const bodies = [];
     for (let i = 0; i < 24; ++i) {

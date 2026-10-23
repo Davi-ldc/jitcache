@@ -3,30 +3,29 @@
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "ArrayProfile.h"
-#include "CBFormat.h"
-#include "CBState.h"
-#include "CBTestSupport.h"
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "CollectionScope.h"
 #include "EnsureStillAliveHere.h"
 #include "FunctionExecutable.h"
 #include "Heap.h"
-#include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "MetadataTable.h"
-#include "ProducerBudget.h"
 #include "SpeculatedType.h"
-#include "TestVM.h"
 #include "UnlinkedCodeBlock.h"
 #include "ValueProfile.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/cb/CBState.h"
+#include "jitcache/tests/cb/CBTestSupport.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestCodeBlocks.h"
+#include "jitcache/tests/support/TestVM.h"
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cmath>
-#include <limits>
 #include <optional>
 #include <span>
 #include <wtf/Ref.h>
@@ -40,10 +39,10 @@
 // slot capture wrote equals the UCB copy it pairs with (argument i with UCB value profile i, value offset k with UCB
 // value profile numArguments + k - 1, array position p with UCB array profile p), and the summary slot is the two ORed,
 // a call site's slot holding its own this profile's flags; a builtin, whose UCB keeps no copies, has its summary slots
-// from its own profiles alone; and decodeSummary with strict on accepts or rejects each field of cb.summary exactly at
-// its check's bound. Live tests build their CBs as the capture tests do: one call installs an LLInt CB, which
-// JIT::compileSync compiles to baseline. Each test keeps its global object on its stack, and its source keeps every
-// value the test passes in globals.
+// from its own profiles alone; and decodeSummary scores any summary from its bytes alone, leaving out the pruning mark.
+// Live tests build their CBs as the capture tests do: one call installs an LLInt CB, which JIT::compileSync compiles to
+// baseline. Each test keeps its global object on its stack, and its source keeps every value the test passes in
+// globals.
 
 namespace JSC::JITCache::Tests {
 
@@ -52,10 +51,6 @@ namespace CBSummaryTestsInternal {
 static constexpr uint8_t notCarried = static_cast<uint8_t>(CBFormat::CounterMode::NotCarried);
 static constexpr uint8_t carried = static_cast<uint8_t>(CBFormat::CounterMode::Carried);
 static constexpr uint8_t pruningMark = static_cast<uint8_t>(ArrayProfileFlag::DidPerformFirstRunPruning);
-
-// The lowest SpeculatedType bit outside SpecBytecodeTop, the bound ValuePrediction puts on every category.
-static_assert(~SpecBytecodeTop);
-static constexpr SpeculatedType outsideBytecodeTop = SpeculatedType { 1 } << std::countr_zero(~SpecBytecodeTop);
 
 static void checkEqual(TestContext& context, const char* file, int line, StringView what, uint64_t actual, uint64_t expected)
 {
@@ -99,27 +94,9 @@ public:
     {
     }
 
-    explicit SectionBytes(std::span<const uint8_t> bytes)
-        : SectionBytes(bytes.size())
-    {
-        if (!bytes.empty())
-            memcpySpan(mutableSpan(), bytes);
-    }
-
-    size_t size() const { return m_size; }
     std::span<const uint8_t> span() const { return asByteSpan(m_words.span()).first(m_size); }
     std::span<uint8_t> mutableSpan() { return asMutableByteSpan(m_words.mutableSpan()).first(m_size); }
 
-    // A copy `size` bytes long: truncated, or extended with zero bytes.
-    SectionBytes resized(size_t size) const
-    {
-        SectionBytes copy(size);
-        if (size_t copied = std::min(size, m_size))
-            memcpySpan(copy.mutableSpan(), span().first(copied));
-        return copy;
-    }
-
-    template<typename T> T read(size_t offset) const { return readAt<T>(span(), offset); }
     template<typename T> void write(size_t offset, const T& value) { writeAt(mutableSpan(), offset, value); }
 
 private:
@@ -220,17 +197,6 @@ static SectionBytes serializeSummary(const Summary& summary)
     return bytes;
 }
 
-// The written bytes with their header edited in place, at the same length.
-template<typename Edit>
-static SectionBytes withHeader(const SectionBytes& bytes, const Edit& edit)
-{
-    SectionBytes edited = bytes;
-    auto header = edited.read<CBFormat::SummaryHeader>(0);
-    edit(header);
-    edited.write(0, header);
-    return edited;
-}
-
 enum class CountPruningMark : bool { No, Yes };
 
 // The score's richness recounted from the summary: one unit per category bit of an argument, value or lazy-operand
@@ -254,57 +220,15 @@ static CBScore expectedScore(const Summary& summary)
     return { recountRichness(summary), summary.header.counterMode == notCarried, summary.header.counterProgress };
 }
 
-static void checkDecodes(TestContext& context, StringView what, std::span<const uint8_t> bytes, bool strict, const CBScore& expected)
+static void checkDecodes(TestContext& context, StringView what, std::span<const uint8_t> bytes, const CBScore& expected)
 {
-    auto score = decodeSummary(bytes, strict);
-    String described = makeString(what, strict ? " (strict)"_s : " (normal)"_s);
-    if (!score) {
-        failWith(context, described, score.error());
-        return;
-    }
-    checkScore(context, __FILE__, __LINE__, described, *score, expected);
+    checkScore(context, __FILE__, __LINE__, what, decodeSummary(bytes), expected);
 }
 
-static void checkRejects(TestContext& context, StringView what, std::span<const uint8_t> bytes, CBCheck expected)
+// The bytes a model lays out decode to the score recounted from the model.
+static void checkDecodesModel(TestContext& context, StringView what, const Summary& model)
 {
-    auto score = decodeSummary(bytes, true);
-    if (score) {
-        JITCACHE_FAIL(makeString(what, ": decodeSummary accepted the section instead of failing with "_s, description(expected)));
-        return;
-    }
-    if (score.error().kind != CBFaultKind::InvalidMaterial)
-        JITCACHE_FAIL(makeString(what, ": decodeSummary failed with a recording fault instead of invalid material"_s));
-    if (score.error().check != expected)
-        JITCACHE_FAIL(makeString(what, ": decodeSummary failed with "_s, description(score.error().check), " instead of "_s, description(expected)));
-}
-
-// A summary within every rule: both modes decode it to the score recounted from its bytes.
-static void checkAcceptedModel(TestContext& context, StringView what, const Summary& model)
-{
-    SectionBytes bytes = serializeSummary(model);
-    for (bool strict : { true, false })
-        checkDecodes(context, what, bytes.span(), strict, expectedScore(model));
-}
-
-// A summary with a valid layout that breaks one rule: strict rejects it with `expected`, and normal mode, which only reads,
-// still returns the score of its bytes.
-static void checkRejectedModel(TestContext& context, StringView what, const Summary& model, CBCheck expected)
-{
-    SectionBytes bytes = serializeSummary(model);
-    checkRejects(context, what, bytes.span(), expected);
-    checkDecodes(context, what, bytes.span(), false, expectedScore(model));
-}
-
-// Bytes edited outside the model whose length and padding pass: both modes decode them to the score of their bytes.
-static void checkAcceptedBytes(TestContext& context, StringView what, const SectionBytes& bytes)
-{
-    auto model = parseSummary(context, bytes.span());
-    if (!model) {
-        JITCACHE_FAIL(makeString(what, ": the edited bytes do not parse"_s));
-        return;
-    }
-    for (bool strict : { true, false })
-        checkDecodes(context, what, bytes.span(), strict, expectedScore(*model));
+    checkDecodes(context, what, serializeSummary(model).span(), expectedScore(model));
 }
 
 // The call-site families of the format's table, A11..A13 (op_call, op_call_ignore_result and op_tail_call), whose
@@ -557,8 +481,8 @@ static constexpr auto builtinSource = "var forEach = Array.prototype.forEach;"
 using namespace CBSummaryTestsInternal;
 
 // Right after a synchronous full collection, in a VM with useConcurrentJIT off and with no JS run in between, capture
-// and scoreLive give one score, which decodeSummary and a recount give again from the written summary, in both modes
-// and with the polymorphic bit set and clear. The recount leaves the pruning mark out, and the collection's merges make
+// and scoreLive give one score, which decodeSummary and a recount give again from the written summary, with the
+// polymorphic bit set and clear. The recount leaves the pruning mark out, and the collection's merges make
 // every cb.state slot equal the UCB copy it pairs with, by array positions that count the call sites, whose summary
 // slots hold their own this profiles' flags ORed with their copies'. The subject stays below
 // maximumOptimizationCandidateBytecodeCost, so the collection's drain folds its value samples into predictions.
@@ -613,60 +537,45 @@ JITCACHE_TEST_WITH_OPTIONS(cbSummaryScoreAgreesAcrossCaptureScoreLiveAndDecode, 
     }
 
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    std::array<std::optional<CBScore>, 2> strictScoreByBit;
-    for (bool strict : { true, false }) {
-        for (bool hasPolymorphicSite : { false, true }) {
-            String what = makeString(strict ? "strict capture"_s : "normal capture"_s, hasPolymorphicSite ? " with the polymorphic bit"_s : " without the polymorphic bit"_s);
-            auto liveScore = CBStateCapture::scoreLive(*codeBlock, strict, hasPolymorphicSite);
-            if (!liveScore) {
-                failWith(context, makeString(what, ", scoreLive"_s), liveScore.error());
-                continue;
-            }
-            auto captured = CBStateCapture::capture(*codeBlock, budget.get(), strict, hasPolymorphicSite);
-            if (!captured) {
-                failWith(context, what, captured.error());
-                continue;
-            }
-            const CBScore& score = captured->score();
-            JITCACHE_CB_SUMMARY_CHECK_SCORE(makeString(what, ", scoreLive against score()"_s), *liveScore, score);
-
-            auto state = parseState(context, captured->stateSection());
-            auto summary = parseSummary(context, captured->summarySection());
-            if (!state || !summary)
-                continue;
-
-            // The summary's bytes alone give the score: a recount, and decodeSummary in both modes.
-            JITCACHE_CB_SUMMARY_CHECK_SCORE(makeString(what, ", recount of the written summary"_s), expectedScore(*summary), score);
-            for (bool decodeStrict : { true, false })
-                checkDecodes(context, makeString(what, ", decodeSummary of the written summary"_s), captured->summarySection(), decodeStrict, score);
-
-            // The recount leaves out the pruning mark, which the A15 flags carry after the second collection.
-            auto markedFlags = static_cast<size_t>(std::ranges::count_if(summary->arrayFlags, [](uint8_t flags) -> bool {
-                return flags & pruningMark;
-            }));
-            if (!markedFlags)
-                JITCACHE_FAIL(makeString(what, ": no array flag carries the pruning mark, so the summary cannot show that richness ignores it"_s));
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", richness with the pruning mark counted"_s), recountRichness(*summary, CountPruningMark::Yes), score.richnessUnits + markedFlags);
-
-            // The counter as the polymorphic bit decides it, and the progress of the triple cb.state carries.
-            uint8_t counterMode = hasPolymorphicSite ? notCarried : carried;
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", cb.state counterMode"_s), state->header.counterMode, counterMode);
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", cb.summary counterMode"_s), summary->header.counterMode, counterMode);
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", counterWithheld"_s), score.counterWithheld, hasPolymorphicSite);
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", counterProgress"_s), score.counterProgress, expectedProgress(state->header));
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", cb.summary counterProgress"_s), summary->header.counterProgress, score.counterProgress);
-
-            // The body's A15 entry, and the pairing of every slot with its UCB copy.
-            JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", A15 entries"_s), state->header.familyEntryCount[CBFormat::numberOfArrayProfileFamilies - 1], 1);
-            checkPairing(context, what, *state, *summary, unlinkedCodeBlock, callSiteFlags);
-
-            // Strict mode only adds checks, so a normal capture with the same bit gives the strict capture's score.
-            auto& strictScore = strictScoreByBit[hasPolymorphicSite];
-            if (strict)
-                strictScore = score;
-            else if (strictScore)
-                JITCACHE_CB_SUMMARY_CHECK_SCORE(makeString(what, " against the strict capture"_s), score, *strictScore);
+    for (bool hasPolymorphicSite : { false, true }) {
+        String what = hasPolymorphicSite ? "the capture with the polymorphic bit"_s : "the capture without the polymorphic bit"_s;
+        CBScore liveScore = CBStateCapture::scoreLive(*codeBlock, hasPolymorphicSite);
+        auto captured = CBStateCapture::capture(*codeBlock, budget.get(), hasPolymorphicSite);
+        if (!captured) {
+            JITCACHE_FAIL(makeString(what, ": capture refused its charge"_s));
+            continue;
         }
+        const CBScore& score = captured->score();
+        JITCACHE_CB_SUMMARY_CHECK_SCORE(makeString(what, ", scoreLive against score()"_s), liveScore, score);
+
+        auto state = parseState(context, captured->stateSection());
+        auto summary = parseSummary(context, captured->summarySection());
+        if (!state || !summary)
+            continue;
+
+        // The summary's bytes alone give the score: a recount, and decodeSummary.
+        JITCACHE_CB_SUMMARY_CHECK_SCORE(makeString(what, ", recount of the written summary"_s), expectedScore(*summary), score);
+        checkDecodes(context, makeString(what, ", decodeSummary of the written summary"_s), captured->summarySection(), score);
+
+        // The recount leaves out the pruning mark, which the A15 flags carry after the second collection.
+        auto markedFlags = static_cast<size_t>(std::ranges::count_if(summary->arrayFlags, [](uint8_t flags) -> bool {
+            return flags & pruningMark;
+        }));
+        if (!markedFlags)
+            JITCACHE_FAIL(makeString(what, ": no array flag carries the pruning mark, so the summary cannot show that richness ignores it"_s));
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", richness with the pruning mark counted"_s), recountRichness(*summary, CountPruningMark::Yes), score.richnessUnits + markedFlags);
+
+        // The counter as the polymorphic bit decides it, and the progress of the triple cb.state carries.
+        uint8_t counterMode = hasPolymorphicSite ? notCarried : carried;
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", cb.state counterMode"_s), state->header.counterMode, counterMode);
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", cb.summary counterMode"_s), summary->header.counterMode, counterMode);
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", counterWithheld"_s), score.counterWithheld, hasPolymorphicSite);
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", counterProgress"_s), score.counterProgress, expectedProgress(state->header));
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", cb.summary counterProgress"_s), summary->header.counterProgress, score.counterProgress);
+
+        // The body's A15 entry, and the pairing of every slot with its UCB copy.
+        JITCACHE_CB_SUMMARY_CHECK_EQUAL(makeString(what, ", A15 entries"_s), state->header.familyEntryCount[CBFormat::numberOfArrayProfileFamilies - 1], 1);
+        checkPairing(context, what, *state, *summary, unlinkedCodeBlock, callSiteFlags);
     }
 
     ensureStillAliveHere(globalObject);
@@ -719,18 +628,14 @@ JITCACHE_TEST_WITH_OPTIONS(cbSummaryBuiltinCallSitesScoreTheirOwnThisProfiles, Y
     }
 
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    auto liveScore = CBStateCapture::scoreLive(*codeBlock, true, false);
-    if (!liveScore) {
-        failWith(context, "scoreLive"_s, liveScore.error());
-        return;
-    }
-    auto captured = CBStateCapture::capture(*codeBlock, budget.get(), true, false);
+    CBScore liveScore = CBStateCapture::scoreLive(*codeBlock, false);
+    auto captured = CBStateCapture::capture(*codeBlock, budget.get(), false);
     if (!captured) {
-        failWith(context, "capture"_s, captured.error());
+        JITCACHE_FAIL("capture refused its charge"_s);
         return;
     }
     const CBScore& score = captured->score();
-    JITCACHE_CB_SUMMARY_CHECK_SCORE("forEach's scoreLive against score()"_s, *liveScore, score);
+    JITCACHE_CB_SUMMARY_CHECK_SCORE("forEach's scoreLive against score()"_s, liveScore, score);
     auto state = parseState(context, captured->stateSection());
     auto summary = parseSummary(context, captured->summarySection());
     if (!state || !summary)
@@ -763,14 +668,12 @@ JITCACHE_TEST_WITH_OPTIONS(cbSummaryBuiltinCallSitesScoreTheirOwnThisProfiles, Y
     ensureStillAliveHere(globalObject);
 }
 
-// Strict decodeSummary of the summaries capture wrote, each header field and value moved just inside and just outside
-// the bound its check puts on it, returns the score of the bytes or fails with exactly that check's CBCheck; normal
-// mode returns the score of any edit whose layout still holds. Every check compares with a score the test recounts from
-// the bytes, which is also capture's own for the written summaries.
-JITCACHE_TEST(cbSummaryDecodeChecksEachRuleAtItsBoundary, Yes)
+// decodeSummary gives the score of a summary's bytes alone: the summaries capture wrote, with the counter carried and
+// withheld, decode to capture's own scores, and summaries built from the carried one decode to the score the test
+// recounts from their bytes, through an added lazy-operand slot and through flag bytes with every bit or only the pruning
+// mark; marking every flag leaves the score of every flag unmarked.
+JITCACHE_TEST(cbSummaryDecodeScoresItsBytes, Yes)
 {
-    using CBFormat::SummaryHeader;
-
     VM& vm = *context.vm();
     JSGlobalObject* globalObject = createRealm(context, vm, elementSource);
     if (!globalObject)
@@ -788,179 +691,38 @@ JITCACHE_TEST(cbSummaryDecodeChecksEachRuleAtItsBoundary, Yes)
         return;
 
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    auto carriedCapture = CBStateCapture::capture(*codeBlock, budget.get(), true, false);
-    auto withheldCapture = CBStateCapture::capture(*codeBlock, budget.get(), true, true);
+    auto carriedCapture = CBStateCapture::capture(*codeBlock, budget.get(), false);
+    auto withheldCapture = CBStateCapture::capture(*codeBlock, budget.get(), true);
     if (!carriedCapture || !withheldCapture) {
-        failWith(context, "capture"_s, carriedCapture ? withheldCapture.error() : carriedCapture.error());
+        JITCACHE_FAIL("capture refused its charge"_s);
         return;
     }
     ensureStillAliveHere(globalObject);
 
-    SectionBytes written(carriedCapture->summarySection());
-    SectionBytes writtenWithheld(withheldCapture->summarySection());
-    auto parsed = parseSummary(context, written.span());
-    auto parsedWithheld = parseSummary(context, writtenWithheld.span());
+    auto parsed = parseSummary(context, carriedCapture->summarySection());
+    auto parsedWithheld = parseSummary(context, withheldCapture->summarySection());
     if (!parsed || !parsedWithheld)
         return;
     const Summary& summary = *parsed;
-    auto offsets = summaryOffsets(summary.header);
 
-    // The written summaries: capture's score, through the recount and through decodeSummary in both modes.
+    // The written summaries: capture's score, through the recount and through decodeSummary.
     JITCACHE_CB_SUMMARY_CHECK_SCORE("recount of the carried summary"_s, expectedScore(summary), carriedCapture->score());
     JITCACHE_CB_SUMMARY_CHECK_SCORE("recount of the withheld summary"_s, expectedScore(*parsedWithheld), withheldCapture->score());
-    for (bool strict : { true, false }) {
-        checkDecodes(context, "the carried summary"_s, written.span(), strict, carriedCapture->score());
-        checkDecodes(context, "the withheld summary"_s, writtenWithheld.span(), strict, withheldCapture->score());
-    }
+    checkDecodes(context, "the carried summary"_s, carriedCapture->summarySection(), carriedCapture->score());
+    checkDecodes(context, "the withheld summary"_s, withheldCapture->summarySection(), withheldCapture->score());
 
-    // SummaryHeader: the header must fit, with layout version 1, the baseline tier and a known counter mode.
-    checkRejects(context, "an empty section"_s, written.resized(0).span(), CBCheck::SummaryHeader);
-    checkRejects(context, "a section one byte shorter than its header"_s, written.resized(sizeof(SummaryHeader) - 1).span(), CBCheck::SummaryHeader);
-    for (unsigned layoutVersion : { 0u, 2u }) {
-        Summary model = summary;
-        model.header.layoutVersion = static_cast<uint16_t>(layoutVersion);
-        checkRejectedModel(context, makeString("layout version "_s, layoutVersion), model, CBCheck::SummaryHeader);
-    }
-    for (unsigned tier : { 0u, 2u }) {
-        Summary model = summary;
-        model.header.tier = static_cast<uint8_t>(tier);
-        checkRejectedModel(context, makeString("tier "_s, tier), model, CBCheck::SummaryHeader);
-    }
-    {
-        Summary model = summary;
-        model.header.counterMode = 2;
-        checkRejectedModel(context, "counter mode 2"_s, model, CBCheck::SummaryHeader);
-    }
-
-    // The counter progress: at most INT32_MAX, and zero when the counter does not travel.
-    {
-        Summary model = summary;
-        model.header.counterProgress = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
-        checkAcceptedModel(context, "a carried progress of INT32_MAX"_s, model);
-        model.header.counterProgress = static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) + 1;
-        checkRejectedModel(context, "a carried progress of INT32_MAX + 1"_s, model, CBCheck::SummaryValue);
-        model.header.counterProgress = std::numeric_limits<uint32_t>::max();
-        checkRejectedModel(context, "a carried progress of UINT32_MAX"_s, model, CBCheck::SummaryValue);
-        model.header.counterMode = notCarried;
-        model.header.counterProgress = 0;
-        checkAcceptedModel(context, "a withheld counter with no progress"_s, model);
-        model.header.counterProgress = 1;
-        checkRejectedModel(context, "a withheld counter with a progress of 1"_s, model, CBCheck::SummaryValue);
-    }
-    {
-        Summary model = *parsedWithheld;
-        model.header.counterProgress = 1;
-        checkRejectedModel(context, "the withheld summary with a progress of 1"_s, model, CBCheck::SummaryValue);
-        model.header.counterMode = carried;
-        model.header.counterProgress = 0;
-        checkAcceptedModel(context, "the withheld summary turned carried with no progress"_s, model);
-    }
-
-    // SummaryLength: the length is exactly what the counts lay out, padding included, and the padding is zero.
-    // decodeSummary compares no count with a CodeBlock, so a count may change wherever the length still matches.
-    checkRejects(context, "a section that holds only its header"_s, written.resized(sizeof(SummaryHeader)).span(), CBCheck::SummaryLength);
-    checkRejects(context, "a section one byte shorter"_s, written.resized(written.size() - 1).span(), CBCheck::SummaryLength);
-    checkRejects(context, "a section one byte longer"_s, written.resized(written.size() + 1).span(), CBCheck::SummaryLength);
-    checkRejects(context, "a section one zero word longer"_s, written.resized(written.size() + sizeof(uint64_t)).span(), CBCheck::SummaryLength);
-    for (size_t offset = offsets.padding; offset < offsets.size; ++offset) {
-        SectionBytes bytes = written;
-        bytes.mutableSpan()[offset] = 1;
-        checkRejects(context, makeString("a nonzero padding byte at "_s, offset), bytes.span(), CBCheck::SummaryLength);
-    }
-    struct CountField {
-        ASCIILiteral name;
-        uint32_t SummaryHeader::* field;
-    };
-    const std::array countFields {
-        CountField { "numArguments"_s, &SummaryHeader::numArguments },
-        CountField { "numValueProfiles"_s, &SummaryHeader::numValueProfiles },
-        CountField { "numArrayProfiles"_s, &SummaryHeader::numArrayProfiles },
-        CountField { "numLazyOperandProfiles"_s, &SummaryHeader::numLazyOperandProfiles },
-    };
-    for (const auto& count : countFields) {
-        SectionBytes atMaximum = withHeader(written, [&](SummaryHeader& header) {
-            header.*count.field = std::numeric_limits<uint32_t>::max();
-        });
-        checkRejects(context, makeString(count.name, " at UINT32_MAX"_s), atMaximum.span(), CBCheck::SummaryLength);
-        // One more 8-byte slot always changes the length; one more array flag can fall in the padding, which the edits
-        // after this loop cover.
-        if (count.field == &SummaryHeader::numArrayProfiles)
-            continue;
-        SectionBytes oneMore = withHeader(written, [&](SummaryHeader& header) {
-            ++(header.*count.field);
-        });
-        checkRejects(context, makeString(count.name, " one higher"_s), oneMore.span(), CBCheck::SummaryLength);
-    }
-    SectionBytes oneArgumentFewer = withHeader(written, [](SummaryHeader& header) {
-        --header.numArguments;
-    });
-    checkRejects(context, "numArguments one lower"_s, oneArgumentFewer.span(), CBCheck::SummaryLength);
-    checkAcceptedBytes(context, "the last argument slot read as the first value slot"_s, withHeader(written, [](SummaryHeader& header) {
-        --header.numArguments;
-        ++header.numValueProfiles;
-    }));
-    if (summary.header.numValueProfiles) {
-        checkAcceptedBytes(context, "the last value slot read as the first lazy-operand slot"_s, withHeader(written, [](SummaryHeader& header) {
-            --header.numValueProfiles;
-            ++header.numLazyOperandProfiles;
-        }));
-    }
-    auto paddingBytes = static_cast<uint32_t>(offsets.size - offsets.padding);
-    if (paddingBytes) {
-        checkAcceptedBytes(context, "every padding byte read as an array flag"_s, withHeader(written, [&](SummaryHeader& header) {
-            header.numArrayProfiles += paddingBytes;
-        }));
-    }
-    SectionBytes pastPadding = withHeader(written, [&](SummaryHeader& header) {
-        header.numArrayProfiles += paddingBytes + 1;
-    });
-    checkRejects(context, "one array flag more than the padding holds"_s, pastPadding.span(), CBCheck::SummaryLength);
-    if (!summary.arrayFlags.isEmpty()) {
-        // One array flag fewer turns the last flag into padding: the length still matches only when the padding absorbs
-        // it, and then the section passes only if that flag is zero.
-        for (uint8_t lastFlags : { uint8_t { 0 }, static_cast<uint8_t>(ArrayProfileFlag::OutOfBounds) }) {
-            Summary model = summary;
-            model.arrayFlags.last() = lastFlags;
-            SectionBytes bytes = withHeader(serializeSummary(model), [](SummaryHeader& header) {
-                --header.numArrayProfiles;
-            });
-            String what = makeString("one array flag fewer, the last one "_s, static_cast<unsigned>(lastFlags));
-            if (summaryOffsets(bytes.read<SummaryHeader>(0)).size != bytes.size() || lastFlags)
-                checkRejects(context, what, bytes.span(), CBCheck::SummaryLength);
-            else
-                checkAcceptedBytes(context, what, bytes);
-        }
-    }
-
-    // SummaryValue on each category: every slot within SpecBytecodeTop. A lazy-operand slot, with its count, gives the
-    // third array a slot to edit.
+    // A lazy-operand slot, with its count, adds its categories as the slots of the other two arrays do.
     Summary withLazySlot = summary;
     withLazySlot.lazyOperandCategories.append(SpecInt32Only);
-    checkAcceptedModel(context, "an added lazy-operand slot"_s, withLazySlot);
-    struct CategoryArray {
-        ASCIILiteral name;
-        Vector<uint64_t> Summary::* slots;
-    };
-    for (auto array : { CategoryArray { "argument"_s, &Summary::argumentCategories }, CategoryArray { "value"_s, &Summary::valueCategories }, CategoryArray { "lazy-operand"_s, &Summary::lazyOperandCategories } }) {
-        for (size_t index = 0; index < (withLazySlot.*array.slots).size(); ++index) {
-            Summary model = withLazySlot;
-            (model.*array.slots)[index] = SpecBytecodeTop;
-            checkAcceptedModel(context, makeString(array.name, " slot "_s, index, " at SpecBytecodeTop"_s), model);
-            (model.*array.slots)[index] = SpecBytecodeTop | outsideBytecodeTop;
-            checkRejectedModel(context, makeString(array.name, " slot "_s, index, " one bit past SpecBytecodeTop"_s), model, CBCheck::SummaryValue);
-            (model.*array.slots)[index] = outsideBytecodeTop;
-            checkRejectedModel(context, makeString(array.name, " slot "_s, index, " holding only a bit outside SpecBytecodeTop"_s), model, CBCheck::SummaryValue);
-        }
-    }
+    checkDecodesModel(context, "an added lazy-operand slot"_s, withLazySlot);
 
-    // The flag bound on each array flag: the eight ArrayProfileFlag bits fill a byte, so every byte is within the bound
-    // and no flag value lies just outside it. The richness of a full byte leaves the pruning mark out.
+    // A flag byte with every bit, and one with only the pruning mark, score their flags without the mark.
     for (size_t position = 0; position < summary.arrayFlags.size(); ++position) {
         Summary model = summary;
         model.arrayFlags[position] = 0xff;
-        checkAcceptedModel(context, makeString("array flags "_s, position, " with every bit"_s), model);
+        checkDecodesModel(context, makeString("array flags "_s, position, " with every bit"_s), model);
         model.arrayFlags[position] = pruningMark;
-        checkAcceptedModel(context, makeString("array flags "_s, position, " with only the pruning mark"_s), model);
+        checkDecodesModel(context, makeString("array flags "_s, position, " with only the pruning mark"_s), model);
     }
 
     // The pruning mark adds no richness: marking every flag leaves the score of the unmarked summary.
@@ -971,12 +733,9 @@ JITCACHE_TEST(cbSummaryDecodeChecksEachRuleAtItsBoundary, Yes)
             flags = static_cast<uint8_t>(flags | pruningMark);
         for (auto& flags : unmarked.arrayFlags)
             flags = static_cast<uint8_t>(flags & ~pruningMark);
-        auto markedScore = decodeSummary(serializeSummary(marked).span(), true);
-        auto unmarkedScore = decodeSummary(serializeSummary(unmarked).span(), true);
-        if (!markedScore || !unmarkedScore)
-            JITCACHE_FAIL("decodeSummary rejected a summary whose flags differ only in the pruning mark"_s);
-        else
-            JITCACHE_CB_SUMMARY_CHECK_SCORE("every flag marked against every flag unmarked"_s, *markedScore, *unmarkedScore);
+        CBScore markedScore = decodeSummary(serializeSummary(marked).span());
+        CBScore unmarkedScore = decodeSummary(serializeSummary(unmarked).span());
+        JITCACHE_CB_SUMMARY_CHECK_SCORE("every flag marked against every flag unmarked"_s, markedScore, unmarkedScore);
     }
 }
 

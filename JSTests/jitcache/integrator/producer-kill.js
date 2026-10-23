@@ -7,15 +7,15 @@
 // jitcache-runs: Producer --jitcache-test-kill=after-root@2; Maintenance compact 0 $ARTIFACT; Consumer
 // jitcache-runs: Producer --jitcache-test-kill=after-reread@2; Maintenance compact 0 $ARTIFACT; Consumer
 // jitcache-expect-exit: 0 kill
-// jitcache-check: 0:0 resources/nothing-past-the-valid-end.ts
-// jitcache-check: 1:0 resources/bytes-past-the-valid-end.ts
-// jitcache-check: 2:0 resources/bytes-past-the-valid-end.ts
-// jitcache-check: 3:0 resources/bytes-past-the-valid-end.ts
-// jitcache-check: 4:0 resources/bytes-past-the-valid-end.ts
-// jitcache-check: 5:0 resources/bytes-past-the-valid-end.ts
-// jitcache-check: 6:0 resources/nothing-past-the-valid-end.ts
-// jitcache-check: 7:0 resources/bytes-past-the-valid-end.ts
-// jitcache-check: 1 resources/compact-cleanup.ts
+// jitcache-check: 0:0 resources/checker.ts past-the-valid-end none
+// jitcache-check: 1:0 resources/checker.ts past-the-valid-end some
+// jitcache-check: 2:0 resources/checker.ts past-the-valid-end some
+// jitcache-check: 3:0 resources/checker.ts past-the-valid-end some
+// jitcache-check: 4:0 resources/checker.ts past-the-valid-end some
+// jitcache-check: 5:0 resources/checker.ts past-the-valid-end some
+// jitcache-check: 6:0 resources/checker.ts past-the-valid-end none
+// jitcache-check: 7:0 resources/checker.ts past-the-valid-end some
+// jitcache-check: 1 resources/checker.ts compact-cleanup
 
 // A producer killed in the middle of a commit leaves an artifact compact cleans and a consumer reads. One sequence per
 // kill point of the writer's commit, each a Producer killed at its writer's second commit, then a compact at ratio 0,

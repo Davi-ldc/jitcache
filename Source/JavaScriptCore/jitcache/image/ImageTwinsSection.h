@@ -2,8 +2,8 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
-#include "ImageSupport.h"
-#include "ImageTypes.h"
+#include "jitcache/image/ImageSupport.h"
+#include "jitcache/image/ImageTypes.h"
 #include <array>
 #include <optional>
 #include <span>
@@ -13,19 +13,16 @@
 
 // What test builds record so that an import's twin, compiled in the consumer, emits what the producer emitted: the
 // random draws, every value emission read from mutable state, and each MathIC regeneration since the compilation. The
-// record keeps them as its twin data, capture writes them to the image-twins.baseline section this file encodes and
-// checks, and the twin check in ImageTwins.h replays them. The Image lane's recorder headers include this one; only
+// record keeps them as its twin data, capture writes them to the image-twins.baseline section this file encodes, and the
+// twin check in ImageTwins.h replays them. The Image lane's recorder headers include this one; only
 // ENABLE(JITCACHE_TWINS) builds have any of it.
 
 namespace JSC {
 
 class CodeBlock;
-class UnlinkedCodeBlock;
 enum OpcodeID : unsigned;
 
 namespace JITCache {
-
-class ImageSectionsView;
 
 // The draws of one baseline compilation.
 struct TwinSeeds {
@@ -98,9 +95,8 @@ std::optional<CompileInputKind> snapshotKindOf(OpcodeID);
 // recorder charges them when it receives them.
 TwinCompileInputs snapshotCompileInputs(CodeBlock&);
 
-// This process's token, 16 bytes drawn once with cryptographicallyRandomValues at the first call, redrawn while all
-// zero. Any thread; the first call is serialized with std::call_once. A process forked from another inherits it with the
-// address space it describes.
+// This process's token, 16 bytes drawn once with cryptographicallyRandomValues at the first call. Any thread; the first
+// call is serialized with std::call_once. A process forked from another inherits it with the address space it describes.
 inline constexpr size_t captureProcessTokenSize = 16;
 std::span<const uint8_t, captureProcessTokenSize> captureProcessToken();
 
@@ -130,18 +126,16 @@ struct ImageTwinsHeader {
     uint32_t regenerationCount { 0 };
     uint32_t producerValueCount { 0 };
     std::array<uint8_t, captureProcessTokenSize> captureProcessToken { };
-
-    friend bool operator==(const ImageTwinsHeader&, const ImageTwinsHeader&) = default;
 };
 
 // A located image-twins.baseline: a span into the borrowed payload, whose accessors read with memcpy-based loads on
-// access. Under strict it passed the structure checks, ImageCheck::TwinsHeader to TwinRegenerations.
+// access.
 class ImageTwinsView {
 public:
     ImageTwinsView() = default;
 
     // The regions the header's counts imply, or nullopt when they do not fit inside the span; such a section fails
-    // ImageCheck::TwinsHeader in either mode, as a body without the section does in a twins build.
+    // ImageCheck::TwinsHeader, as a body without the section does in a twins build.
     static std::optional<ImageTwinsView> locate(std::span<const uint8_t>);
 
     const ImageTwinsHeader& header() const LIFETIME_BOUND { return m_header; }
@@ -161,47 +155,24 @@ public:
     TwinData twinData() const;
     size_t twinDataStorageBytes() const;
 
-    friend bool operator==(const ImageTwinsView&, const ImageTwinsView&);
-
 private:
-    friend std::optional<ImageCheck> firstTwinsStructureFailure(const ImageSectionsView&);
-
-    // Offsets into the section: each region's start, and the end of the bytes before the padding that follows it.
+    // Offsets into the section: each region's start.
     struct Layout {
         size_t binarySwitchSeeds { 0 };
-        size_t binarySwitchSeedsEnd { 0 };
         size_t inputs { 0 };
-        size_t inputsEnd { 0 };
         size_t binaryArithBits { 0 };
-        size_t binaryArithBitsEnd { 0 };
         size_t unaryArithBits { 0 };
-        size_t unaryArithBitsEnd { 0 };
         size_t regenerations { 0 };
         size_t producerValues { 0 };
-        size_t end { 0 };
-
-        friend bool operator==(const Layout&, const Layout&) = default;
     };
 
     std::span<const uint8_t> regenerationEntry(size_t offset) const;
     static TwinRegeneration decodeRegeneration(std::span<const uint8_t> entry);
 
-    bool passesTwinsHeader() const;
-    bool passesTwinInputs() const;
-    bool passesTwinRegenerations(const ImageSectionsView&) const;
-
     std::span<const uint8_t> m_bytes;
     ImageTwinsHeader m_header;
     Layout m_layout;
 };
-
-// ImageCheck::TwinsHeader to TwinRegenerations on the view's twins section, which needs the parsed image section for the
-// regenerations. parseImageSections runs it under strict, after the image's own structure checks; with strict off,
-// debug builds ASSERT it.
-std::optional<ImageCheck> firstTwinsStructureFailure(const ImageSectionsView&);
-// ImageCheck::TwinInputSites, the compile inputs against the import's UCB. validateImageSectionsAgainst runs it after
-// the image's checks against the UCB.
-std::optional<ImageCheck> firstTwinsFailureAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
 
 // The writer capture streams the section through: the record's twin data, the producer values capture computed by
 // resolving every fixup, and the capturing process's token, with no buffer of its own; false once the sink refuses.

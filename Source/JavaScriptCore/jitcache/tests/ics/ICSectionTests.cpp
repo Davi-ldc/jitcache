@@ -4,26 +4,20 @@
 
 #include "ArrayProfile.h"
 #include "BytecodeStructs.h"
-#include "ICRestore.h"
-#include "ICSection.h"
 #include "IndexingType.h"
-#include "JITCacheTest.h"
 #include "PropertyInlineCache.h"
+#include "jitcache/ics/ICSection.h"
+#include "jitcache/tests/support/JITCacheTest.h"
 #include <array>
-#include <bit>
 #include <cstddef>
 #include <limits>
-#include <optional>
-#include <utility>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
 
-// Tests of ICSection and ICRestore (ics/ICSection.h, ics/ICRestore.h and their .cpp): the ICsBaseline format, its
-// structural checks (SectionSize to SummaryCount in parseSection; MoldPairing, MetadataLayout and MoldMegamorphicBit,
-// which prepare composes, on plain molds and site counts), the opcode table, the state a consumer's IC and call site
-// derive from each record, and the round trip. None of these tests needs a VM.
+// Tests of ICSection (ics/ICSection.h and .cpp): the ICsBaseline format and its parsing, the opcode table, the state a
+// consumer's IC and call site derive from each record, and the round trip. None of these tests needs a VM.
 
 namespace JSC::JITCache::Tests {
 
@@ -118,18 +112,14 @@ static ICs::CallLinkRecord callLink(ICs::CallLinkModeCode mode, uint8_t historyB
     return record;
 }
 
-// Modes and flags an array profile can hold, and the first bit of each it cannot.
+// Modes and flags an array profile can hold.
 static constexpr uint32_t int32ArrayModes = asArrayModesIgnoringTypedArrays(ArrayWithInt32);
 static constexpr uint32_t outOfBoundsFlag = static_cast<uint32_t>(ArrayProfileFlag::OutOfBounds);
 static constexpr uint32_t pruningFlag = static_cast<uint32_t>(ArrayProfileFlag::DidPerformFirstRunPruning);
-static constexpr uint32_t modeBitOutsideAllArrayModes = 1u << std::countr_one(static_cast<uint32_t>(ALL_ARRAY_MODES));
-static_assert(!(modeBitOutsideAllArrayModes & static_cast<uint32_t>(ALL_ARRAY_MODES)));
-static constexpr uint32_t flagBitAboveArrayProfileFlags = 0x100;
 
 // Three property ICs (two with cases), and three call-link sites in two groups, the first of them with a this profile:
 // 16 + 16 + 24 + 30 bytes, padded with two zero bytes to 88.
 static constexpr size_t validSectionSize = 88;
-static constexpr size_t validSectionPaddingOffset = 86;
 
 static TestSection validSection()
 {
@@ -270,91 +260,7 @@ static bool sameRecord(const ICs::CallLinkRecord& a, const ICs::CallLinkRecord& 
     return equalSpans(asByteSpan(a), asByteSpan(b));
 }
 
-// Records that the parse or summary read failed exactly the given check at the given site.
-template<typename T>
-static void expectInvalid(TestContext& context, ASCIILiteral what, const std::expected<T, ICs::Invalid>& result, ICs::Check check, uint32_t siteIndex = 0)
-{
-    if (result) {
-        JITCACHE_FAIL(makeString(what, ": accepted, expected "_s, ICs::description(check), " at site "_s, siteIndex));
-        return;
-    }
-    if (result.error().check != check || result.error().siteIndex != siteIndex) {
-        JITCACHE_FAIL(makeString(what, ": failed "_s, ICs::description(result.error().check), " at site "_s, result.error().siteIndex,
-            ", expected "_s, ICs::description(check), " at site "_s, siteIndex));
-    }
-}
-
-static std::expected<ICs::SectionView, ICs::Invalid> parseStrict(std::span<const uint8_t> bytes)
-{
-    return ICs::parseSection(bytes, ICs::StrictChecks::Yes);
-}
-
-// Applies change to the valid section and records that the strict parse of the result fails exactly the given check at
-// the given site.
-template<typename Functor>
-static void expectChangeInvalid(TestContext& context, ASCIILiteral what, ICs::Check check, uint32_t siteIndex, const Functor& change)
-{
-    Vector<uint8_t> bytes = encodeValidSectionWith(change);
-    expectInvalid(context, what, parseStrict(bytes.span()), check, siteIndex);
-}
-
-// Records that one of prepare's check functions (MoldPairing, MetadataLayout, MoldMegamorphicBit) failed exactly the
-// given check at the given site.
-static void expectCheckFails(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& result, ICs::Check check, uint32_t siteIndex)
-{
-    if (!result) {
-        JITCACHE_FAIL(makeString(what, ": passed, expected "_s, ICs::description(check), " at site "_s, siteIndex));
-        return;
-    }
-    if (result->check != check || result->siteIndex != siteIndex) {
-        JITCACHE_FAIL(makeString(what, ": failed "_s, ICs::description(result->check), " at site "_s, result->siteIndex,
-            ", expected "_s, ICs::description(check), " at site "_s, siteIndex));
-    }
-}
-
-static void expectCheckPasses(TestContext& context, ASCIILiteral what, const std::optional<ICs::Invalid>& result)
-{
-    if (result)
-        JITCACHE_FAIL(makeString(what, ": failed "_s, ICs::description(result->check), " at site "_s, result->siteIndex));
-}
-
-// A mold as baseline emission leaves it for these checks: only its access type and fold bit matter to MoldPairing and
-// MoldMegamorphicBit.
-static BaselineUnlinkedPropertyInlineCache mold(AccessType accessType, bool canBeMegamorphic = false)
-{
-    BaselineUnlinkedPropertyInlineCache result;
-    result.accessType = accessType;
-    result.canBeMegamorphic = canBeMegamorphic;
-    return result;
-}
-
-// The molds the valid section's three property-IC records stand for, in mold order.
-static Vector<BaselineUnlinkedPropertyInlineCache> validSectionMolds()
-{
-    Vector<BaselineUnlinkedPropertyInlineCache> molds;
-    molds.append(mold(AccessType::GetById));
-    molds.append(mold(AccessType::PutByIdStrict));
-    molds.append(mold(AccessType::InstanceOf));
-    return molds;
-}
-
-static unsigned callLinkPosition(OpcodeID opcodeID)
-{
-    auto position = ICs::canonicalCallLinkPosition(opcodeID);
-    RELEASE_ASSERT(position);
-    return *position;
-}
-
-// The call-link site counts of a CB whose metadata layout matches the valid section: two call sites, one construct.
-static ICs::CallLinkSiteCounts validSectionSiteCounts()
-{
-    ICs::CallLinkSiteCounts counts { };
-    counts[callLinkPosition(OpCall::opcodeID)] = 2;
-    counts[callLinkPosition(OpConstruct::opcodeID)] = 1;
-    return counts;
-}
-
-// The state a consumer's property IC takes from a record, restated here independently of ICRestore.
+// The state a consumer's property IC takes from a record, restated here independently of ICSection.
 static ICs::RestoredPropertyIC expectedRestoredPropertyIC(const ICs::PropertyICRecord& record)
 {
     bool megamorphicCaseListed = record.stateBits & ICs::StateBit::megamorphicCaseListed;
@@ -591,12 +497,7 @@ JITCACHE_TEST(icsRecordByteLayout, No)
         Vector<uint8_t> buffer(FillWith { }, offset, 0);
         buffer.appendVector(bytes);
         std::span<const uint8_t> sectionBytes = buffer.span().subspan(offset);
-        auto parsed = parseStrict(sectionBytes);
-        if (!parsed) {
-            JITCACHE_FAIL(makeString("the layout section at offset "_s, offset, " failed "_s, ICs::description(parsed.error().check)));
-            continue;
-        }
-        const ICs::SectionView& view = *parsed;
+        ICs::SectionView view = ICs::parseSection(sectionBytes);
         JITCACHE_CHECK(view.header.propertyICCount == 4);
         JITCACHE_CHECK(view.header.icSitesWithCases == 3);
         JITCACHE_CHECK(view.header.callLinkGroupCount == 2);
@@ -627,9 +528,9 @@ JITCACHE_TEST(icsRecordByteLayout, No)
     wide.callLinkGroupCount = 1;
     wide.callLinkSiteCount = 0x103;
     Vector<uint8_t> wideBytes = encode(wide);
-    auto wideParsed = parseStrict(wideBytes.span());
-    JITCACHE_CHECK(wideParsed && wideParsed->header.propertyICCount == 0x102 && wideParsed->header.callLinkSiteCount == 0x103);
-    JITCACHE_CHECK(wideParsed && wideParsed->group(0).siteCount == 0x103 && wideParsed->propertyICs.size() == 0x102 && wideParsed->callLinks.size() == 0x103);
+    ICs::SectionView wideParsed = ICs::parseSection(wideBytes.span());
+    JITCACHE_CHECK(wideParsed.header.propertyICCount == 0x102 && wideParsed.header.callLinkSiteCount == 0x103);
+    JITCACHE_CHECK(wideParsed.group(0).siteCount == 0x103 && wideParsed.propertyICs.size() == 0x102 && wideParsed.callLinks.size() == 0x103);
 
     // SectionView::group reads its eight bytes as two little-endian words.
     const std::array<uint8_t, ICs::callLinkGroupSize> groupWords { 0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05 };
@@ -642,243 +543,26 @@ JITCACHE_TEST(icsRecordByteLayout, No)
     JITCACHE_CHECK(handmade.group(0).opcodeID == 0x01020304 && handmade.group(0).siteCount == 0x05060708);
 }
 
-JITCACHE_TEST(icsParseSectionStrictAndNormalAgree, No)
+// A bare header, with no group and no record, parses into empty views.
+JITCACHE_TEST(icsParseSectionHeaderOnly, No)
 {
-    TestSection withoutCallLinks;
-    withoutCallLinks.propertyICs.append(propertyIC(AccessType::InById, ICs::LearningBit::everConsidered, 2, 0, 2, 0));
-    withoutCallLinks.propertyICCount = 1;
-    withoutCallLinks.icSitesWithCases = 1;
-
-    Vector<Vector<uint8_t>> sections;
-    sections.append(encode(validSection()));
-    sections.append(encode(withoutCallLinks));
-    sections.append(encode(TestSection { }));
-    for (auto& bytes : sections) {
-        auto strict = ICs::parseSection(bytes.span(), ICs::StrictChecks::Yes);
-        auto normal = ICs::parseSection(bytes.span(), ICs::StrictChecks::No);
-        if (!strict || !normal) {
-            JITCACHE_FAIL(makeString("a valid section of "_s, bytes.size(), " bytes was rejected"_s));
-            continue;
-        }
-        JITCACHE_CHECK(equalSpans(asByteSpan(strict->header), asByteSpan(normal->header)));
-        JITCACHE_CHECK(strict->groupBytes.data() == normal->groupBytes.data() && strict->groupBytes.size() == normal->groupBytes.size());
-        JITCACHE_CHECK(strict->propertyICs.data() == normal->propertyICs.data() && strict->propertyICs.size() == normal->propertyICs.size());
-        JITCACHE_CHECK(strict->callLinks.data() == normal->callLinks.data() && strict->callLinks.size() == normal->callLinks.size());
-    }
-
-    auto empty = parseStrict(sections[2].span());
-    JITCACHE_CHECK(empty && empty->propertyICs.empty() && empty->callLinks.empty() && empty->groupBytes.empty());
-    JITCACHE_CHECK(sections[2].size() == ICs::sectionHeaderSize);
+    Vector<uint8_t> bytes = encode(TestSection { });
+    JITCACHE_CHECK(bytes.size() == ICs::sectionHeaderSize);
+    ICs::SectionView empty = ICs::parseSection(bytes.span());
+    JITCACHE_CHECK(empty.propertyICs.empty() && empty.callLinks.empty() && empty.groupBytes.empty());
 }
 
-// SectionSize. Each input below fails SectionSize and nothing before it.
-JITCACHE_TEST(icsParseSectionSectionSize, No)
-{
-    Vector<uint8_t> valid = encode(validSection());
-    JITCACHE_CHECK(parseStrict(valid.span()).has_value());
-
-    std::span<const uint8_t> none;
-    expectInvalid(context, "an empty span"_s, parseStrict(none), ICs::Check::SectionSize);
-    expectInvalid(context, "a 15-byte span"_s, parseStrict(valid.span().first(15)), ICs::Check::SectionSize);
-    expectInvalid(context, "a section without its padding"_s, parseStrict(valid.span().first(validSectionPaddingOffset)), ICs::Check::SectionSize);
-
-    Vector<uint8_t> trailing = valid;
-    trailing.appendVector(Vector<uint8_t>(FillWith { }, 8, 0));
-    expectInvalid(context, "eight trailing zero bytes"_s, parseStrict(trailing.span()), ICs::Check::SectionSize);
-
-    expectChangeInvalid(context, "15 call-link groups"_s, ICs::Check::SectionSize, 0, [](TestSection& section) {
-        section.callLinkGroupCount = ICs::numberOfCallLinkOpcodes + 1;
-    });
-    expectChangeInvalid(context, "a header that counts one more property IC"_s, ICs::Check::SectionSize, 0, [](TestSection& section) {
-        ++section.propertyICCount;
-    });
-    expectChangeInvalid(context, "a header that counts no call-link site"_s, ICs::Check::SectionSize, 0, [](TestSection& section) {
-        section.callLinkSiteCount = 0;
-    });
-}
-
-// SummaryBound.
-JITCACHE_TEST(icsParseSectionSummaryBound, No)
-{
-    expectChangeInvalid(context, "more IC sites with cases than property ICs"_s, ICs::Check::SummaryBound, 0, [](TestSection& section) {
-        section.icSitesWithCases = section.propertyICCount + 1;
-    });
-
-    TestSection withoutPropertyICs;
-    withoutPropertyICs.icSitesWithCases = 1;
-    Vector<uint8_t> bytes = encode(withoutPropertyICs);
-    expectInvalid(context, "an IC site with cases and no property IC"_s, parseStrict(bytes.span()), ICs::Check::SummaryBound);
-}
-
-// CallLinkGroups.
-JITCACHE_TEST(icsParseSectionCallLinkGroups, No)
-{
-    expectChangeInvalid(context, "a group of an opcode without a CallLinkInfo"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[0].opcodeID = OpEnter::opcodeID;
-    });
-    expectChangeInvalid(context, "a group of an opcode ID out of range"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[1].opcodeID = std::numeric_limits<uint32_t>::max();
-    });
-    expectChangeInvalid(context, "groups in decreasing canonical order"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[0] = ICs::CallLinkGroup { OpConstruct::opcodeID, 1 };
-        section.groups[1] = ICs::CallLinkGroup { OpCall::opcodeID, 2 };
-    });
-    expectChangeInvalid(context, "two groups of one opcode"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[1].opcodeID = OpCall::opcodeID;
-    });
-    expectChangeInvalid(context, "a group without sites"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[0].siteCount = 3;
-        section.groups[1].siteCount = 0;
-    });
-    expectChangeInvalid(context, "group counts that sum past the header's"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[1].siteCount = 2;
-    });
-    expectChangeInvalid(context, "group counts that sum short of the header's"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[0].siteCount = 1;
-    });
-    // 0xffffffff + 4 wraps to the header's 3 in 32 bits; the sum must not overflow.
-    expectChangeInvalid(context, "group counts whose 32-bit sum wraps to the header's"_s, ICs::Check::CallLinkGroups, 0, [](TestSection& section) {
-        section.groups[0].siteCount = std::numeric_limits<uint32_t>::max();
-        section.groups[1].siteCount = 4;
-    });
-
-    // A group for every canonical opcode, in canonical order, passes.
-    TestSection everyOpcode;
-    for (const ExpectedCallLinkOpcode& opcode : expectedCallLinkOpcodes) {
-        everyOpcode.groups.append(ICs::CallLinkGroup { opcode.opcodeID, 1 });
-        everyOpcode.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0));
-    }
-    everyOpcode.callLinkGroupCount = ICs::numberOfCallLinkOpcodes;
-    everyOpcode.callLinkSiteCount = ICs::numberOfCallLinkOpcodes;
-    JITCACHE_CHECK(parseStrict(encode(everyOpcode).span()).has_value());
-}
-
-// ReservedBits.
-JITCACHE_TEST(icsParseSectionReservedBits, No)
-{
-    Vector<uint8_t> padding = encode(validSection());
-    padding[validSectionPaddingOffset + 1] = 1;
-    expectInvalid(context, "a nonzero padding byte"_s, parseStrict(padding.span()), ICs::Check::ReservedBits, 0);
-
-    expectChangeInvalid(context, "a nonzero reserved byte"_s, ICs::Check::ReservedBits, 1, [](TestSection& section) {
-        section.propertyICs[1].reserved[1] = 1;
-    });
-    expectChangeInvalid(context, "a nonzero first reserved byte"_s, ICs::Check::ReservedBits, 2, [](TestSection& section) {
-        section.propertyICs[2].reserved[0] = 0x80;
-    });
-    for (unsigned unusedBit = 4; unusedBit < 8; ++unusedBit) {
-        expectChangeInvalid(context, "an unused learning bit"_s, ICs::Check::ReservedBits, 2, [&](TestSection& section) {
-            section.propertyICs[2].learningBits |= 1 << unusedBit;
-        });
-    }
-    for (unsigned unusedBit = 3; unusedBit < 8; ++unusedBit) {
-        expectChangeInvalid(context, "an unused state bit"_s, ICs::Check::ReservedBits, 0, [&](TestSection& section) {
-            section.propertyICs[0].stateBits |= 1 << unusedBit;
-        });
-    }
-    for (unsigned unusedBit = 6; unusedBit < 8; ++unusedBit) {
-        expectChangeInvalid(context, "an unused call-link bit"_s, ICs::Check::ReservedBits, 2, [&](TestSection& section) {
-            section.callLinks[2].bits |= 1 << unusedBit;
-        });
-    }
-
-    // The this words: the valid section's first op_call record holds a this profile, and its construct record, the
-    // third, belongs to an opcode without one.
-    expectChangeInvalid(context, "this modes at a construct site"_s, ICs::Check::ReservedBits, 2, [](TestSection& section) {
-        storeLittleEndian(section.callLinks[2].thisArrayModes, int32ArrayModes);
-    });
-    expectChangeInvalid(context, "this flags at a construct site"_s, ICs::Check::ReservedBits, 2, [](TestSection& section) {
-        storeLittleEndian(section.callLinks[2].thisArrayProfileFlags, outOfBoundsFlag);
-    });
-    expectChangeInvalid(context, "a this mode bit outside ALL_ARRAY_MODES"_s, ICs::Check::ReservedBits, 0, [](TestSection& section) {
-        storeLittleEndian(section.callLinks[0].thisArrayModes, int32ArrayModes | modeBitOutsideAllArrayModes);
-    });
-    expectChangeInvalid(context, "a this flag bit above the eight array-profile flags"_s, ICs::Check::ReservedBits, 1, [](TestSection& section) {
-        storeLittleEndian(section.callLinks[1].thisArrayProfileFlags, flagBitAboveArrayProfileFlags);
-    });
-
-    // Every mode an array profile can hold and every flag, the pruning mark included, pass at an op_call site.
-    Vector<uint8_t> fullThisProfile = encodeValidSectionWith([](TestSection& section) {
-        storeLittleEndian(section.callLinks[1].thisArrayModes, static_cast<uint32_t>(ALL_ARRAY_MODES));
-        storeLittleEndian(section.callLinks[1].thisArrayProfileFlags, 0xff);
-    });
-    JITCACHE_CHECK(parseStrict(fullThisProfile.span()).has_value());
-}
-
-// EnumRange.
-JITCACHE_TEST(icsParseSectionEnumRange, No)
-{
-    expectChangeInvalid(context, "the first access type past the last"_s, ICs::Check::EnumRange, 1, [](TestSection& section) {
-        section.propertyICs[1].accessType = numberOfAccessTypes;
-    });
-    expectChangeInvalid(context, "access type 255"_s, ICs::Check::EnumRange, 2, [](TestSection& section) {
-        section.propertyICs[2].accessType = std::numeric_limits<uint8_t>::max();
-    });
-
-    Vector<uint8_t> lastAccessType = encodeValidSectionWith([](TestSection& section) {
-        section.propertyICs[1].accessType = numberOfAccessTypes - 1;
-    });
-    JITCACHE_CHECK(parseStrict(lastAccessType.span()).has_value());
-}
-
-// SummaryCount.
-JITCACHE_TEST(icsParseSectionSummaryCount, No)
-{
-    expectChangeInvalid(context, "a summary below the sites with cases"_s, ICs::Check::SummaryCount, 0, [](TestSection& section) {
-        section.icSitesWithCases = 1;
-    });
-    expectChangeInvalid(context, "a summary above the sites with cases"_s, ICs::Check::SummaryCount, 0, [](TestSection& section) {
-        section.icSitesWithCases = 3;
-    });
-    expectChangeInvalid(context, "a site that gained cases"_s, ICs::Check::SummaryCount, 0, [](TestSection& section) {
-        section.propertyICs[1].caseCount = 4;
-    });
-}
-
+// The summary is the header's count, even where the records disagree with it.
 JITCACHE_TEST(icsReadBaselineICsSummary, No)
 {
     Vector<uint8_t> valid = encode(validSection());
-    auto summary = ICs::readBaselineICsSummary(valid.span(), ICs::StrictChecks::Yes);
-    JITCACHE_CHECK(summary && summary->icSitesWithCases == 2);
-    auto trusted = ICs::readBaselineICsSummary(valid.span(), ICs::StrictChecks::No);
-    JITCACHE_CHECK(trusted && trusted->icSitesWithCases == 2);
-
-    auto read = [](std::span<const uint8_t> bytes) {
-        return ICs::readBaselineICsSummary(bytes, ICs::StrictChecks::Yes);
-    };
-    std::span<const uint8_t> none;
-    expectInvalid(context, "an empty section"_s, read(none), ICs::Check::SectionSize);
-    expectInvalid(context, "a truncated header of 8 bytes"_s, read(valid.span().first(8)), ICs::Check::SectionSize);
-    expectInvalid(context, "a truncated header of 15 bytes"_s, read(valid.span().first(15)), ICs::Check::SectionSize);
-    expectInvalid(context, "a header alone"_s, read(valid.span().first(ICs::sectionHeaderSize)), ICs::Check::SectionSize);
-
-    Vector<uint8_t> overcounted = encodeValidSectionWith([](TestSection& section) {
-        section.propertyICCount += 2;
-    });
-    expectInvalid(context, "a header that counts more records than the section holds"_s, read(overcounted.span()), ICs::Check::SectionSize);
-    Vector<uint8_t> tooManyGroups = encodeValidSectionWith([](TestSection& section) {
-        section.callLinkGroupCount = ICs::numberOfCallLinkOpcodes + 1;
-    });
-    expectInvalid(context, "15 call-link groups"_s, read(tooManyGroups.span()), ICs::Check::SectionSize);
-    Vector<uint8_t> unbounded = encodeValidSectionWith([](TestSection& section) {
-        section.icSitesWithCases = 4;
-    });
-    expectInvalid(context, "more IC sites with cases than property ICs"_s, read(unbounded.span()), ICs::Check::SummaryBound);
-
-    // The summary reads the header alone: CallLinkGroups to SummaryCount are prepare's.
-    Vector<uint8_t> reservedByte = encodeValidSectionWith([](TestSection& section) {
-        section.propertyICs[0].reserved[0] = 1;
-    });
-    auto reserved = read(reservedByte.span());
-    JITCACHE_CHECK(reserved && reserved->icSitesWithCases == 2);
-    Vector<uint8_t> miscountedBytes = encodeValidSectionWith([](TestSection& section) {
+    JITCACHE_CHECK(ICs::readBaselineICsSummary(valid.span()).icSitesWithCases == 2);
+    Vector<uint8_t> miscounted = encodeValidSectionWith([](TestSection& section) {
         section.icSitesWithCases = 1;
     });
-    auto miscounted = read(miscountedBytes.span());
-    JITCACHE_CHECK(miscounted && miscounted->icSitesWithCases == 1);
-    Vector<uint8_t> bareHeaderBytes = encode(TestSection());
-    auto bareHeader = read(bareHeaderBytes.span());
-    JITCACHE_CHECK(bareHeader && !bareHeader->icSitesWithCases);
+    JITCACHE_CHECK(ICs::readBaselineICsSummary(miscounted.span()).icSitesWithCases == 1);
+    Vector<uint8_t> bareHeader = encode(TestSection());
+    JITCACHE_CHECK(!ICs::readBaselineICsSummary(bareHeader.span()).icSitesWithCases);
 }
 
 JITCACHE_TEST(icsIsPolymorphicPropertyIC, No)
@@ -1100,19 +784,6 @@ JITCACHE_TEST(icsPropertyICRoundTrip, No)
         }
         return true;
     });
-
-    // A section of recaptured records is well formed, with no IC site with cases. The valid section's call-link records
-    // are two op_call sites and a construct site.
-    TestSection recapturedSection = validSection();
-    for (auto& record : recapturedSection.propertyICs)
-        record = ICs::recapturedPropertyIC(record);
-    const ICs::CallLinkOpcode& callOpcode = ICs::callLinkOpcodes[callLinkPosition(OpCall::opcodeID)];
-    const ICs::CallLinkOpcode& constructOpcode = ICs::callLinkOpcodes[callLinkPosition(OpConstruct::opcodeID)];
-    recapturedSection.callLinks[0] = ICs::recapturedCallLink(callOpcode, recapturedSection.callLinks[0]);
-    recapturedSection.callLinks[1] = ICs::recapturedCallLink(callOpcode, recapturedSection.callLinks[1]);
-    recapturedSection.callLinks[2] = ICs::recapturedCallLink(constructOpcode, recapturedSection.callLinks[2]);
-    recapturedSection.icSitesWithCases = 0;
-    JITCACHE_CHECK(parseStrict(encode(recapturedSection).span()).has_value());
 }
 
 JITCACHE_TEST(icsCallLinkRoundTrip, No)
@@ -1165,209 +836,6 @@ JITCACHE_TEST(icsCallLinkRoundTrip, No)
         }
         return true;
     });
-}
-
-// MoldPairing. The valid section pairs with its own molds. Each mold list below fails MoldPairing and nothing else: the
-// section passes parseSection's checks, its layout matches the site counts and no mold carries the fold bit.
-JITCACHE_TEST(icsRestoreCheckMoldPairing, No)
-{
-    Vector<uint8_t> bytes = encode(validSection());
-    auto view = parseStrict(bytes.span());
-    if (!view) {
-        JITCACHE_FAIL(makeString("the valid section failed "_s, ICs::description(view.error().check)));
-        return;
-    }
-    Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
-    expectCheckPasses(context, "the valid section with its molds"_s, ICs::checkMoldPairing(*view, molds.span()));
-    expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));
-
-    auto expectOnlyMoldPairingFails = [&](ASCIILiteral what, const Vector<BaselineUnlinkedPropertyInlineCache>& changed, uint32_t siteIndex) {
-        expectCheckFails(context, what, ICs::checkMoldPairing(*view, changed.span()), ICs::Check::MoldPairing, siteIndex);
-        expectCheckPasses(context, what, ICs::checkMolds(changed.span()));
-    };
-
-    Vector<BaselineUnlinkedPropertyInlineCache> fewer = molds;
-    fewer.removeLast();
-    expectOnlyMoldPairingFails("one mold fewer than records"_s, fewer, 0);
-
-    Vector<BaselineUnlinkedPropertyInlineCache> more = molds;
-    more.append(mold(AccessType::GetById));
-    expectOnlyMoldPairingFails("one mold more than records"_s, more, 0);
-
-    expectOnlyMoldPairingFails("no mold for three records"_s, { }, 0);
-
-    // A record stands for the access type of its own mold, so a mold list in another order fails at the first index
-    // whose access type differs.
-    Vector<BaselineUnlinkedPropertyInlineCache> sloppy = molds;
-    sloppy[1].accessType = AccessType::PutByIdSloppy;
-    expectOnlyMoldPairingFails("the second mold of the sloppy put"_s, sloppy, 1);
-
-    Vector<BaselineUnlinkedPropertyInlineCache> lastDiffers = molds;
-    lastDiffers[2].accessType = AccessType::InById;
-    expectOnlyMoldPairingFails("the third mold of another access type"_s, lastDiffers, 2);
-
-    Vector<BaselineUnlinkedPropertyInlineCache> rotated;
-    rotated.append(mold(AccessType::PutByIdStrict));
-    rotated.append(mold(AccessType::InstanceOf));
-    rotated.append(mold(AccessType::GetById));
-    expectOnlyMoldPairingFails("the molds rotated by one"_s, rotated, 0);
-
-    // A section without property ICs pairs only with code without molds.
-    Vector<uint8_t> emptyBytes = encode(TestSection { });
-    auto emptyView = parseStrict(emptyBytes.span());
-    if (!emptyView) {
-        JITCACHE_FAIL(makeString("the empty section failed "_s, ICs::description(emptyView.error().check)));
-        return;
-    }
-    expectCheckPasses(context, "no record and no mold"_s, ICs::checkMoldPairing(*emptyView, { }));
-    Vector<BaselineUnlinkedPropertyInlineCache> oneMold;
-    oneMold.append(mold(AccessType::InById));
-    expectCheckFails(context, "no record and one mold"_s, ICs::checkMoldPairing(*emptyView, oneMold.span()), ICs::Check::MoldPairing, 0);
-
-    // Both ends of the access-type range pair with themselves.
-    TestSection extremes;
-    extremes.propertyICs.append(propertyIC(static_cast<AccessType>(0), 0, 0, 0, 0, 0));
-    extremes.propertyICs.append(propertyIC(static_cast<AccessType>(numberOfAccessTypes - 1), 0, 0, 0, 0, 0));
-    extremes.propertyICCount = 2;
-    Vector<uint8_t> extremesBytes = encode(extremes);
-    auto extremesView = parseStrict(extremesBytes.span());
-    if (!extremesView) {
-        JITCACHE_FAIL(makeString("the extreme access types failed "_s, ICs::description(extremesView.error().check)));
-        return;
-    }
-    Vector<BaselineUnlinkedPropertyInlineCache> extremeMolds;
-    extremeMolds.append(mold(static_cast<AccessType>(0)));
-    extremeMolds.append(mold(static_cast<AccessType>(numberOfAccessTypes - 1)));
-    expectCheckPasses(context, "the extreme access types"_s, ICs::checkMoldPairing(*extremesView, extremeMolds.span()));
-    std::swap(extremeMolds[0], extremeMolds[1]);
-    expectCheckFails(context, "the extreme access types swapped"_s, ICs::checkMoldPairing(*extremesView, extremeMolds.span()), ICs::Check::MoldPairing, 0);
-}
-
-// MetadataLayout. The valid section matches a CB with two call sites and one construct site. Each count list below fails
-// MetadataLayout and nothing else: the section passes parseSection's checks and pairs with its molds, which carry no
-// fold bit.
-JITCACHE_TEST(icsRestoreCheckMetadataLayout, No)
-{
-    Vector<uint8_t> bytes = encode(validSection());
-    auto view = parseStrict(bytes.span());
-    if (!view) {
-        JITCACHE_FAIL(makeString("the valid section failed "_s, ICs::description(view.error().check)));
-        return;
-    }
-    Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
-    expectCheckPasses(context, "the valid section with its molds"_s, ICs::checkMoldPairing(*view, molds.span()));
-    expectCheckPasses(context, "the valid section's molds"_s, ICs::checkMolds(molds.span()));
-    expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));
-
-    const unsigned callPosition = callLinkPosition(OpCall::opcodeID);
-    const unsigned constructPosition = callLinkPosition(OpConstruct::opcodeID);
-    auto expectLayoutFails = [&](ASCIILiteral what, const auto& change) {
-        ICs::CallLinkSiteCounts counts = validSectionSiteCounts();
-        change(counts);
-        expectCheckFails(context, what, ICs::checkMetadataLayout(*view, counts), ICs::Check::MetadataLayout, 0);
-    };
-    expectLayoutFails("one call site fewer"_s, [&](ICs::CallLinkSiteCounts& counts) {
-        counts[callPosition] = 1;
-    });
-    expectLayoutFails("one call site more"_s, [&](ICs::CallLinkSiteCounts& counts) {
-        counts[callPosition] = 3;
-    });
-    expectLayoutFails("no construct site"_s, [&](ICs::CallLinkSiteCounts& counts) {
-        counts[constructPosition] = 0;
-    });
-    expectLayoutFails("a tail call the section has no group for"_s, [&](ICs::CallLinkSiteCounts& counts) {
-        counts[callLinkPosition(OpTailCall::opcodeID)] = 1;
-    });
-    // The same three sites under other opcodes: the totals agree, the opcodes do not.
-    expectLayoutFails("the counts of the two opcodes swapped"_s, [&](ICs::CallLinkSiteCounts& counts) {
-        counts[callPosition] = 1;
-        counts[constructPosition] = 2;
-    });
-    expectLayoutFails("the call sites counted as call_ignore_result"_s, [&](ICs::CallLinkSiteCounts& counts) {
-        counts[callPosition] = 0;
-        counts[callLinkPosition(OpCallIgnoreResult::opcodeID)] = 2;
-    });
-    expectLayoutFails("a CB without a metadata table"_s, [](ICs::CallLinkSiteCounts& counts) {
-        counts = { };
-    });
-
-    // A section without groups matches only a CB without call-link sites.
-    Vector<uint8_t> emptyBytes = encode(TestSection { });
-    auto emptyView = parseStrict(emptyBytes.span());
-    if (!emptyView) {
-        JITCACHE_FAIL(makeString("the empty section failed "_s, ICs::description(emptyView.error().check)));
-        return;
-    }
-    expectCheckPasses(context, "no group and no site"_s, ICs::checkMetadataLayout(*emptyView, ICs::CallLinkSiteCounts { }));
-    ICs::CallLinkSiteCounts oneSite { };
-    oneSite[callLinkPosition(OpCallVarargs::opcodeID)] = 1;
-    expectCheckFails(context, "no group and one varargs site"_s, ICs::checkMetadataLayout(*emptyView, oneSite), ICs::Check::MetadataLayout, 0);
-
-    // A group for every canonical opcode matches one site of each.
-    TestSection everyOpcode;
-    ICs::CallLinkSiteCounts everyCount { };
-    for (const ExpectedCallLinkOpcode& opcode : expectedCallLinkOpcodes) {
-        everyOpcode.groups.append(ICs::CallLinkGroup { opcode.opcodeID, 1 });
-        everyOpcode.callLinks.append(callLink(ICs::CallLinkModeCode::Init, 0, 0));
-        everyCount[callLinkPosition(opcode.opcodeID)] = 1;
-    }
-    everyOpcode.callLinkGroupCount = ICs::numberOfCallLinkOpcodes;
-    everyOpcode.callLinkSiteCount = ICs::numberOfCallLinkOpcodes;
-    Vector<uint8_t> everyBytes = encode(everyOpcode);
-    auto everyView = parseStrict(everyBytes.span());
-    if (!everyView) {
-        JITCACHE_FAIL(makeString("the section with every opcode failed "_s, ICs::description(everyView.error().check)));
-        return;
-    }
-    expectCheckPasses(context, "one site of every opcode"_s, ICs::checkMetadataLayout(*everyView, everyCount));
-    everyCount[callLinkPosition(OpCallIgnoreResult::opcodeID)] = 2;
-    expectCheckFails(context, "one call_ignore_result site more"_s, ICs::checkMetadataLayout(*everyView, everyCount), ICs::Check::MetadataLayout, 0);
-}
-
-// MoldMegamorphicBit. Molds as baseline emission leaves them carry no fold bit. Each mold list below fails
-// MoldMegamorphicBit and nothing else: it still pairs with the valid section, whose layout matches the site counts.
-JITCACHE_TEST(icsRestoreCheckMolds, No)
-{
-    expectCheckPasses(context, "no mold"_s, ICs::checkMolds({ }));
-    Vector<BaselineUnlinkedPropertyInlineCache> molds = validSectionMolds();
-    expectCheckPasses(context, "the valid section's molds"_s, ICs::checkMolds(molds.span()));
-
-    Vector<uint8_t> bytes = encode(validSection());
-    auto view = parseStrict(bytes.span());
-    if (!view) {
-        JITCACHE_FAIL(makeString("the valid section failed "_s, ICs::description(view.error().check)));
-        return;
-    }
-    expectCheckPasses(context, "the valid section with its site counts"_s, ICs::checkMetadataLayout(*view, validSectionSiteCounts()));
-
-    auto expectOnlyMoldsFail = [&](ASCIILiteral what, const Vector<BaselineUnlinkedPropertyInlineCache>& changed, uint32_t siteIndex) {
-        expectCheckFails(context, what, ICs::checkMolds(changed.span()), ICs::Check::MoldMegamorphicBit, siteIndex);
-        expectCheckPasses(context, what, ICs::checkMoldPairing(*view, changed.span()));
-    };
-
-    Vector<BaselineUnlinkedPropertyInlineCache> second = molds;
-    second[1].canBeMegamorphic = true;
-    expectOnlyMoldsFail("the second mold with the fold bit"_s, second, 1);
-
-    Vector<BaselineUnlinkedPropertyInlineCache> last = molds;
-    last[2].canBeMegamorphic = true;
-    expectOnlyMoldsFail("the last mold with the fold bit"_s, last, 2);
-
-    // The first failure is the one reported.
-    Vector<BaselineUnlinkedPropertyInlineCache> firstAndLast = molds;
-    firstAndLast[0].canBeMegamorphic = true;
-    firstAndLast[2].canBeMegamorphic = true;
-    expectOnlyMoldsFail("the first and last molds with the fold bit"_s, firstAndLast, 0);
-
-    // Only the fold bit matters: the other identity bits are the molds' own.
-    Vector<BaselineUnlinkedPropertyInlineCache> otherBits = molds;
-    for (auto& changed : otherBits) {
-        changed.propertyIsInt32 = true;
-        changed.propertyIsString = true;
-        changed.propertyIsSymbol = true;
-        changed.prototypeIsKnownObject = true;
-    }
-    expectCheckPasses(context, "molds with every other identity bit"_s, ICs::checkMolds(otherBits.span()));
 }
 
 } // namespace JSC::JITCache::Tests

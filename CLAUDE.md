@@ -10,6 +10,8 @@ Start with the simplest change that meets THREAD's goals and add mechanism only 
 
 Edit the file using the Edit tool, never by script.
 
+Commits, pull requests and anything else you publish carry no Co-Authored-By or other line that credits Claude: Davi is their only author.
+
 No Python slop. Bash or the built-in tools work better 99% of the time. To read an entire file, use the `Read` tool, not `cat`.
 
 Limit GPT Astra concurrency to at most 6 at a time (including yourself if you are an Astra), or 20 at a time if you are Claude.
@@ -49,7 +51,7 @@ Build from the checkout root with `bun build.ts [target] [--arch=aarch64] [--job
 
 Outputs land in `<build-root>/linux-<arch>-<profile>/deps/WebKit` (`bin/jsc`); keep binaries and headers of one profile together, since sanitizers change the ABI. The toolchain is LLVM 23.1.x and a Bun checkout whose history contains the pinned revision; `JITCACHE_*` environment variables tell build.ts where they are.
 
-Run one build at a time (a lock enforces it) and never a test beside a build. Test with `Tools/Scripts/run-jitcache-tests` (C++ groups and JS directories) and Bun's `test/js/bun/jitcache/jitcache.test.ts` with `--timeout 120000`, since the ASan build is slow.
+Every build, test and bench command (`build.ts`, the test runner and its self-test, the benches and `Tools/Scripts/jitcache/bun-test.ts`) holds one machine lock for its whole run, and a command that finds it held waits and names the holder. The commands a holder starts skip the lock, which ends when the holder exits, except that `build.ts` hands it to its builder, so a build keeps it until the builder exits. A command run by hand, such as `jsc`, `ninja` or a bare `bun test`, takes no lock, so never run one beside a build. Test with `Tools/Scripts/run-jitcache-tests` (C++ groups and JS directories) and with `bun Tools/Scripts/jitcache/bun-test.ts --bun=<Bun executable>`, which runs Bun's JITCache tests in `test/js/bun/jitcache/` from the Bun checkout with `--timeout 120000`, since the ASan build is slow. One command runs a twins build's whole verification, each step only after the previous one passed: `bun Tools/Scripts/run-jitcache-tests --ladder --build=<twins build> --bun=<that build's bun-debug> --pin=<pin build> --plain-build=<debug build> --jobs=8` runs the C++ tests one process per part, the corpora with the Bun-hosted scripts and the pin comparison, Bun's tests, and plain mode, then lists each failure of the failing step with its file.
 
 A Bun bump goes in this order: a census of what the new pin changes, read from both trees without building (the cached GitHub API, and `diff3` on every file both sides changed); the old pin's bench baselines; THREAD and SPEC deltas, with THREAD's accepted by Davi before any code; one merge of Bun and the engine until `twins`, plain and `bun-twins` build; then each lane ported by a fresh agent in its own worktree with two reviewers (three for the UCB codec, the one large port in 1.4.3), a review of the whole bump, and a milestone's verification.
 

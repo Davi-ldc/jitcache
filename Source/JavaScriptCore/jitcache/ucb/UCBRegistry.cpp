@@ -1,10 +1,10 @@
 #include "config.h"
-#include "UCBRegistry.h"
+#include "jitcache/ucb/UCBRegistry.h"
 
 #include "JSModuleRecord.h"
 #include "UnlinkedCodeBlock.h"
-#include "ValidatedBody.h"
 #include "WeakInlines.h"
+#include "jitcache/store/ValidatedBody.h"
 #include <algorithm>
 #include <wtf/Locker.h>
 #include <wtf/StdLibExtras.h>
@@ -15,9 +15,9 @@ namespace JSC::JITCache {
 namespace UCBRegistryInternal {
 
 #if ASSERT_ENABLED || ENABLE(JITCACHE_TWINS)
-// Whether the calling thread is inside a critical section of a registry's m_lock. The lock is a leaf, so a thread is inside
-// at most one at a time, and nothing it runs there may destroy a pending import or drop a reference to a provider or a
-// ParentIdentity. ~PendingImport asserts it, and the registry tests' stubs check it.
+// Whether the calling thread is inside a critical section of a registry's m_lock. The lock is a leaf, so a thread is
+// inside at most one at a time, and nothing it runs there may destroy a pending import or drop a reference to a
+// ParentIdentity. ~PendingImport asserts that no pending import dies there, which the registry tests' stubs also check.
 static thread_local bool insideCriticalSection { false };
 #endif
 
@@ -59,14 +59,13 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(UCBRegistry);
 // record, and with it no analysis source, is left by then.
 UCBRegistry::~UCBRegistry() = default;
 
-Ref<ParentIdentity> ParentIdentity::create(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
+Ref<ParentIdentity> ParentIdentity::create(const BodyKey& key, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
 {
-    return adoptRef(*new ParentIdentity(key, WTF::move(suppliedDigestProvider), declarationCount, childHolderDigests));
+    return adoptRef(*new ParentIdentity(key, declarationCount, childHolderDigests));
 }
 
-ParentIdentity::ParentIdentity(const BodyKey& key, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
+ParentIdentity::ParentIdentity(const BodyKey& key, unsigned declarationCount, std::span<const uint8_t> childHolderDigests)
     : m_key(key)
-    , m_suppliedDigestProvider(WTF::move(suppliedDigestProvider))
     , m_declarationCount(declarationCount)
     , m_childHolderDigests(childHolderDigests.size() / sizeof(Digest256))
 {
@@ -89,11 +88,6 @@ std::optional<Digest256> ParentIdentity::childHolderDigest(ChildTable table, uin
 const BodyKey& ParentIdentity::key() const
 {
     return m_key;
-}
-
-SourceProvider* ParentIdentity::suppliedDigestProvider() const
-{
-    return m_suppliedDigestProvider.get();
 }
 
 Ref<PendingImport> PendingImport::create(Ref<ValidatedBody>&& body, const BodyKey& key, uint64_t indexToken, Origin origin)
@@ -145,7 +139,7 @@ void UCBRegistry::recordRootExecutable(const UnlinkedFunctionExecutable& executa
     UCBRegistryInternal::CriticalSectionMark mark;
     Locker locker { m_lock };
     ASSERT(!m_children.contains(&executable));
-    // A UFE keeps its first identity. The map copies the identity, taking a provider reference, only when it inserts.
+    // A UFE keeps its first identity.
     auto result = m_roots.add(&executable, identity);
     ASSERT_UNUSED(result, result.isNewEntry || (result.iterator->value.kind == identity.kind && result.iterator->value.identityDigest == identity.identityDigest));
 }
@@ -181,7 +175,7 @@ bool UCBRegistry::recordCodeBlock(UnlinkedCodeBlock& codeBlock, UCBRecord&& reco
         }
         for (unsigned i = 0; i < expressionCount; ++i)
             children.append(codeBlock.functionExpr(i));
-        parent = ParentIdentity::create(record.key, RefPtr { record.suppliedDigestProvider }, declarationCount, childHolderDigests);
+        parent = ParentIdentity::create(record.key, declarationCount, childHolderDigests);
     }
 
     UCBRegistryInternal::CriticalSectionMark mark;
@@ -225,7 +219,6 @@ auto UCBRegistry::recordOf(const UnlinkedCodeBlock& codeBlock) const -> std::opt
         record.missedBodyVersion,
         record.matchedBodyVersion,
         !!record.pendingImport,
-        record.suppliedDigestProvider,
     };
 }
 
@@ -329,20 +322,6 @@ JSModuleRecord* UCBRegistry::moduleAnalysisSource(const UnlinkedCodeBlock& codeB
     return iterator->value->analysisSource.get();
 }
 
-bool UCBRegistry::suppliedDigestVerified(SourceID provider) const
-{
-    UCBRegistryInternal::CriticalSectionMark mark;
-    Locker locker { m_lock };
-    return m_verifiedSuppliedDigests.contains(provider);
-}
-
-void UCBRegistry::markSuppliedDigestVerified(SourceID provider)
-{
-    UCBRegistryInternal::CriticalSectionMark mark;
-    Locker locker { m_lock };
-    m_verifiedSuppliedDigests.add(provider);
-}
-
 size_t UCBRegistry::recordedCodeBlockCount() const
 {
     UCBRegistryInternal::CriticalSectionMark mark;
@@ -367,7 +346,7 @@ size_t UCBRegistry::copyRecordedCodeBlocks(std::span<RecordedCodeBlock> out) con
 
 void UCBRegistry::unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock* codeBlock)
 {
-    // Declared before the lock, so the record's pending import, provider and analysis source go after it is released.
+    // Declared before the lock, so the record's pending import and analysis source go after it is released.
     std::unique_ptr<UCBRecord> removed;
     {
         UCBRegistryInternal::CriticalSectionMark mark;
@@ -387,15 +366,14 @@ void UCBRegistry::unlinkedCodeBlockDestroyed(const UnlinkedCodeBlock* codeBlock)
 
 void UCBRegistry::unlinkedFunctionExecutableDestroyed(const UnlinkedFunctionExecutable* executable)
 {
-    // Declared before the lock, so the identity's ParentIdentity and provider go after it is released; the
-    // last child of a parent destroys the node the children shared.
+    // Declared before the lock, so the identity's ParentIdentity goes after it is released; the last child of a parent
+    // destroys the node the children shared.
     std::optional<ChildIdentity> child;
-    std::optional<RootIdentity> root;
     {
         UCBRegistryInternal::CriticalSectionMark mark;
         Locker locker { m_lock };
         child = m_children.takeOptional(executable);
-        root = m_roots.takeOptional(executable);
+        m_roots.remove(executable);
         // A UCB this UFE produced may outlive it, kept by a conservative root alone, so its record forgets the holder
         // (UCBRecord::holder). Freeing the list is allowed under the lock.
         for (const UnlinkedCodeBlock* codeBlock : m_heldCodeBlocks.take(executable)) {

@@ -1,12 +1,13 @@
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
+// jitcache-runs: 9x Producer
+// jitcache-fixture: fails 0:0 oracle-heap
+// jitcache-fixture: fails 1:0 oracle-heap
+// jitcache-fixture: fails 2:0 oracle-heap
+// jitcache-fixture: fails 3:0 oracle-heap
+// jitcache-fixture: fails 4:0 oracle-heap
+// jitcache-fixture: fails 5:0 oracle-heap
+// jitcache-fixture: fails 6:0 oracle-heap
+// jitcache-fixture: fails 7:0 oracle-heap
+// jitcache-fixture: fails 8:0 oracle-heap
 
 // Sequence k makes its Producer run and the oracle's Off run, otherwise equal, differ in one thing
 // JavaScript can reach at the end of the run, and each such difference must change the end-of-run description. The

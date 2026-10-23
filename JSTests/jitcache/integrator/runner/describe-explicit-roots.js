@@ -1,4 +1,5 @@
 // jitcache-runs: Off
+// jitcache-fixture: passes
 
 // The heap description from explicit roots: each of eight differences changes what jitcacheDescribeHeap gives of an
 // object that reaches it, while a value only the shell's arguments reaches, or only the global object reaches, changes

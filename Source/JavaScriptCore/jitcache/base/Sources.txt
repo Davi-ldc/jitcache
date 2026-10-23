@@ -1,0 +1,5 @@
+jitcache/base/BenchClock.cpp
+jitcache/base/BodyKey.cpp
+jitcache/base/EngineObject.cpp
+jitcache/base/JITCacheSHA256.cpp
+jitcache/base/ProducerBudget.cpp

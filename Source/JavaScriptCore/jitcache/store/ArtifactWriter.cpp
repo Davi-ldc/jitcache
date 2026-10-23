@@ -1,13 +1,13 @@
 #include "config.h"
-#include "ArtifactWriter.h"
+#include "jitcache/store/ArtifactWriter.h"
 
-#include "ArtifactStore.h"
-#include "JITCacheBench.h"
-#include "JITCacheContainer.h"
-#include "JITCacheFiles.h"
-#include "JITCacheParameters.h"
-#include "JITCachePlatform.h"
-#include "ProducerBudget.h"
+#include "jitcache/base/BenchClock.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/JITCacheFiles.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/store/JITCachePlatform.h"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -312,8 +312,8 @@ static std::optional<CommitFailure> streamSections(PackFile& file, std::span<uin
     return std::nullopt;
 }
 
-// Rereads the body from the pack in chunks of the staging buffer into a Full-mode validation stream, whatever strict says,
-// and requires exactly the planned layout.
+// Rereads the body from the pack in chunks of the staging buffer into a Full-mode validation stream and requires exactly
+// the planned layout.
 static std::optional<CommitFailure> rereadBody(PackFile& file, std::span<uint8_t> staging, const BodyKey& key,
     std::span<const uint8_t, 16> headerDigest, uint64_t bodyOffset, uint64_t bodySize, const BodyLayout& plannedLayout)
 {
@@ -634,7 +634,7 @@ std::optional<CommitFailure> ArtifactWriter::publish(const PackIndexEntry& entry
         Locker locker { m_artifact.m_indexLock };
         latestBlock = m_artifact.m_latestBlock;
         // A full index once the chain is long, so a reader that opens the pack walks at most that many deltas.
-        if (!entry.isTombstone() && m_artifact.m_deltasSinceFull + 1 >= packDeltaChainBound) {
+        if (m_artifact.m_deltasSinceFull + 1 >= packDeltaChainBound) {
             size_t count = m_artifact.m_index.size() + 1;
             size_t charge = count * (sizeof(PackIndexEntry) + packIndexEntryBytes);
             if (m_budget.tryCharge(charge)) {
@@ -677,23 +677,6 @@ std::optional<CommitFailure> ArtifactWriter::publish(const PackIndexEntry& entry
 #endif
 }
 
-std::optional<CommitFailure> ArtifactWriter::remove(const BodyKey& key)
-{
-    using namespace ArtifactWriterInternal;
-    if (int error = ensurePackOpen())
-        return CommitFailure { WriterChecks::openPack, errorText(error) };
-    uint64_t end;
-    {
-        Locker locker { m_artifact.m_indexLock };
-        if (!m_artifact.m_index.contains(key))
-            return std::nullopt;
-        end = m_artifact.m_validEnd;
-    }
-    PackIndexEntry tombstone;
-    tombstone.key = key;
-    return publish(tombstone, end);
-}
-
 std::expected<std::optional<CompactionResult>, CompactionFailure> ArtifactWriter::compactIfNeeded(bool timed)
 {
     using namespace ArtifactWriterInternal;
@@ -707,9 +690,9 @@ std::expected<std::optional<CompactionResult>, CompactionFailure> ArtifactWriter
         if (auto damage = m_artifact.follow())
             return std::unexpected(CompactionFailure { Kind::Damaged, damage->check, String { damage->packRejection } });
         validEnd = m_artifact.m_validEnd;
-        // A compacted pack holds its live records and one full index. Any other byte (a superseded version, a tombstone, an
-        // index block appended since the last compaction) is dead, so a delta that committed anything compacts and one
-        // that committed nothing leaves a dense pack alone.
+        // A compacted pack holds its live records and one full index. Any other byte (a superseded version, an index block
+        // appended since the last compaction) is dead, so a delta that committed anything compacts and one that committed
+        // nothing leaves a dense pack alone.
         uint64_t denseBytes = m_artifact.m_liveBytes + packIndexBlockBytes(m_artifact.m_index.size());
         if (validEnd <= denseBytes)
             return std::optional<CompactionResult> { };
@@ -817,7 +800,8 @@ std::expected<CompactionResult, CompactionFailure> ArtifactWriter::compactPack(c
     for (auto& entry : source.entries) {
         if (excludes(entry.key))
             continue;
-        // Each body passes the full checks before it moves, so the new pack holds only what a strict reader accepts.
+        // Each body passes the Full checks before it moves, as the writer's reread does, so the new pack holds only bodies
+        // the writer could have written.
         if (auto check = checkPackedBody(source.pack, entry, target.headerDigest)) {
             if (target.dropsDamagedBodies) {
                 result.droppedBodies.append({ entry.key, *check });
@@ -960,15 +944,16 @@ std::expected<CommitResult, CommitFailure> ArtifactWriter::rewriteSection(const 
 {
     using namespace ArtifactWriterInternal;
 
-    BodyOpen opened = m_artifact.open(key, ValidationMode::Full);
+    BodyOpen opened = m_artifact.open(key);
     if (opened.outcome != StoreOutcome::Found)
         return failure(WriterChecks::rewrite, describeUnopenedBody(opened));
     RefPtr<ValidatedBody> body = WTF::move(opened.body);
 
     CommitStamp stamp { body->key(), body->llintThreshold(), body->counterProgress(), body->highestTier() };
     uint8_t highestTier = stamp.highestTier;
-    // The Full open checked that the body holds every kind its highest tier requires, an empty section included, and no
-    // other kind except ucb.analysis. A capture stores ucb.analysis only when it built one, and one is never empty.
+    // The writer's reread, and compaction before it moves a body, checked that the body holds every kind its highest tier
+    // requires, an empty section included, and no other kind except ucb.analysis. A capture stores ucb.analysis only when
+    // it built one, and one is never empty.
     auto holds = [&](SectionKind sectionKind) {
         return isSectionRequired(sectionKind, highestTier) || !body->section(sectionKind).empty();
     };

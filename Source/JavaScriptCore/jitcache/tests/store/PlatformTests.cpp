@@ -2,12 +2,12 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
-#include "JITCacheOptions.h"
-#include "JITCachePlatform.h"
-#include "JITCacheTest.h"
 #include "MacroAssembler.h"
 #include "Options.h"
-#include "TestArtifact.h"
+#include "jitcache/store/JITCacheOptions.h"
+#include "jitcache/store/JITCachePlatform.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestPack.h"
 #include <algorithm>
 #include <array>
 #include <span>

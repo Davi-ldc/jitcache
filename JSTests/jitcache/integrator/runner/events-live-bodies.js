@@ -1,5 +1,6 @@
 // jitcache-runs: Producer --jitcache-body-events=live-body-events.jsonl
 // jitcache-check: 0 resources/live-bodies.ts
+// jitcache-fixture: passes
 
 // A Producer run's body-event dump has a line for each keyed body still alive, with the counts
 // jitcacheBodyEvents gave for it at the end. h6Hot compiles and h6Cold stays in the LLInt; a global keeps both alive

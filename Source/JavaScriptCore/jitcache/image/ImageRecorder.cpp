@@ -1,17 +1,17 @@
 #include "config.h"
-#include "ImageRecorder.h"
+#include "jitcache/image/ImageRecorder.h"
 
 #if ENABLE(JIT)
 
 #include "ArithProfile.h"
 #include "BaselineJITCode.h"
-#include "ImageFootprint.h"
-#include "ImageRecord.h"
-#include "ImageSection.h"
-#include "ImageSupport.h"
 #include "JIT.h"
 #include "LinkBuffer.h"
 #include "UnlinkedCodeBlock.h"
+#include "jitcache/image/ImageFootprint.h"
+#include "jitcache/image/ImageRecord.h"
+#include "jitcache/image/ImageSection.h"
+#include "jitcache/image/ImageSupport.h"
 #include <algorithm>
 #include <limits>
 #include <wtf/MathExtras.h>
@@ -19,7 +19,7 @@
 #include <wtf/TZoneMallocInlines.h>
 
 #if ENABLE(JITCACHE_TWINS)
-#include "ImageTwinsSection.h"
+#include "jitcache/image/ImageTwinsSection.h"
 #endif
 
 // Besides the declarations of its header, the build checks that keep recording sound: no sampling instrumentation,

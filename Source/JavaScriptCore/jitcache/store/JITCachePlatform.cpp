@@ -1,9 +1,9 @@
 #include "config.h"
-#include "JITCachePlatform.h"
+#include "jitcache/store/JITCachePlatform.h"
 
-#include "CodeSymbolAnchor.h"
-#include "JITCacheOptions.h"
 #include "MacroAssembler.h"
+#include "jitcache/base/EngineObject.h"
+#include "jitcache/store/JITCacheOptions.h"
 #include <atomic>
 #include <mutex>
 #include <type_traits>
@@ -104,56 +104,18 @@ BuildID buildIDOfObject(const struct dl_phdr_info& object)
     return { };
 }
 
-static bool loadedSegmentsContain(const struct dl_phdr_info& object, uintptr_t address)
-{
-    for (auto& header : unsafeMakeSpan(object.dlpi_phdr, object.dlpi_phnum)) {
-        if (header.p_type != PT_LOAD)
-            continue;
-        uintptr_t start = static_cast<uintptr_t>(object.dlpi_addr + header.p_vaddr);
-        if (address >= start && address - start < header.p_memsz)
-            return true;
-    }
-    return false;
-}
-
-// An address inside the engine object: the code-symbol anchor, since the header's ID must cover the object the image's
-// offsets are measured in. Builds without the JIT have no anchor, and any engine function names the same object.
-static uintptr_t engineAddress()
-{
-#if ENABLE(JIT)
-    return reinterpret_cast<uintptr_t>(&codeSymbolAnchor);
-#else
-    return reinterpret_cast<uintptr_t>(&processFacts);
-#endif
-}
-
-// The main executable is the first object dl_iterate_phdr lists; the engine object is the one whose loaded segments
-// hold the engine's address, and it gets an ID of its own only when it is not the main executable.
+// The main executable's build ID, and the engine object's (EngineObject.h) when it is not the main executable. An
+// engine that no loaded object holds cannot be identified, so it counts as an object of its own without an ID, which
+// start rejects.
 static void computeBuildIDs(ProcessFacts& facts)
 {
-    struct Search {
-        uintptr_t engine;
-        ProcessFacts& facts;
-        bool sawMainExecutable;
-        bool foundEngine;
-    } search { engineAddress(), facts, false, false };
-    dl_iterate_phdr([](struct dl_phdr_info* object, size_t, void* data) -> int {
-        auto& search = *static_cast<Search*>(data);
-        bool isMainExecutable = !search.sawMainExecutable;
-        search.sawMainExecutable = true;
-        if (isMainExecutable)
-            search.facts.mainExecutable = buildIDOfObject(*object);
-        if (!loadedSegmentsContain(*object, search.engine))
-            return 0;
-        if (!isMainExecutable)
-            search.facts.engineObject = buildIDOfObject(*object);
-        search.foundEngine = true;
-        return 1;
-    }, &search);
-    // An engine that no listed object holds cannot be identified, so it counts as an object of its own without an ID,
-    // which start rejects.
-    if (!search.foundEngine)
+    const LoadedObjects& objects = loadedObjects();
+    if (objects.mainExecutable)
+        facts.mainExecutable = buildIDOfObject(*objects.mainExecutable);
+    if (!objects.engine)
         facts.engineObject = BuildID { };
+    else if (objects.engine != objects.mainExecutable)
+        facts.engineObject = buildIDOfObject(*objects.engine);
 }
 
 #endif // OS(LINUX)

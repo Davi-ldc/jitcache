@@ -9,14 +9,15 @@
 #include "CodeBlock.h"
 #include "CodeSpecializationKind.h"
 #include "Completion.h"
+#include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
-#include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "JSLock.h"
 #include "SourceCode.h"
 #include "VM.h"
+#include "jitcache/tests/support/JITCacheTest.h"
 #include <initializer_list>
 #include <optional>
 #include <wtf/Noncopyable.h>
@@ -24,18 +25,11 @@
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
 
-#if ENABLE(JIT)
-#include "BaselineJITCode.h"
-#include "DeferGC.h"
-#include "JIT.h"
-#include <wtf/Ref.h>
-#endif
-
 // What the tests of every part do with a VM: run a second VM beside the test's own, evaluate a source in a global object
-// of its own, read the globals the source defines, call its functions through JSC::call, find a function's CB and, with
-// the JIT, compile it to baseline in place. A helper that can fail records the failure in the test's context and returns
-// null, nullopt or false, so its caller only has to stop. The helpers root nothing: a test keeps every value it passes in
-// the source's globals and the global object on its stack, so no collection takes what the test still reads.
+// of its own, read the globals the source defines, call its functions through JSC::call and find a function's CB. A helper
+// that can fail records the failure in the test's context and returns null, nullopt or false, so its caller only has to
+// stop. The helpers root nothing: a test keeps every value it passes in the source's globals and the global object on its
+// stack, so no collection takes what the test still reads.
 
 namespace JSC::JITCache::Tests {
 
@@ -145,53 +139,6 @@ inline JSGlobalObject* createRunOnceRealm(TestContext& context, VM& vm)
 {
     return createRealm(context, vm, runOnceSource, runOnceSourceName);
 }
-
-#if ENABLE(JIT)
-
-// Compiles the LLInt CB the function's calls installed to baseline, in that same CB, as JIT::compileSync does for any CB
-// the LLInt has run, with collection deferred while it compiles; the setup that installs the code arms the baseline
-// counter. Then checks that the CB is still its executable's code.
-inline CodeBlock* compileToBaseline(TestContext& context, JSFunction* function)
-{
-    VM& vm = function->vm();
-    CodeBlock* codeBlock = function->jsExecutable()->codeBlockForCall();
-    if (!codeBlock || codeBlock->jitType() != JITType::InterpreterThunk) {
-        JITCACHE_FAIL("the first call did not leave an LLInt CB"_s);
-        return nullptr;
-    }
-    CompilationResult result;
-    {
-        DeferGCForAWhile deferGC(vm);
-        result = JIT::compileSync(vm, codeBlock, JITCompilationMustSucceed);
-    }
-    if (result != CompilationResult::CompilationSuccessful || codeBlock->jitType() != JITType::BaselineJIT || !codeBlock->baselineJITData()) {
-        JITCACHE_FAIL("JIT::compileSync did not install baseline code in the LLInt CB"_s);
-        return nullptr;
-    }
-    if (function->jsExecutable()->codeBlockForCall() != codeBlock) {
-        JITCACHE_FAIL("the baseline CB is not its executable's code"_s);
-        return nullptr;
-    }
-    return codeBlock;
-}
-
-// The function's baseline CB: one call installs its LLInt CB, which compileToBaseline then compiles.
-inline CodeBlock* bringToBaseline(TestContext& context, JSGlobalObject* globalObject, JSFunction* function, std::initializer_list<JSValue> arguments)
-{
-    if (!callFunction(context, globalObject, function, arguments))
-        return nullptr;
-    return compileToBaseline(context, function);
-}
-
-// The code a baseline CB runs, held by the test so that it outlives anything done to the CB.
-inline Ref<BaselineJITCode> baselineCodeOf(CodeBlock& codeBlock)
-{
-    RefPtr jitCode = codeBlock.jitCode();
-    RELEASE_ASSERT(jitCode && jitCode->jitType() == JITType::BaselineJIT);
-    return Ref { static_cast<BaselineJITCode&>(*jitCode) };
-}
-
-#endif // ENABLE(JIT)
 
 } // namespace JSC::JITCache::Tests
 

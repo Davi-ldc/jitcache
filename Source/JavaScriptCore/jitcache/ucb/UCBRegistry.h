@@ -1,17 +1,14 @@
 #pragma once
 
 #include "ParserModes.h"
-#include "SourceID.h"
-#include "SourceProvider.h"
-#include "UCBKeys.h"
 #include "Weak.h"
+#include "jitcache/ucb/UCBKeys.h"
 #include <array>
 #include <memory>
 #include <optional>
 #include <span>
 #include <wtf/FixedVector.h>
 #include <wtf/HashMap.h>
-#include <wtf/HashSet.h>
 #include <wtf/Lock.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/Ref.h>
@@ -37,8 +34,8 @@ class ValidatedBody; // the integrator's handle on a validated body file
 
 // Statistics.
 enum class MissReason : uint8_t { NoKey, NoBody, BodyUnchanged, RequestKey, Context, Holder, Stack };
-// The steps ucb.identity, ucb.feedback, ucb.decode, ucb.closure, ucb.strict-core, ucb.supplied-digest and ucb.analysis.
-enum class InvalidMaterialStep : uint8_t { Identity, Feedback, Decode, Closure, StrictCore, SuppliedDigest, Analysis };
+// The steps ucb.identity and ucb.decode.
+enum class InvalidMaterialStep : uint8_t { Identity, Decode };
 
 enum class UCBOrigin : uint8_t { Generated, Imported }; // what produced the UCB in this VM
 enum class ImportResolution : uint8_t { Installed, DroppedByGate };
@@ -49,7 +46,6 @@ struct UCBStatistics {
     uint64_t gateDrops { 0 }; // pending imports the shouldJIT gate dropped
     uint64_t sourceDigests { 0 }; // root source digests hashed from text, at requests, root creations and analysis imports; a direct eval's is not counted
     uint64_t suppliedSourceDigests { 0 }; // root digests requests and root creations took from builtin metadata or a provider
-    uint64_t suppliedDigestVerifications { 0 }; // supplied digests checked against their text, by imports and by the analysis import
     uint64_t contextDigests { 0 }; // context digests computed, by requests and captures
     uint64_t holderDigests { 0 }; // holder digests computed, by requests and captures
     uint64_t tdzEnvironmentDigests { 0 }; // TDZ environments digested, each once while it lives
@@ -65,31 +61,26 @@ struct UCBStatistics {
     uint64_t analysisUnrepresentable { 0 };
     std::array<uint64_t, 7> misses { }; // indexed by MissReason
     std::array<uint64_t, 2> records { }; // indexed by UCBOrigin
-    std::array<uint64_t, 7> invalidMaterial { }; // indexed by InvalidMaterialStep
+    std::array<uint64_t, 2> invalidMaterial { }; // indexed by InvalidMaterialStep
 };
 static_assert(static_cast<size_t>(MissReason::Stack) + 1 == std::tuple_size_v<decltype(UCBStatistics::misses)>);
 static_assert(static_cast<size_t>(UCBOrigin::Imported) + 1 == std::tuple_size_v<decltype(UCBStatistics::records)>);
-static_assert(static_cast<size_t>(InvalidMaterialStep::Analysis) + 1 == std::tuple_size_v<decltype(UCBStatistics::invalidMaterial)>);
+static_assert(static_cast<size_t>(InvalidMaterialStep::Decode) + 1 == std::tuple_size_v<decltype(UCBStatistics::invalidMaterial)>);
 
 // Identities.
-// suppliedDigestProvider, in each type below: the provider whose supplied digest an import at the key relies on, kept only
-// in a VM that imports with strict on, so that the import can verify it; else null, and always null for a direct eval and
-// everything nested in one.
-// What the children of one recorded UCB share: its key and suppliedDigestProvider, kept once per parent and alive while
-// any of its child UFEs has an entry. A UCB imported from a body that lists its children's holder digests also keeps them,
-// declarations then expressions, which the holder check compares for the child UFEs its decode made.
+// What the children of one recorded UCB share: its key, kept once per parent and alive while any of its child UFEs has an
+// entry. A UCB imported from a body that lists its children's holder digests also keeps them, declarations then
+// expressions, which the holder check compares for the child UFEs its decode made.
 class ParentIdentity final : public ThreadSafeRefCounted<ParentIdentity> {
 public:
-    static Ref<ParentIdentity> create(const BodyKey&, RefPtr<SourceProvider>&& suppliedDigestProvider, unsigned declarationCount = 0, std::span<const uint8_t> childHolderDigests = { });
+    static Ref<ParentIdentity> create(const BodyKey&, unsigned declarationCount = 0, std::span<const uint8_t> childHolderDigests = { });
     const BodyKey& key() const LIFETIME_BOUND;
-    SourceProvider* suppliedDigestProvider() const;
     // The digest the parent's body lists for that child, or none when it lists none or a zero digest.
     std::optional<Digest256> childHolderDigest(ChildTable, uint32_t index) const;
 
 private:
-    ParentIdentity(const BodyKey&, RefPtr<SourceProvider>&&, unsigned declarationCount, std::span<const uint8_t> childHolderDigests);
+    ParentIdentity(const BodyKey&, unsigned declarationCount, std::span<const uint8_t> childHolderDigests);
     BodyKey m_key;
-    RefPtr<SourceProvider> m_suppliedDigestProvider;
     unsigned m_declarationCount { 0 };
     FixedVector<Digest256> m_childHolderDigests;
 };
@@ -104,7 +95,6 @@ static_assert(sizeof(ChildIdentity) == 16);
 struct RootIdentity { // FunctionConstructor or Builtin
     IdentityKind kind;
     Digest256 identityDigest;
-    RefPtr<SourceProvider> suppliedDigestProvider;
 };
 
 using ExecutableIdentity = Variant<ChildIdentity, RootIdentity>;
@@ -137,7 +127,6 @@ struct UCBRecord { // move-only, for its Weak
     std::optional<uint64_t> missedBodyVersion; // the index token at which no body fitted the UCB
     std::optional<uint64_t> matchedBodyVersion; // the commit identifier of the body the UCB was imported or attached from
     RefPtr<PendingImport> pendingImport; // at most one
-    RefPtr<SourceProvider> suppliedDigestProvider;
     // Function code, in a VM whose production is active with the delta capture All (VMState::capturesUncompiledBodies):
     // the requesting UFE, which a capture without a CodeBlock encodes through; null otherwise, and once the UFE's
     // destructor hook ran. A conservative root can keep the UCB alive after the UFE dies, which is why the hook clears it.
@@ -154,8 +143,8 @@ struct UCBRecord { // move-only, for its Weak
 // m_lock is a leaf: no other lock is taken while it is held, and inside its critical sections no code
 // allocates a cell, enters or leaves a DeferGC or DeferGCForAWhile scope, runs a write barrier, calls into the collector or
 // the integrator, destroys a PendingImport, makes or destroys a module's analysis source, whose making counts as a heap
-// allocation, or drops a reference to a SourceProvider or a ParentIdentity. A destructor hook moves such references and
-// handles out under the lock and lets them go after unlocking.
+// allocation, or drops a reference to a ParentIdentity. A destructor hook moves such references and handles out under the
+// lock and lets them go after unlocking.
 class UCBRegistry {
     WTF_MAKE_NONCOPYABLE(UCBRegistry);
     WTF_MAKE_TZONE_ALLOCATED(UCBRegistry);
@@ -173,10 +162,10 @@ public:
 
     // UCB records. VM thread.
     // Records the UCB and gives each child UFE of its two tables (functionDeclIfDecoded, functionExpr) a ChildIdentity, in
-    // table order, all referencing one ParentIdentity made from the record's key and suppliedDigestProvider (none for a UCB
-    // without children). A UCB that already has a record keeps it, and with it the key it was recorded under; returns
-    // false then. childHolderDigests: an import's list (IdentitySection::childHolderDigests), which the ParentIdentity
-    // keeps; empty for every other record.
+    // table order, all referencing one ParentIdentity made from the record's key (none for a UCB without children). A UCB
+    // that already has a record keeps it, and with it the key it was recorded under; returns false then.
+    // childHolderDigests: an import's list (IdentitySection::childHolderDigests), which the ParentIdentity keeps; empty for
+    // every other record.
     bool recordCodeBlock(UnlinkedCodeBlock&, UCBRecord&&, std::span<const uint8_t> childHolderDigests = { });
     struct RecordView {
         BodyKey key;
@@ -186,7 +175,6 @@ public:
         std::optional<uint64_t> missedBodyVersion;
         std::optional<uint64_t> matchedBodyVersion;
         bool hasPendingImport;
-        RefPtr<SourceProvider> suppliedDigestProvider;
     };
     std::optional<RecordView> recordOf(const UnlinkedCodeBlock&) const;
     std::optional<BodyKey> keyOf(const UnlinkedCodeBlock&) const;
@@ -207,10 +195,6 @@ public:
     // replaces, is destroyed after unlocking.
     void setModuleAnalysisSource(const UnlinkedCodeBlock&, Weak<JSModuleRecord>&&);
     JSModuleRecord* moduleAnalysisSource(const UnlinkedCodeBlock&) const; // the live source, or null
-
-    // Supplied digests an import verified, by the provider's SourceID, which no other provider ever takes. VM thread.
-    bool suppliedDigestVerified(SourceID) const;
-    void markSuppliedDigestVerified(SourceID);
 
     // Delta's walk of every recorded UCB. Under the lock the walk only copies, so the caller tests each cell
     // after it, outside the lock: a cell's liveness test takes its block's lock, which the leaf rule forbids here.
@@ -247,14 +231,13 @@ private:
     // The UCBs whose records name each holder (UCBRecord::holder), so that the holder's destructor hook clears those
     // records' field. A UFE holds one UCB per specialization, and an older one lives on only while a CodeBlock keeps it.
     UncheckedKeyHashMap<const UnlinkedFunctionExecutable*, Vector<const UnlinkedCodeBlock*, 1>> m_heldCodeBlocks WTF_GUARDED_BY_LOCK(m_lock);
-    UncheckedKeyHashSet<SourceID> m_verifiedSuppliedDigests WTF_GUARDED_BY_LOCK(m_lock);
     UCBStatistics m_statistics; // not under m_lock: only the VM thread's engine and readers touch it
 };
 
 #if ENABLE(JITCACHE_TWINS)
-// Whether the calling thread is inside a critical section of a registry's lock. The registry tests' stubs read it in their
-// destructors, which the registry's destructor hooks run, to show that the registry lets pending imports, providers and
-// ParentIdentity references go only after it unlocks.
+// Whether the calling thread is inside a critical section of a registry's lock. The registry tests' stubs read it in
+// their destructors, which the registry's destructor hooks run, to show that the registry lets pending imports go only
+// after it unlocks.
 bool isUCBRegistryLockHeldByCurrentThread();
 #endif
 

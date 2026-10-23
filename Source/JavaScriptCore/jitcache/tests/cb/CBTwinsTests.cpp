@@ -7,15 +7,11 @@
 #include "BaselineJITCode.h"
 #include "BytecodeIndex.h"
 #include "BytecodeStructs.h"
-#include "CBFormat.h"
-#include "CBState.h"
-#include "CBTestSupport.h"
 #include "CodeBlock.h"
 #include "DeferGC.h"
 #include "ExecutionCounter.h"
 #include "FunctionExecutable.h"
 #include "IterationModeMetadata.h"
-#include "JITCacheTest.h"
 #include "JSArray.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
@@ -24,14 +20,19 @@
 #include "LazyValueProfile.h"
 #include "Operands.h"
 #include "Options.h"
-#include "ProducerBudget.h"
 #include "SpeculatedType.h"
 #include "StructureID.h"
-#include "TestVM.h"
-#include "TwinReport.h"
 #include "UnlinkedCodeBlock.h"
 #include "ValueProfile.h"
 #include "VirtualRegister.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/cb/CBState.h"
+#include "jitcache/tests/cb/CBTestSupport.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestCodeBlocks.h"
+#include "jitcache/tests/support/TestVM.h"
+#include "jitcache/twins/TwinReport.h"
 #include <algorithm>
 #include <initializer_list>
 #include <limits>
@@ -52,8 +53,8 @@
 // aging fault, bodies without a metadata table go through every lane call, and verifyTwins passes on a section that
 // seeds every family. Each test runs on a fresh VM and builds its CBs as the import tests do: it evaluates its source
 // in its own global object, one call through JSC::call installs an LLInt CB, and JIT::compileSync compiles that CB to
-// baseline. The newborn CB of a function never called, with the same body text, takes a strict capture of that
-// baseline CB through prepare, seedLinkedState, native setup with the producer's code and finishCounter, inside one
+// baseline. The newborn CB of a function never called, with the same body text, takes a capture of that baseline CB
+// through prepare, seedLinkedState, native setup with the producer's code and finishCounter, inside one
 // deferral as the install function runs them; verifyTwins then writes to a twin report in a temporary file, which the
 // test reads back.
 
@@ -186,7 +187,7 @@ static void expectTwinChecks(TestContext& context, const String& what, const CBS
 }
 
 // Takes a newborn CB of the function through the import's install sequence with the section, inside one deferral:
-// prepare with strict on, seedLinkedState, beforeSetup(codeBlock), native setup with the producer's code, and
+// prepare, seedLinkedState, beforeSetup(codeBlock), native setup with the producer's code, and
 // finishCounter; then calls afterFinish(codeBlock, the prepared import, what finishCounter returned), which runs where
 // the install function calls verifyTwins, before installCode.
 template<typename BeforeSetup, typename AfterFinish>
@@ -196,16 +197,12 @@ static void restoreOnNewborn(TestContext& context, JSFunction* function, std::sp
     CodeBlock* newborn = createNewbornCodeBlock(context, function);
     if (!newborn)
         return;
-    auto prepared = CBStateImport::prepare(section, *newborn, true);
-    if (!prepared) {
-        failWith(context, "prepare"_s, prepared.error());
-        return;
-    }
-    prepared->seedLinkedState(*newborn);
+    CBStateImport prepared = CBStateImport::prepare(section);
+    prepared.seedLinkedState(*newborn);
     beforeSetup(*newborn);
     newborn->setupWithUnlinkedBaselineCode(Ref { code });
-    CBCounterRestore restore = prepared->finishCounter(*newborn);
-    afterFinish(*newborn, *prepared, restore);
+    CBCounterRestore restore = prepared.finishCounter(*newborn);
+    afterFinish(*newborn, prepared, restore);
 }
 
 // Writes a slice into the counter as finishCounter writes its result for the record, and resamples aging as it does, so
@@ -224,8 +221,8 @@ static constexpr auto elementSource = "function element(array, index) { return a
     "function elementTwin(array, index) { return array[index] + 1; }\n"
     "var array = [1, 2, 3];\n"_s;
 
-// The import validation test's subject, which has an entry in nearly every family: it is sloppy, so `this` gives a
-// to_this; `array.length` a get_length; Array(n) a jneq_ptr and a new_array_with_size; the nested literals new_array
+// The subject of cbTwinsCheckEverySeededField, which has an entry in nearly every family: it is sloppy, so `this` gives
+// a to_this; `array.length` a get_length; Array(n) a jneq_ptr and a new_array_with_size; the nested literals new_array
 // and new_array_buffer of each copy-on-write type; for-of an iterator_open, an iterator_next and an
 // iterator_close_check; for-in the enumerator opcodes; and the calls of helper two call sites.
 #define CB_TWINS_TESTS_SUBJECT_BODY \
@@ -270,9 +267,9 @@ static constexpr auto metadataFreeSource = "function id(x) { return x; }\n"
     "var other = { y: 2 };\n"_s;
 
 // The sequence for one body without a metadata table: the producer runs in the LLInt once per argument and compiles to
-// baseline; a strict capture holds no value profile, no family entry and both argument predictions, and scoreLive
-// agrees with its score. The twin's newborn CB has no metadata table either, both walkers call nothing on it, and
-// prepare with strict on, seedLinkedState, setup, finishCounter and verifyTwins run on it and report no difference.
+// baseline; a capture holds no value profile, no family entry and both argument predictions, and scoreLive agrees with
+// its score. The twin's newborn CB has no metadata table either, both walkers call nothing on it, and prepare,
+// seedLinkedState, setup, finishCounter and verifyTwins run on it and report no difference.
 static void checkBodyWithoutMetadataTable(TestContext& context, JSGlobalObject* globalObject, ASCIILiteral producerName, ASCIILiteral twinName, std::initializer_list<JSValue> calls)
 {
     VM& vm = globalObject->vm();
@@ -292,15 +289,11 @@ static void checkBodyWithoutMetadataTable(TestContext& context, JSGlobalObject* 
         return;
     }
 
-    auto liveScore = CBStateCapture::scoreLive(*producer, true, false);
-    if (!liveScore) {
-        failWith(context, makeString(producerName, ": scoreLive"_s), liveScore.error());
-        return;
-    }
+    CBScore liveScore = CBStateCapture::scoreLive(*producer, false);
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    auto captured = CBStateCapture::capture(*producer, budget.get(), true, false);
+    auto captured = CBStateCapture::capture(*producer, budget.get(), false);
     if (!captured) {
-        failWith(context, makeString(producerName, ": capture"_s), captured.error());
+        JITCACHE_FAIL(makeString(producerName, ": capture refused its charge"_s));
         return;
     }
     auto image = decodeState(context, captured->stateSection());
@@ -323,9 +316,9 @@ static void checkBodyWithoutMetadataTable(TestContext& context, JSGlobalObject* 
         }
     }
     const CBScore& score = captured->score();
-    JITCACHE_CHECK(liveScore->richnessUnits == score.richnessUnits);
-    JITCACHE_CHECK(liveScore->counterWithheld == score.counterWithheld);
-    JITCACHE_CHECK(liveScore->counterProgress == score.counterProgress);
+    JITCACHE_CHECK(liveScore.richnessUnits == score.richnessUnits);
+    JITCACHE_CHECK(liveScore.counterWithheld == score.counterWithheld);
+    JITCACHE_CHECK(liveScore.counterProgress == score.counterProgress);
 
     Ref<BaselineJITCode> code = baselineCodeOf(*producer);
     DeferGCForAWhile deferGC(vm);
@@ -348,16 +341,12 @@ static void checkBodyWithoutMetadataTable(TestContext& context, JSGlobalObject* 
     });
     JITCACHE_CHECK(!walkerCalls);
 
-    auto prepared = CBStateImport::prepare(captured->stateSection(), *newborn, true);
-    if (!prepared) {
-        failWith(context, makeString(twinName, ": prepare"_s), prepared.error());
-        return;
-    }
-    prepared->seedLinkedState(*newborn);
+    CBStateImport prepared = CBStateImport::prepare(captured->stateSection());
+    prepared.seedLinkedState(*newborn);
     newborn->setupWithUnlinkedBaselineCode(code.copyRef());
-    CBCounterRestore restore = prepared->finishCounter(*newborn);
+    CBCounterRestore restore = prepared.finishCounter(*newborn);
     JITCACHE_CHECK(restore.carried);
-    expectTwinChecks(context, makeString(producerName, "'s section on "_s, twinName, "'s newborn CB"_s), *prepared, *newborn, restore, { });
+    expectTwinChecks(context, makeString(producerName, "'s section on "_s, twinName, "'s newborn CB"_s), prepared, *newborn, restore, { });
 }
 
 } // namespace CBTwinsTestsInternal
@@ -536,8 +525,8 @@ JITCACHE_TEST(cbTwinsReadNoMetadataTable, Yes)
     checkBodyWithoutMetadataTable(context, globalObject, "has"_s, "hasTwin"_s, { *object, *other });
 }
 
-// verifyTwins on a section that seeds every family the subject has: a strict capture of its baseline CB, with FastMap
-// added at its first iterator_open site, so that the realm step runs, and lazy-operand records that repeat a key, so that
+// verifyTwins on a section that seeds every family the subject has: a capture of its baseline CB, with FastMap added at
+// its first iterator_open site, so that the realm step runs, and lazy-operand records that repeat a key, so that
 // the holder collapses them. On the twin's newborn CB the check reports nothing. Then, each time on a fresh newborn CB, a
 // seeded field changed after finishCounter, a sample written beside a seeded field, or a native field the lane must not
 // write is reported under its own check and nothing else.

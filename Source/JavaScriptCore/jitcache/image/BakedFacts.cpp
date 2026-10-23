@@ -1,36 +1,34 @@
 #include "config.h"
-#include "BakedFacts.h"
+#include "jitcache/image/BakedFacts.h"
 
 #if ENABLE(JIT)
 
-#include "ByteFields.h"
 #include "BytecodeStructs.h"
 #include "CodeBlock.h"
-#include "ImageSection.h"
 #include "JSCInlines.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/image/ImageSection.h"
 #include <algorithm>
 #include <array>
 #include <optional>
 #include <utility>
 
-// Besides the declarations of its header, the section's field offsets, the rules ImageCheck::BakedFacts applies to its
-// header and entries, and the test of one scope fact against a newborn CB's metadata.
+// Besides the declarations of its header, the section's field offsets and the test of one scope fact against a newborn
+// CB's metadata.
 
 namespace JSC::JITCache {
 
 namespace BakedFactsInternal {
 
-// Header fields.
+// Header fields; the u16 at offset 2 is reserved.
 static constexpr size_t levelOffset = 0;
 static constexpr size_t taintOffset = 1;
-static constexpr size_t headerReservedOffset = 2;
 static constexpr size_t countOffset = 4;
 
-// Entry fields.
+// Entry fields; the u16 at offset 6 is reserved.
 static constexpr size_t entryBytecodeOffset = 0;
 static constexpr size_t entryOpcodeOffset = 4;
 static constexpr size_t entryResolveTypeOffset = 5;
-static constexpr size_t entryReservedOffset = 6;
 static constexpr size_t entryDepthOffset = 8;
 static constexpr size_t entryImportSlotOffset = 12;
 static_assert(entryImportSlotOffset + sizeof(uint32_t) == bakedFactsEntrySize);
@@ -49,67 +47,9 @@ static bool mayHaveImportSlot(ScopeOpcode opcode, ResolveType resolveType)
     return opcode == ScopeOpcode::ResolveScope && resolveType == ModuleVar;
 }
 
-static bool isValidCapabilityLevel(uint8_t level)
-{
-    // The compilation reads its level through capabilityLevel(), which never returns CapabilityLevelNotSet. Without a
-    // default, the switch stops building when the engine adds a level.
-    switch (static_cast<DFG::CapabilityLevel>(level)) {
-    case DFG::CannotCompile:
-    case DFG::CanCompile:
-    case DFG::CanCompileAndInline:
-        return true;
-    case DFG::CapabilityLevelNotSet:
-        return false;
-    }
-    return false;
-}
-
-static bool isValidScopeOpcode(uint8_t opcode)
-{
-    return opcode >= static_cast<uint8_t>(ScopeOpcode::ResolveScope) && opcode <= static_cast<uint8_t>(ScopeOpcode::PutToScope);
-}
-
 static std::span<const uint8_t> entryAt(std::span<const uint8_t> section, unsigned index)
 {
     return section.subspan(bakedFactsHeaderSize + static_cast<size_t>(index) * bakedFactsEntrySize, bakedFactsEntrySize);
-}
-
-// ImageCheck::BakedFacts, on a section whose header and counted entries lie inside it: the exact size, known values,
-// zero reserved fields, facts strictly increasing by bytecode offset, each a shape recording writes, with a depth only
-// on a ClosureVar or ModuleVar resolve_scope and an import slot only on a ModuleVar one.
-static bool passesBakedFacts(std::span<const uint8_t> section)
-{
-    uint32_t count = readField<uint32_t>(section, countOffset);
-    if (section.size() != bakedFactsHeaderSize + static_cast<size_t>(count) * bakedFactsEntrySize)
-        return false;
-    if (!isValidCapabilityLevel(section[levelOffset]) || section[taintOffset] > 1)
-        return false;
-    if (readField<uint16_t>(section, headerReservedOffset))
-        return false;
-
-    std::optional<uint32_t> previousOffset;
-    for (unsigned index = 0; index < count; ++index) {
-        auto entry = entryAt(section, index);
-        uint32_t bytecodeOffset = readField<uint32_t>(entry, entryBytecodeOffset);
-        if (previousOffset && bytecodeOffset <= *previousOffset)
-            return false;
-        previousOffset = bytecodeOffset;
-
-        uint8_t opcodeByte = entry[entryOpcodeOffset];
-        if (!isValidScopeOpcode(opcodeByte))
-            return false;
-        auto opcode = static_cast<ScopeOpcode>(opcodeByte);
-        auto resolveType = static_cast<ResolveType>(entry[entryResolveTypeOffset]);
-        if (!isBakedScopeShape(opcode, resolveType))
-            return false;
-        if (readField<uint16_t>(entry, entryReservedOffset))
-            return false;
-        if (readField<uint32_t>(entry, entryDepthOffset) && !mayHaveDepth(opcode, resolveType))
-            return false;
-        if (readField<uint32_t>(entry, entryImportSlotOffset) && !mayHaveImportSlot(opcode, resolveType))
-            return false;
-    }
-    return true;
 }
 
 // Whether the CB's metadata for the fact's instruction holds what the compilation baked. Only a resolve_scope of type
@@ -245,28 +185,15 @@ ScopeFact BakedFactsView::scopeFact(unsigned index) const
     };
 }
 
-bool operator==(const BakedFactsView& a, const BakedFactsView& b)
-{
-    return a.m_bytes.data() == b.m_bytes.data() && a.m_bytes.size() == b.m_bytes.size()
-        && a.m_capabilityLevel == b.m_capabilityLevel && a.m_couldBeTainted == b.m_couldBeTainted
-        && a.m_scopeFactCount == b.m_scopeFactCount;
-}
-
-std::expected<BakedFactsView, ImageCheck> parseBakedFactsSection(std::span<const uint8_t> section, bool strict)
+std::optional<BakedFactsView> parseBakedFactsSection(std::span<const uint8_t> section)
 {
     using namespace BakedFactsInternal;
     if (section.size() < bakedFactsHeaderSize)
-        return std::unexpected(ImageCheck::BakedFacts);
+        return std::nullopt;
     uint32_t count = readField<uint32_t>(section, countOffset);
     uint64_t locatedSize = bakedFactsHeaderSize + static_cast<uint64_t>(count) * bakedFactsEntrySize;
     if (locatedSize > section.size())
-        return std::unexpected(ImageCheck::BakedFacts);
-
-    if (strict) {
-        if (!passesBakedFacts(section))
-            return std::unexpected(ImageCheck::BakedFacts);
-    } else
-        ASSERT(passesBakedFacts(section));
+        return std::nullopt;
 
     BakedFactsView view;
     view.m_bytes = section.first(static_cast<size_t>(locatedSize));

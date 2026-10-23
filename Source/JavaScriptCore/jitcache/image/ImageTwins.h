@@ -43,8 +43,6 @@ enum class ImageTestHook : uint8_t {
     None,
     RelocationPairs, // checkImage forces one equal relocation pair in each domain the body's fixups reach
     OperationPair, // checkImage forces one for the body's first Operation fixup, which the relocation check skips
-    ChangeRecordedTarget, // capture changes the target of the record's first fixup before its reach check runs
-    SkipPatch, // prepareImage skips its first patch
 };
 void setImageTestHook(ImageTestHook);
 ImageTestHook imageTestHook();

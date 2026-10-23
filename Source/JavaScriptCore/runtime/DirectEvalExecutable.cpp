@@ -32,7 +32,7 @@
 #include "GlobalObjectMethodTable.h"
 #include "JSCJSValueInlines.h"
 #include "ParserError.h"
-#include "UCBRequests.h"
+#include "jitcache/ucb/UCBRequests.h"
 
 namespace JSC {
 

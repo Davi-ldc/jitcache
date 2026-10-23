@@ -3,9 +3,8 @@
 // regexp-constants.js for Bun, with the RegExp cells' compiled state cleared by Bun.shrink(), which asks the VM to
 // delete all code once it is idle (VM::shrinkFootprintWhenIdle): live RegExp objects hold the patterns and flags of the
 // literals below, they run, Bun.shrink() clears their cells when the module's evaluation returns, and the functions'
-// bodies are generated, or imported in the Consumer, only afterwards, in a timer. With strict on no import is invalid
-// material; at every import the twin check finds the core encoding and the constant cells' forms equal to the twin's;
-// and the output equals the JITCache-off run.
+// bodies are generated, or imported in the Consumer, only afterwards, in a timer. At every import the twin check finds
+// the core encoding and the constant cells' forms equal to the twin's, and the output equals the JITCache-off run.
 //
 // The runs use the lane's default sequence; Bun calls delta at exit for the Producer.
 const { context } = require("./resources/ucb-bun.js");

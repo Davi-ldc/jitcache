@@ -9,9 +9,10 @@
 #include <wtf/Forward.h>
 
 // What a host calls in twins builds, exported to Bun as <JavaScriptCore/JITCacheTwinsHost.h> and included by the jsc
-// shell, so both hosts call the same declarations. Every declaration is under ENABLE(JITCACHE_TWINS), so a build without
-// twins sees none, and every signature uses only WTF and JSC types. Placement.cpp defines the placement functions and
-// ShellFunctions.cpp the rest.
+// shell's adapter (shell/), so both hosts call the same declarations. Every declaration is under
+// ENABLE(JITCACHE_TWINS), so a build without twins sees none, and every signature uses only WTF and JSC types.
+// Placement.cpp defines the placement functions and HostFunctions.cpp the rest, forwarding jitcacheUCBStatistics and
+// verifyModuleAnalysisTwin to the UCB lane.
 
 namespace JSC {
 
@@ -37,14 +38,12 @@ JS_EXPORT_PRIVATE void recordLayout(const String& path);
 JS_EXPORT_PRIVATE void recordVMLayout(VM&, const String& path, HeapProbes = HeapProbes::Live);
 
 // The host functions bun:jsc registers under the names the jsc shell gives them: jitcacheStatus, jitcacheProgress,
-// jitcacheUCBStatistics, jitcacheDescribeHeap, jitcacheBodyEvents and jitcacheRewriteSection. Bun needs the last because
-// only Bun imports a module's analysis, so the tests that damage ucb.analysis run there.
+// jitcacheUCBStatistics, jitcacheDescribeHeap and jitcacheBodyEvents.
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheStatus);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheProgress);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheUCBStatistics);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheDescribeHeap);
 JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheBodyEvents);
-JS_EXPORT_PRIVATE JSC_DECLARE_HOST_FUNCTION(functionJITCacheRewriteSection);
 
 // The body-event dump at the end of a run, one JSON line per keyed body with events and one with the VM's totals; it
 // needs no JITCache configuration.

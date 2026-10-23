@@ -28,11 +28,11 @@
 
 #if ENABLE(JIT)
 
-#include "ImageRecord.h"
 #include "JITMathIC.h"
 #include "JumpTable.h"
 #include "PCToCodeOriginMap.h"
 #include "PropertyInlineCache.h"
+#include "jitcache/image/ImageRecord.h"
 
 namespace JSC {
 

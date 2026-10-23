@@ -29,10 +29,10 @@
 #if ENABLE(JIT)
 
 #include "CodeBlock.h"
-#include "ImageEmission.h"
-#include "ImageRecord.h"
 #include "LinkBuffer.h"
 #include "Repatch.h"
+#include "jitcache/image/ImageEmission.h"
+#include "jitcache/image/ImageRecord.h"
 
 namespace JSC {
 

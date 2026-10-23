@@ -1,14 +1,13 @@
 #pragma once
 
 #include "CachedBytecode.h"
-#include "UCBFeedback.h"
-#include "UCBRegistry.h"
+#include "jitcache/ucb/UCBFeedback.h"
+#include "jitcache/ucb/UCBRegistry.h"
 #include <expected>
 #include <optional>
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
 #include <wtf/Vector.h>
-#include <wtf/text/WTFString.h>
 
 namespace JSC {
 
@@ -28,16 +27,9 @@ namespace JSC::JITCache {
 
 class ProducerBudget;
 
-// SavedAnalysisInvalid: with strict on, the saved body's ucb.analysis that a capture would copy fails its check.
-// SavedAnalysisUnusable: reading that section found the saved body damaged, and the read raised the fault itself, so the
-// caller raises nothing more and commits nothing.
-enum class UCBCaptureFailure : uint8_t { BudgetExceeded, StrictCheckFailed, SavedAnalysisInvalid, SavedAnalysisUnusable };
-// detail: for SavedAnalysisInvalid, the property the check found the saved section lacking, in the check's words; null
-// for every other failure.
-struct UCBCaptureError {
-    UCBCaptureFailure failure;
-    String detail;
-};
+// SavedAnalysisUnusable: reading the saved body's ucb.analysis, which a capture would copy, found the saved body damaged,
+// and the read raised the fault itself, so the caller raises nothing more and commits nothing.
+enum class UCBCaptureFailure : uint8_t { BudgetExceeded, SavedAnalysisUnusable };
 
 struct UCBSections { // move-only
     UCBSections(Vector<uint8_t>&& identity, Ref<CachedBytecode>&& core, Vector<uint8_t>&& feedback, Vector<uint8_t>&& analysis, Ref<ProducerBudget>&&, size_t chargedBytes);
@@ -45,7 +37,7 @@ struct UCBSections { // move-only
     UCBSections& operator=(UCBSections&&) = delete;
     ~UCBSections(); // releases chargedBytes from budget when budget is non-null
 
-    Vector<uint8_t> identity; // 152 bytes plus the butterfly map and the child holder digests
+    Vector<uint8_t> identity; // 113 bytes and the butterfly map, padded to a multiple of 8, then the child holder digests
     Ref<CachedBytecode> core;
     Vector<uint8_t> feedback;
     Vector<uint8_t> analysis; // a module's ucb.analysis, empty when the body gets none
@@ -66,10 +58,7 @@ const UnlinkedFunctionExecutable* holderOf(const CodeBlock&);
 // Only for an accepted capture; holder is holderOf(cb) for a capture with a CodeBlock, the record's for one without;
 // BodyImage is Present for a capture with a CodeBlock and Absent for one without, which writes no UCB copies. A module's
 // UCB also gets its analysis: its live analysis source's encoding, or else a copy of the saved body's ucb.analysis, or
-// none. A refused charge releases what the call charged and returns BudgetExceeded; with strict on, a child UFE without
-// the identity its parent's record gave it, UCB copies that do not number numberOfValueProfiles() and
-// numberOfArrayProfiles(), or an encoded analysis that fails validateModuleAnalysis return StrictCheckFailed, which the
-// integrator raises as a recording fault. Every failure releases what the call charged.
-std::expected<UCBSections, UCBCaptureError> buildSections(VM&, UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, BodyImage, ProducerBudget&);
+// none. A refused charge returns BudgetExceeded. Every failure releases what the call charged.
+std::expected<UCBSections, UCBCaptureFailure> buildSections(VM&, UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, BodyImage, ProducerBudget&);
 
 } // namespace JSC::JITCache

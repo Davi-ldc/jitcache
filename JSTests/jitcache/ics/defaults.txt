@@ -1,0 +1,5 @@
+// The defaults of the scripts in ics/ and below it. A script that produces calls delta itself, at the point its
+// snapshots describe, so the default Producer takes no --jitcache-delta-at-exit, and every script reads its sites
+// through jitcacheICsSnapshot, which only twins builds register.
+// jitcache-runs: Producer; Consumer
+// jitcache-requires: twins

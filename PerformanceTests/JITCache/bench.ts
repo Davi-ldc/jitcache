@@ -22,8 +22,9 @@
 
 import { dlopen, FFIType } from "bun:ffi";
 import { accessSync, appendFileSync, closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { cpus, homedir, hostname, loadavg, release } from "node:os";
+import { cpus, hostname, loadavg, release } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { holdMachineLock } from "../../Tools/Scripts/jitcache/lock.ts";
 import { cases } from "./run.ts";
 
 // The cases, run.ts, calls.ts and node_modules sit beside this file.
@@ -137,8 +138,7 @@ const usage = `Usage: bun bench.ts --bun=<Bun executable> [options]
                               artifacts and reports
   --timeout=<seconds>         1800 by default; a process that runs longer is killed and fails
   --check                     correctness only: 1 repetition, 1 process per mode and variant, scenarios of 5 and 35
-                              calls, producers of 20 calls and no build lock, so it can run beside a build; its times
-                              measure nothing
+                              calls, producers of 20 calls and no wait for an idle machine; its times measure nothing
   --summarize                 rebuild summary.md and request-curves.tsv from results files, pooling them; they go
                               beside the only file, or to --out, which several files require`;
 
@@ -164,7 +164,7 @@ interface Options {
   reports: boolean;
   out: string;
   timeoutSeconds: number;
-  check: boolean; // correctness only: no build lock, and times that measure nothing
+  check: boolean; // correctness only: times that measure nothing
 }
 
 type Command = { kind: "run"; options: Options } | { kind: "summarize"; files: string[]; out: string | null };
@@ -438,48 +438,6 @@ function processEnvironment(transpilerCache: string): Record<string, string> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The build lock
-
-// HARNESS.md Benches: the bench holds the build lock while it measures, so no build or other run overlaps it; build.ts
-// takes the same lock around every build. A child flock holds it until its standard input closes, which also happens
-// when this process dies, so a crash cannot leave the lock taken.
-async function takeBuildLock(): Promise<() => Promise<void>> {
-  const directory = join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "jitcache");
-  mkdirSync(directory, { recursive: true });
-  const path = join(directory, "build.lock");
-  const hold = (wait: boolean) =>
-    Bun.spawn(["flock", "--exclusive", ...(wait ? [] : ["--nonblock"]), path, "sh", "-c", "echo held && exec cat >/dev/null"], {
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "inherit",
-    });
-  let holder = hold(false);
-  if ((await firstLine(holder.stdout)) !== "held") {
-    await holder.exited;
-    console.log(`waiting for the build lock ${path}, which a build or another bench holds`);
-    holder = hold(true);
-    if ((await firstLine(holder.stdout)) !== "held") throw new Error(`flock could not take ${path}: it exited with ${await holder.exited}`);
-  }
-  return async () => {
-    holder.stdin.end();
-    await holder.exited;
-  };
-}
-
-async function firstLine(stream: ReadableStream<Uint8Array>): Promise<string> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-  while (!text.includes("\n")) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    text += decoder.decode(value, { stream: true });
-  }
-  reader.releaseLock();
-  return text.split("\n")[0];
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
 // The bench report
 
 // What the summary reads from one process's report. Each field is read only when it is a number, and unknown events and
@@ -489,7 +447,7 @@ interface ReportCounts {
   malformedLines: number;
   start: { outcome: unknown; role: unknown; nanoseconds: number | null; indexedBodies: number | null } | null;
   installs: number;
-  installNanoseconds: number; // the install events' totals: thread CPU time
+  installNanoseconds: number; // the install events' totals: wall time capped at the thread's CPU time
   requests: Record<string, number>; // by action: import, attach
   requestNanoseconds: number; // the request events' counted and apart parts: thread CPU time
   // The module-analysis events by outcome (hit, miss, absent, off, invalid): their count, their nanoseconds, the thread
@@ -500,7 +458,7 @@ interface ReportCounts {
   // misses.
   lookups: Record<string, number>;
   compiles: number; // native baseline compiles
-  compileNanoseconds: number; // their compilation and finalization: thread CPU time
+  compileNanoseconds: number; // their compilation and finalization: wall time capped at the thread's CPU time
   captures: Record<string, number>; // by "<trigger> <outcome>"
   committedCaptures: number;
   capturedBytes: number; // the sections the committed captures wrote
@@ -1081,8 +1039,7 @@ function countBodies(artifact: string, record: ProcessRecord) {
 // version, 2, as 2 bytes at 8; its root at 56 is the valid end, 8 bytes little-endian, and the 8 bytes before the valid
 // end, the latest index block's trailer, give that block's offset. An index block (JITCINDX) holds its previous block's
 // offset at 8, its kind at 16 (0 for the full index the chain ends at, 1 for a delta), its entry count at 20, and 80-byte
-// entries from 32, each starting with a 40-byte key and its record's offset, 0 for a tombstone. The engine checks the
-// rest, the CRCs among it.
+// entries from 32, each starting with a 40-byte key. The engine checks the rest, the CRCs among it.
 function readPackKeys(path: string, record: ProcessRecord): { keys: Set<string>; validEnd: number } | null {
   let bytes: Buffer;
   try {
@@ -1115,9 +1072,7 @@ function readPackKeys(path: string, record: ProcessRecord): { keys: Set<string>;
     if (view.getUint32(at + 16, true) === 0) keys.clear();
     for (let index = 0; index < view.getUint32(at + 20, true); ++index) {
       const entry = at + 32 + 80 * index;
-      const key = bytes.toString("hex", entry, entry + 40);
-      if (u64(entry + 40)) keys.add(key);
-      else keys.delete(key);
+      keys.add(bytes.toString("hex", entry, entry + 40));
     }
   }
   return { keys, validEnd };
@@ -1512,7 +1467,7 @@ function summarize(pool: Pool): { text: string; passed: boolean } {
   for (const run of pool.runs) lines.push(describeRun(run, pool), "");
   const revisions = [...new Set(pool.runs.map(run => run.revision))];
   if (revisions.length > 1) lines.push(`The pooled runs used different Bun builds (${revisions.join(", ")}), so their numbers do not compare.`, "");
-  if (pool.runs.some(run => run.options.check)) lines.push("A check (--check) takes no build lock and may run beside a build, so its times measure nothing; only its checks count.", "");
+  if (pool.runs.some(run => run.options.check)) lines.push("A check (--check) runs one short process per mode and variant without waiting for an idle machine, so its times measure nothing; only its checks count.", "");
   if (pool.repetitions.length) lines.push(...pool.repetitions.map(repetition => `- ${describeRepetition(repetition, pool)}`), "");
   lines.push("## Checks", "", ...describeProblems(problems), "", ...variantLines(pool), ...requestLines(pool), "## Reading the tables", "", readingGuide, "");
   for (const name of caseNames) {
@@ -2151,65 +2106,60 @@ async function main(argv: string[]): Promise<number> {
     }
   }
   const driver = pinDriver(options.cpu, allowed.list);
-  // A check measures nothing, so it leaves the lock to the builds it may run beside.
-  const releaseLock = options.check ? async () => {} : await takeBuildLock();
-  let results: ResultsFile;
-  try {
-    const probe = (flag: string) => Bun.spawnSync([options.bun, flag], { env: environment, stdout: "pipe", stderr: "pipe" });
-    const revisionProbe = probe("--revision");
-    const revision = revisionProbe.stdout.toString().trim() || `--revision failed: ${revisionProbe.stderr.toString().trim()}`;
-    const help = probe("--help").stdout.toString();
-    const bunRefused = bunRefusal(options, help, environment);
-    if (bunRefused) {
-      console.error(`bench.ts: ${bunRefused}`);
-      return 1;
-    }
-    const processDirectory = join(options.out, "processes");
-    mkdirSync(processDirectory, { recursive: true });
-    mkdirSync(join(options.out, "artifacts"));
-    results = new ResultsFile(join(options.out, "results.jsonl"));
-    const driverRunsBun = sameFile(options.bun, process.execPath);
-    const context: Context = { options, environment, transpilerCache, pageCache, driverRunsBun, clockTicks, processDirectory };
-    const runRecord: RunRecord = {
-      kind: "run",
-      started: new Date().toISOString(),
-      argv,
-      options,
-      bun: options.bun,
-      revision,
-      ...machineFacts(),
-      pinnedCpuSiblings: smtSiblings(options.cpu),
-      driverCpu: driver.cpu,
-      driverNote: driver.note,
-      driverRunsBun,
-      pageSize: pageCache?.pageSize ?? null,
-      taskIoAccounting: existsSync("/proc/self/io"),
-      clockTicks,
-      environment,
-    };
-    results.write(runRecord);
-    console.log(
-      `${options.bun} (${revision}): ${options.cases.join(", ")}; ${joinWords([...options.branches])} branches; variants ${joinWords([...options.variants])}; scenarios of ${joinWords(options.scenarios.map(String))} calls; ${plural(options.processes, "process", "processes")} per mode in ${plural(options.repetitions, "repetition", "repetitions")}. Bun runs on CPU ${options.cpu}, and the driver ${driver.cpu === null ? `has no CPU of its own: ${driver.note}` : `on CPU ${driver.cpu}`}.${driverRunsBun && runsCold(options) ? " The driver runs this Bun itself, so cold processes start with its executable cached." : ""}`,
-    );
-    const run = async (job: Job) => {
-      const record = await runJob(context, job);
+  // Every build, test and other bench waits until this run exits, --check's included.
+  holdMachineLock();
+  const probe = (flag: string) => Bun.spawnSync([options.bun, flag], { env: environment, stdout: "pipe", stderr: "pipe" });
+  const revisionProbe = probe("--revision");
+  const revision = revisionProbe.stdout.toString().trim() || `--revision failed: ${revisionProbe.stderr.toString().trim()}`;
+  const help = probe("--help").stdout.toString();
+  const bunRefused = bunRefusal(options, help, environment);
+  if (bunRefused) {
+    console.error(`bench.ts: ${bunRefused}`);
+    return 1;
+  }
+  const processDirectory = join(options.out, "processes");
+  mkdirSync(processDirectory, { recursive: true });
+  mkdirSync(join(options.out, "artifacts"));
+  const results = new ResultsFile(join(options.out, "results.jsonl"));
+  const driverRunsBun = sameFile(options.bun, process.execPath);
+  const context: Context = { options, environment, transpilerCache, pageCache, driverRunsBun, clockTicks, processDirectory };
+  const runRecord: RunRecord = {
+    kind: "run",
+    started: new Date().toISOString(),
+    argv,
+    options,
+    bun: options.bun,
+    revision,
+    ...machineFacts(),
+    pinnedCpuSiblings: smtSiblings(options.cpu),
+    driverCpu: driver.cpu,
+    driverNote: driver.note,
+    driverRunsBun,
+    pageSize: pageCache?.pageSize ?? null,
+    taskIoAccounting: existsSync("/proc/self/io"),
+    clockTicks,
+    environment,
+  };
+  results.write(runRecord);
+  console.log(
+    `${options.bun} (${revision}): ${options.cases.join(", ")}; ${joinWords([...options.branches])} branches; variants ${joinWords([...options.variants])}; scenarios of ${joinWords(options.scenarios.map(String))} calls; ${plural(options.processes, "process", "processes")} per mode in ${plural(options.repetitions, "repetition", "repetitions")}. Bun runs on CPU ${options.cpu}, and the driver ${driver.cpu === null ? `has no CPU of its own: ${driver.note}` : `on CPU ${driver.cpu}`}.${driverRunsBun && runsCold(options) ? " The driver runs this Bun itself, so cold processes start with its executable cached." : ""}`,
+  );
+  const run = async (job: Job) => {
+    const record = await runJob(context, job);
+    results.write(record);
+    console.log(progressLine(record));
+  };
+  // A failed build leaves its variant nothing to measure, so the run ends there and its summary lists the failure.
+  if (buildApps(context, results)) {
+    for (let repetition = 1; repetition <= options.repetitions; ++repetition) {
+      const started = new Date().toISOString();
+      const idle = await waitForIdle(clockTicks, !options.check);
+      const record: RepetitionRecord = { kind: "repetition", repetition, started, ...idle };
       results.write(record);
-      console.log(progressLine(record));
-    };
-    // A failed build leaves its variant nothing to measure, so the run ends there and its summary lists the failure.
-    if (buildApps(context, results)) {
-      for (let repetition = 1; repetition <= options.repetitions; ++repetition) {
-        const started = new Date().toISOString();
-        const idle = await waitForIdle(clockTicks, !options.check);
-        const record: RepetitionRecord = { kind: "repetition", repetition, started, ...idle };
-        results.write(record);
-        console.log(`repetition ${repetition}: ${idle.idle ? "idle" : "noisy"}, load average ${idle.loadAverage[0].toFixed(2)}${idle.waitedSeconds ? ` after a wait of ${idle.waitedSeconds} s` : ""}`);
-        for (const job of repetitionJobs(options, repetition)) await run(job);
-      }
-      for (const job of untimedJobs(options)) await run(job);
+      console.log(`repetition ${repetition}: ${idle.idle ? "idle" : "noisy"}, load average ${idle.loadAverage[0].toFixed(2)}${idle.waitedSeconds ? ` after a wait of ${idle.waitedSeconds} s` : ""}`);
+      for (const job of repetitionJobs(options, repetition)) await run(job);
     }
-  } finally {
-    await releaseLock();
+    for (const job of untimedJobs(options)) await run(job);
   }
   const end: EndRecord = { kind: "end", finished: new Date().toISOString(), loadAverage: loadavg() };
   results.write(end);

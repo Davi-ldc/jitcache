@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ArtifactStore.h"
+#include "jitcache/store/ArtifactStore.h"
 #include <expected>
 #include <memory>
 #include <optional>

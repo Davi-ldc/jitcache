@@ -1,12 +1,12 @@
 // The runner's bench mode, --bench: it measures a release-local build instead of testing it. Every jsc-hosted script
-// plain mode runs goes through --bench-processes fresh copies of each sequence, one process at a time under the build
-// lock, with the bench report on and strict at its default. Each run's line gives its CPU-time spans' minimum and median
-// over the copies beside every copy's value, and each Consumer run that may install also runs as native copies, whose
-// artifact holds no body, for the installation bound per body.
+// plain mode runs under --milestone goes through --bench-processes fresh copies of each sequence, one process at a time
+// under the machine lock, which the runner holds, with the bench report on. Each run's line gives its time spans'
+// minimum and median over the copies beside every copy's value, and each Consumer run that may install also runs as
+// native copies, whose artifact holds no body, for the installation bound per body. --bench-breakdowns adds
+// jitCacheBenchBreakdowns to every process, whose parts and steps then explain the totals they also raise.
 
-import { spawn } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { cpus, homedir, loadavg, release, tmpdir, totalmem } from "node:os";
+import { cpus, loadavg, release, tmpdir, totalmem } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import {
   type BodyStatus,
@@ -16,7 +16,7 @@ import {
   addNativeSide,
   boundBody,
   boundCoverage,
-  isCPUTime,
+  isMinimumSpan,
   loadText,
   percentText,
   processSpans,
@@ -26,27 +26,24 @@ import {
   spansByCopy,
   summarize,
 } from "./bench-report.ts";
-import { type Build, Launcher, type ProcessIO, benchEnvironment, readText, tail } from "./build.ts";
-import { type Attempt, ResultsLog, type RunnerOptions, checkStatuses } from "./runs.ts";
+import { type Build, Launcher, type ProcessIO, benchEnvironment, readText, tail } from "./launcher.ts";
+import { ResultsLog } from "./results.ts";
+import type { RunnerOptions } from "./runs.ts";
 import {
   type CommandContext,
-  type Role,
   type Script,
   type SequencePaths,
-  MalformedScript,
   addresses,
-  collectScripts,
   configuresJITCache,
-  corpusRoot,
-  displayPath,
   endsBySignal,
   expectedExit,
   exitProblem,
   flagName,
   jscArguments,
-  lanes,
-  parseScript,
+  selectScripts,
+  selectSequences,
 } from "./scripts.ts";
+import { checkStatuses } from "./statuses.ts";
 
 class BenchError extends Error {}
 
@@ -56,55 +53,9 @@ class BenchError extends Error {}
 export const coversRun = (options: string[]) =>
   options.every(option => option.startsWith("--jitcache") || ["--useConcurrentJIT", "--diskCachePath"].includes(flagName(option)));
 
-// build.ts's lock, which every build holds while it runs.
-const buildLockPath = () => resolve(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "jitcache", "build.lock");
-
-interface HeldLock {
-  readonly lost: boolean; // the holder exited before the release, and the lock with it
-  release(): Promise<void>;
-}
-
-// The bench holds the build lock for its whole duration, so no build or other bench overlaps it. A flock process holds
-// it, as build.ts takes it, until the runner closes that process's standard input or exits.
-async function holdBuildLock(path: string): Promise<HeldLock> {
-  mkdirSync(dirname(path), { recursive: true });
-  for (const blocking of [false, true]) {
-    if (blocking) console.log(`waiting for the build lock ${path}, which a build or another bench holds`);
-    const holder = spawn("flock", ["--exclusive", ...(blocking ? [] : ["--nonblock"]), path, "sh", "-c", "echo held && exec cat >/dev/null"], { stdio: ["pipe", "pipe", "inherit"] });
-    let releasing = false;
-    let lost = false;
-    const closed = new Promise<void>(done => holder.on("close", () => {
-      if (!releasing) lost = true;
-      done();
-    }));
-    const held = await new Promise<boolean>(done => {
-      let output = "";
-      holder.stdout!.on("data", chunk => {
-        output += chunk;
-        if (output.includes("held\n")) done(true);
-      });
-      holder.on("error", () => done(false));
-      holder.on("close", () => done(false));
-    });
-    if (!held) continue;
-    return {
-      get lost() {
-        return lost;
-      },
-      async release() {
-        releasing = true;
-        holder.stdin!.end();
-        await closed;
-      },
-    };
-  }
-  throw new BenchError(`flock could not take the build lock ${path}`);
-}
-
 // Whether the build's times mean anything: a release build without ASan or the twins checks, as release-local is.
 function benchProfile(build: Build): { name: string; buildType: string; warning: string | null } {
-  const cache = readText(join(build.directory, "CMakeCache.txt")) ?? "";
-  const buildType = /^CMAKE_BUILD_TYPE:[A-Z]+=(.*)$/m.exec(cache)?.[1]?.trim() || "unknown";
+  const { buildType } = build;
   const name = basename(resolve(build.directory, "../.."));
   const reasons = [
     buildType === "Debug" || buildType === "unknown" ? `of build type ${buildType}` : null,
@@ -113,17 +64,6 @@ function benchProfile(build: Build): { name: string; buildType: string; warning:
   ].filter(Boolean);
   const warning = reasons.length ? `${build.directory} is ${reasons.join(", ")}, so its bench numbers mean nothing; the bench measures a release-local build` : null;
   return { name, buildType, warning };
-}
-
-// The plain-mode command line with strict at its default, off, so the runner's --jitcache-strict=1 goes, and with the
-// bench report right after --jitcache-log. The run's own options still come last.
-export function benchArguments(context: CommandContext, script: Script, sequence: number, role: Role, options: string[], paths: SequencePaths, name: string, report: string): string[] {
-  const args = jscArguments(context, script, sequence, role, options, paths, name);
-  if (!configuresJITCache(role)) return args;
-  const strict = args.indexOf("--jitcache-strict=1");
-  if (strict < 0 || args[strict + 1] !== "--jitcache-log") throw new Error("jscArguments no longer writes --jitcache-strict=1 --jitcache-log");
-  args.splice(strict, 2, "--jitcache-log", `--jitcache-bench-report=${report}`);
-  return args;
 }
 
 interface RunProblem {
@@ -162,10 +102,11 @@ const hasNativeCopies = (script: Script, k: number, i: number) =>
   script.sequences[k][i].role === "Consumer" && !script.expectNoInstall.some(at => addresses(at, k, i));
 
 // One invocation of the bench mode. Its command context is plain mode's, without --extra-options or the calibration's
-// variable, and it gathers every run's measures and every Consumer run's bound by copy.
+// variable, and with jitCacheBenchBreakdowns under --bench-breakdowns, which stays out of each run's own options and so
+// out of coversRun. It gathers every run's measures and every Consumer run's bound by copy.
 class Bench implements CommandContext {
   readonly twins = false;
-  readonly extraOptions: string[] = [];
+  readonly extraOptions: string[];
   readonly mallocForceEnabled = false;
   readonly launcher: Launcher;
   readonly base: string; // the bench's temporary directory
@@ -175,10 +116,12 @@ class Bench implements CommandContext {
   readonly bounds = new Map<string, RunBound>();
   readonly listed: string[] = [];
   readonly malformed: string[] = [];
+  skipped = 0; // the scripts the bench does not run
   processes = 0;
   kept = false;
 
   constructor(readonly options: RunnerOptions, readonly build: Build) {
+    this.extraOptions = options.benchBreakdowns ? ["--jitCacheBenchBreakdowns=true"] : [];
     this.launcher = new Launcher(build, options.timeoutSeconds, "max");
     this.base = mkdtempSync(join(tmpdir(), "jitcache-bench-"));
     this.results = new ResultsLog(build.resultsDirectory, this.base, "bench-");
@@ -215,33 +158,31 @@ class Bench implements CommandContext {
   }
 }
 
-// The scripts plain mode runs, jsc-hosted. Every other script is listed, and a malformed one counts against the bench.
-function benchScripts(bench: Bench): Script[] {
+// The scripts plain mode runs, jsc-hosted, each with the sequences of it that run on this build: the bench runs at
+// milestones, so it runs the milestone sequences too. Every other script and sequence is listed, and a malformed script
+// counts against the bench.
+function benchScripts(bench: Bench): { script: Script; sequences: number[] }[] {
   const { options } = bench;
-  const paths = options.testPaths.length ? options.testPaths : lanes.map(lane => join(corpusRoot, lane));
-  const scripts: Script[] = [];
-  for (const path of collectScripts(paths)) {
-    const display = displayPath(path);
-    if (options.filter && !options.filter.test(display)) continue;
-    let script: Script;
-    try {
-      script = parseScript(path);
-    } catch (error) {
-      if (!(error instanceof MalformedScript)) throw error;
-      bench.malformed.push(`${display}: ${error.message}`);
-      bench.results.write({ kind: "bench-script", script: display, outcome: "malformed", reason: error.message });
+  const scripts: { script: Script; sequences: number[] }[] = [];
+  for (const { display, script } of selectScripts(options.testPaths, options.filter)) {
+    if (typeof script === "string") {
+      bench.malformed.push(`${display}: ${script}`);
+      bench.results.write({ kind: "bench-script", script: display, outcome: "malformed", reason: script });
       continue;
     }
+    const cadence = selectSequences(script, { milestone: true, build: bench.build });
     const skip = script.requiresTwins ? "requires twins"
       : script.host === "bun" ? "Bun-hosted, and the bench measures jsc-hosted scripts only; the macro benches measure Bun"
       : script.qemuCpu.length ? "declares jitcache-qemu-cpu, so it runs only under QEMU"
-      : null;
+      : cadence.reason;
     if (skip) {
+      ++bench.skipped;
       bench.listed.push(`${display}: ${skip}`);
       bench.results.write({ kind: "bench-script", script: display, outcome: "skip", reason: skip });
       continue;
     }
-    scripts.push(script);
+    for (const note of cadence.skipped) bench.listed.push(`${display}: ${note}`);
+    scripts.push({ script, sequences: cadence.selected });
   }
   return scripts;
 }
@@ -305,9 +246,11 @@ async function benchRun(bench: Bench, measures: RunMeasures, copy: number, paths
   const report = join(paths.scratch, `${name}.bench`);
   const expected = expectedExit(script, k, i);
   const io: ProcessIO = { env: benchEnvironment(!endsBySignal(expected)), cwd: paths.scratch, stdout: join(paths.scratch, `${name}.stdout`), stderr: join(paths.scratch, `${name}.stderr`) };
+  // The plain-mode command line, with the bench report right after --jitcache-log. A native copy also tells the script
+  // so, since it imports nothing and a check that assumes an import would fail there.
   const args = run.role === "Maintenance"
     ? ["--jitcache-maintenance", "--", ...run.options.map(word => word.replaceAll("$ARTIFACT", paths.artifact))]
-    : benchArguments(bench, script, k, run.role, run.options, paths, name, report);
+    : jscArguments(bench, script, k, run.role, run.options, paths, name, { benchReport: report, scriptArguments: side === "native" ? ["native"] : [] });
   const started = performance.now();
   const end = await bench.launcher.engine(bench.build.jsc, args, io, null);
   const wallMilliseconds = performance.now() - started;
@@ -325,8 +268,7 @@ async function benchRun(bench: Bench, measures: RunMeasures, copy: number, paths
       problems.push(`the native copy started ${start.outcome} as ${start.role} on an artifact of ${start.indexedBodies} bodies, where it must start as a consumer of an empty one`);
     if (!endsBySignal(expected)) {
       const checked = side === "native" ? { ...script, expectNoInstall: [...script.expectNoInstall, { sequence: k, run: i }] } : script;
-      const attempt: Attempt = { sequence: k, attempt: 1, directory: paths.scratch, failures: [], marks: [], notes: [], faults: new Map() };
-      checkStatuses(checked, k, i, run, readText(io.stderr) ?? "", attempt, (_, check, detail) => problems.push(`${check}: ${detail}`));
+      checkStatuses(checked, k, i, run, readText(io.stderr) ?? "", (_, check, detail) => problems.push(`${check}: ${detail}`));
     }
   }
   if (problems.length) {
@@ -348,7 +290,7 @@ async function benchRun(bench: Bench, measures: RunMeasures, copy: number, paths
   return true;
 }
 
-// A run's line: its CPU-time spans with their minimum and median beside every copy's value, and every other field, the
+// A run's line: its time spans with their minimum and median beside every copy's value, and every other field, the
 // process's memory and its wall time by copy.
 function runRecord(measures: RunMeasures) {
   const spans: Record<string, SpanSummary> = {};
@@ -356,7 +298,7 @@ function runRecord(measures: RunMeasures) {
   const memory: Record<string, (number | null)[]> = {};
   for (const [name, values] of spansByCopy(measures.spans)) {
     if (name.startsWith("process.")) memory[name.slice("process.".length)] = values;
-    else if (isCPUTime(name)) spans[name] = summarize(values)!;
+    else if (isMinimumSpan(name)) spans[name] = summarize(values)!;
     else fields[name] = values;
   }
   const run = measures.script.sequences[measures.sequence][measures.run];
@@ -378,6 +320,8 @@ function runRecord(measures: RunMeasures) {
   };
 }
 
+const breakdownsNote = "breakdowns: every process times the counted parts of its requests and the steps of its installs, whose clock reads raise each import's cost, so this run explains a bound and sets none";
+
 // The whole native cost of a run, the least over its native copies of every compile's time; 0 without a native copy.
 const wholeNativeCost = (bound: RunBound) => {
   const totals = bound.nativeNanoseconds.filter((value): value is number => value !== null);
@@ -392,32 +336,31 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
   const started = performance.now();
   console.log(`bench of ${build.directory} (${profile.name}, ${profile.buildType}): ${copies} copies of each sequence`);
   if (profile.warning) console.log(`warning: ${profile.warning}`);
+  if (options.benchBreakdowns) console.log(breakdownsNote);
   bench.results.write({
     kind: "bench",
     date: new Date().toISOString(),
     build: { directory: build.directory, profile: profile.name, buildType: profile.buildType, architecture: build.architecture, twins: build.twins, sanitized: build.sanitized },
     machine: { cpus: cpus().length, model: cpus()[0]?.model ?? null, memoryBytes: totalmem(), kernel: release() },
     copies,
+    breakdowns: options.benchBreakdowns,
     warning: profile.warning,
   });
   const scripts = benchScripts(bench);
   const loadAverage: { before: number[] | null; copies: number[][]; after: number[] | null } = { before: null, copies: [], after: null };
   let error: string | null = null;
-  let lock: HeldLock | null = null;
-  let lockLost = false;
   try {
     if (!scripts.length) throw new BenchError("no script of the test paths runs in plain mode in jsc");
-    lock = await holdBuildLock(buildLockPath());
     loadAverage.before = loadavg();
     await createNativeArtifact(bench);
-    const sequences = scripts.reduce((sum, script) => sum + script.sequences.length, 0);
-    console.log(`${scripts.length} scripts, ${sequences} sequences, under the build lock; load average ${loadText(loadAverage.before)}`);
+    const sequenceCount = scripts.reduce((sum, { sequences }) => sum + sequences.length, 0);
+    console.log(`${scripts.length} scripts, ${sequenceCount} sequences, under the machine lock; load average ${loadText(loadAverage.before)}`);
     // Copy n of every sequence runs before copy n + 1 of any, so a slow spell of the machine reaches few copies of each
     // case and the minimum holds.
     for (let copy = 0; copy < copies; ++copy) {
       const copyStarted = performance.now();
-      for (const script of scripts) {
-        for (let k = 0; k < script.sequences.length; ++k) await runBenchCopy(bench, script, k, copy);
+      for (const { script, sequences } of scripts) {
+        for (const k of sequences) await runBenchCopy(bench, script, k, copy);
       }
       loadAverage.copies.push(loadavg());
       console.log(`copy ${copy + 1} of ${copies}: ${((performance.now() - copyStarted) / 1000).toFixed(0)} s, load average ${loadText(loadAverage.copies[copy])}`);
@@ -426,18 +369,13 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
   } catch (caught) {
     if (!(caught instanceof BenchError)) throw caught;
     error = caught.message;
-  } finally {
-    // A holder that exited before the release took the lock with it, so a build may have overlapped the bench.
-    if (lock) {
-      lockLost = lock.lost;
-      await lock.release();
-    }
   }
 
   // A script counts as measured once a process of it ran, so a bench that stopped before its copies measured none.
   const measured = new Map<Script, number>();
+  const sequencesOf = new Map(scripts.map(({ script, sequences }) => [script, sequences.length]));
   for (const measures of bench.runs.values()) measured.set(measures.script, (measured.get(measures.script) ?? 0) + measures.problems.length);
-  for (const [script, problems] of measured) bench.results.write({ kind: "bench-script", script: script.display, outcome: "measured", sequences: script.sequences.length, problems });
+  for (const [script, problems] of measured) bench.results.write({ kind: "bench-script", script: script.display, outcome: "measured", sequences: sequencesOf.get(script), problems });
   const records = [...bench.runs.values()].map(runRecord);
   for (const record of records) bench.results.write(record);
   const bodies = [...bench.bounds.values()].flatMap(bound => [...bound.tallies.values()].map(tally => ({ bound, body: boundBody(tally) })));
@@ -452,15 +390,16 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
     const whole = bounds.reduce((sum, bound) => sum + wholeNativeCost(bound), 0);
     return smallestBodyCandidates.map(smallestBody => boundCoverage(scopeBodies, whole, smallestBody, script));
   });
-  for (const row of coverage) bench.results.write({ kind: "bound-coverage", ...row });
+  // Each line says whether its run timed breakdowns, whose ratios set no bound.
+  for (const row of coverage) bench.results.write({ kind: "bound-coverage", breakdowns: options.benchBreakdowns, ...row });
   const statuses = Object.fromEntries((["joined", "set aside", "native only", "import only"] as BodyStatus[]).map(status => [status, bodies.filter(({ body }) => body.status === status).length]));
   const problemRuns = records.filter(record => record.problems.length).length;
-  const exit = error || lockLost || bench.malformed.length || problemRuns ? 1 : 0;
+  const exit = error || bench.malformed.length || problemRuns ? 1 : 0;
   const kept = bench.kept || bench.results.path.startsWith(`${bench.base}${sep}`);
   bench.results.write({
     kind: "bench-summary",
     copies,
-    scripts: { measured: measured.size, skipped: bench.listed.length, malformed: bench.malformed.length },
+    scripts: { measured: measured.size, skipped: bench.skipped, malformed: bench.malformed.length },
     runs: records.length,
     processes: bench.processes,
     problemRuns,
@@ -470,7 +409,6 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
     listed: bench.listed,
     malformed: bench.malformed,
     loadAverage,
-    lockLost,
     seconds: Math.round((performance.now() - started) / 1000),
     kept: kept ? bench.base : null,
     error,
@@ -479,7 +417,8 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
 
   for (const [script, problems] of measured) {
     if (!problems) {
-      console.log(`MEASURED ${script.display}${script.sequences.length > 1 ? ` (${script.sequences.length} sequences)` : ""}`);
+      const sequences = sequencesOf.get(script) ?? 0;
+      console.log(`MEASURED ${script.display}${sequences > 1 ? ` (${sequences} sequences)` : ""}`);
       continue;
     }
     console.log(`PROBLEMS ${script.display}`);
@@ -494,7 +433,6 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
   for (const line of bench.malformed) console.log(`MALFORMED ${line}`);
   for (const line of bench.listed) console.log(`listed: ${line}`);
   if (error) console.log(`ERROR ${error}`);
-  if (lockLost) console.log("ERROR the build lock's holder exited before the bench released it, so a build may have overlapped the bench");
   if (bodies.length) {
     console.log(`installation bound: ${Object.entries(statuses).map(([status, count]) => `${count} ${status}`).join(", ")}; coverage over every script, per script in the results:`);
     for (const row of coverage.filter(row => row.script === null)) {
@@ -505,6 +443,7 @@ export async function runBench(options: RunnerOptions, build: Build): Promise<nu
   console.log(`${measured.size} scripts measured in ${copies} copies, ${problemRuns} runs with problems, ${dropped} run copies dropped, ${bench.listed.length} listed, ${bench.malformed.length} malformed`);
   console.log(`load average ${loadText(loadAverage.before)} before, ${loadText(loadAverage.after)} after`);
   if (profile.warning) console.log(`warning: ${profile.warning}`);
+  if (options.benchBreakdowns) console.log(breakdownsNote);
   if (kept) console.log(`kept: ${bench.base}`);
   else rmSync(bench.base, { recursive: true, force: true });
   console.log(`results: ${bench.results.path}`);

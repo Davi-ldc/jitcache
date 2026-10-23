@@ -2,7 +2,7 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false; Consumer --useConcurrentJIT=false
 
 // Hot bodies without a metadata table, one with a property IC and one without, are
-// captured at both capture points and installed with strict on. In the first sequence the Producer commits only the
+// captured at both capture points and installed. In the first sequence the Producer commits only the
 // capture its baseline compilation makes; in the second, delta's capture replaces it. Each body must still run baseline
 // code when delta runs, so the Producer first calls a probe with the same text until the probe's DFG compilation and then
 // calls the body half as often: past its baseline compilation and well short of its DFG one. noInline keeps every

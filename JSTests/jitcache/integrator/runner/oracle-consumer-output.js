@@ -1,4 +1,5 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
+// jitcache-fixture: fails 0:1 oracle-output
 
 // The Consumer prints a line its Off run does not, so the oracle fails run 1 on its output, and
 // nothing else fails. The runner's self-test (self-test.ts) expects exactly that failure.

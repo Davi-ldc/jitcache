@@ -422,8 +422,9 @@ bool hasCapacityToUseLargeGigacage();
     v(Int32, thresholdForJITAfterWarmUp, 500, Normal, nullptr) \
     v(Int32, thresholdForJITSoon, 100, Normal, nullptr) \
     v(Bool, jitCacheImportLLIntProgress, true, Normal, "JITCache: a body imported without baseline code arms its LLInt counter with the progress it carries, at most one invocation short of crossing; false arms it from zero. A measurement switch."_s) \
-    v(Bool, jitCacheVouchedHolderDigests, true, Normal, "JITCache: a child UFE an imported parent's decode made is checked against the holder digest the parent's body lists for it, which strict also recomputes; false computes every child's holder digest. A measurement switch."_s) \
+    v(Bool, jitCacheVouchedHolderDigests, true, Normal, "JITCache: a child UFE an imported parent's decode made is checked against the holder digest the parent's body lists for it; false computes every child's holder digest. A measurement switch."_s) \
     v(Bool, jitCacheImportModuleAnalysis, true, Normal, "JITCache: a module whose body carries its analysis gets it in place of the analysis parse; false parses every module as without JITCache while its UCB still imports. A measurement switch."_s) \
+    v(Bool, jitCacheBenchBreakdowns, false, Normal, "JITCache: a bench report also times the counted parts of each request, the steps of each install and the stages of its image's preparation, whose clock reads then fall inside the totals they explain. A measurement switch."_s) \
     \
     v(Int32, thresholdForOptimizeAfterWarmUp, 1000, Normal, nullptr) \
     v(Int32, thresholdForOptimizeAfterLongWarmUp, 1000, Normal, nullptr) \

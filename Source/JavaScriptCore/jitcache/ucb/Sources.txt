@@ -1,0 +1,13 @@
+// codec/ and generation/ hold fragments that engine files include at their end, so no list names them.
+jitcache/ucb/UCBAnalysis.cpp
+jitcache/ucb/UCBCapture.cpp
+jitcache/ucb/UCBFeedback.cpp
+jitcache/ucb/UCBImport.cpp
+jitcache/ucb/UCBKeys.cpp
+jitcache/ucb/UCBMatch.cpp
+jitcache/ucb/UCBRegistry.cpp
+jitcache/ucb/UCBRequestCost.cpp
+jitcache/ucb/UCBRequests.cpp
+jitcache/ucb/UCBSections.cpp
+jitcache/ucb/UCBTwins.cpp
+jitcache/ucb/UCBTwinsHost.cpp

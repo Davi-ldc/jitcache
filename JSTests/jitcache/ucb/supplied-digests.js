@@ -1,31 +1,25 @@
 // jitcache-host: bun
-// jitcache-runs: Producer; Consumer
-// jitcache-runs: Producer; Consumer
-// jitcache-runs: Producer; Consumer
-// jitcache-runs: Producer; Consumer
+// jitcache-runs: 4x Producer; Consumer
 
-// Source digests a provider supplies, which strict verifies against the text once per provider before an import relies
-// on one: a `bun build --compile` executable whose modules carry the source digests the build recorded
-// (Flags::HAS_JITCACHE_SOURCE_DIGESTS), run as a JITCache VM of its own with this run's role and strict on
-// (resources/ucb-bun.js, runApp). The app, resources/supplied-digests-app.js with
-// resources/supplied-digests-module.js embedded beside it, makes the checks; the sequence index picks the case:
+// Source digests a provider supplies, which an import relies on without hashing the text: a `bun build --compile`
+// executable whose modules carry the source digests the build recorded (Flags::HAS_JITCACHE_SOURCE_DIGESTS), run as a
+// JITCache VM of its own with this run's role (resources/ucb-bun.js, runApp). The app, resources/supplied-digests-app.js
+// with resources/supplied-digests-module.js embedded beside it, makes the checks; the sequence index picks the case:
 // 0. No source digest is computed over the load of the embedded module and of node:querystring, an internal module
-//    (sourceDigests unchanged while suppliedSourceDigests counts both); each module's roots import after one
-//    verification of its provider (suppliedDigestVerifications), `new` on an ES5 constructor imports its construct body
-//    with no further verification, and a direct eval in an imported function imports with none. In the Consumer, the
-//    lookup of an ES module's analysis when Bun creates its provider also hashes the text, which counts as one more
-//    verification of the recorded digest.
+//    (sourceDigests unchanged while suppliedSourceDigests counts both); each module's roots import, `new` on an ES5
+//    constructor imports its construct body, and a direct eval in an imported function imports too.
 // 1. With the digest record removed from the executable, as a Bun without the record would have written it: its
 //    modules' digests are computed from their text, and they import as before. In the Consumer an ES module's digest is
-//    computed by that lookup and handed to its provider, so its import verifies it as it verifies a recorded one.
+//    computed by the lookup of its analysis when Bun creates its provider, and handed to the provider, so its import
+//    takes it as it takes a recorded one.
 // 2. and 3. Built as CommonJS, so that the embedded module is CommonJS and require evaluates it through
 //    JSCommonJSModule::evaluate; a build without --format=cjs makes it an ES module, which no module wrapper touches. The
 //    app overrides the module wrapper (Module.wrapper) before it loads that module, in the Producer (2) or in the
 //    Consumer (3). The overridden text no longer has the recorded digest, which JSCommonJSModule::evaluate clears, so
 //    the overriding run computes the module's digest from its text and keys its bodies by it: neither run imports a body
-//    the other captured, and strict raises no invalid material.
-// The engine's C++ tests check that imports with strict off verify nothing. In twins runs every supplied root digest
-// equals the digest of the root's text, and every run, the app's output included, equals the JITCache-off run.
+//    the other captured.
+// In twins runs every supplied root digest equals the digest of the root's text, and every run, the app's output
+// included, equals the JITCache-off run.
 //
 // The runs use the lane's default sequence, so the test's own VM calls delta at exit in the Producer; the app calls none
 // (resources/ucb-bun.js).

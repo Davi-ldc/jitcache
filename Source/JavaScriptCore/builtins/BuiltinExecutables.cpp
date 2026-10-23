@@ -31,7 +31,7 @@
 #include "JSCJSValueInlines.h"
 #include "Parser.h"
 #include "SourceCharacters.h"
-#include "UCBRequests.h"
+#include "jitcache/ucb/UCBRequests.h"
 #include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>

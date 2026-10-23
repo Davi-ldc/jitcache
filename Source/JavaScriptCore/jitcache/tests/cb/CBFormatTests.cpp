@@ -2,8 +2,8 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
-#include "CBFormat.h"
-#include "JITCacheTest.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/tests/support/JITCacheTest.h"
 #include <array>
 #include <cstddef>
 #include <initializer_list>
@@ -12,8 +12,8 @@
 #include <wtf/text/MakeString.h>
 
 // Tests of the CB lane's section format (cb/CBFormat.h, .cpp): the layouts of cb.state and cb.summary, and the exact
-// size of each section on edge counts, every count at UINT32_MAX included, plus the family table and the domain
-// predicates that index and bound those layouts.
+// size of each section on edge counts, every count at UINT32_MAX included, plus the family table that indexes those
+// layouts and the encoding of the record fields cb.state does not store as the engine does.
 
 namespace JSC::JITCache::Tests {
 
@@ -40,7 +40,6 @@ static uint64_t paddedSize(uint64_t unpadded)
 static CBFormat::StateHeader emptyStateHeader()
 {
     CBFormat::StateHeader header { };
-    header.layoutVersion = CBFormat::stateLayoutVersion;
     header.tier = static_cast<uint8_t>(CBFormat::Tier::Baseline);
     header.counterMode = static_cast<uint8_t>(CBFormat::CounterMode::Carried);
     return header;
@@ -49,7 +48,6 @@ static CBFormat::StateHeader emptyStateHeader()
 static CBFormat::SummaryHeader emptySummaryHeader()
 {
     CBFormat::SummaryHeader header { };
-    header.layoutVersion = CBFormat::summaryLayoutVersion;
     header.tier = static_cast<uint8_t>(CBFormat::Tier::Baseline);
     header.counterMode = static_cast<uint8_t>(CBFormat::CounterMode::Carried);
     return header;
@@ -89,9 +87,9 @@ JITCACHE_TEST(cbFormatStructLayout, No)
 
     JITCACHE_CB_CHECK_EQUAL("sizeof(StateHeader)", sizeof(StateHeader), 160);
     JITCACHE_CB_CHECK_EQUAL("alignof(StateHeader)", alignof(StateHeader), 4);
-    JITCACHE_CB_CHECK_EQUAL("StateHeader::layoutVersion", offsetof(StateHeader, layoutVersion), 0);
-    JITCACHE_CB_CHECK_EQUAL("StateHeader::tier", offsetof(StateHeader, tier), 2);
-    JITCACHE_CB_CHECK_EQUAL("StateHeader::counterMode", offsetof(StateHeader, counterMode), 3);
+    JITCACHE_CB_CHECK_EQUAL("StateHeader::tier", offsetof(StateHeader, tier), 0);
+    JITCACHE_CB_CHECK_EQUAL("StateHeader::counterMode", offsetof(StateHeader, counterMode), 1);
+    JITCACHE_CB_CHECK_EQUAL("StateHeader::reserved", offsetof(StateHeader, reserved), 2);
     JITCACHE_CB_CHECK_EQUAL("StateHeader::numArguments", offsetof(StateHeader, numArguments), 4);
     JITCACHE_CB_CHECK_EQUAL("StateHeader::numValueProfiles", offsetof(StateHeader, numValueProfiles), 8);
     JITCACHE_CB_CHECK_EQUAL("StateHeader::numLazyOperandProfiles", offsetof(StateHeader, numLazyOperandProfiles), 12);
@@ -116,17 +114,15 @@ JITCACHE_TEST(cbFormatStructLayout, No)
     JITCACHE_CB_CHECK_EQUAL("LazyOperandRecord::prediction", offsetof(LazyOperandRecord, prediction), 16);
 
     JITCACHE_CB_CHECK_EQUAL("sizeof(SummaryHeader)", sizeof(SummaryHeader), 24);
-    JITCACHE_CB_CHECK_EQUAL("SummaryHeader::layoutVersion", offsetof(SummaryHeader, layoutVersion), 0);
-    JITCACHE_CB_CHECK_EQUAL("SummaryHeader::tier", offsetof(SummaryHeader, tier), 2);
-    JITCACHE_CB_CHECK_EQUAL("SummaryHeader::counterMode", offsetof(SummaryHeader, counterMode), 3);
+    JITCACHE_CB_CHECK_EQUAL("SummaryHeader::tier", offsetof(SummaryHeader, tier), 0);
+    JITCACHE_CB_CHECK_EQUAL("SummaryHeader::counterMode", offsetof(SummaryHeader, counterMode), 1);
+    JITCACHE_CB_CHECK_EQUAL("SummaryHeader::reserved", offsetof(SummaryHeader, reserved), 2);
     JITCACHE_CB_CHECK_EQUAL("SummaryHeader::numArguments", offsetof(SummaryHeader, numArguments), 4);
     JITCACHE_CB_CHECK_EQUAL("SummaryHeader::numValueProfiles", offsetof(SummaryHeader, numValueProfiles), 8);
     JITCACHE_CB_CHECK_EQUAL("SummaryHeader::numArrayProfiles", offsetof(SummaryHeader, numArrayProfiles), 12);
     JITCACHE_CB_CHECK_EQUAL("SummaryHeader::numLazyOperandProfiles", offsetof(SummaryHeader, numLazyOperandProfiles), 16);
     JITCACHE_CB_CHECK_EQUAL("SummaryHeader::counterProgress", offsetof(SummaryHeader, counterProgress), 20);
 
-    JITCACHE_CB_CHECK_EQUAL("stateLayoutVersion", CBFormat::stateLayoutVersion, 1);
-    JITCACHE_CB_CHECK_EQUAL("summaryLayoutVersion", CBFormat::summaryLayoutVersion, 1);
     JITCACHE_CB_CHECK_EQUAL("Tier::Baseline", static_cast<uint8_t>(CBFormat::Tier::Baseline), 1);
     JITCACHE_CB_CHECK_EQUAL("CounterMode::NotCarried", static_cast<uint8_t>(CBFormat::CounterMode::NotCarried), 0);
     JITCACHE_CB_CHECK_EQUAL("CounterMode::Carried", static_cast<uint8_t>(CBFormat::CounterMode::Carried), 1);
@@ -284,8 +280,7 @@ JITCACHE_TEST(cbFormatFamilyTable, No)
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<12>::Op, OpCallIgnoreResult>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<13>::Op, OpTailCall>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<15>::Op, OpIteratorNext>));
-    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<CBFormat::newArrayBufferFamily>::Op, OpNewArrayBuffer>));
-    JITCACHE_CB_CHECK_EQUAL("newArrayBufferFamily", CBFormat::newArrayBufferFamily, 19);
+    JITCACHE_CHECK((std::is_same_v<CBFormat::Family<19>::Op, OpNewArrayBuffer>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<20>::Op, OpIteratorOpen>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<21>::Op, OpIteratorNext>));
     JITCACHE_CHECK((std::is_same_v<CBFormat::Family<22>::Op, OpAsyncIteratorOpen>));
@@ -319,72 +314,17 @@ JITCACHE_TEST(cbFormatFamilyTable, No)
     JITCACHE_CHECK(CBFormat::stateArrayOf(FamilyKind::BranchBit) == StateArray::BranchBits);
 }
 
-JITCACHE_TEST(cbFormatDomainPredicates, No)
+JITCACHE_TEST(cbFormatFieldEncodings, No)
 {
-    using CBFormat::allocationHintFits;
-    using CBFormat::iterationModesFit;
-    using CBFormat::newArrayBufferFamily;
-
-    // The counter mode, predictions, array modes and array flags.
-    JITCACHE_CHECK(CBFormat::counterModeFits(0) && CBFormat::counterModeFits(1) && !CBFormat::counterModeFits(2));
-    JITCACHE_CHECK(CBFormat::predictionFits(SpecNone) && CBFormat::predictionFits(SpecBytecodeTop));
-    JITCACHE_CHECK(!CBFormat::predictionFits(SpecFullTop) && !CBFormat::predictionFits(SpecNonInt32AsInt52) && !CBFormat::predictionFits(SpecDoubleImpureNaN));
-    JITCACHE_CHECK(CBFormat::arrayModesFit(ALL_ARRAY_MODES) && !CBFormat::arrayModesFit(1u << 2) && !CBFormat::arrayModesFit(1u << 24));
-    JITCACHE_CHECK(CBFormat::arrayProfileFlagsFit(0xff) && !CBFormat::arrayProfileFlagsFit(0x100));
-
-    // Allocation hints: the vector length, the indexing types F16..F19 admit and the literal order in F19, which the
-    // import tests' mutations break.
-    unsigned newArrayFamily = CBFormat::firstAllocationHintFamily;
-    JITCACHE_CHECK(CBFormat::allocationHintVectorLengthFits(BASE_CONTIGUOUS_VECTOR_LEN_MAX) && !CBFormat::allocationHintVectorLengthFits(BASE_CONTIGUOUS_VECTOR_LEN_MAX + 1));
+    // An allocation hint holds its indexing type and its vector length.
     uint16_t hint = CBFormat::encodeAllocationHint(CopyOnWriteArrayWithDouble, 17);
     JITCACHE_CHECK(CBFormat::allocationHintIndexingType(hint) == CopyOnWriteArrayWithDouble && CBFormat::allocationHintVectorLength(hint) == 17);
-    JITCACHE_CHECK(!allocationHintFits(newArrayBufferFamily, CopyOnWriteArrayWithInt32, CopyOnWriteArrayWithDouble));
-    JITCACHE_CHECK(!allocationHintFits(newArrayBufferFamily, CopyOnWriteArrayWithInt32, CopyOnWriteArrayWithContiguous));
-    JITCACHE_CHECK(!allocationHintFits(newArrayBufferFamily, CopyOnWriteArrayWithDouble, CopyOnWriteArrayWithContiguous));
-    JITCACHE_CHECK(allocationHintFits(newArrayBufferFamily, CopyOnWriteArrayWithDouble, CopyOnWriteArrayWithInt32));
-    JITCACHE_CHECK(allocationHintFits(newArrayBufferFamily, CopyOnWriteArrayWithContiguous, CopyOnWriteArrayWithInt32));
-    JITCACHE_CHECK(allocationHintFits(newArrayBufferFamily, CopyOnWriteArrayWithContiguous, CopyOnWriteArrayWithDouble));
-    JITCACHE_CHECK(!allocationHintFits(newArrayBufferFamily, ArrayWithContiguous, CopyOnWriteArrayWithInt32));
-    JITCACHE_CHECK(!CBFormat::allocationHintTypeFits(newArrayBufferFamily, ArrayWithContiguous));
-    JITCACHE_CHECK(!allocationHintFits(newArrayFamily, CopyOnWriteArrayWithInt32, ArrayWithUndecided));
-    JITCACHE_CHECK(allocationHintFits(newArrayFamily, ArrayWithUndecided, ArrayWithUndecided));
-    JITCACHE_CHECK(allocationHintFits(newArrayFamily, ArrayWithSlowPutArrayStorage, ArrayWithUndecided));
-    JITCACHE_CHECK(!allocationHintFits(newArrayFamily, ArrayClass, ArrayWithUndecided));
-    JITCACHE_CHECK(!allocationHintFits(CBFormat::firstIterationModesFamily, ArrayWithInt32, ArrayWithUndecided));
-
-    // Iteration modes: each opcode's full native mask, and the bits the import tests' mutations set.
-    auto bit = [](IterationMode mode) {
-        return static_cast<uint16_t>(mode);
-    };
-    for (unsigned family = CBFormat::firstIterationModesFamily; family < CBFormat::firstIterationModesFamily + CBFormat::numberOfIterationModesFamilies; ++family)
-        JITCACHE_CHECK(iterationModesFit(family, CBFormat::nativeIterationModes(family)));
-    JITCACHE_CB_CHECK_EQUAL("iterator_open mask", CBFormat::nativeIterationModes(CBFormat::iteratorOpenIterationModesFamily), 0x1fff);
-    JITCACHE_CB_CHECK_EQUAL("iterator_next mask", CBFormat::nativeIterationModes(CBFormat::iteratorNextIterationModesFamily), 0x1ff3);
-    JITCACHE_CB_CHECK_EQUAL("async_iterator_open mask", CBFormat::nativeIterationModes(CBFormat::asyncIteratorOpenIterationModesFamily), 0x6001);
-    JITCACHE_CB_CHECK_EQUAL("async_iterator_next mask", CBFormat::nativeIterationModes(CBFormat::asyncIteratorNextIterationModesFamily), 0x2001);
-    JITCACHE_CB_CHECK_EQUAL("iterator_close_check mask", CBFormat::nativeIterationModes(CBFormat::iteratorCloseCheckIterationModesFamily), 0x12);
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorOpenIterationModesFamily, bit(IterationMode::FastAsyncGenerator)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorOpenIterationModesFamily, bit(IterationMode::AsyncFromSync)));
-    JITCACHE_CHECK(iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastArray)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastMap)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorNextIterationModesFamily, bit(IterationMode::FastSet)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::asyncIteratorOpenIterationModesFamily, bit(IterationMode::FastArray)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::asyncIteratorNextIterationModesFamily, bit(IterationMode::AsyncFromSync)));
-    JITCACHE_CHECK(iterationModesFit(CBFormat::iteratorCloseCheckIterationModesFamily, static_cast<uint16_t>(bit(IterationMode::FastArray) | bit(IterationMode::FastString))));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorCloseCheckIterationModesFamily, bit(IterationMode::Generic)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::iteratorCloseCheckIterationModesFamily, bit(IterationMode::FastMap)));
-    JITCACHE_CHECK(!iterationModesFit(CBFormat::firstAllocationHintFamily, bit(IterationMode::Generic)));
 
     // iterator_close_check's byte, widened to cb.state's record and narrowed back.
+    uint16_t closeCheckBits = static_cast<uint16_t>(IterationMode::FastArray) | static_cast<uint16_t>(IterationMode::FastString);
     uint8_t closeCheckModes = 0;
-    CBFormat::setIterationModes(closeCheckModes, CBFormat::nativeIterationModes(CBFormat::iteratorCloseCheckIterationModesFamily));
-    JITCACHE_CB_CHECK_EQUAL("iterator_close_check modes", CBFormat::iterationModesOf(closeCheckModes), 0x12);
-
-    // Enumerator modes, to_this statuses and the jneq_ptr bit.
-    JITCACHE_CHECK(CBFormat::enumeratorModesFit(0x0f) && !CBFormat::enumeratorModesFit(0x10));
-    JITCACHE_CHECK(CBFormat::toThisStatusFits(ToThisOK) && CBFormat::toThisStatusFits(ToThisConflicted) && CBFormat::toThisStatusFits(ToThisClearedByGC));
-    JITCACHE_CHECK(!CBFormat::toThisStatusFits(3));
-    JITCACHE_CHECK(CBFormat::branchBitFits(0) && CBFormat::branchBitFits(1) && !CBFormat::branchBitFits(2));
+    CBFormat::setIterationModes(closeCheckModes, closeCheckBits);
+    JITCACHE_CB_CHECK_EQUAL("iterator_close_check modes", CBFormat::iterationModesOf(closeCheckModes), closeCheckBits);
 }
 
 #undef JITCACHE_CB_CHECK_EQUAL

@@ -1,5 +1,5 @@
 #include "config.h"
-#include "UCBTwins.h"
+#include "jitcache/ucb/UCBTwins.h"
 
 #if ENABLE(JITCACHE_TWINS)
 
@@ -7,8 +7,6 @@
 #include "CachedTypes.h"
 #include "GlobalExecutable.h"
 #include "HeapIterationScope.h"
-#include "JITCacheBench.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "JSCellButterfly.h"
 #include "MarkedSpaceInlines.h"
@@ -17,18 +15,20 @@
 #include "SourceCode.h"
 #include "StrongInlines.h"
 #include "SymbolTable.h"
-#include "TwinReport.h"
-#include "UCBFeedback.h"
-#include "UCBRegistry.h"
-#include "UCBRequests.h"
-#include "UCBSections.h"
-#include "UCBTwinGeneration.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedGlobalCodeBlock.h"
 #include "UnlinkedProgramCodeBlock.h"
 #include "VM.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/twins/TwinReport.h"
+#include "jitcache/ucb/UCBFeedback.h"
+#include "jitcache/ucb/UCBRegistry.h"
+#include "jitcache/ucb/UCBRequests.h"
+#include "jitcache/ucb/UCBSections.h"
+#include "jitcache/ucb/UCBTwinGeneration.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -432,10 +432,8 @@ void verifyImport(const RequestState& state, UnlinkedCodeBlock& imported, const 
             reporter.difference("T3"_s, "the lexical declarations iterate in another order than the twin's"_s);
     }
 
-    // The feedback check, against the capture record the body carries. The import parsed it already; strict off reads it
-    // where the layout puts each field.
-    if (auto feedback = FeedbackSection::parse(body.section(SectionKind::UCBFeedback), false))
-        ucbTwinsCompareFeedback(imported, *feedback, body.highestTier() ? BodyImage::Present : BodyImage::Absent, reporter);
+    // The feedback check, against the capture record the body carries, which the import parsed already.
+    ucbTwinsCompareFeedback(imported, FeedbackSection::parse(body.section(SectionKind::UCBFeedback)), body.highestTier() ? BodyImage::Present : BodyImage::Absent, reporter);
 
     // The children and constant-cell checks.
     ucbTwinsCompareChildren(vm, imported, twin, holder, reporter);
@@ -458,8 +456,7 @@ void verifyMatched(UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutabl
 
 void verifySuppliedDigest(const SourceCode& rootSource, const RootSourceDigest& digest, TwinReportSink& sink)
 {
-    // The supplied-digest check, whatever strict says. Only a digest taken from where the text was produced needs its text;
-    // a computed one is it.
+    // The supplied-digest check. Only a digest taken from where the text was produced needs its text; a computed one is it.
     if (digest.origin == SourceDigestOrigin::Computed)
         return;
     if (sourceDigest(rootSource.view()) == digest.digest)

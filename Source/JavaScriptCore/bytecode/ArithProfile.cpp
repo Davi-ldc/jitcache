@@ -27,35 +27,12 @@
 #include "ArithProfile.h"
 
 #include "CCallHelpers.h"
-#include "ImageEmission.h"
-#include "ImageRecorder.h"
 #include "JSCJSValueInlines.h"
+#include "jitcache/image/ImageEmission.h"
 
 namespace JSC {
 
 #if ENABLE(JIT)
-
-namespace ArithProfileInternal {
-
-// The reference a profile write records when the assembler has a JITCache recorder: the profile's target in its UCB's
-// vectors, by the address the profile lies at. Baseline code writes only profiles of its own UCB, so a profile in
-// neither vector is a programming error, which makes the record unrecordable and keeps the native write.
-static std::optional<JITCache::ImageReference> recordedArithProfile(CCallHelpers& jit, const void* profile, const void* bits)
-{
-    auto* recorder = jit.jitCacheRecorder();
-    if (!recorder) [[likely]]
-        return std::nullopt;
-    auto target = recorder->arithProfileTarget(profile);
-    if (!target) {
-        ASSERT_NOT_REACHED();
-        recorder->markUnrecordable(JITCache::Unrecordable::InconsistentRecord);
-        return std::nullopt;
-    }
-    return JITCache::ImageReference(*target, bits);
-}
-
-} // namespace ArithProfileInternal
-
 template<typename BitfieldType>
 void ArithProfile<BitfieldType>::emitObserveResult(CCallHelpers& jit, GPRReg valueGPR, GPRReg tempGPR, TagRegistersMode mode)
 {
@@ -190,7 +167,7 @@ template<typename BitfieldType>
 void ArithProfile<BitfieldType>::emitUnconditionalSet(CCallHelpers& jit, BitfieldType mask) const
 {
     static_assert(std::same_as<BitfieldType, uint16_t>);
-    if (auto reference = ArithProfileInternal::recordedArithProfile(jit, this, addressOfBits())) [[unlikely]] {
+    if (auto reference = JITCache::recordedArithProfile(jit, this, addressOfBits())) [[unlikely]] {
         JITCache::or16AtReference(jit, CCallHelpers::TrustedImm32(mask), *reference);
         return;
     }
@@ -200,7 +177,7 @@ void ArithProfile<BitfieldType>::emitUnconditionalSet(CCallHelpers& jit, Bitfiel
 template<typename BitfieldType>
 void ArithProfile<BitfieldType>::emitUnconditionalSet(CCallHelpers& jit, GPRReg mask) const
 {
-    if (auto reference = ArithProfileInternal::recordedArithProfile(jit, this, addressOfBits())) [[unlikely]] {
+    if (auto reference = JITCache::recordedArithProfile(jit, this, addressOfBits())) [[unlikely]] {
         JITCache::or16AtReference(jit, mask, *reference);
         return;
     }

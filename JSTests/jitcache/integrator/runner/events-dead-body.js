@@ -1,5 +1,6 @@
 // jitcache-runs: Off --jitcache-body-events=dead-body-events.jsonl --useUnlinkedCodeBlockJettisoning=true
 // jitcache-check: 0 resources/dead-body.ts
+// jitcache-fixture: passes
 
 // Body events of a dead body: with --useUnlinkedCodeBlockJettisoning=true, a function that ran and was then made unreachable
 // keeps its counts in the body-event dump's total after more fullGC() calls than UnlinkedCodeBlock::maxAge (7), which

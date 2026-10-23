@@ -5,7 +5,6 @@
 #if ENABLE(JIT)
 
 #include <array>
-#include <expected>
 #include <optional>
 #include <span>
 #include <stddef.h>
@@ -14,10 +13,9 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/UniqueArray.h>
-#include <wtf/text/ASCIILiteral.h>
 
-// The CB lane's interface: capture of a baseline CodeBlock's state into cb.state and cb.summary, scoring, validation, and
-// the seeding of a newborn CodeBlock. CBFormat.h holds the sections' layouts.
+// The CB lane's interface: capture of a baseline CodeBlock's state into cb.state and cb.summary, scoring, and the seeding
+// of a newborn CodeBlock. CBFormat.h holds the sections' layouts.
 
 namespace JSC {
 
@@ -37,39 +35,6 @@ class ProducerBudget; // the integrator's producer budget, which capture charges
 #if ENABLE(JITCACHE_TWINS)
 class TwinReport; // the integrator's sink for twin differences
 #endif
-
-enum class CBFaultKind : uint8_t { InvalidMaterial, RecordingFault };
-
-enum class CBCheck : uint8_t {
-    // cb.state's rules, in validateState's order
-    StateHeader, ArgumentCount, ValueProfileCount, FamilyCount, StateLength,
-    ValuePrediction, ArrayProfile, AllocationHint, IterationModes, EnumeratorModes,
-    ToThisStatus, BranchBit, LazyOperand, TierUpHistory, Counter,
-    // cb.summary's rules
-    SummaryHeader, SummaryLength, SummaryValue,
-    // what prepare assumes of the newborn CodeBlock and of the captured counter
-    StrictNewborn, StrictLinkState, StrictCounter,
-    // capture's own checks
-    CapturePairing, CaptureCharge, CaptureStrict,
-};
-
-struct CBFault {
-    CBFaultKind kind;
-    CBCheck check;
-};
-
-// The check's name in a fault's step, after "cb.": one lowercase token, its words joined by '-'.
-ASCIILiteral description(CBCheck);
-// What the check rejected, in plain words, for the fault's detail.
-ASCIILiteral faultDetail(CBCheck);
-
-// Shared by capture's strict check and the readers of saved sections. Each reads the span (and the CB) in place,
-// allocates nothing and returns the first failing check, or nothing.
-std::optional<CBCheck> validateState(std::span<const uint8_t> stateSection, CodeBlock&);
-std::optional<CBCheck> validateSummary(std::span<const uint8_t> summarySection);
-// True when the captured counter's threshold is infinite, or its total is at least the float nearest -counterValue: a
-// progress that is not negative, up to the float rounding native counters apply to the total.
-bool counterObeysNativeInvariant(const CBFormat::StateHeader&);
 
 struct CBScore {
     uint64_t richnessUnits { 0 };
@@ -93,9 +58,10 @@ class CBStateCapture {
     WTF_MAKE_TZONE_ALLOCATED(CBStateCapture);
 public:
     // VM thread, JS paused, API lock and heap access, no collector phase. hasPolymorphicSite is the ICs lane's bit for
-    // the same CB, read in the same pause; when set, the counter does not travel.
-    static std::expected<CBStateCapture, CBFault> capture(CodeBlock&, ProducerBudget&, bool strict, bool hasPolymorphicSite);
-    static std::expected<CBScore, CBFault> scoreLive(CodeBlock&, bool strict, bool hasPolymorphicSite);
+    // the same CB, read in the same pause; when set, the counter does not travel. capture returns nothing when the charge
+    // for its two buffers fails.
+    static std::optional<CBStateCapture> capture(CodeBlock&, ProducerBudget&, bool hasPolymorphicSite);
+    static CBScore scoreLive(CodeBlock&, bool hasPolymorphicSite);
 
     CBStateCapture(CBStateCapture&&);
     ~CBStateCapture(); // frees both buffers and releases their charge
@@ -125,15 +91,15 @@ private:
     CBScore m_score;
 };
 
-// Any thread that owns the material; reads only the span, validating it first with strict on.
-std::expected<CBScore, CBFault> decodeSummary(std::span<const uint8_t> summarySection, bool strict);
+// Any thread that owns the material; reads only the span.
+CBScore decodeSummary(std::span<const uint8_t> summarySection);
 
 class CBStateImport {
 public:
     // The install steps, in this order, on the VM thread inside the install function's GC deferral, for a newborn CB
-    // that no marker or compiler thread can reach before installCode. prepare reads the span and the CB and writes
-    // neither, so after a failure elsewhere the next newborn CB of the body can prepare again from the same bytes.
-    static std::expected<CBStateImport, CBFault> prepare(std::span<const uint8_t> stateSection, CodeBlock&, bool strict);
+    // that no marker or compiler thread can reach before installCode. prepare reads only the span and writes nothing,
+    // so after a failure elsewhere the next newborn CB of the body can prepare again from the same bytes.
+    static CBStateImport prepare(std::span<const uint8_t> stateSection);
 
     void seedLinkedState(CodeBlock&) const; // after linking, before the CB has a JIT type; infallible
     CBCounterRestore finishCounter(CodeBlock&) const; // after native setup; infallible

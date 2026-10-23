@@ -1,6 +1,6 @@
 // jitcache-runs: Producer --evalMode=true; Consumer
 // jitcache-expect-no-install: 1
-// jitcache-check: 1 resources/rejected-must-match.ts
+// jitcache-check: 1 resources/checker.ts start rejected start.incompatible evalMode
 
 // A must-match option that differs between producer and consumer. The Producer runs with evalMode, a must-match option
 // (options.md), on, so the artifact header it writes records it, and commits mmBody. The Consumer runs with the

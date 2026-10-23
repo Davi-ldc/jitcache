@@ -1,5 +1,5 @@
 #include "config.h"
-#include "JITCacheOptions.h"
+#include "jitcache/store/JITCacheOptions.h"
 
 #include "Options.h"
 #include <type_traits>

@@ -7,22 +7,23 @@
 #include "CodeBlock.h"
 #include "Completion.h"
 #include "FunctionExecutable.h"
-#include "ImageCapture.h"
-#include "ImageEmission.h"
-#include "ImageRecord.h"
-#include "ImageRecorder.h"
-#include "ImageTestSupport.h"
-#include "ImageTypes.h"
-#include "JITCacheAPI.h"
-#include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "LinkBuffer.h"
-#include "ProducerBudget.h"
 #include "SourceCode.h"
-#include "TestFiles.h"
-#include "TestVM.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/ImageCapture.h"
+#include "jitcache/image/ImageEmission.h"
+#include "jitcache/image/ImageRecord.h"
+#include "jitcache/image/ImageRecorder.h"
+#include "jitcache/image/ImageTypes.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/session/ProducerContext.h"
+#include "jitcache/tests/image/ImageTestSupport.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestFiles.h"
+#include "jitcache/tests/support/TestVM.h"
 #include <array>
 #include <optional>
 #include <wtf/Vector.h>
@@ -206,7 +207,6 @@ JITCACHE_TEST_WITH_OPTIONS(imageTinyBudgetLeavesRecordsIncompleteAndReleasesEver
         config.artifactPath = directory->path("artifact"_s);
         config.role = Role::Producer;
         config.producerLimitBytes = 2 * kRecordChargeStep;
-        config.strict = true;
         StartResult started = JITCache::start(vm, config);
         if (started.outcome != StartOutcome::Started) {
             JITCACHE_FAIL(makeString("the producer did not start: "_s, toJSON(started)));
@@ -532,7 +532,6 @@ JITCACHE_TEST_WITH_OPTIONS(imageRefusedRegenerationLinksItsSnippet, No, "--useCo
         config.artifactPath = directory->path("artifact"_s);
         config.role = Role::Producer;
         config.producerLimitBytes = 64 * MB;
-        config.strict = true;
         StartResult started = JITCache::start(vm, config);
         if (started.outcome != StartOutcome::Started) {
             JITCACHE_FAIL(makeString("the producer did not start: "_s, toJSON(started)));

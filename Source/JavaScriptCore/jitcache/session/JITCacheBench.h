@@ -1,6 +1,7 @@
 #pragma once
 
-#include "ProducerBudget.h"
+#include "jitcache/base/BenchClock.h"
+#include "jitcache/base/ProducerBudget.h"
 #include <array>
 #include <cstddef>
 #include <initializer_list>
@@ -20,10 +21,15 @@
 // The bench report and the timers that feed it. When Config::benchReportPath is set, the VMState keeps a report, which
 // appends JSON lines to that path, buffered and flushed when the buffer passes 1 MiB, after each delta, at each host's
 // exit (finishHostRun) and in willDestroyVM. Every line holds event, pid and the VM's ordinal in the process, then the
-// event's fields. Times are nanoseconds of CLOCK_THREAD_CPUTIME_ID on the thread that did the work, except a counted
-// span's step breakdown, which reads CLOCK_MONOTONIC; sizes are bytes, and keys are lowercase hex. The report is off by
-// default and is not charged to the producer budget. Any part may call record for the measurements it reports, at the
-// cost of one load and one test when the report is off.
+// event's fields. Times are nanoseconds on the thread that did the work. The spans the installation bound reads, a
+// request's counted total, an install's total and a native compilation's two spans, are CLOCK_MONOTONIC time capped at
+// the thread CPU time read outside them (BoundSpanTimer, RequestTimer), so the CPU clock's system calls stay out of
+// them; a request's apart total is the rest of its CPU time. The parts and steps that explain a bound span read
+// CLOCK_MONOTONIC inside it, so they are timed only under jitCacheBenchBreakdowns, and runs that set the bound leave it
+// off; a request's apart parts, the relinks a finalize span leaves out and the index line's times read CLOCK_MONOTONIC
+// too. Every other time is CLOCK_THREAD_CPUTIME_ID, read where its span begins and ends. Sizes are bytes, and keys are
+// lowercase hex. The report is off by default and is not charged to the producer budget. Any part may call record for
+// the measurements it reports, at the cost of one load and one test when the report is off.
 
 namespace JSC {
 
@@ -33,7 +39,6 @@ class VM;
 
 namespace JSC::JITCache {
 
-class BodyKey;
 class OpenedArtifact;
 
 struct BenchField {
@@ -54,6 +59,8 @@ public:
     // VM thread: the buffered lines, then the lookup line, the index line when the report has an artifact, and the budget
     // and process lines.
     void flush();
+    // Whether the timers also time the parts and steps inside the bound's spans: jitCacheBenchBreakdowns when it opened.
+    bool timesBreakdowns() const { return m_timesBreakdowns; }
     void addRelinkNanoseconds(uint64_t); // VM thread: RelinkTimer adds each relink of incoming calls it measured
     uint64_t takeRelinkNanoseconds(); // VM thread: returns the relinks added so far and resets the total
 
@@ -83,6 +90,7 @@ private:
     const int m_fd; // opened for appending
     const int m_pid;
     const unsigned m_vmOrdinal;
+    const bool m_timesBreakdowns;
     StringBuilder m_buffer; // the lines not yet written
     uint64_t m_relinkNanoseconds { 0 };
     RefPtr<ProducerBudget> m_budget;
@@ -93,18 +101,9 @@ private:
 // Null when no report is open.
 BenchReport* benchReport(VM&);
 
-// Any thread. The clock every event's times read: CLOCK_THREAD_CPUTIME_ID, in nanoseconds. The vDSO does not serve it on
-// Linux, so each read is a system call inside the span it measures; a counted span reads it only where it begins and
-// ends.
-uint64_t benchThreadCPUNanoseconds();
-
-// A key as every event writes it: the lowercase hex of its 40 canonical bytes, which the shell's jitcacheReadSection
-// and jitcacheRewriteSection take back.
-String bodyKeyHex(const BodyKey&);
-
-// A scope around ScriptExecutable::installCode's relink of incoming calls. It reads the thread CPU clock when
-// benchReport(vm) is non-null and !vm.heap.currentThreadIsDoingGCWork(), and otherwise measures nothing, so it touches
-// the report only on the VM thread outside GC work.
+// A scope around ScriptExecutable::installCode's relink of incoming calls. It reads CLOCK_MONOTONIC, the clock of the
+// finalize span, which leaves the relink out, when benchReport(vm) is non-null and !vm.heap.currentThreadIsDoingGCWork(),
+// and otherwise measures nothing, so it touches the report only on the VM thread outside GC work.
 class RelinkTimer {
     WTF_MAKE_NONCOPYABLE(RelinkTimer);
     WTF_FORBID_HEAP_ALLOCATION;
@@ -125,11 +124,11 @@ enum class BaselineSpan : bool {
     Finalize, // finalize up to the finalize capture hook, on the VM thread, without relinking incoming calls
 };
 
-// One of those spans: its thread CPU time, read where it begins and where it ends, and whether the VM generated per-VM
-// support meanwhile, on this thread or another, which sets the body aside in the bench's comparison. A compile span
-// touches no report: the plan's constructor decides on the VM thread whether it measures. A finalize span takes the VM's
-// report, which lives as long as the VM's state and so outlives every plan; it discards what relinks before it left in
-// the report's relink total, and at its end subtracts the relinks RelinkTimer added during it.
+// One of those spans: its time as BoundSpanTimer reads it, and whether the VM generated per-VM support meanwhile, on this
+// thread or another, which sets the body aside in the bench's comparison. A compile span touches no report: the plan's
+// constructor decides on the VM thread whether it measures. A finalize span takes the VM's report, which lives as long as
+// the VM's state and so outlives every plan; it discards what relinks before it left in the report's relink total, and
+// at its end leaves out the relinks RelinkTimer added during it.
 class BaselineSpanTimer {
     WTF_MAKE_NONCOPYABLE(BaselineSpanTimer);
     WTF_FORBID_HEAP_ALLOCATION;
@@ -148,7 +147,7 @@ private:
     BenchReport* m_report { nullptr }; // a measured finalize span's report
     bool m_measures { false };
     uint64_t m_supportGenerationsAtStart { 0 };
-    uint64_t m_startNanoseconds { 0 };
+    BoundSpanTimer m_span;
 };
 #endif // ENABLE(JIT)
 

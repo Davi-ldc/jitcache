@@ -1,19 +1,19 @@
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=1
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=2
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=3
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=4
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=5
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=6
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=7
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=8
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=9
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=10
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=11
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=12
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=13
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=14
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=15
-// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=16
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=1; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=2; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=3; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=4; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=5; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=6; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=7; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=8; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=9; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=10; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=11; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=12; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=13; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=14; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=15; Consumer
+// jitcache-runs: Producer --useExecutableAllocationFuzz=true --fireExecutableAllocationFuzzAt=16; Consumer
 // jitcache-requires: twins
 // jitcache-pin: off its Off runs call jitcacheICsSnapshot, which only twins builds have
 // jitcache-expect-fault: 0 exec-alloc.baseline-plan
@@ -21,6 +21,7 @@
 // jitcache-expect-fault: 0 exec-alloc.ftl-plan
 // jitcache-expect-fault: 0 exec-alloc.mathic-snippet
 // jitcache-require-fault: 0 exec-alloc.ic-handler
+// jitcache-expect-no-install: 0:1
 
 // An IC stub or handler that cannot get executable memory raises exec-alloc.ic-handler before the slow path writes its
 // give-up. The fuzzer fails the n-th executable allocation that may fail:
@@ -30,12 +31,17 @@
 // compiled in site order at its second visit, so this range fails both plans and fourteen stubs. Every run checks,
 // natively, that each visit reads the right values and that at most one site gave up, listing no case. A Producer also
 // checks that its status names what failed: exec-alloc.baseline-plan when reads stayed in the LLInt,
-// exec-alloc.ic-handler exactly when a site gave up. Whatever the fault, delta() then throws naming it. The runner checks
-// that some run reports exec-alloc.ic-handler and that each output equals the JITCache-off run's.
+// exec-alloc.ic-handler exactly when a site gave up. Whatever the fault, delta() then throws naming it. Each Consumer
+// imports what its Producer committed. The fault ended production before anything could save what the visits taught, so
+// the Producer committed reads, if at all, at its compilation, before any visit: a Consumer's reads, once in baseline and
+// before any of its sites runs, has every IC as installation builds it, holding no give-up and no tookSlowPath. Only the
+// first sequence's Producer, whose first allocation failed, commits nothing; from the second on, the plan that finalized
+// first committed its body, which the Consumer installs. The runner checks that some run reports exec-alloc.ic-handler,
+// that every Consumer but the first installs a body and that each output equals the JITCache-off run's.
 load("./resources/ics.js", "caller relative");
 
 (function main(role) {
-    check(role === "Producer" || role === "Off", `unknown role ${role}`);
+    check(role === "Producer" || role === "Consumer" || role === "Off", `unknown role ${role}`);
     const siteCount = 32;
 
     // Each site reads its own property of the global object through the global proxy. Such a load gets neither a handler
@@ -72,9 +78,9 @@ load("./resources/ics.js", "caller relative");
             checkSame(values[site], site, `the value site ${site} read at ${label}`);
     }
 
-    // Returns how many sites gave up. Every site the fuzzer spared lists the case its second visit cached. The site
-    // whose stub it failed got GiveUpOnCache, which installed operationGetByIdGaveUp beside no case, and the third visit
-    // reached that operation.
+    // Returns how many sites gave up. Every site the fuzzer spared lists the one case a visit cached: the second, or the
+    // first at a site an import brought back with its countdown at zero. The site whose stub the fuzzer failed got
+    // GiveUpOnCache, which installed operationGetByIdGaveUp beside no case, and the third visit reached that operation.
     function checkSites() {
         const ics = snapshot(reads).propertyICs;
         checkSame(ics.length, siteCount, "the number of reads's property ICs");
@@ -97,6 +103,9 @@ load("./resources/ics.js", "caller relative");
 
     underTest(reads);
     const inBaseline = reachBaseline(reads);
+    // reachBaseline calls reads with skip, so none of its sites has run yet.
+    if (role === "Consumer" && inBaseline)
+        expectFresh("reads in a Consumer", snapshot(reads));
     // The first visit spends each IC's countdown and the second caches at every site, in site order
     // (PropertyInlineCache::considerRepatchingCacheImpl). The third runs what the second left.
     const first = reads(false, globalThis);

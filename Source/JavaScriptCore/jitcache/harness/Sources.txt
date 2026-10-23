@@ -1,0 +1,3 @@
+jitcache/harness/HeapDescription.cpp
+jitcache/harness/HostFunctions.cpp
+jitcache/harness/Placement.cpp

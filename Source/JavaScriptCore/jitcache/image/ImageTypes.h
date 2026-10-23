@@ -9,7 +9,7 @@
 #include <wtf/text/ASCIILiteral.h>
 
 // The Image lane's vocabulary: how a reference is emitted (its form), what it names (its target), the record a
-// compilation leaves, and the names of the checks that guard what the lane reads. No header JSC exports includes this
+// compilation leaves, and the names of the sections an import can fail to locate. No header JSC exports includes this
 // one; JIT.h and the other exported headers declare the enumerations they need opaquely, so that no exported class
 // depends on the lane's types.
 
@@ -48,7 +48,6 @@ enum class TargetKind : uint8_t {
     ImageOffset, // a: offset into the image; snippets only
     SnippetEntry, // a: MathIC index; the image only
 };
-inline constexpr uint8_t numberOfTargetKinds = static_cast<uint8_t>(TargetKind::SnippetEntry);
 
 // A reference's typed target. Every field a kind does not use is zero.
 struct ImageTarget {
@@ -175,23 +174,16 @@ struct MathICRecord {
     std::optional<SnippetProvenance> snippet; // only for an IC with inline code
 };
 
-// Every check the lane runs; status(vm) reports the failing one through description(ImageCheck).
+// The section an import could not locate, because the regions its counts imply do not fit inside the bytes it was
+// handed; status(vm) reports it through description(ImageCheck).
 enum class ImageCheck : uint8_t {
-    None, // an outcome no check names: NotEligible, ChargeRefused, ExecutableMemoryExhausted
-    // The structure of image.baseline, an import's first checks, then of baked-facts.baseline.
-    Header, CodeBounds, Fixups, SideTables, MathICEntries, MathICAndSwitchTargets, BakedFacts,
-    // image.baseline against the import's UCB.
-    SimpleSwitchTables, StringSwitchTables, UCBIndexes, BytecodeIndexes, CodeMapCount, SwitchRanks, ConstantTargets,
-    // image-twins.baseline in twins builds: its structure, then its compile inputs against the import's UCB.
-    TwinsHeader, TwinInputs, TwinRegenerations, TwinInputSites,
-    // A capture: fixups reach their targets, and the code's MathICs and side tables match the record.
-    CodeFixupTargets, SnippetFixupTargets, MathICCount, SideTablePointers,
-    // Preparation: every patched fixup reaches its target.
-    PatchReadBack,
+    Header, // image.baseline
+    BakedFacts, // baked-facts.baseline
+    TwinsHeader, // image-twins.baseline, which twins builds always read
 };
 
-// The failing step status(vm) shows after the part, one hyphenated lowercase token per check such as "patch-read-back",
-// or "none", with static storage. ImageSection.cpp defines it.
+// The failing step status(vm) shows after the part, one hyphenated lowercase token per check such as "baked-facts",
+// with static storage. ImageSection.cpp defines it.
 ASCIILiteral description(ImageCheck);
 
 // What the lane's section writers stream bytes through: false once the receiver refuses, and the writer then stops.

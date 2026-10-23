@@ -5,8 +5,8 @@
 #include "ArithProfile.h"
 #include "BinarySwitch.h"
 #include "CCallHelpers.h"
-#include "ImageTypes.h"
 #include "VirtualRegister.h"
+#include "jitcache/image/ImageTypes.h"
 #include <bit>
 #include <optional>
 #include <type_traits>
@@ -22,6 +22,8 @@ namespace JSC {
 
 class UnlinkedCodeBlock;
 class VM;
+enum class AccessType : int8_t;
+enum class CommonJITThunkID : uint8_t;
 
 namespace JITCache {
 
@@ -100,11 +102,42 @@ void or16AtReference(MacroAssembler&, MacroAssembler::TrustedImm32, const ImageR
 void or16AtReference(MacroAssembler&, GPRReg, const ImageReference& address);
 void orStructureIDBase(MacroAssembler&, GPRReg source, GPRReg dest);
 
+// The reference a profile write records when masm has a recorder: the profile's target in its UCB's vectors, by the
+// address the profile lies at, with bits as its value. Baseline code writes only profiles of its own UCB, so a profile
+// in neither vector is a programming error, which makes the record unrecordable. On nullopt, which is also the answer
+// without a recorder, the caller keeps its native write.
+std::optional<ImageReference> recordedArithProfile(MacroAssembler&, const void* profile, const void* bits);
+
 // Support code, reached through the key the consumer resolves.
 void nearCallSupport(MacroAssembler&, VM&, const ImageTarget& supportKey);
 void nearTailCallSupport(MacroAssembler&, VM&, const ImageTarget& supportKey);
 void jumpSupport(MacroAssembler&, VM&, const ImageTarget& supportKey);
 void linkJumpToSupport(MacroAssembler&, VM&, MacroAssembler::Jump, const ImageTarget& supportKey);
+
+// The support keys the baseline emitters link through the helpers above, with every field their kind does not use zero.
+namespace SupportKey {
+
+constexpr ImageTarget baselineThunk(BaselineThunk thunk)
+{
+    return ImageTarget { .kind = TargetKind::BaselineThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+}
+
+constexpr ImageTarget commonThunk(CommonJITThunkID thunk)
+{
+    return ImageTarget { .kind = TargetKind::CommonThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+}
+
+constexpr ImageTarget inlineCacheSlowPathThunk(AccessType accessType)
+{
+    return ImageTarget { .kind = TargetKind::InlineCacheSlowPathThunk, .a = static_cast<uint32_t>(accessType), .b = 0, .payload = 0 };
+}
+
+constexpr ImageTarget processThunk(ProcessThunk thunk)
+{
+    return ImageTarget { .kind = TargetKind::ProcessThunk, .a = static_cast<uint32_t>(thunk), .b = 0, .payload = 0 };
+}
+
+} // namespace SupportKey
 
 // A MathIC snippet's branches back to its image, at imageOffset.
 void jumpToImage(MacroAssembler&, uint32_t imageOffset, CodeLocationLabel<JSInternalPtrTag>);

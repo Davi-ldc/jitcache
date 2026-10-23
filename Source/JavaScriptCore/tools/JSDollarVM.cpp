@@ -151,10 +151,6 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <wtf/cocoa/CrashReporter.h>
 #endif
 
-#if ENABLE(JITCACHE_TWINS)
-#include "JITCacheTwinsHost.h"
-#endif
-
 using namespace JSC;
 
 IGNORE_WARNINGS_BEGIN("frame-address")
@@ -2361,9 +2357,6 @@ static JSC_DECLARE_HOST_FUNCTION(functionFFIWrite);
 static JSC_DECLARE_HOST_FUNCTION(functionFFICString);
 static JSC_DECLARE_HOST_FUNCTION(functionFFIArenaDepth);
 static JSC_DECLARE_HOST_FUNCTION(functionFFICompileCounts);
-#endif
-#if ENABLE(JITCACHE_TWINS)
-static JSC_DECLARE_HOST_FUNCTION(functionJITCacheUCBStatistics);
 #endif
 
 const ClassInfo JSDollarVM::s_info = { "DollarVM"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(JSDollarVM) };
@@ -5874,17 +5867,6 @@ JSC_DEFINE_HOST_FUNCTION(functionCreateBufferAccessors, (JSGlobalObject* globalO
 }
 #endif // USE(BUN_JSC_ADDITIONS)
 
-#if ENABLE(JITCACHE_TWINS)
-// Usage: $vm.jitCacheUCBStatistics(options)
-// The UCB statistics, the registry's counts and, for { verifyRegistry: true }, registryViolations. The
-// object is the one bun:jsc's jitcacheUCBStatistics returns, so both hosts build it in one place.
-JSC_DEFINE_HOST_FUNCTION(functionJITCacheUCBStatistics, (JSGlobalObject* globalObject, CallFrame* callFrame))
-{
-    DollarVMAssertScope assertScope;
-    return JITCache::functionJITCacheUCBStatistics(globalObject, callFrame);
-}
-#endif // ENABLE(JITCACHE_TWINS)
-
 constexpr unsigned jsDollarVMPropertyAttributes = PropertyAttribute::ReadOnly | PropertyAttribute::DontEnum | PropertyAttribute::DontDelete;
 
 void JSDollarVM::finishCreation(VM& vm)
@@ -6154,10 +6136,6 @@ void JSDollarVM::finishCreation(VM& vm)
     addFunction(vm, allowIfNotFuzz, "ffiCString"_s, functionFFICString, 1);
     addFunction(vm, allowIfNotFuzz, "ffiArenaDepth"_s, functionFFIArenaDepth, 0);
     addFunction(vm, allowIfNotFuzz, "ffiCompileCounts"_s, functionFFICompileCounts, 0);
-#endif
-
-#if ENABLE(JITCACHE_TWINS)
-    addFunction(vm, allowIfNotFuzz, "jitCacheUCBStatistics"_s, functionJITCacheUCBStatistics, 1);
 #endif
 
     if (allowIfNotFuzz) {

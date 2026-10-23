@@ -6,11 +6,13 @@
 #include <span>
 #include <stdint.h>
 #include <type_traits>
+#include <wtf/Forward.h>
 #include <wtf/OptionSet.h>
 
-// The body key, which names a body the same way in every process, and the types it is made of. Every part of JITCache may
-// include this file: storage indexes and stamps bodies by key, maintenance and the twin reports print keys, and the UCB
-// lane derives them (UCBKeys.h). Nothing here takes a lock or allocates, and any thread may call it.
+// The body key, which names a body the same way in every process, the types it is made of and its hex form. Every part
+// of JITCache may include this file: storage indexes and stamps bodies by key, maintenance and the twin reports print
+// keys, and the UCB lane derives them (UCBKeys.h). Nothing here takes a lock, only bodyKeyHex allocates, and any thread
+// may call it.
 
 namespace JSC {
 
@@ -63,5 +65,14 @@ private:
 // The integrator keys its index by the whole key and builds the table's empty and deleted values as byte fills.
 static_assert(sizeof(BodyKey) == BodyKey::byteSize);
 static_assert(std::is_trivially_copyable_v<BodyKey>);
+
+// A body key as reports and the shell spell it: the lowercase hex of its 40 canonical bytes.
+constexpr size_t bodyKeyHexLength = 2 * BodyKey::byteSize;
+std::array<char, bodyKeyHexLength> bodyKeyHexDigits(const BodyKey&);
+// The same digits as a String, as every bench event and diagnostic writes a key; the shell's jitcacheReadSection and
+// jitcacheRewriteSection take it back through bodyKeyFromHex.
+String bodyKeyHex(const BodyKey&);
+// The key 80 lowercase hex digits spell, or nothing when they are not that or BodyKey::fromBytes rejects the bytes.
+std::optional<BodyKey> bodyKeyFromHex(std::span<const char>);
 
 } // namespace JSC::JITCache

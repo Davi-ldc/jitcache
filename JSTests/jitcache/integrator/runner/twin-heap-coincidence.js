@@ -1,4 +1,5 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer --jitcache-test-twin-entry=coincidence:heap
+// jitcache-fixture: fails 0:1 twin-coincidence attempt 2
 
 // A heap coincidence marks the sequence, whose only failure it is, so the runner repeats the
 // sequence once in fresh processes; the test entry recurs there, and the repetition fails.

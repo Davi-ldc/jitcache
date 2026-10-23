@@ -26,7 +26,7 @@ load("./resources/ucb.js", "caller relative");
             total = (total * 3 + i) | 0;
         return total;
     };
-    const holderDigestOffset = 112;
+    const holderDigestOffset = 72;
 
     // Calls hmF of a new realm `count` times; returns its key, which the realm's CodeBlock gives.
     function callInNewRealm(count)

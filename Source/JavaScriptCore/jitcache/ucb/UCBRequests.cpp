@@ -1,21 +1,23 @@
 #include "config.h"
-#include "UCBRequests.h"
+#include "jitcache/ucb/UCBRequests.h"
 
 #include "BuiltinExecutables.h"
 #include "DirectEvalExecutable.h"
 #include "GlobalExecutable.h"
-#include "JITCacheBench.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "SourceCode.h"
 #include "SourceCodeKey.h"
-#include "UCBImport.h"
-#include "UCBRegistry.h"
 #include "UnlinkedEvalCodeBlock.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedGlobalCodeBlock.h"
 #include "VM.h"
+#include "jitcache/base/BenchClock.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/session/JITCacheBench.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/ucb/UCBImport.h"
+#include "jitcache/ucb/UCBRegistry.h"
 
 // The request objects and hooks the native call sites use. Each member only decides whether the request still acts and
 // then calls the engine of UCBImport.h, which re-checks the VM's state at every step and writes everything in RequestState

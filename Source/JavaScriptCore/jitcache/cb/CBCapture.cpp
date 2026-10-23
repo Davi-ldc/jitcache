@@ -1,13 +1,11 @@
 #include "config.h"
-#include "CBState.h"
+#include "jitcache/cb/CBState.h"
 
 #if ENABLE(JIT)
 
 #include "ArrayAllocationProfile.h"
 #include "ArrayProfile.h"
 #include "BaselineJITCode.h"
-#include "ByteFields.h"
-#include "CBFormat.h"
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "DeferGC.h"
@@ -16,13 +14,15 @@
 #include "LazyOperandValueProfile.h"
 #include "LazyValueProfile.h"
 #include "Operands.h"
-#include "ProducerBudget.h"
 #include "SpeculatedType.h"
 #include "ToThisStatus.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedMetadataTable.h"
 #include "VM.h"
 #include "ValueProfile.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/cb/CBFormat.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -99,40 +99,27 @@ static SlotCounts countSlots(CodeBlock& codeBlock)
     return counts;
 }
 
-// First that the CB is eligible as the reads assume, then that its UCB copies pair with its profiles as the native
-// merges assume: they walk the CB's profiles with a running index into the UCB vectors and check nothing else. Neither
-// check dereferences baselineJITData() nor indexes a profile.
-static std::optional<CBCheck> eligibilityFailure(CodeBlock& codeBlock, const SlotCounts& counts)
+#if ASSERT_ENABLED
+// What capture and scoreLive assert before any read beyond the counts, the glue having decided eligibility: first that
+// the CB is eligible as the reads assume, then that its UCB copies pair with its profiles as the native merges assume,
+// since they walk the CB's profiles with a running index into the UCB vectors and check nothing else. Neither check
+// dereferences baselineJITData() nor indexes a profile.
+static bool isReadable(CodeBlock& codeBlock, const SlotCounts& counts)
 {
     if (codeBlock.jitType() != JITType::BaselineJIT
         || !codeBlock.baselineJITData()
         || codeBlock.isJettisoned()
         || codeBlock.m_didFailJITCompilation
         || codeBlock.argumentValueProfiles().size() != counts.numArguments)
-        return CBCheck::CaptureStrict;
+        return false;
 
     // A builtin, or a UCB without copies, pairs with nothing, as the native merges skip it.
     auto* unlinkedProfiles = unlinkedProfilesOf(*codeBlock.unlinkedCodeBlock());
-    if (unlinkedProfiles
-        && (unlinkedProfiles->valueProfiles().size() != static_cast<uint64_t>(counts.numArguments) + counts.numValueProfiles
-            || unlinkedProfiles->arrayProfiles().size() != counts.numArrayProfiles))
-        return CBCheck::CapturePairing;
-    return std::nullopt;
+    return !unlinkedProfiles
+        || (unlinkedProfiles->valueProfiles().size() == static_cast<uint64_t>(counts.numArguments) + counts.numValueProfiles
+            && unlinkedProfiles->arrayProfiles().size() == counts.numArrayProfiles);
 }
-
-// The checks capture and scoreLive run before any read beyond the counts. With strict on a failure is a recording fault,
-// since the CB is the producer's own state; in normal mode the glue has already decided eligibility, so both checks are
-// assertions.
-static std::optional<CBFault> checkCodeBlock(CodeBlock& codeBlock, const SlotCounts& counts, bool strict)
-{
-    if (!strict) {
-        ASSERT(!eligibilityFailure(codeBlock, counts));
-        return std::nullopt;
-    }
-    if (auto check = eligibilityFailure(codeBlock, counts))
-        return CBFault { CBFaultKind::RecordingFault, *check };
-    return std::nullopt;
-}
+#endif
 
 // The baseline counter as capture records it: the live triple when the counter travels, and zeros, with no counter field
 // read, when a polymorphic site withholds it.
@@ -155,8 +142,8 @@ static CounterRecord readCounter(CodeBlock& codeBlock, bool hasPolymorphicSite)
 
 // The progress the score and cb.summary hold, which the glue also stamps in the body's envelope: m_totalCount +
 // m_counter, floored at zero and capped at the active threshold, and 0 when the counter does not travel. The negated
-// comparisons send a NaN to zero, and the clamp keeps a negative threshold, which no native counter holds and strict
-// validation rejects, from converting a negative double.
+// comparisons send a NaN to zero, and the clamp keeps a negative threshold, which no native counter holds, from
+// converting a negative double.
 static uint32_t counterProgress(const CounterRecord& counter)
 {
     if (counter.mode == CBFormat::CounterMode::NotCarried)
@@ -206,8 +193,7 @@ static CBScore scoreOf(const Richness& richness, uint8_t counterMode, uint32_t p
 // lazy-operand profile in the holder's order (it has no UCB copy), and array position p, the running index over
 // A0..A15 that counts the call sites too, with UCB array profile p. An array profile with a cb.state record also comes
 // with that record's index, which skips the call sites. Each field is read once. The copies are indexed through
-// std::span's hardened operator[], as the native merges index them, so a broken pairing that strict did not catch fails
-// as it would natively.
+// std::span's hardened operator[], as the native merges index them, so a broken pairing fails as it would natively.
 template<typename Visitor>
 static void forEachScoredSlot(CodeBlock& codeBlock, const SlotCounts& counts, Visitor& visitor)
 {
@@ -396,7 +382,7 @@ static void writeUnscoredFamilies(CodeBlock& codeBlock, const SlotCounts& counts
 
 } // namespace CBCaptureInternal
 
-std::expected<CBStateCapture, CBFault> CBStateCapture::capture(CodeBlock& codeBlock, ProducerBudget& budget, bool strict, bool hasPolymorphicSite)
+std::optional<CBStateCapture> CBStateCapture::capture(CodeBlock& codeBlock, ProducerBudget& budget, bool hasPolymorphicSite)
 {
     using namespace CBCaptureInternal;
 
@@ -404,12 +390,10 @@ std::expected<CBStateCapture, CBFault> CBStateCapture::capture(CodeBlock& codeBl
     AssertNoGC assertNoGC;
 
     SlotCounts counts = countSlots(codeBlock);
-    if (auto fault = checkCodeBlock(codeBlock, counts, strict))
-        return std::unexpected(*fault);
+    ASSERT(isReadable(codeBlock, counts));
 
     // The layouts depend only on the counts. A size past size_t is a charge no budget can hold.
     CBFormat::StateHeader stateHeader { };
-    stateHeader.layoutVersion = CBFormat::stateLayoutVersion;
     stateHeader.tier = static_cast<uint8_t>(CBFormat::Tier::Baseline);
     stateHeader.numArguments = counts.numArguments;
     stateHeader.numValueProfiles = counts.numValueProfiles;
@@ -417,7 +401,6 @@ std::expected<CBStateCapture, CBFault> CBStateCapture::capture(CodeBlock& codeBl
     stateHeader.familyEntryCount = counts.familyEntryCount;
 
     CBFormat::SummaryHeader summaryHeader { };
-    summaryHeader.layoutVersion = CBFormat::summaryLayoutVersion;
     summaryHeader.tier = static_cast<uint8_t>(CBFormat::Tier::Baseline);
     summaryHeader.numArguments = counts.numArguments;
     summaryHeader.numValueProfiles = counts.numValueProfiles;
@@ -427,11 +410,11 @@ std::expected<CBStateCapture, CBFault> CBStateCapture::capture(CodeBlock& codeBl
     auto stateLayout = CBFormat::stateLayout(stateHeader);
     auto summaryLayout = CBFormat::summaryLayout(summaryHeader);
     if (!stateLayout || !summaryLayout)
-        return std::unexpected(CBFault { CBFaultKind::RecordingFault, CBCheck::CaptureCharge });
+        return std::nullopt;
     CheckedSize chargedBytes = stateLayout->size;
     chargedBytes += summaryLayout->size;
     if (chargedBytes.hasOverflowed() || !budget.tryCharge(chargedBytes.value()))
-        return std::unexpected(CBFault { CBFaultKind::RecordingFault, CBCheck::CaptureCharge });
+        return std::nullopt;
 
     // The two buffers, zeroed, the only memory capture allocates. The object owns them and the charge from here on, so
     // every later return that drops it frees both and releases the charge.
@@ -464,21 +447,10 @@ std::expected<CBStateCapture, CBFault> CBStateCapture::capture(CodeBlock& codeBl
     forEachScoredSlot(codeBlock, counts, writer);
     writeUnscoredFamilies(codeBlock, counts, writer);
     result.m_score = scoreOf(writer.richness(), summaryHeader.counterMode, summaryHeader.counterProgress);
-
-    // With strict on, the built sections must pass the checks a strict consumer runs on them, so a producer never commits
-    // material its strict consumers reject. The checks read the bytes in place and allocate nothing; a failure drops the
-    // object, which frees both buffers and releases their charge.
-    if (strict) {
-        if (validateState(result.stateSection(), codeBlock)
-            || !counterObeysNativeInvariant(stateHeader)
-            || validateSummary(result.summarySection()))
-            return std::unexpected(CBFault { CBFaultKind::RecordingFault, CBCheck::CaptureStrict });
-    }
-
     return result;
 }
 
-std::expected<CBScore, CBFault> CBStateCapture::scoreLive(CodeBlock& codeBlock, bool strict, bool hasPolymorphicSite)
+CBScore CBStateCapture::scoreLive(CodeBlock& codeBlock, bool hasPolymorphicSite)
 {
     using namespace CBCaptureInternal;
 
@@ -486,8 +458,7 @@ std::expected<CBScore, CBFault> CBStateCapture::scoreLive(CodeBlock& codeBlock, 
     AssertNoGC assertNoGC;
 
     SlotCounts counts = countSlots(codeBlock);
-    if (auto fault = checkCodeBlock(codeBlock, counts, strict))
-        return std::unexpected(*fault);
+    ASSERT(isReadable(codeBlock, counts));
 
     CounterRecord counter = readCounter(codeBlock, hasPolymorphicSite);
     LiveScorer scorer;
@@ -495,17 +466,12 @@ std::expected<CBScore, CBFault> CBStateCapture::scoreLive(CodeBlock& codeBlock, 
     return scoreOf(scorer.richness(), static_cast<uint8_t>(counter.mode), counterProgress(counter));
 }
 
-std::expected<CBScore, CBFault> decodeSummary(std::span<const uint8_t> summarySection, bool strict)
+CBScore decodeSummary(std::span<const uint8_t> summarySection)
 {
     using namespace CBCaptureInternal;
     using CBFormat::SummaryArray;
 
-    // Normal mode trusts the section, whose integrity the integrator checked before the lane reads it.
-    if (strict) {
-        if (auto check = validateSummary(summarySection))
-            return std::unexpected(CBFault { CBFaultKind::InvalidMaterial, *check });
-    }
-
+    // The section is trusted, since the integrator checked its integrity before the lane reads it.
     auto header = readField<CBFormat::SummaryHeader>(summarySection, 0);
     // Four 32-bit counts cannot overflow a 64-bit size_t, and every supported target is 64-bit.
     auto layout = CBFormat::summaryLayout(header);

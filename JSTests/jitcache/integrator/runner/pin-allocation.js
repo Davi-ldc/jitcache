@@ -1,4 +1,7 @@
 // jitcache-runs: Producer
+// jitcache-fixture: runner --pin=$BUILD --pin-options=--forceGCSlowPaths=true
+// jitcache-fixture: fails 0 pin-code
+// jitcache-fixture: detail block main:\d+ \((new_object|create_this)\)
 
 // The pin comparison of this build with itself fails at the first block whose inline allocation
 // became a jump to its slow path, when --pin-options=--forceGCSlowPaths=true reaches this build's side alone. make's

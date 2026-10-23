@@ -27,10 +27,10 @@
 #include "BaselineJITPlan.h"
 #include "LOLJIT.h"
 
-#include "JITCacheBench.h"
-#include "JITCacheFaults.h"
-#include "JITCacheGlue.h"
 #include "JITSafepoint.h"
+#include "jitcache/glue/JITCacheGlue.h"
+#include "jitcache/session/JITCacheBench.h"
+#include "jitcache/session/JITCacheFaults.h"
 
 #if ENABLE(JIT)
 

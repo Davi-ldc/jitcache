@@ -1,13 +1,15 @@
 #pragma once
 
-#include "JITCacheBench.h"
+#include "jitcache/session/JITCacheBench.h"
+#include "jitcache/session/JITCacheTeardown.h"
 #include <stdint.h>
 #include <wtf/Platform.h>
 
-// The entry points native code calls: install, capture, teardown and the bench hooks (JITCacheBench.h: benchReport,
-// RelinkTimer and BaselineSpanTimer), and in twins builds the image twin check's hook. Native edit sites include this
-// header, and JITCacheFaults.h for the executable-allocation fault. Every function this header declares runs on the VM
-// thread.
+// The entry points native code calls: install, capture, teardown (JITCacheTeardown.h: willDestroyVM and
+// didFinalizeHeap) and the bench hooks (JITCacheBench.h: benchReport, RelinkTimer and BaselineSpanTimer), and in twins
+// builds the image twin check's hook. Native edit sites include this header, and JITCacheFaults.h for the
+// executable-allocation fault. Every function this header declares runs on the VM thread. BaselineInstall.cpp defines
+// the install, BaselineCapture.cpp the two capture hooks and InstallTwins.cpp the image twin check's hook.
 
 namespace JSC {
 
@@ -44,21 +46,13 @@ bool shouldRecordBaselineImage(VM&, CodeBlock&);
 // The finalize capture: BaselineJITPlan::finalize calls it at the end of its CompilationSuccessful case, after
 // installCode and jitSoon. It records the compile event from the timing when one is given, whatever the VM's role, and
 // then captures the CB when its VM's production is active and the CB is a candidate. The plan's two BaselineSpanTimers
-// measure the timing, in thread CPU time.
+// measure the timing, as the installation bound's spans are read (BoundSpanTimer).
 struct BaselineCompileTiming {
     uint64_t compileNanoseconds; // compileInThreadImpl after its profile drain
     uint64_t finalizeNanoseconds; // finalize up to this call, without relinking incoming calls
     bool supportGenerated; // per-VM support generated during either span
 };
 void didFinalizeBaselineCompilation(VM&, CodeBlock&, const BaselineCompileTiming*); // null when the plan did not measure
-
-// Teardown, called from VM::~VM. willDestroyVM runs right after the cancelAllPlansForVM block, with GC deferred for good
-// and no compilation of the VM running: it destroys the image twin-check state, closes the twin report, flushes the bench
-// report, ends production without recording a fault and frees the production memory. didFinalizeHeap runs right after
-// heap.shutDown(), whose lastChanceToFinalize() has run every UCB and UFE destructor: it stores null into the VM's
-// pointer and destroys the state.
-void willDestroyVM(VM&);
-void didFinalizeHeap(VM&);
 
 #if ENABLE(JITCACHE_TWINS)
 // prepareForExecutionImpl calls it last. When the image twin-check state holds this CB's pending check and a twin report

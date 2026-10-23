@@ -39,6 +39,7 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false --jitcache-max-memory=159744
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false --jitcache-max-memory=163840
 // jitcache-runs: Producer --jitcache-delta-at-exit --useConcurrentJIT=false --jitcache-max-memory=262144
+// jitcache-cadence: milestone 1-14 16-39
 // jitcache-expect-fault: 0 budget.limit
 // jitcache-require-fault: 0:0 budget.limit
 // jitcache-require-fault: 15:0 budget.limit
@@ -64,6 +65,9 @@
 // VM's destruction. The first sequence's limit admits only the first step of guarded's record, so its producer must
 // report budget.limit and commits nothing, and its consumer has nothing to install. The 64 KiB producer must report it
 // too.
+// Every change runs sequences 0 (4 KiB), 15 (64 KiB) and 40 (256 KiB), and the sweep's other 38 sequences run under
+// --milestone, as the cadence directive says, since imageBudgetSweepLinksEveryExceptionCheck already sweeps the
+// recorder's refusals, deterministically, with the C++ tests.
 (function main(role, scratch, artifact, sequence) {
     const statementCount = 48;
     const statements = [];

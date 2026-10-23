@@ -1,23 +1,23 @@
 #include "config.h"
-#include "JITCacheVMState.h"
+#include "jitcache/session/JITCacheVMState.h"
 
-#include "ArtifactStore.h"
-#include "ArtifactWriter.h"
-#include "JITCacheBench.h"
-#include "JITCacheContainer.h"
-#include "JITCacheFiles.h"
-#include "JITCacheParameters.h"
-#include "UCBRegistry.h"
+#include "jitcache/base/BenchClock.h"
+#include "jitcache/session/JITCacheBench.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/ArtifactWriter.h"
+#include "jitcache/store/JITCacheFiles.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/ucb/UCBRegistry.h"
 #include <utility>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
 
 // Every VMState member: the constructor, the destructor and the release of production memory; the switches, the fault
-// records and the members that raise faults; the producer context; the body lookups with their test override; and what
-// the glue, the hosts and status read and write on the state's parts. Destroying a state or its production memory runs
-// the destructors of the parts' types, so this file includes their headers. start and the teardown hooks, which create
-// and destroy the state, are in JITCacheAPI.cpp.
+// records and the members that raise faults; the producer context; the body lookups with their test override; what the
+// glue, the hosts and status read and write; and the per-VM parts. Destroying a state runs the destructors of the types
+// it holds through pointers, so this file includes their headers; a part's destructor is virtual, so it includes no
+// part's header. start and the teardown hooks, which create and destroy the state, are in JITCacheAPI.cpp.
 
 namespace JSC::JITCache {
 
@@ -76,8 +76,8 @@ VMState::~VMState()
 {
     // didFinalizeHeap destroys the state once willDestroyVM has ended production and released its memory. A state
     // destroyed without that still releases each production charge once, and then its members go in the reverse order
-    // of their declaration: the writer before the producer lock, which releases the lock, the opened artifact and the
-    // budget it refers to, and the registry after every UCB and UFE destructor has run.
+    // of their declaration: the parts left first, the writer before the producer lock, which releases the lock, the
+    // opened artifact and the budget it refers to, and the registry after every UCB and UFE destructor has run.
     m_productionActive.store(false, std::memory_order_release);
     releaseEndedProductionMemory();
 }
@@ -88,8 +88,8 @@ void VMState::releaseEndedProductionMemory()
     if (m_productionMemoryReleased || productionActive())
         return;
     m_productionMemoryReleased = true;
-    // The deleter the capture glue supplied releases the charges of the entries and the buckets.
-    m_keptSummaries.reset();
+    // The production parts first: the kept summaries release the charges of their entries and buckets.
+    destroyParts(VMPartLifetime::UntilProductionEnds);
     if (m_writer)
         m_writer->releaseStagingBuffer();
     // The entries themselves stay in the index the process's VMs share, for the VMs that import; only their charge
@@ -113,11 +113,6 @@ bool VMState::productionActive() const
     // Production is off whenever activity is. Both switches are read, so a reader on another thread that sees a
     // debugger's attach on one of them sees production ended.
     return producing() && m_productionActive.load(std::memory_order_acquire) && activityOn();
-}
-
-bool VMState::strict() const
-{
-    return m_config.strict;
 }
 
 DeltaCapture VMState::deltaCapture() const
@@ -174,8 +169,7 @@ BodyLookup VMState::openBody(const BodyKey& key)
 
     BenchReport* report = m_benchReport.get();
     uint64_t startNanoseconds = report ? benchThreadCPUNanoseconds() : 0;
-    // Full validation exactly when strict is on; both modes run the integrity checks.
-    BodyOpen opened = artifact->open(key, strict() ? ValidationMode::Full : ValidationMode::Integrity);
+    BodyOpen opened = artifact->open(key);
     if (opened.bodyBytes)
         ++m_progress.bodyOpens;
 
@@ -238,9 +232,9 @@ SectionLookup VMState::readBodySection(const BodyKey& key, SectionKind kind)
     OpenedArtifact* artifact = m_artifact.get();
     ASSERT(artifact);
 
-    // One section, checksummed alone, in the mode openBody uses; the module's request opens the whole body later. It counts
-    // neither as a body open nor as a lookup: the UCB lane's module-analysis event times it.
-    SectionRead read = artifact->readSection(key, kind, strict() ? ValidationMode::Full : ValidationMode::Integrity);
+    // One section, checksummed alone; the module's request opens the whole body later. It counts neither as a body open
+    // nor as a lookup: the UCB lane's module-analysis event times it.
+    SectionRead read = artifact->readSection(key, kind);
     switch (read.outcome) {
     case StoreOutcome::Found:
         return SectionLookup { Kind::Found, WTF::move(read.pack), nullptr, read.section };
@@ -293,8 +287,8 @@ Ref<ProducerBudget> VMState::twinBudget()
 
 void VMState::setBodyLookupForTesting(Function<uint64_t(const BodyKey&)>&& token, Function<BodyLookup(const BodyKey&)>&& open)
 {
-    // The override answers alone, without the store, the index or a progress counter, and changes neither the role nor
-    // strictness; the activity test still runs first.
+    // The override answers alone, without the store, the index or a progress counter, and leaves the role as it is;
+    // the activity test still runs first.
     ASSERT(token && open);
     m_bodyVersionOverride = WTF::move(token);
     m_openBodyOverride = WTF::move(open);
@@ -424,30 +418,6 @@ ArtifactWriter* VMState::writer()
     return m_writer.get();
 }
 
-SupportTargetTable* VMState::supportTargetTable()
-{
-    return m_supportTargetTable.get();
-}
-
-void VMState::setSupportTargetTable(SupportTargetTableHolder&& table)
-{
-    ASSERT(!m_supportTargetTable);
-    m_supportTargetTable = WTF::move(table);
-}
-
-KeptSummaries* VMState::keptSummaries()
-{
-    return m_keptSummaries.get();
-}
-
-void VMState::setKeptSummaries(KeptSummariesHolder&& summaries)
-{
-    // The capture glue creates them only while production is active, before releaseEndedProductionMemory can free them.
-    ASSERT(!m_keptSummaries);
-    ASSERT(!m_productionMemoryReleased);
-    m_keptSummaries = WTF::move(summaries);
-}
-
 void VMState::addIndexEntryCharge(size_t bytes)
 {
     ASSERT(m_budget);
@@ -462,18 +432,32 @@ unsigned& VMState::capturesInProgress()
 }
 #endif
 
-#if ENABLE(JITCACHE_TWINS)
-ImageTwinCheckState* VMState::imageTwinCheckState()
+VMPart* VMState::findPart(const VMPartKey& key)
 {
-    return m_imageTwinCheckState.get();
+    for (auto& entry : m_parts) {
+        if (entry.key == &key)
+            return entry.part.get();
+    }
+    return nullptr;
 }
 
-void VMState::setImageTwinCheckState(ImageTwinCheckStateHolder&& twinCheckState)
+VMPart& VMState::addPart(const VMPartKey& key, std::unique_ptr<VMPart>&& newPart)
 {
-    ASSERT(!m_imageTwinCheckState);
-    m_imageTwinCheckState = WTF::move(twinCheckState);
+    // A production part is created only while production is active, before releaseEndedProductionMemory can destroy it.
+    ASSERT(!findPart(key));
+    ASSERT(key.lifetime != VMPartLifetime::UntilProductionEnds || !m_productionMemoryReleased);
+    VMPart& added = *newPart;
+    m_parts.append(PartEntry { &key, WTF::move(newPart) });
+    return added;
 }
-#endif
+
+void VMState::destroyParts(VMPartLifetime lifetime)
+{
+    // Each part is destroyed in place while the list closes up, so no part's destructor may reach the state's parts.
+    m_parts.removeAllMatching([&](const PartEntry& entry) {
+        return entry.key->lifetime == lifetime;
+    });
+}
 
 void VMState::turnActivityOff(FaultReport&& report)
 {

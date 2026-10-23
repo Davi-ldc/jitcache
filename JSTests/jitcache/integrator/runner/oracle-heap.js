@@ -1,4 +1,5 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
+// jitcache-fixture: fails 0:1 oracle-heap
 
 // The Consumer leaves a value reachable from a global binding that its Off run does not, and prints
 // what the Off run prints, so the oracle fails run 1 on its heap description alone. The failure also shows that the

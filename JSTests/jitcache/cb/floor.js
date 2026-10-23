@@ -15,13 +15,12 @@
 // JIT off, baseline code enters operationOptimize at the entry increment that ends the slice armed last, and that slice
 // ends at M·T, where the memory multiplier M is a few thousandths above 1 with the default pool. A DFG plan that
 // finishes while a capture reads only zeroes m_counter at that end, so even that race leaves at most about M·T plus one
-// entry increment. Strict validation accepts the rewritten counter, since its rules for a counter bound only the
-// signs. Plain builds have neither jitcacheDelta nor jitcacheRewriteSection, so there the second sequence repeats the
-// first and the checker finds no cb-floor.json. Their runs, like the first sequence of a twins build, cover progress
-// just short of the threshold, which takes the same crossed branch in finishCounter as the rewritten progress: that
-// check crosses from M·T - min(T, C) / 2 on, with the Consumer's multiplier and slice ceiling C. floorBody makes no call
-// after the script's delta and sees one type at each profile, so the delta at exit finds no capture of it that beats
-// the committed body, rewritten or not, and leaves that body in place.
+// entry increment. Plain builds have neither jitcacheDelta nor jitcacheRewriteSection, so there the second sequence
+// repeats the first and the checker finds no cb-floor.json. Their runs, like the first sequence of a twins build, cover
+// progress just short of the threshold, which takes the same crossed branch in finishCounter as the rewritten progress:
+// that check crosses from M·T - min(T, C) / 2 on, with the Consumer's multiplier and slice ceiling C. floorBody makes no
+// call after the script's delta and sees one type at each profile, so the delta at exit finds no capture of it that
+// beats the committed body, rewritten or not, and leaves that body in place.
 //
 // In the Consumer the imported counter starts at the floor, two entry increments short of crossing, so floorBody enters
 // operationOptimize on its second invocation and not during its first; resources/floor-check.ts reads the line

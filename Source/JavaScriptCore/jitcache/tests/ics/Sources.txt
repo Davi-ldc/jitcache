@@ -1,0 +1,4 @@
+jitcache/tests/ics/ICCaptureTests.cpp
+jitcache/tests/ics/ICRestoreTests.cpp
+jitcache/tests/ics/ICSectionTests.cpp
+jitcache/tests/ics/ICTwinsTests.cpp

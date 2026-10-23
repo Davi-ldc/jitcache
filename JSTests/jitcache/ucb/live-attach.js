@@ -210,7 +210,7 @@ load("./resources/ucb.js", "caller relative");
             const key = t.bodyKey(realm.laF);
             const identity = t.readSection(key, "ucb.identity");
             t.check(identity, "laF has no ucb.identity");
-            t.rewriteSection(key, "ucb.identity", 48, [identity[48] ^ 0x5a]);
+            t.rewriteSection(key, "ucb.identity", 40, [identity[40] ^ 0x5a]);
         }
         afterRelease("laF's request after its body's context changed", laFRequest, {
             "misses.Context": 1, attaches: 0, contextDigests: 1, holderDigests: 0, sourceDigests: 0,

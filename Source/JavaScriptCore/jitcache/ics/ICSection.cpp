@@ -1,35 +1,21 @@
 #include "config.h"
-#include "ICSection.h"
+#include "jitcache/ics/ICSection.h"
 
 #if ENABLE(JIT)
 
-#include "ArrayProfile.h"
 #include "BytecodeStructs.h"
-#include "PropertyInlineCache.h"
 #include <algorithm>
-#include <wtf/Assertions.h>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/StdLibExtras.h>
 
-// Parsing of the ICsBaseline section and its structural checks, and the two derivations from a record: the consumer
-// state it restores, and the record a capture of that state writes.
+// Parsing of the ICsBaseline section, and the two derivations from a record: the consumer state it restores, and the
+// record a capture of that state writes.
 
 namespace JSC::JITCache::ICs {
 
 namespace ICSectionInternal {
 
 static constexpr size_t sectionAlignment = 8;
-
-// The eight ArrayProfileFlag bits, the pruning mark included: the flags any array profile can hold.
-static constexpr uint32_t allArrayProfileFlags = static_cast<uint32_t>(ArrayProfileFlag::MayStoreHole)
-    | static_cast<uint32_t>(ArrayProfileFlag::OutOfBounds)
-    | static_cast<uint32_t>(ArrayProfileFlag::MayBeLargeTypedArray)
-    | static_cast<uint32_t>(ArrayProfileFlag::MayInterceptIndexedAccesses)
-    | static_cast<uint32_t>(ArrayProfileFlag::UsesNonOriginalArrayStructures)
-    | static_cast<uint32_t>(ArrayProfileFlag::MayBeResizableOrGrowableSharedTypedArray)
-    | static_cast<uint32_t>(ArrayProfileFlag::DidPerformFirstRunPruning)
-    | static_cast<uint32_t>(ArrayProfileFlag::MayBeRegExpMatchesArray);
-static_assert(allArrayProfileFlags == 0xff);
 
 static bool hasBit(uint8_t bits, uint8_t bit)
 {
@@ -47,124 +33,6 @@ static SectionHeader readHeader(std::span<const uint8_t> bytes)
     SectionHeader header { };
     memcpySpan(asMutableByteSpan(header), bytes.first(sectionHeaderSize));
     return header;
-}
-
-struct SlicedSection {
-    SectionView view;
-    std::span<const uint8_t> padding;
-};
-
-// Slices by the header's counts. Out-of-range counts fail the span's bounds assertions, so the caller checks the section
-// size first or trusts the section.
-static SlicedSection slice(std::span<const uint8_t> bytes)
-{
-    SectionHeader header = readHeader(bytes);
-    std::span<const uint8_t> rest = bytes.subspan(sectionHeaderSize);
-    auto groupBytes = consumeSpan(rest, callLinkGroupSize * header.callLinkGroupCount);
-    auto propertyICBytes = consumeSpan(rest, sizeof(PropertyICRecord) * header.propertyICCount);
-    auto callLinkBytes = consumeSpan(rest, sizeof(CallLinkRecord) * header.callLinkSiteCount);
-    return SlicedSection {
-        .view = SectionView {
-            .header = header,
-            .groupBytes = groupBytes,
-            .propertyICs = spanReinterpretCast<const PropertyICRecord>(propertyICBytes),
-            .callLinks = spanReinterpretCast<const CallLinkRecord>(callLinkBytes),
-        },
-        .padding = rest,
-    };
-}
-
-// SectionSize and SummaryBound, which read the header alone.
-static std::optional<Invalid> checkHeader(std::span<const uint8_t> bytes)
-{
-    if (bytes.size() < sectionHeaderSize)
-        return Invalid { Check::SectionSize, 0 };
-    SectionHeader header = readHeader(bytes);
-    if (header.callLinkGroupCount > numberOfCallLinkOpcodes)
-        return Invalid { Check::SectionSize, 0 };
-    auto size = sectionSize(header.callLinkGroupCount, header.propertyICCount, header.callLinkSiteCount);
-    if (!size || *size != bytes.size())
-        return Invalid { Check::SectionSize, 0 };
-
-    if (header.icSitesWithCases > header.propertyICCount)
-        return Invalid { Check::SummaryBound, 0 };
-
-    return std::nullopt;
-}
-
-// A call-link record sets no unused bit, holds this words only at an opcode with a this profile, and there only modes
-// and flags an array profile can hold.
-static bool hasOnlyKnownBits(const CallLinkOpcode& opcode, const CallLinkRecord& record)
-{
-    if (record.bits & ~CallLinkBit::mask)
-        return false;
-    uint32_t modes = readThisArrayModes(record);
-    uint32_t flags = readThisArrayProfileFlags(record);
-    if (!opcode.hasThisProfile)
-        return !modes && !flags;
-    return !(modes & ~static_cast<uint32_t>(ALL_ARRAY_MODES)) && !(flags & ~allArrayProfileFlags);
-}
-
-// The checks from CallLinkGroups to SummaryCount, on a section whose size checkHeader accepted.
-static std::optional<Invalid> checkBody(const SlicedSection& section)
-{
-    const SectionView& view = section.view;
-
-    // A section has at most numberOfCallLinkOpcodes groups, so the 64-bit sum of their 32-bit counts cannot overflow,
-    // and a sum that does not fit 32 bits differs from callLinkSiteCount.
-    uint64_t siteCountSum = 0;
-    std::optional<unsigned> previousPosition;
-    for (unsigned index = 0; index < view.header.callLinkGroupCount; ++index) {
-        CallLinkGroup group = view.group(index);
-        auto position = canonicalCallLinkPosition(static_cast<OpcodeID>(group.opcodeID));
-        if (!position || (previousPosition && *position <= *previousPosition) || !group.siteCount)
-            return Invalid { Check::CallLinkGroups, 0 };
-        previousPosition = position;
-        siteCountSum += group.siteCount;
-    }
-    if (siteCountSum != view.header.callLinkSiteCount)
-        return Invalid { Check::CallLinkGroups, 0 };
-
-    for (size_t index = 0; index < view.propertyICs.size(); ++index) {
-        const PropertyICRecord& record = view.propertyICs[index];
-        if ((record.learningBits & ~LearningBit::mask) || (record.stateBits & ~StateBit::mask) || record.reserved[0] || record.reserved[1])
-            return Invalid { Check::ReservedBits, static_cast<uint32_t>(index) };
-    }
-    // The groups passed CallLinkGroups, so they give each record its opcode, and their counts add up to the records.
-    size_t recordIndex = 0;
-    for (unsigned groupIndex = 0; groupIndex < view.header.callLinkGroupCount; ++groupIndex) {
-        CallLinkGroup group = view.group(groupIndex);
-        const CallLinkOpcode& opcode = callLinkOpcodes[*canonicalCallLinkPosition(static_cast<OpcodeID>(group.opcodeID))];
-        for (uint32_t siteInGroup = 0; siteInGroup < group.siteCount; ++siteInGroup, ++recordIndex) {
-            if (!hasOnlyKnownBits(opcode, view.callLinks[recordIndex]))
-                return Invalid { Check::ReservedBits, static_cast<uint32_t>(recordIndex) };
-        }
-    }
-    if (std::ranges::any_of(section.padding, [](uint8_t byte) -> bool { return byte; }))
-        return Invalid { Check::ReservedBits, 0 };
-
-    for (size_t index = 0; index < view.propertyICs.size(); ++index) {
-        if (static_cast<unsigned>(view.propertyICs[index].accessType) >= numberOfAccessTypes)
-            return Invalid { Check::EnumRange, static_cast<uint32_t>(index) };
-    }
-
-    size_t sitesWithCases = 0;
-    for (const PropertyICRecord& record : view.propertyICs) {
-        if (record.caseCount)
-            ++sitesWithCases;
-    }
-    if (sitesWithCases != view.header.icSitesWithCases)
-        return Invalid { Check::SummaryCount, 0 };
-
-    return std::nullopt;
-}
-
-// The checks that read only the section, in order, stopping at the first failure.
-static std::optional<Invalid> checkSection(std::span<const uint8_t> bytes)
-{
-    if (auto invalid = checkHeader(bytes))
-        return invalid;
-    return checkBody(slice(bytes));
 }
 
 } // namespace ICSectionInternal
@@ -185,33 +53,6 @@ std::optional<size_t> sectionSize(size_t groupCount, size_t propertyICCount, siz
     return size.value() & ~(ICSectionInternal::sectionAlignment - 1);
 }
 
-ASCIILiteral description(Check check)
-{
-    switch (check) {
-    case Check::SectionSize:
-        return "section-size"_s;
-    case Check::SummaryBound:
-        return "summary-bound"_s;
-    case Check::CallLinkGroups:
-        return "call-link-groups"_s;
-    case Check::ReservedBits:
-        return "reserved-bits"_s;
-    case Check::EnumRange:
-        return "enum-range"_s;
-    case Check::SummaryCount:
-        return "summary-count"_s;
-    case Check::MoldPairing:
-        return "mold-pairing"_s;
-    case Check::MetadataLayout:
-        return "metadata-layout"_s;
-    case Check::MoldMegamorphicBit:
-        return "mold-megamorphic-bit"_s;
-    case Check::NewbornCallLinks:
-        return "newborn-call-links"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
 CallLinkGroup SectionView::group(unsigned index) const
 {
     CallLinkGroup result { };
@@ -219,26 +60,25 @@ CallLinkGroup SectionView::group(unsigned index) const
     return result;
 }
 
-std::expected<SectionView, Invalid> parseSection(std::span<const uint8_t> bytes, StrictChecks strict)
+SectionView parseSection(std::span<const uint8_t> bytes)
 {
-    if (strict == StrictChecks::Yes) {
-        if (auto invalid = ICSectionInternal::checkSection(bytes))
-            return makeUnexpected(*invalid);
-    } else {
-        // Normal mode trusts the section, whose integrity the integrator checked; debug builds still assert its
-        // structure.
-        ASSERT(!ICSectionInternal::checkSection(bytes));
-    }
-    return ICSectionInternal::slice(bytes).view;
+    // The section is trusted, since the integrator checked its integrity. Counts out of range fail the span's bounds
+    // assertions.
+    SectionHeader header = ICSectionInternal::readHeader(bytes);
+    std::span<const uint8_t> rest = bytes.subspan(sectionHeaderSize);
+    auto groupBytes = consumeSpan(rest, callLinkGroupSize * header.callLinkGroupCount);
+    auto propertyICBytes = consumeSpan(rest, sizeof(PropertyICRecord) * header.propertyICCount);
+    auto callLinkBytes = consumeSpan(rest, sizeof(CallLinkRecord) * header.callLinkSiteCount);
+    return SectionView {
+        .header = header,
+        .groupBytes = groupBytes,
+        .propertyICs = spanReinterpretCast<const PropertyICRecord>(propertyICBytes),
+        .callLinks = spanReinterpretCast<const CallLinkRecord>(callLinkBytes),
+    };
 }
 
-std::expected<Summary, Invalid> readBaselineICsSummary(std::span<const uint8_t> section, StrictChecks strict)
+Summary readBaselineICsSummary(std::span<const uint8_t> section)
 {
-    if (strict == StrictChecks::Yes) {
-        if (auto invalid = ICSectionInternal::checkHeader(section))
-            return makeUnexpected(*invalid);
-    } else
-        ASSERT(!ICSectionInternal::checkHeader(section));
     return Summary { ICSectionInternal::readHeader(section).icSitesWithCases };
 }
 

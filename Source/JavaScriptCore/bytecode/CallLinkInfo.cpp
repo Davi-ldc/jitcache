@@ -32,7 +32,6 @@
 #include "DFGJITCode.h"
 #include "DisallowMacroScratchRegisterUsage.h"
 #include "FunctionCodeBlock.h"
-#include "ImageEmission.h"
 #include "JITOperations.h"
 #include "JITThunks.h"
 #include "JSCellInlines.h"
@@ -42,6 +41,7 @@
 #include "Opcode.h"
 #include "Repatch.h"
 #include "ThunkGenerators.h"
+#include "jitcache/image/ImageEmission.h"
 #include <wtf/ListDump.h>
 #include <wtf/TZoneMallocInlines.h>
 

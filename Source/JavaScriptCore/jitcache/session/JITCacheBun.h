@@ -10,7 +10,7 @@
 // The entry points only Bun's integration calls, so that JITCacheAPI.h stays the interface of any host that embeds
 // JavaScriptCore. Exported to Bun as <JavaScriptCore/JITCacheBun.h>: it includes only WTF headers and JSExportMacros.h, and
 // no member exists only under ENABLE(JITCACHE_TWINS), so every translation unit sees one layout. ucb/UCBAnalysis.cpp
-// defines importModuleAnalysis.
+// defines importModuleAnalysis and ucb/UCBKeys.cpp providerSourceDigest.
 
 namespace JSC {
 
@@ -31,5 +31,12 @@ struct ModuleAnalysisImport {
 // import or a fault stopped the import; Bun then creates the provider as it would without JITCache.
 JS_EXPORT_PRIVATE std::optional<ModuleAnalysisImport> importModuleAnalysis(JSGlobalObject&, StringView source,
     const std::array<uint8_t, 32>* suppliedDigest);
+
+// The source digest JITCache keys a root body's text with, which a provider returns from jitCacheSourceDigest(): SHA-256
+// of one byte, 1 when every code unit is at most 0xFF and 2 otherwise, then the code units, one Latin-1 byte each after a
+// 1 and two UTF-16LE bytes each after a 2. Bun computes it where it produces a text, in `bun build --compile` and in the
+// runtime transpiler cache, so that text's provider supplies it and JITCache keys the text without reading it. Pure: any
+// thread, no lock.
+JS_EXPORT_PRIVATE std::array<uint8_t, 32> providerSourceDigest(StringView source);
 
 } // namespace JSC::JITCache

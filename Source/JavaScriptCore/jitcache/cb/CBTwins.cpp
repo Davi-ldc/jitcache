@@ -1,22 +1,18 @@
 #include "config.h"
-#include "CBState.h"
+#include "jitcache/cb/CBState.h"
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "ArrayAllocationProfile.h"
 #include "ArrayProfile.h"
 #include "BaselineJITCode.h"
-#include "ByteFields.h"
 #include "BytecodeStructs.h"
-#include "CBFormat.h"
 #include "CodeBlock.h"
 #include "DeferGC.h"
 #include "ExecutionCounter.h"
 #include "GetByIdMetadata.h"
 #include "IndexingType.h"
 #include "IterationModeMetadata.h"
-#include "JITCacheBench.h"
-#include "JITCacheVMState.h"
 #include "JSGlobalObject.h"
 #include "LazyOperandValueProfile.h"
 #include "LazyValueProfile.h"
@@ -25,10 +21,14 @@
 #include "SpeculatedType.h"
 #include "StructureID.h"
 #include "ToThisStatus.h"
-#include "TwinReport.h"
 #include "UnlinkedCodeBlock.h"
 #include "VM.h"
 #include "ValueProfile.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/twins/TwinReport.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>

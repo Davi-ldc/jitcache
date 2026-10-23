@@ -1,14 +1,14 @@
 #include "config.h"
-#include "JITCacheMaintenance.h"
+#include "jitcache/maintenance/JITCacheMaintenance.h"
 
-#include "ArtifactStore.h"
-#include "ArtifactWriter.h"
-#include "BodyKey.h"
-#include "JITCacheAPI.h"
-#include "JITCacheContainer.h"
-#include "JITCacheFiles.h"
-#include "JITCacheMaintenanceTesting.h"
-#include "JITCacheParameters.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/maintenance/JITCacheMaintenanceTesting.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/ArtifactWriter.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/JITCacheFiles.h"
+#include "jitcache/store/JITCacheParameters.h"
 #include <algorithm>
 #include <array>
 #include <atomic>

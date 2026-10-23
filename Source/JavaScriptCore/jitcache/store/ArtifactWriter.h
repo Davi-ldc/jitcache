@@ -1,8 +1,8 @@
 #pragma once
 
-#include "BodyKey.h"
-#include "JITCacheContainer.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/ValidatedBody.h"
 #include <array>
 #include <expected>
 #include <optional>
@@ -155,8 +155,6 @@ public:
     // Given a timing, the commit reads the thread CPU clock at the bounds of the parts it fills; given none, it reads no
     // clock.
     std::expected<CommitResult, CommitFailure> commit(const CommitStamp&, const CommitSections&, CommitTiming* = nullptr);
-    // Appends a tombstone for a key the index lists and publishes it; a key without a body is left alone.
-    std::optional<CommitFailure> remove(const BodyKey&);
     // The end of a delta: compacts the pack unless it already holds only its live records and one full index. Returns the
     // compaction, or nothing when the pack stays.
     std::expected<std::optional<CompactionResult>, CompactionFailure> compactIfNeeded(bool timed);
@@ -195,10 +193,10 @@ public:
     // compaction-before-rename and compaction-after-rename.
     static ASCIILiteral name(KillPoint);
     static std::optional<KillPoint> killPointNamed(StringView);
-    // Opens the key's current body in Full mode through OpenedArtifact::open, copies every section it holds, a module's
-    // ucb.analysis included, into a buffer charged to the budget, overwrites bytes.size() bytes of the kind's section at
-    // offset, and commits the copy under the opened body's key, tier, L and P, which recomputes every checksum and draws a
-    // fresh commit identifier.
+    // Opens the key's current body through OpenedArtifact::open, copies every section it holds, a module's ucb.analysis
+    // included, into a buffer charged to the budget, overwrites bytes.size() bytes of the kind's section at offset, and
+    // commits the copy under the opened body's key, tier, L and P, which recomputes every checksum and draws a fresh
+    // commit identifier.
     std::expected<CommitResult, CommitFailure> rewriteSection(const BodyKey&, SectionKind, uint64_t offset, std::span<const uint8_t> bytes);
 #endif
 
@@ -209,8 +207,8 @@ private:
     // clears a retired mark an abandoned compaction left on it. Returns 0 or the errno of the call that failed.
     int ensurePackOpen();
     void closePack();
-    // Appends one index block after the bytes up to end and stores its end in the root. With a record entry, the block is
-    // a full index once the chain since the last one reaches packDeltaChainBound and the budget accepts its buffer.
+    // Appends one index block after the bytes up to end and stores its end in the root. The block is a full index once the
+    // chain since the last one reaches packDeltaChainBound and the budget accepts its buffer.
     std::optional<CommitFailure> publish(const PackIndexEntry&, uint64_t end);
 
     OpenedArtifact& m_artifact;

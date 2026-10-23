@@ -1,19 +1,18 @@
 #include "config.h"
-#include "UCBFeedback.h"
+#include "jitcache/ucb/UCBFeedback.h"
 
 #include "ArithProfile.h"
-#include "ByteFields.h"
 #include "JSCInlines.h"
 #include "Options.h"
 #include "SymbolTable.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "VM.h"
+#include "jitcache/base/ByteFields.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <limits>
-#include <wtf/CheckedArithmetic.h>
 #include <wtf/MathExtras.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
@@ -23,54 +22,32 @@ namespace JSC::JITCache {
 namespace UCBFeedbackInternal {
 
 // The header of ucb.feedback.
-static constexpr uint32_t sectionMagic = 0x46424355;
-static constexpr uint16_t layoutVersion = 1;
-static constexpr size_t magicOffset = 0;
-static constexpr size_t versionOffset = 4;
-static constexpr size_t reservedOffset = 6;
-static constexpr size_t valueProfileCountOffset = 8;
-static constexpr size_t arrayProfileCountOffset = 12;
-static constexpr size_t binaryArithProfileCountOffset = 16;
-static constexpr size_t unaryArithProfileCountOffset = 20;
-static constexpr size_t exitSiteCountOffset = 24;
-static constexpr size_t functionDeclCountOffset = 28;
-static constexpr size_t functionExprCountOffset = 32;
-static constexpr size_t didOptimizeOffset = 36;
-static constexpr size_t quickDFGTierUpOffset = 37;
-static constexpr size_t quickFTLTierUpOffset = 38;
-static constexpr size_t copiesOffset = 39; // 1 when the value predictions and array profiles follow the header, 0 when they are absent
-static constexpr size_t llintActiveThresholdOffset = 40;
-static constexpr size_t llintTotalCountOffset = 44;
-static constexpr size_t llintCounterOffset = 48;
-static constexpr size_t constantCountOffset = 52;
-static constexpr size_t headerSize = 56;
+static constexpr size_t valueProfileCountOffset = 0;
+static constexpr size_t arrayProfileCountOffset = 4;
+static constexpr size_t binaryArithProfileCountOffset = 8;
+static constexpr size_t unaryArithProfileCountOffset = 12;
+static constexpr size_t exitSiteCountOffset = 16;
+static constexpr size_t functionDeclCountOffset = 20;
+static constexpr size_t functionExprCountOffset = 24;
+static constexpr size_t didOptimizeOffset = 28;
+static constexpr size_t quickDFGTierUpOffset = 29;
+static constexpr size_t quickFTLTierUpOffset = 30;
+static constexpr size_t copiesOffset = 31; // 1 when the value predictions and array profiles follow the header, 0 when they are absent
+static constexpr size_t llintActiveThresholdOffset = 32;
+static constexpr size_t llintTotalCountOffset = 36;
+static constexpr size_t llintCounterOffset = 40;
+static constexpr size_t constantCountOffset = 44;
+static constexpr size_t headerSize = 48;
 
-static constexpr uint32_t countLimit = 1u << 28;
 static constexpr size_t arrayProfileSize = 8; // u32 observedArrayModes, u32 flags
 static constexpr size_t arithProfileSize = 2;
 static constexpr size_t exitSiteSize = 8; // u32 BytecodeIndex::asBits(), u8 ExitKind, u8 ExitingJITType, u8 ExitingInlineKind, u8 0
 static constexpr size_t exitSiteKindOffset = 4;
 static constexpr size_t exitSiteJITTypeOffset = 5;
 static constexpr size_t exitSiteInlineKindOffset = 6;
-static constexpr size_t exitSitePaddingOffset = 7;
 
 // The TriState bytes hold the enumerators' own values.
 static_assert(!static_cast<uint8_t>(TriState::False) && static_cast<uint8_t>(TriState::True) == 1 && static_cast<uint8_t>(TriState::Indeterminate) == 2);
-
-// The last ExitKind the strict check accepts. A WebKit bump that adds a kind must move it.
-static constexpr ExitKind lastExitKind = UnexpectedResizableArrayBufferView;
-static_assert(static_cast<unsigned>(lastExitKind) == 31, "ExitKind changed: make lastExitKind its last enumerator");
-
-// The flags a UCB copy can hold: every ArrayProfileFlag but the pruning mark, which UnlinkedArrayProfile::update keeps out.
-static constexpr OptionSet<ArrayProfileFlag> restorableArrayProfileFlags {
-    ArrayProfileFlag::MayStoreHole,
-    ArrayProfileFlag::OutOfBounds,
-    ArrayProfileFlag::MayBeLargeTypedArray,
-    ArrayProfileFlag::MayInterceptIndexedAccesses,
-    ArrayProfileFlag::UsesNonOriginalArrayStructures,
-    ArrayProfileFlag::MayBeResizableOrGrowableSharedTypedArray,
-    ArrayProfileFlag::MayBeRegExpMatchesArray,
-};
 
 // An arithmetic profile's richness categories: a binary profile's seven results and both operand types, below its special
 // fast-path bit, and a unary profile's results and argument type.
@@ -79,85 +56,73 @@ static constexpr unsigned unaryCategoryBits = ObservedResults::numBitsNeeded + O
 static_assert(BinaryArithProfile::specialFastPathBit == 1u << binaryCategoryBits);
 static constexpr uint32_t binaryCategoryMask = (1u << binaryCategoryBits) - 1;
 static constexpr uint32_t unaryCategoryMask = (1u << unaryCategoryBits) - 1;
-static constexpr uint32_t binaryBitsLimit = BinaryArithProfile::specialFastPathBit << 1;
-static constexpr uint32_t unaryBitsLimit = 1u << unaryCategoryBits;
 
 // The points one LLInt invocation adds to its body's counter: 5 at the prologue and 10 at the return
 // (llint/LowLevelInterpreter.asm, the prologue and checkSwitchToJITForEpilogue macros).
 static constexpr double llintInvocationPoints = 15;
-
-template<size_t alignment>
-static CheckedSize alignedTo(CheckedSize offset)
-{
-    static_assert(isPowerOfTwo(alignment));
-    CheckedSize padded = offset + (alignment - 1);
-    if (padded.hasOverflowed())
-        return padded;
-    return padded.value() & ~(alignment - 1);
-}
 
 static size_t constantBitsSize(uint32_t constantCount)
 {
     return (static_cast<size_t>(constantCount) + 7) / 8;
 }
 
-// The regions after the header, in layout order, with checked arithmetic. The counts are 32-bit, so no offset overflows
-// a 64-bit size_t; a strict parse checks anyway. The value predictions and the array profiles take room only in a section
-// that carries the UCB's copies; V and A are the UCB's counts either way.
-static CheckedSize arraysOffset(const FeedbackCounts& counts)
+// The regions after the header, in layout order. Every count is 32-bit and every element at most 8 bytes, so plain
+// size_t arithmetic cannot overflow on the 64-bit targets. The value predictions and the array profiles take room only
+// in a section that carries the UCB's copies; V and A are the UCB's counts either way.
+static size_t arraysOffset(const FeedbackCounts& counts)
 {
-    CheckedSize offset = headerSize;
+    size_t offset = headerSize;
     if (counts.copies)
-        offset += CheckedSize(counts.valueProfiles) * sizeof(SpeculatedType);
+        offset += counts.valueProfiles * sizeof(SpeculatedType);
     return offset;
 }
 
-static CheckedSize binaryOffset(const FeedbackCounts& counts)
+static size_t binaryOffset(const FeedbackCounts& counts)
 {
-    CheckedSize offset = arraysOffset(counts);
+    size_t offset = arraysOffset(counts);
     if (counts.copies)
-        offset += CheckedSize(counts.arrayProfiles) * arrayProfileSize;
+        offset += counts.arrayProfiles * arrayProfileSize;
     return offset;
 }
 
-static CheckedSize unaryOffset(const FeedbackCounts& counts)
+static size_t unaryOffset(const FeedbackCounts& counts)
 {
-    return binaryOffset(counts) + CheckedSize(counts.binaryArithProfiles) * arithProfileSize;
+    return binaryOffset(counts) + counts.binaryArithProfiles * arithProfileSize;
 }
 
-static CheckedSize unaryEnd(const FeedbackCounts& counts)
+static size_t unaryEnd(const FeedbackCounts& counts)
 {
-    return unaryOffset(counts) + CheckedSize(counts.unaryArithProfiles) * arithProfileSize;
+    return unaryOffset(counts) + counts.unaryArithProfiles * arithProfileSize;
 }
 
-static CheckedSize exitsOffset(const FeedbackCounts& counts)
+static size_t exitsOffset(const FeedbackCounts& counts)
 {
-    return alignedTo<4>(unaryEnd(counts));
+    return roundUpToMultipleOf<4>(unaryEnd(counts));
 }
 
-static CheckedSize childrenOffset(const FeedbackCounts& counts)
+static size_t childrenOffset(const FeedbackCounts& counts)
 {
-    return exitsOffset(counts) + CheckedSize(counts.exitSites) * exitSiteSize;
+    return exitsOffset(counts) + counts.exitSites * exitSiteSize;
 }
 
-static CheckedSize constantsOffset(const FeedbackCounts& counts)
+static size_t constantsOffset(const FeedbackCounts& counts)
 {
-    return childrenOffset(counts) + CheckedSize(counts.functionDecls) + CheckedSize(counts.functionExprs);
+    return childrenOffset(counts) + counts.functionDecls + counts.functionExprs;
 }
 
-static CheckedSize constantsEnd(const FeedbackCounts& counts)
+static size_t constantsEnd(const FeedbackCounts& counts)
 {
     return constantsOffset(counts) + constantBitsSize(counts.constants);
 }
 
-static CheckedSize sectionSize(const FeedbackCounts& counts)
+static size_t sectionSize(const FeedbackCounts& counts)
 {
-    return alignedTo<8>(constantsEnd(counts));
+    return roundUpToMultipleOf<8>(constantsEnd(counts));
 }
 
-static size_t elementOffset(CheckedSize regionOffset, unsigned index, size_t elementSize)
+static size_t elementOffset(size_t regionOffset, unsigned index, size_t elementSize)
 {
-    return (regionOffset + CheckedSize(index) * elementSize).value();
+    return regionOffset + index * elementSize;
 }
 
 static FeedbackCounts countsIn(std::span<const uint8_t> bytes)
@@ -181,109 +146,6 @@ static DFG::FrequentExitSite exitSiteAt(std::span<const uint8_t> bytes, size_t o
 {
     return DFG::FrequentExitSite(BytecodeIndex::fromBits(readField<uint32_t>(bytes, offset)), static_cast<ExitKind>(bytes[offset + exitSiteKindOffset]),
         static_cast<ExitingJITType>(bytes[offset + exitSiteJITTypeOffset]), static_cast<ExitingInlineKind>(bytes[offset + exitSiteInlineKindOffset]));
-}
-
-static bool isRestorableExitSiteRecord(std::span<const uint8_t> bytes, size_t offset)
-{
-    uint8_t kind = bytes[offset + exitSiteKindOffset];
-    uint8_t jitType = bytes[offset + exitSiteJITTypeOffset];
-    uint8_t inlineKind = bytes[offset + exitSiteInlineKindOffset];
-    return kind != ExitKindUnset && kind <= lastExitKind
-        && (jitType == ExitFromDFG || jitType == ExitFromFTL)
-        && (inlineKind == ExitFromNotInlined || inlineKind == ExitFromInlined)
-        && !bytes[offset + exitSitePaddingOffset];
-}
-
-static bool isTriState(uint8_t byte)
-{
-    return byte <= static_cast<uint8_t>(TriState::Indeterminate);
-}
-
-// The layout's rules, which strict checks before anything reads the section.
-static bool obeysFeedbackRules(std::span<const uint8_t> bytes)
-{
-    if (bytes.size() < headerSize)
-        return false;
-    if (readField<uint32_t>(bytes, magicOffset) != sectionMagic || readField<uint16_t>(bytes, versionOffset) != layoutVersion || readField<uint16_t>(bytes, reservedOffset))
-        return false;
-    FeedbackCounts counts = countsIn(bytes);
-    for (uint32_t count : { counts.valueProfiles, counts.arrayProfiles, counts.binaryArithProfiles, counts.unaryArithProfiles, counts.exitSites, counts.functionDecls, counts.functionExprs, counts.constants }) {
-        if (count >= countLimit)
-            return false;
-    }
-    // The copies byte is 0 or 1; it decides the size the rest of the checks read.
-    if (bytes[copiesOffset] > 1)
-        return false;
-    CheckedSize size = sectionSize(counts);
-    if (size.hasOverflowed() || size.value() != bytes.size())
-        return false;
-
-    if (counts.copies) {
-        // Native value profiles see only boxed values, so no prediction carries SpecInt52Any or SpecDoubleImpureNaN.
-        for (uint32_t i = 0; i < counts.valueProfiles; ++i) {
-            if (readField<SpeculatedType>(bytes, headerSize + i * sizeof(SpeculatedType)) & ~SpecBytecodeTop)
-                return false;
-        }
-
-        size_t arrays = arraysOffset(counts).value();
-        for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
-            size_t offset = arrays + i * arrayProfileSize;
-            if ((readField<uint32_t>(bytes, offset) & ~ALL_ARRAY_MODES) || (readField<uint32_t>(bytes, offset + 4) & ~restorableArrayProfileFlags.toRaw()))
-                return false;
-        }
-    }
-
-    size_t binary = binaryOffset(counts).value();
-    for (uint32_t i = 0; i < counts.binaryArithProfiles; ++i) {
-        if (readField<uint16_t>(bytes, binary + i * arithProfileSize) >= binaryBitsLimit)
-            return false;
-    }
-    size_t unary = unaryOffset(counts).value();
-    for (uint32_t i = 0; i < counts.unaryArithProfiles; ++i) {
-        if (readField<uint16_t>(bytes, unary + i * arithProfileSize) >= unaryBitsLimit)
-            return false;
-    }
-
-    size_t exits = exitsOffset(counts).value();
-    size_t alignmentGap = unaryEnd(counts).value();
-    if (!isAllZero(bytes.subspan(alignmentGap, exits - alignmentGap)))
-        return false;
-    // Quadratic, as ExitProfile::add is when it builds the list, which keeps native lists short.
-    for (uint32_t i = 0; i < counts.exitSites; ++i) {
-        size_t offset = exits + i * exitSiteSize;
-        if (!isRestorableExitSiteRecord(bytes, offset))
-            return false;
-        DFG::FrequentExitSite site = exitSiteAt(bytes, offset);
-        for (uint32_t j = 0; j < i; ++j) {
-            if (exitSiteAt(bytes, exits + j * exitSiteSize) == site)
-                return false;
-        }
-    }
-
-    if (!isTriState(bytes[didOptimizeOffset]) || !isTriState(bytes[quickDFGTierUpOffset]) || bytes[quickFTLTierUpOffset] > 1)
-        return false;
-
-    // The counter is either in the state ExecutionCounter::deferIndefinitely leaves or armed with a progress in [0, 2^31).
-    auto threshold = readField<int32_t>(bytes, llintActiveThresholdOffset);
-    auto totalCount = readField<float>(bytes, llintTotalCountOffset);
-    auto counter = readField<int32_t>(bytes, llintCounterOffset);
-    bool deferred = threshold == std::numeric_limits<int32_t>::max() && !totalCount && counter == std::numeric_limits<int32_t>::min();
-    double progress = static_cast<double>(totalCount) + counter;
-    bool armed = threshold >= 0 && std::isfinite(totalCount) && progress >= 0 && progress < 0x1p31;
-    if (!deferred && !armed)
-        return false;
-
-    size_t children = childrenOffset(counts).value();
-    for (uint8_t byte : bytes.subspan(children, static_cast<size_t>(counts.functionDecls) + counts.functionExprs)) {
-        if (byte > 1)
-            return false;
-    }
-
-    size_t constants = constantsOffset(counts).value();
-    size_t constantBytes = constantBitsSize(counts.constants);
-    if (uint32_t usedBits = counts.constants % 8; usedBits && (bytes[constants + constantBytes - 1] >> usedBits))
-        return false;
-    return isAllZero(bytes.subspan(constants + constantBytes));
 }
 
 // The UCB's tier-up history: didOptimize and the quick tier-up bits. m_quickDFGTierUp and m_quickFTLTierUp
@@ -343,6 +205,7 @@ static SymbolTable* symbolTableAt(UnlinkedCodeBlock& ucb, uint32_t index)
     return dynamicDowncast<SymbolTable>(value);
 }
 
+#if ASSERT_ENABLED
 // Every count the body shares with the UCB's index spaces. The exit sites are feedback, not an index space, and whether the
 // copies travel is the body's.
 static bool countsFit(UnlinkedCodeBlock& ucb, const FeedbackCounts& counts)
@@ -355,15 +218,13 @@ static bool countsFit(UnlinkedCodeBlock& ucb, const FeedbackCounts& counts)
         && counts.functionExprs == ucb.numberOfFunctionExprs()
         && counts.constants == ucb.constantRegisters().size();
 }
+#endif
 
 } // namespace UCBFeedbackInternal
 
-std::optional<FeedbackSection> FeedbackSection::parse(std::span<const uint8_t> bytes, bool strict)
+FeedbackSection FeedbackSection::parse(std::span<const uint8_t> bytes)
 {
     using namespace UCBFeedbackInternal;
-
-    if (strict && !obeysFeedbackRules(bytes))
-        return std::nullopt;
 
     FeedbackSection section;
     section.m_bytes = bytes;
@@ -418,7 +279,7 @@ DFG::FrequentExitSite FeedbackSection::exitSite(unsigned index) const
 bool FeedbackSection::childSingletonInvalidated(ChildTable table, unsigned index) const
 {
     using namespace UCBFeedbackInternal;
-    CheckedSize tableOffset = childrenOffset(m_counts);
+    size_t tableOffset = childrenOffset(m_counts);
     if (table == ChildTable::Expressions)
         tableOffset += m_counts.functionDecls;
     return m_bytes[elementOffset(tableOffset, index, 1)] & 1;
@@ -478,42 +339,11 @@ FeedbackCounts liveFeedbackCounts(UnlinkedCodeBlock& ucb, BodyImage image)
     };
 }
 
-bool feedbackFits(UnlinkedCodeBlock& ucb, const FeedbackSection& section, BodyImage image)
-{
-    const FeedbackCounts& counts = section.counts();
-    if (!UCBFeedbackInternal::countsFit(ucb, counts))
-        return false;
-    // A builtin's UCB never has copies, and a body without an image carries none.
-    if (counts.copies != (image == BodyImage::Present && !ucb.isBuiltinFunction()))
-        return false;
-    // Every exit site lies inside the instruction stream.
-    unsigned instructionsSize = ucb.instructionsSize();
-    for (uint32_t i = 0; i < counts.exitSites; ++i) {
-        if (section.exitSite(i).bytecodeIndex().offset() >= instructionsSize)
-            return false;
-    }
-    return true;
-}
-
-bool constantBitsFit(UnlinkedCodeBlock& ucb, const FeedbackSection& section)
-{
-    uint32_t constantCount = section.counts().constants;
-    size_t registerCount = ucb.constantRegisters().size();
-    for (uint32_t i = 0; i < constantCount; ++i) {
-        if (!section.constantSingletonInvalidated(i))
-            continue;
-        if (i >= registerCount || !UCBFeedbackInternal::symbolTableAt(ucb, i))
-            return false;
-    }
-    return true;
-}
-
 // Takes the UCB's cell lock for the tier-up history, so the caller must not hold it.
 void seedFeedback(VM& vm, UnlinkedCodeBlock& ucb, const FeedbackSection& section, BodyImage image)
 {
     const FeedbackCounts& counts = section.counts();
-    // With strict on, feedbackFits and constantBitsFit have checked the counts and the constants; with strict off the body
-    // is trusted.
+    // The body is trusted to fit the UCB, whose index spaces the loops below walk with the section's counts.
     ASSERT(UCBFeedbackInternal::countsFit(ucb, counts));
 
     // A body with an image installs without the BaselineJITPlan that would allocate the UCB's value and array copies, so
@@ -574,7 +404,7 @@ void seedFeedback(VM& vm, UnlinkedCodeBlock& ucb, const FeedbackSection& section
 
 size_t feedbackSectionSize(const FeedbackCounts& counts)
 {
-    return UCBFeedbackInternal::sectionSize(counts).value();
+    return UCBFeedbackInternal::sectionSize(counts);
 }
 
 void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const FeedbackCounts& counts)
@@ -588,8 +418,6 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
     RELEASE_ASSERT(!counts.copies || profiles);
 
     zeroSpan(out);
-    writeField<uint32_t>(out, magicOffset, sectionMagic);
-    writeField<uint16_t>(out, versionOffset, layoutVersion);
     writeField<uint32_t>(out, valueProfileCountOffset, counts.valueProfiles);
     writeField<uint32_t>(out, arrayProfileCountOffset, counts.arrayProfiles);
     writeField<uint32_t>(out, binaryArithProfileCountOffset, counts.binaryArithProfiles);
@@ -615,7 +443,7 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
             writeField<SpeculatedType>(out, headerSize + i * sizeof(SpeculatedType), valueProfiles[i].prediction());
 
         auto arrayProfiles = profiles->arrayProfiles();
-        size_t arrays = arraysOffset(counts).value();
+        size_t arrays = arraysOffset(counts);
         for (uint32_t i = 0; i < counts.arrayProfiles; ++i) {
             size_t offset = arrays + i * arrayProfileSize;
             writeField<uint32_t>(out, offset, arrayProfiles[i].observedArrayModes());
@@ -623,17 +451,17 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
         }
     }
 
-    size_t binary = binaryOffset(counts).value();
+    size_t binary = binaryOffset(counts);
     for (uint32_t i = 0; i < counts.binaryArithProfiles; ++i)
         writeField<uint16_t>(out, binary + i * arithProfileSize, static_cast<uint16_t>(ucb.binaryArithProfile(i).bits()));
-    size_t unary = unaryOffset(counts).value();
+    size_t unary = unaryOffset(counts);
     for (uint32_t i = 0; i < counts.unaryArithProfiles; ++i)
         writeField<uint16_t>(out, unary + i * arithProfileSize, static_cast<uint16_t>(ucb.unaryArithProfile(i).bits()));
 
     {
         // The sites cannot change between the count and this write; the bound only keeps the write in its region.
-        size_t offset = exitsOffset(counts).value();
-        size_t end = childrenOffset(counts).value();
+        size_t offset = exitsOffset(counts);
+        size_t end = childrenOffset(counts);
         ConcurrentJSLocker locker(ucb.m_lock);
         ucb.exitProfile().forEachFrequentExitSite(locker, [&](const DFG::FrequentExitSite& site) {
             if (offset == end)
@@ -647,14 +475,14 @@ void writeFeedbackSection(std::span<uint8_t> out, UnlinkedCodeBlock& ucb, const 
         ASSERT(offset == end);
     }
 
-    size_t children = childrenOffset(counts).value();
+    size_t children = childrenOffset(counts);
     for (uint32_t i = 0; i < counts.functionDecls; ++i)
         out[children + i] = ucb.functionDecl(i)->singletonHasBeenInvalidated();
     children += counts.functionDecls;
     for (uint32_t i = 0; i < counts.functionExprs; ++i)
         out[children + i] = ucb.functionExpr(i)->singletonHasBeenInvalidated();
 
-    size_t constants = constantsOffset(counts).value();
+    size_t constants = constantsOffset(counts);
     for (uint32_t i = 0; i < counts.constants; ++i) {
         if (SymbolTable* symbolTable = symbolTableAt(ucb, i); symbolTable && symbolTable->singleton().hasBeenInvalidated())
             out[constants + i / 8] |= 1u << (i % 8);
@@ -697,7 +525,7 @@ double carriedLLIntProgress(int32_t threshold, double progress)
     using namespace UCBFeedbackInternal;
     if (threshold == std::numeric_limits<int32_t>::max())
         return 0;
-    // The comparisons send a NaN, which only a body normal mode trusts can hold, to zero.
+    // The comparisons send a NaN to zero.
     if (!(progress > 0))
         return 0;
     // The consumer's first invocation of the body then completes in the LLInt, profiling every site it reaches, before

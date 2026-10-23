@@ -1,5 +1,5 @@
 #include "config.h"
-#include "ICCapture.h"
+#include "jitcache/ics/ICCapture.h"
 
 #if ENABLE(JIT)
 
@@ -10,15 +10,15 @@
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
 #include "ConcurrentJSLock.h"
-#include "ICSites.h"
+#include "InlineCacheCompiler.h"
 #include "JITCode.h"
 #include "PolymorphicCallStubRoutine.h"
 #include "PropertyInlineCache.h"
-#include "Repatch.h"
+#include "jitcache/ics/ICOperations.h"
+#include "jitcache/ics/ICSites.h"
 #include <algorithm>
 #include <array>
 #include <limits>
-#include <optional>
 #include <wtf/Assertions.h>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/StdLibExtras.h>
@@ -84,7 +84,6 @@ struct SectionShape {
     size_t size { 0 };
 };
 
-// A CB without BaselineJITData counts no IC, so that a strict capture of it can still report NoBaselineJITData.
 static SectionShape sectionShape(CodeBlock& codeBlock, BaselineJITData* jitData)
 {
     SectionShape shape;
@@ -105,21 +104,23 @@ static SectionShape sectionShape(CodeBlock& codeBlock, BaselineJITData* jitData)
     return shape;
 }
 
-// Each IC's access type equals its mold's. CodeBlock::setupWithUnlinkedBaselineCode builds IC i from mold i of the
-// BaselineJITCode it installs, so record i stands for IC i, and a strict restore pairs it with mold i of the prepared
-// code. A published BaselineJITData implies that installed code is the CB's JIT code. An IC without a mold at its index
-// fails as well.
-static std::optional<CaptureError> checkMolds(CodeBlock& codeBlock, BaselineJITData& jitData)
+#if ASSERT_ENABLED
+// Whether each IC's access type equals its mold's. CodeBlock::setupWithUnlinkedBaselineCode builds IC i from mold i of
+// the BaselineJITCode it installs, so record i stands for IC i, and the consumer's attach writes it into the IC that
+// its own setup builds from the same mold. A published BaselineJITData implies that installed code is the CB's JIT
+// code. An IC without a mold at its index fails as well.
+static bool icsMatchMolds(CodeBlock& codeBlock, BaselineJITData& jitData)
 {
     RefPtr jitCode = codeBlock.jitCode();
     ASSERT(jitCode && jitCode->jitType() == JITType::BaselineJIT);
     const auto& molds = static_cast<BaselineJITCode&>(*jitCode).m_unlinkedPropertyInlineCaches;
     for (uint32_t index = 0, count = propertyICCount(&jitData); index < count; ++index) {
         if (index >= molds.size() || molds[index].accessType != jitData.propertyCache(index).accessType)
-            return CaptureError { CaptureCheck::MoldMismatch, index };
+            return false;
     }
-    return std::nullopt;
+    return true;
 }
+#endif
 
 // Reads the record of every IC, in IC order, then of every call-link site, in canonical order, under the CB's lock the
 // locker witnesses; hands each record to its sink; and adds up the summary and the polymorphic bit.
@@ -156,7 +157,7 @@ PropertyICRecord readPropertyICRecord(const ConcurrentJSLocker& locker, const Ha
     auto cases = propertyCache.listedAccessCases(locker);
     bool megamorphicCaseListed = false;
     for (AccessCase* accessCase : cases) {
-        if (AccessCase::isMegamorphic(accessCase->type())) {
+        if (isMegamorphic(accessCase->type())) {
             megamorphicCaseListed = true;
             break;
         }
@@ -218,19 +219,6 @@ CallLinkRecord readCallLinkRecord(const ConcurrentJSLocker&, const CallLinkSite&
     return record;
 }
 
-ASCIILiteral description(CaptureCheck check)
-{
-    switch (check) {
-    case CaptureCheck::NoBaselineJITData:
-        return "no-baseline-jit-data"_s;
-    case CaptureCheck::OutputSizeMismatch:
-        return "output-size-mismatch"_s;
-    case CaptureCheck::MoldMismatch:
-        return "mold-mismatch"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
 size_t baselineICsSectionSize(CodeBlock& codeBlock)
 {
     ASSERT(codeBlock.jitType() == JITType::BaselineJIT);
@@ -245,32 +233,22 @@ CaptureSummary summarizeBaselineICs(CodeBlock& codeBlock)
     BaselineJITData* jitData = codeBlock.baselineJITData();
     ASSERT(jitData);
     ConcurrentJSLocker locker(codeBlock.m_lock);
-    ASSERT(!jitData || !ICCaptureInternal::checkMolds(codeBlock, *jitData));
+    ASSERT(ICCaptureInternal::icsMatchMolds(codeBlock, *jitData));
     return ICCaptureInternal::readRecords(locker, codeBlock, jitData, [](const PropertyICRecord&) { }, [](const CallLinkRecord&) { });
 }
 
-std::expected<CaptureSummary, CaptureError> captureBaselineICs(CodeBlock& codeBlock, std::span<uint8_t> output, StrictChecks strict)
+CaptureSummary captureBaselineICs(CodeBlock& codeBlock, std::span<uint8_t> output)
 {
-    // The integrator's call is checked first, because a record written past either bound would corrupt memory. Normal
-    // mode trusts it and debug builds assert it.
+    // Debug builds assert the integrator's call, since a record written past either bound would corrupt memory.
     BaselineJITData* jitData = codeBlock.baselineJITData();
-    if (strict == StrictChecks::Yes && !jitData)
-        return makeUnexpected(CaptureError { CaptureCheck::NoBaselineJITData, 0 });
     ASSERT(jitData);
     ASSERT(codeBlock.jitType() == JITType::BaselineJIT);
 
     ICCaptureInternal::SectionShape shape = ICCaptureInternal::sectionShape(codeBlock, jitData);
-    if (strict == StrictChecks::Yes && output.size() != shape.size)
-        return makeUnexpected(CaptureError { CaptureCheck::OutputSizeMismatch, 0 });
     ASSERT(output.size() == shape.size);
 
     ConcurrentJSLocker locker(codeBlock.m_lock);
-
-    if (strict == StrictChecks::Yes) {
-        if (auto error = ICCaptureInternal::checkMolds(codeBlock, *jitData))
-            return makeUnexpected(*error);
-    } else
-        ASSERT(!jitData || !ICCaptureInternal::checkMolds(codeBlock, *jitData));
+    ASSERT(ICCaptureInternal::icsMatchMolds(codeBlock, *jitData));
 
     // The header comes first in the section but last in the writing, once the property ICs have given its summary
     // count. Every other byte is written in order, the padding included.
@@ -307,9 +285,6 @@ std::expected<CaptureSummary, CaptureError> captureBaselineICs(CodeBlock& codeBl
         .callLinkSiteCount = shape.callLinkSiteCount,
     };
     memcpySpan(headerBytes, asByteSpan(header));
-
-    // What capture writes always passes the structural checks a strict import runs on it.
-    ASSERT(parseSection(output, StrictChecks::Yes).has_value());
     return result;
 }
 

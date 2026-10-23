@@ -1,0 +1,6 @@
+// The defaults of the scripts in integrator/ and below it, the runner's fixtures included. A script without runs of its
+// own runs a Producer that calls delta once the script is done, then a Consumer. Every script needs a twins build: the
+// tests read their outcomes through shell functions that only twins builds register, and the fixtures exercise the twin
+// report and the heap description.
+// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
+// jitcache-requires: twins

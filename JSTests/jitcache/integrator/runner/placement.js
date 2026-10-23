@@ -1,58 +1,12 @@
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
-// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
+// jitcache-runs: 50x Producer --jitcache-delta-at-exit; Consumer
+// jitcache-fixture: passes
+// jitcache-fixture: wide
 
-// Address-space placement, in the 50 sequences above, which fill the directive lines: in the environment the runner's
-// calibration chose, every Consumer's executable pool lies outside its Producer's, its structure reservation has another
-// base, and each of its three heap probes differs from its Producer's. Each process writes its layout file before its
-// script runs, so the Consumer reads both files and throws on a placement that did not move, which fails the run. The Off runs of the oracle record no layout and check nothing.
+// Address-space placement, in 50 sequences: in the environment the runner's calibration chose, every Consumer's
+// executable pool lies outside its Producer's, its structure reservation has another base, and each of its three heap
+// probes differs from its Producer's. Each process writes its layout file before its script runs, so the Consumer reads
+// both files and throws on a placement that did not move, which fails the run. The Off runs of the oracle record no
+// layout and check nothing. The self-test runs the sequences with its whole width.
 load("./resources/warm-up.js", "caller relative");
 (function main(role, scratch) {
     print(warmUp());

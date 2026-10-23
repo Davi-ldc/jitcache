@@ -21,7 +21,7 @@ import fs from "node:fs";
 import Module from "node:module";
 import { pathToFileURL } from "node:url";
 import ucbBun from "./resources/ucb-bun.js";
-import { maMissHot } from "./module-analysis/ma-miss-hot.mjs";
+import { maMissHot } from "./resources/module-analysis/ma-miss-hot.mjs";
 
 const t = ucbBun.context();
 const producer = t.role === "Producer";
@@ -68,13 +68,13 @@ case 1: {
     break;
 }
 case 2: {
-    const uncompiled = await load("the uncompiled module", () => import("./module-analysis/ma-miss-uncompiled.mjs"), { analysisImports: 0, analysisMisses: 1 });
+    const uncompiled = await load("the uncompiled module", () => import("./resources/module-analysis/ma-miss-uncompiled.mjs"), { analysisImports: 0, analysisMisses: 1 });
     console.log(`uncompiled ${uncompiled.maUncompiled}`);
     break;
 }
 case 3: {
     Module.enableCompileCache(t.file("ma-compile-cache"));
-    const cached = await load("the module the compile cache serves", () => import("./module-analysis/ma-miss-cached.mjs"), { analysisImports: 0, analysisMisses: 0, analysisAbsent: 0 });
+    const cached = await load("the module the compile cache serves", () => import("./resources/module-analysis/ma-miss-cached.mjs"), { analysisImports: 0, analysisMisses: 0, analysisAbsent: 0 });
     if (producer)
         Module.flushCompileCache();
     console.log(`cached ${cached.maCached}`);

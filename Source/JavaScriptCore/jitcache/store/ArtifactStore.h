@@ -1,8 +1,8 @@
 #pragma once
 
-#include "BodyKey.h"
-#include "JITCacheContainer.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/ValidatedBody.h"
 #include <array>
 #include <bit>
 #include <expected>
@@ -46,12 +46,6 @@ inline constexpr ASCIILiteral header = "header"_s;
 inline constexpr ASCIILiteral pack = "pack"_s;
 inline constexpr ASCIILiteral replacedCacheDirectory = ".cache.replaced"_s;
 } // namespace ArtifactNames
-
-// A body key as reports and the shell spell it: the lowercase hex of its 40 canonical bytes.
-constexpr size_t bodyKeyHexLength = 2 * BodyKey::byteSize;
-std::array<char, bodyKeyHexLength> bodyKeyHexDigits(const BodyKey&);
-// The key 80 lowercase hex digits spell, or nothing when they are not that or BodyKey::fromBytes rejects the bytes.
-std::optional<BodyKey> bodyKeyFromHex(std::span<const char>);
 
 // A temporary's name: ".header." or ".pack.", 32 lowercase hex digits of a fresh 128-bit value from
 // cryptographicallyRandomValues, and ".tmp". Both are created with O_CREAT | O_EXCL in cache/, so a header or a pack
@@ -189,7 +183,7 @@ using PackIndex = HashMap<BodyKey, PackIndexEntry, BodyKeyHash, BodyKeyHashTrait
 // Reads the index a root names from a pack's bytes: the trailer that ends the valid bytes gives the latest block, which
 // must end exactly at validEnd; the walk goes back from it through the previous blocks to the full index, or to stopAt
 // when it meets it, and applies them in order to index. Every block lies below the block after it, its trailer gives its
-// own start, and every body entry's record extent lies below its block. Returns the blocks applied, or why the pack
+// own start, and every entry's record extent lies below its block. Returns the blocks applied, or why the pack
 // fails container.pack, after which index is unspecified. readAt returns the bytes [offset, offset + size) of the pack,
 // which the walk bounds by validEnd first. liveBytes, packLiveBytes of index, follows the blocks applied.
 struct PackIndexRead {
@@ -202,15 +196,14 @@ std::expected<PackIndexRead, PackRejection> readPackIndex(uint64_t validEnd, std
     const ScopedLambda<std::span<const uint8_t>(uint64_t offset, uint64_t size)>& readAt);
 
 // The bytes a pack's live bodies take: its prefix and the extents of the records its index lists. The rest of its valid
-// bytes, superseded records, tombstoned ones and index blocks, are dead.
+// bytes, superseded records and index blocks, are dead.
 uint64_t packLiveBytes(const PackIndex&);
 
 // The outcomes of the store's three reads of a body:
 //   Absent       the index lists no body for the key
 //   Unavailable  the fault hook of test builds failed the read with EMFILE, ENFILE or ENOMEM; never readSection's
-//   Invalid      the pack failed its own checks (container.pack), or the body failed the first of the body checks of
-//                JITCacheContainer.h that the read's mode runs, or, in Full mode, its index entry does not repeat its
-//                envelope (container.pack)
+//   Invalid      the pack failed its own checks (container.pack), or the body failed the first of the integrity checks
+//                of JITCacheContainer.h that the read runs
 //   Found        the read succeeded
 enum class StoreOutcome : uint8_t { Absent, Unavailable, Invalid, Found };
 struct StoreFailure { // Invalid: container.io with its errno, a body check, or container.pack
@@ -247,28 +240,25 @@ struct IndexStatistics {
 
 class OpenedArtifact;
 
-class SavedSummaries { // one body's bytes, with its three summary sections checked; holds the pack's mapping
+class SavedSummaries { // one body's bytes, with the sections its read named checked; holds the pack's mapping
     WTF_MAKE_NONCOPYABLE(SavedSummaries);
     WTF_MAKE_TZONE_ALLOCATED(SavedSummaries);
 public:
     uint64_t version() const { return m_version; } // the envelope's commit identifier
     uint8_t highestTier() const { return m_highestTier; }
-    std::span<const uint8_t> ucbFeedback() const { return m_ucbFeedback; }
-    std::span<const uint8_t> cbSummary() const { return m_cbSummary; }
-    std::span<const uint8_t> ics() const { return m_ics; } // the whole ICsBaseline section
+    // A section the read named, whole; empty when the body lacks it, and for every kind the read did not name.
+    std::span<const uint8_t> section(SectionKind kind) const { return m_sections[static_cast<size_t>(kind)]; }
     ~SavedSummaries();
 
 private:
-    friend class OpenedArtifact; // readSavedSummaries builds it from bytes whose envelope, directory and summaries passed
-    SavedSummaries(Ref<MappedPack>&&, uint64_t version, uint8_t highestTier, std::span<const uint8_t> ucbFeedback,
-        std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics);
+    friend class OpenedArtifact; // readSavedSummaries builds it from bytes whose envelope, directory and named sections passed
+    using SectionSpans = std::array<std::span<const uint8_t>, numberOfSectionKinds>; // by SectionKind
+    SavedSummaries(Ref<MappedPack>&&, uint64_t version, uint8_t highestTier, const SectionSpans&);
 
     const Ref<MappedPack> m_pack;
     const uint64_t m_version;
     const uint8_t m_highestTier;
-    const std::span<const uint8_t> m_ucbFeedback;
-    const std::span<const uint8_t> m_cbSummary;
-    const std::span<const uint8_t> m_ics;
+    const SectionSpans m_sections;
 };
 struct SavedSummaryRead {
     StoreOutcome outcome;
@@ -298,11 +288,13 @@ public:
 
     // Any thread that holds no JITCache lock.
     uint64_t token(const BodyKey&); // the commit identifier of the key's newest body, 0 when it has none; no system call
-    BodyOpen open(const BodyKey&, ValidationMode); // borrows the body from the mapping and validates it
-    SavedSummaryRead readSavedSummaries(const BodyKey&, ValidationMode); // the key's body through the current root
-    // One section of the key's body through the current root: the envelope's and the directory's checks in the mode, and
+    BodyOpen open(const BodyKey&); // borrows the body from the mapping and runs its integrity checks
+    // The key's body through the current root, with the envelope's and the directory's integrity checks and the CRC of
+    // each named section, the summaries a score reads.
+    SavedSummaryRead readSavedSummaries(const BodyKey&, std::span<const SectionKind>);
+    // One section of the key's body through the current root: the envelope's and the directory's integrity checks, and
     // the CRC of that section alone, since the open that reads the body moments later checks the rest.
-    SectionRead readSection(const BodyKey&, SectionKind, ValidationMode);
+    SectionRead readSection(const BodyKey&, SectionKind);
     bool containsKey(const BodyKey&);
     uint64_t indexedBodies(); // without following the root: status and the start bench event
     IndexStatistics statistics(); // without following the root

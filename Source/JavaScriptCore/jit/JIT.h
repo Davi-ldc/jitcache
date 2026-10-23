@@ -287,6 +287,10 @@ namespace JSC {
         void exceptionCheck(Jump jumpToHandler);
         void exceptionCheck();
 
+        // JITCache: the near call to the VM's slow path thunk for an access type, through the support key the consumer
+        // resolves.
+        void nearCallInlineCacheSlowPathThunk(AccessType);
+
         void advanceToNextCheckpoint();
         void emitJumpSlowToHotForCheckpoint(Jump);
         void setFastPathResumePoint();

@@ -3,7 +3,7 @@
 // body's import cost against its native compilation's. The runner's bench mode (microbench.ts) and the bound's own
 // warmed bench (PerformanceTests/JITCache/bound.ts) both read reports through it.
 
-import { readText } from "./build.ts";
+import { readText } from "./launcher.ts";
 
 // The values installationBoundSmallestBody may take, in bytes of the installed image's linked size, the install event's
 // image.codeSize.
@@ -13,10 +13,14 @@ export const smallestBodyCandidates = [0, 128, 256, 512, 1024, 2048, 4096];
 // written once per occurrence.
 const flushEvents = new Set(["lookup", "index", "budget", "process"]);
 
-// The fields that hold thread CPU time, by event: the only spans the bench takes a minimum and a median of, since the
-// minimum filters interference, which only lengthens a span. Every other field is reported by copy: a count, size, score
-// or flag has no interference to filter, and a wall time, such as the install steps', only explains a CPU-time span.
-const cpuTimeFields: Record<string, (field: string) => boolean> = {
+// The spans the bench takes a minimum and a median of, by event: those that hold thread CPU time, and the spans the
+// installation bound reads (a request's counted total, an install's total, a compile's two times), which are wall time
+// capped at the CPU time read around them. Interference only lengthens either kind, so the minimum filters it. The one
+// exception is a request's apart total, the rest of the request's CPU time: interference during counted work moves time
+// from apart to counted, so the minimum of counted still passes over it while the minimum of apart can come from the
+// copy it hit. Every other field is reported by copy: a count, size, score or flag has no interference to filter, and a
+// part's or step's wall time only explains a span.
+const minimumSpanFields: Record<string, (field: string) => boolean> = {
   start: field => field === "nanoseconds",
   open: field => field === "nanoseconds",
   lookup: field => field.endsWith(".nanoseconds"),
@@ -28,9 +32,9 @@ const cpuTimeFields: Record<string, (field: string) => boolean> = {
   pack: field => field === "compactionNanoseconds",
 };
 
-export const isCPUTime = (span: string) => {
+export const isMinimumSpan = (span: string) => {
   const dot = span.indexOf(".");
-  return dot > 0 && !span.includes("=") && (cpuTimeFields[span.slice(0, dot)]?.(span.slice(dot + 1)) ?? false);
+  return dot > 0 && !span.includes("=") && (minimumSpanFields[span.slice(0, dot)]?.(span.slice(dot + 1)) ?? false);
 };
 
 export type BenchEvent = Record<string, unknown> & { event: string };
@@ -126,12 +130,12 @@ export function spansByCopy(copies: (Map<string, number> | null)[]): Map<string,
 interface ImportSample {
   nanoseconds: number; // request + install
   request: number; // the request event's counted total
-  install: number; // the install event's total, the install function's thread CPU time
+  install: number; // the install event's total
   action: string; // the request's action, import
   imageCodeSize: number; // the image's linked size
   allocation: number; // the installed code's executable allocation, the install event's codeSize
   fixups: number; // the image's fixup count
-  steps: Record<string, number>; // the install's steps that ran, wall time that explains the total
+  steps: Record<string, number>; // the install's steps that ran, wall time that explains the total; none without breakdowns
 }
 
 interface NativeSample {

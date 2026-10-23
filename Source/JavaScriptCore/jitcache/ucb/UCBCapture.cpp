@@ -1,21 +1,20 @@
 #include "config.h"
-#include "UCBCapture.h"
+#include "jitcache/ucb/UCBCapture.h"
 
 #include "CachedTypes.h"
 #include "CodeBlock.h"
 #include "FunctionExecutable.h"
-#include "JITCacheSHA256.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "Options.h"
-#include "ProducerBudget.h"
-#include "UCBAnalysis.h"
-#include "UCBFeedback.h"
-#include "UCBSections.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "VM.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/ucb/UCBAnalysis.h"
+#include "jitcache/ucb/UCBFeedback.h"
+#include "jitcache/ucb/UCBSections.h"
 #include <algorithm>
 #include <expected>
 #include <utility>
@@ -87,46 +86,10 @@ private:
     size_t m_bytes { 0 };
 };
 
-// A strict check of what the capture builds from: every child UFE of the UCB's two tables has the identity (key, table,
-// index) its parent's record gave it.
-static bool ucbChildrenHaveIdentities(UCBRegistry& registry, UnlinkedCodeBlock& ucb, const BodyKey& key)
-{
-    auto hasIdentity = [&](const UnlinkedFunctionExecutable* child, ChildTable table, size_t index) {
-        if (!child)
-            return false;
-        // The copy's references drop here, outside the registry lock, and never the last one: the child's entry holds one.
-        std::optional<ExecutableIdentity> identity = registry.identityOf(*child);
-        if (!identity)
-            return false;
-        auto* childIdentity = std::get_if<ChildIdentity>(&*identity);
-        return childIdentity && childIdentity->parent && childIdentity->parent->key() == key && childIdentity->table == table && childIdentity->index == index;
-    };
-
-    size_t declarationCount = ucb.numberOfFunctionDecls();
-    for (size_t index = 0; index < declarationCount; ++index) {
-        if (!hasIdentity(ucb.functionDecl(static_cast<int>(index)), ChildTable::Declarations, index))
-            return false;
-    }
-    size_t expressionCount = ucb.numberOfFunctionExprs();
-    for (size_t index = 0; index < expressionCount; ++index) {
-        if (!hasIdentity(ucb.functionExpr(static_cast<int>(index)), ChildTable::Expressions, index))
-            return false;
-    }
-    return true;
-}
-
-// The other strict check: a UCB with value and array copies has numberOfValueProfiles() and numberOfArrayProfiles() of
-// them, the counts the feedback section writes and the CB lane's summary pairs its profiles with by position.
-static bool ucbCopiesNumberTheProfiles(UnlinkedCodeBlock& ucb)
-{
-    auto* profiles = ucb.valueAndArrayProfiles();
-    return !profiles || (profiles->valueProfiles().size() == ucb.numberOfValueProfiles() && profiles->arrayProfiles().size() == ucb.numberOfArrayProfiles());
-}
-
 // A module's analysis: the encoding of its live analysis source, the record JSC's analysis parse built; or else a copy of
 // the saved body's ucb.analysis at the same key, which keeps the analysis of a module whose record Bun built from that
 // section and of one whose source died; or nothing. The bytes it returns stay charged in `charges`.
-static std::expected<Vector<uint8_t>, UCBCaptureError> ucbCaptureModuleAnalysis(VM& vm, VMState& state, UnlinkedCodeBlock& ucb, const BodyKey& key,
+static std::expected<Vector<uint8_t>, UCBCaptureFailure> ucbCaptureModuleAnalysis(VM& vm, VMState& state, UnlinkedCodeBlock& ucb, const BodyKey& key,
     ProducerBudget& budget, UCBCaptureCharges& charges)
 {
     UCBRegistry& registry = state.registry();
@@ -135,17 +98,13 @@ static std::expected<Vector<uint8_t>, UCBCaptureError> ucbCaptureModuleAnalysis(
         auto encoded = encodeModuleAnalysis(vm, *source, budget);
         if (!encoded) {
             if (encoded.error() == AnalysisEncodeFailure::BudgetRefused)
-                return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+                return std::unexpected(UCBCaptureFailure::BudgetExceeded);
             // A record this form cannot carry exactly; the body goes without the section and the module is parsed.
             ++statistics.analysisUnrepresentable;
             return Vector<uint8_t> { };
         }
         charges.adopt(encoded->size());
         ++statistics.analysisCaptured;
-        // With strict on, what the encoder built from the producer's own record is held to the rules a reader checks.
-        String failure;
-        if (state.strict() && !validateModuleAnalysis(encoded->span(), failure))
-            return std::unexpected(UCBCaptureError { UCBCaptureFailure::StrictCheckFailed, { } });
         return WTF::move(*encoded);
     }
 
@@ -156,7 +115,7 @@ static std::expected<Vector<uint8_t>, UCBCaptureError> ucbCaptureModuleAnalysis(
         return Vector<uint8_t> { };
     case SectionLookup::Kind::Unusable:
         // The read found the saved body damaged and raised the fault, which ended production.
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::SavedAnalysisUnusable, { } });
+        return std::unexpected(UCBCaptureFailure::SavedAnalysisUnusable);
     case SectionLookup::Kind::Found:
         break;
     }
@@ -164,16 +123,9 @@ static std::expected<Vector<uint8_t>, UCBCaptureError> ucbCaptureModuleAnalysis(
     if (bytes.empty())
         return Vector<uint8_t> { };
     if (!charges.tryCharge(bytes.size()))
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
     Vector<uint8_t> copy { bytes };
     ++statistics.analysisCopied;
-    // With strict on, bytes read from the artifact are checked before they travel again; the failure carries what the
-    // check found, for the fault the glue raises.
-    String failure;
-    if (state.strict() && !validateModuleAnalysis(copy.span(), failure)) {
-        ++statistics.invalidMaterial[static_cast<size_t>(InvalidMaterialStep::Analysis)];
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::SavedAnalysisInvalid, WTF::move(failure) });
-    }
     return copy;
 }
 
@@ -236,7 +188,7 @@ const UnlinkedFunctionExecutable* holderOf(const CodeBlock& codeBlock)
     return uncheckedDowncast<FunctionExecutable>(codeBlock.ownerExecutable())->unlinkedExecutable();
 }
 
-std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, BodyImage image, ProducerBudget& budget)
+std::expected<UCBSections, UCBCaptureFailure> buildSections(VM& vm, UnlinkedCodeBlock& ucb, const UnlinkedFunctionExecutable* holder, BodyImage image, ProducerBudget& budget)
 {
     using namespace UCBCaptureInternal;
 
@@ -256,13 +208,6 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
     // its children's TDZ chains, and gives the identity section its holder digest and parse fields.
     ASSERT(!!holder == (coreKind == UnlinkedCodeBlockCoreKind::Function));
 
-    // The strict checks. They check what the capture builds from the producer's own state, so a failure is a recording
-    // fault.
-    if (state->strict()) {
-        if (!ucbChildrenHaveIdentities(registry, ucb, record->key) || !ucbCopiesNumberTheProfiles(ucb))
-            return std::unexpected(UCBCaptureError { UCBCaptureFailure::StrictCheckFailed, { } });
-    }
-
     UCBCaptureCharges charges(budget);
 
     // The feedback section, with the UCB's copies exactly when the body has an image and the UCB has them. The exit sites
@@ -270,7 +215,7 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
     FeedbackCounts counts = liveFeedbackCounts(ucb, image);
     size_t feedbackSize = feedbackSectionSize(counts);
     if (!charges.tryCharge(feedbackSize))
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
     Vector<uint8_t> feedback(feedbackSize);
     writeFeedbackSection(feedback.mutableSpan(), ucb, counts);
 
@@ -280,11 +225,9 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
     RefPtr<CachedBytecode> core = encodeUnlinkedCodeBlockCore(vm, ucb, holder, &encodingBudget, encodeFailure);
     if (!core) {
         ASSERT(encodeFailure == CoreEncodeFailure::BudgetRefused);
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
     }
     charges.adopt(core->size());
-
-    Digest256 coreDigest = SHA256::hash(core->span());
 
     // The digests, before the identity section's charge. The holder digest charges what it allocates through the same
     // adapter and releases it once hashed; the environment digests it keeps serve every role and stay uncharged.
@@ -297,7 +240,7 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
         // An environment digested before a refusal keeps its digest, so it counts either way.
         statistics.tdzEnvironmentDigests += environmentsDigested;
         if (!holderDigestValue)
-            return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+            return std::unexpected(UCBCaptureFailure::BudgetExceeded);
         ++statistics.holderDigests;
         parseFields = FunctionParseFields { holder->features(), holder->lexicallyScopedFeatures(), holder->hasCapturedVariables() };
     }
@@ -319,7 +262,7 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
     size_t childCount = declarationCount + ucb.numberOfFunctionExprs();
     size_t childDigestsBytes = childCount * sizeof(Digest256);
     if (childDigestsBytes && !charges.tryCharge(childDigestsBytes))
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
     Vector<Digest256> childHolderDigests(childCount);
     for (size_t i = 0; i < childCount; ++i) {
         UnlinkedFunctionExecutable* child = i < declarationCount ? ucb.functionDecl(i) : ucb.functionExpr(i - declarationCount);
@@ -336,9 +279,9 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
     uint32_t constantCount = static_cast<uint32_t>(ucb.constantRegisters().size());
     size_t identitySize = identitySectionSize(constantCount, childCount);
     if (!charges.tryCharge(identitySize))
-        return std::unexpected(UCBCaptureError { UCBCaptureFailure::BudgetExceeded, { } });
+        return std::unexpected(UCBCaptureFailure::BudgetExceeded);
     Vector<uint8_t> identity(identitySize);
-    writeIdentitySection(identity.mutableSpan(), vm, record->key, *contextDigest, coreDigest, holderDigestValue, coreKind, parseFields, ucb, childHolderDigests.span());
+    writeIdentitySection(identity.mutableSpan(), vm, record->key, *contextDigest, holderDigestValue, coreKind, parseFields, ucb, childHolderDigests.span());
     // The digests now live in the section; their buffer does not travel.
     childHolderDigests.clear();
     if (childDigestsBytes)
@@ -349,7 +292,7 @@ std::expected<UCBSections, UCBCaptureError> buildSections(VM& vm, UnlinkedCodeBl
     if (identityKind == IdentityKind::Module) {
         auto moduleAnalysis = ucbCaptureModuleAnalysis(vm, *state, ucb, record->key, budget, charges);
         if (!moduleAnalysis)
-            return std::unexpected(WTF::move(moduleAnalysis.error()));
+            return std::unexpected(moduleAnalysis.error());
         analysis = WTF::move(*moduleAnalysis);
     }
 

@@ -33,8 +33,6 @@
 #include "BinarySwitch.h"
 #include "BytecodeGenerator.h"
 #include "Exception.h"
-#include "ImageEmission.h"
-#include "ImageRecorder.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "JSCast.h"
@@ -47,6 +45,8 @@
 #include "TypeLocation.h"
 #include "TypeProfilerLog.h"
 #include "VirtualRegister.h"
+#include "jitcache/image/ImageEmission.h"
+#include "jitcache/image/ImageRecorder.h"
 
 namespace JSC {
 

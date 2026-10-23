@@ -13,12 +13,12 @@
 // before it. In the first two sequences
 // the producer compiles hot from int32s, regenerates its add at the first double and commits the image with its snippet
 // at its delta at exit. Each consumer's first such allocation is hot's import: the image (n = 1) and then its snippet
-// (n = 2), and the failure of either is ExecutableMemoryExhausted at exec-alloc.jitcache-image, which turns cache
-// activity off at that import, so the consumer installs nothing. In the third, the producer's first allocation is hot's
-// baseline plan and its second the snippet of hot's regeneration, whose failure raises exec-alloc.mathic-snippet before
-// the regeneration falls back natively; production ends there, and the consumer installs the body the finalize capture
-// committed before it, which it checks. Each failure is required to happen, and every output equals the JITCache-off
-// run's.
+// (n = 2), and the failure of either leaves prepareImage without executable memory, which the install reports as
+// exec-alloc.jitcache-image; that turns cache activity off at that import, so the consumer installs nothing. In the
+// third, the producer's first allocation is hot's baseline plan and its second the snippet of hot's regeneration, whose
+// failure raises exec-alloc.mathic-snippet before the regeneration falls back natively; production ends there, and the
+// consumer installs the body the finalize capture committed before it, which it checks. Each failure is required to
+// happen, and every output equals the JITCache-off run's.
 (function main(role, scratch, artifact, sequence) {
     function hot(a, b) {
         return a + b;

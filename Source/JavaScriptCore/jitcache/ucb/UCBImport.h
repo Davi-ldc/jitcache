@@ -1,11 +1,9 @@
 #pragma once
 
-#include "CodeSpecializationKind.h"
 #include "ParserModes.h"
-#include "UCBKeys.h"
-#include "UCBRequests.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/ucb/UCBRequests.h"
 #include <optional>
-#include <wtf/OptionSet.h>
 
 namespace JSC {
 
@@ -19,18 +17,7 @@ class VM;
 namespace JSC::JITCache {
 
 // The engine's entry points, which the request objects call. All run on the VM thread holding the API lock and heap
-// access. A request's key mode is fixed by the UCB it acts on, so requestKey is asked for one mode per request.
-
-// The request's key with the given mode and the snapshot's bits, computed once per request and cached in the state with the
-// source digest it rests on and the provider of a supplied digest; empty when the request has no key.
-std::optional<BodyKey> requestKey(RequestState&, OptionSet<CodeGenerationMode> keyMode);
-// The request's context digest and a UFE body's holder digest, each computed at most once, by the first step that reads
-// it. requestContext requires a key; a root body's context reads requestHolderDigest.
-const Digest256& requestContext(RequestState&);
-const Digest256& requestHolderDigest(RequestState&);
-// What a record made by the request keeps of its context: the inputs its context digest is computed from, or for a direct
-// eval the digest requestContext computed, which it computes now if it has not and production is active.
-RecordedContext recordedContext(RequestState&);
+// access. The request's own digests are in UCBMatch.h.
 
 // Where the native path would generate: imports a body at the request's key, decoding its core into a new UCB, seeding its
 // feedback and, for a body with an image, attaching a pending import, or returns null.

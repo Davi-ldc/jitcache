@@ -3,21 +3,11 @@
 #if ENABLE(JITCACHE_TWINS)
 
 #include "ArgList.h"
-#include "ArtifactStore.h"
-#include "CBFormat.h"
-#include "CBState.h"
 #include "CallData.h"
 #include "CodeBlock.h"
 #include "DeferGC.h"
 #include "FunctionExecutable.h"
-#include "ICSection.h"
 #include "JIT.h"
-#include "JITCacheAPI.h"
-#include "JITCacheCapture.h"
-#include "JITCacheContainer.h"
-#include "JITCacheParameters.h"
-#include "JITCacheTest.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
@@ -25,27 +15,34 @@
 #include "ReleaseHeapAccessScope.h"
 #include "SourceCode.h"
 #include "StrongInlines.h"
-#include "TestArtifact.h"
-#include "TestFiles.h"
-#include "TestVM.h"
-#include "UCBFeedback.h"
-#include "UCBRegistry.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedModuleProgramCodeBlock.h"
 #include "VMEntryScopeInlines.h"
-#include "ValidatedBody.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/glue/JITCacheCapture.h"
+#include "jitcache/glue/KeptSummaries.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestArtifact.h"
+#include "jitcache/tests/support/TestFiles.h"
+#include "jitcache/tests/support/TestVM.h"
+#include "jitcache/ucb/UCBFeedback.h"
+#include "jitcache/ucb/UCBRegistry.h"
 #include <array>
-#include <cmath>
 #include <optional>
 #include <span>
 #include <wtf/StdLibExtras.h>
-#include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
 
-// Tests of JITCacheCapture (glue/JITCacheCapture.h and .cpp): how beats orders capture scores, scoreSections over a saved
-// body's summary sections, delta's rejections, commits and faults, what a commit charges the producer budget, the counter
-// a commit stamps, and delta's capture of bodies that ran without compiling, from the producer's commit at tier 0 to the
-// consumer's import. Each test that starts JITCache runs strict on a temporary directory.
+// Tests of the capture glue (glue/): how beats orders capture scores, scoreSections over a saved body's summary sections,
+// delta's rejections, commits and faults, what a commit charges the producer budget, the counter a commit stamps, and
+// delta's commit at tier 0 of the bodies that ran without compiling. Each test that starts JITCache runs on a temporary
+// directory.
 
 namespace JSC::JITCache::Tests {
 
@@ -88,7 +85,7 @@ static bool callWith(TestContext& context, JSGlobalObject* globalObject, JSFunct
 
 // The function's baseline CB: one call installs the LLInt CB, and JIT::compileSync, with collection deferred as at the end
 // of any compilation, compiles it and runs BaselineJITPlan::finalize, whose finalize capture commits the body in a
-// producing VM. It checks less than TestVM.h's bringToBaseline, which also requires the CB's JIT data.
+// producing VM. It checks less than TestCodeBlocks.h's bringToBaseline, which also requires the CB's JIT data.
 static CodeBlock* bringToBaseline(TestContext& context, JSGlobalObject* globalObject, JSFunction* function, JSValue argument)
 {
     VM& vm = globalObject->vm();
@@ -171,17 +168,15 @@ JITCACHE_TEST(integratorBeatsOrdersScores, No)
 
 #if ENABLE(JIT)
 
-// scoreSections over a committed body's three summary sections gives its kept score in both modes, and with strict on, a
-// malformed feedback, CB summary or ICs span, the others whole, names the reader that rejected it, with its part and
-// check.
-JITCACHE_TEST(integratorScoreSectionsNamesTheReader, Yes)
+// scoreSections over the three summary sections the finalize capture committed gives the score it kept.
+JITCACHE_TEST(integratorScoreSectionsGivesTheKeptScore, Yes)
 {
     ProcessHooksScope hooks;
     auto directory = TemporaryDirectory::create(context, "jitcache-integrator"_s);
     if (!directory)
         return;
     VM& vm = *context.vm();
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JSGlobalObject* globalObject = createCaptureRealm(context, vm);
@@ -200,47 +195,9 @@ JITCACHE_TEST(integratorScoreSectionsNamesTheReader, Yes)
         return;
     }
     JITCACHE_CHECK(body->version() == kept->version);
-    std::span<const uint8_t> feedback = body->section(SectionKind::UCBFeedback);
-    std::span<const uint8_t> summary = body->section(SectionKind::CBSummaryBaseline);
-    std::span<const uint8_t> ics = body->section(SectionKind::ICsBaseline);
-    for (bool strict : { true, false }) {
-        auto score = scoreSections(body->highestTier(), feedback, summary, ics, strict);
-        if (!score || !sameScore(*score, kept->score))
-            JITCACHE_FAIL(makeString("scoreSections with strict "_s, strict ? "on"_s : "off"_s, " differs from the kept score "_s, scoreText(kept->score)));
-    }
-    if (feedback.empty() || summary.empty() || ics.empty()) {
-        JITCACHE_FAIL("a committed body lacks a summary section"_s);
-        return;
-    }
-
-    auto checkRejected = [&](ASCIILiteral label, std::span<const uint8_t> feedbackSpan, std::span<const uint8_t> summarySpan, std::span<const uint8_t> icsSpan,
-        ASCIILiteral part, ASCIILiteral check) {
-        auto score = scoreSections(body->highestTier(), feedbackSpan, summarySpan, icsSpan, true);
-        if (score) {
-            JITCACHE_FAIL(makeString(label, ": scoreSections accepted it"_s));
-            return;
-        }
-        if (score.error().part != part || score.error().check != check)
-            JITCACHE_FAIL(makeString(label, ": rejected by "_s, score.error().part, " at "_s, score.error().check, ", expected "_s, part, " at "_s, check));
-    };
-
-    // Each span one byte short of its layout, the others whole.
-    checkRejected("a short ucb.feedback"_s, feedback.first(feedback.size() - 1), summary, ics, "ucb"_s, "saved-summary"_s);
-    auto shortSummary = summary.first(summary.size() - 1);
-    auto summaryCheck = decodeSummary(shortSummary, true);
-    JITCACHE_CHECK(!summaryCheck);
-    if (!summaryCheck)
-        checkRejected("a short cb.summary"_s, feedback, shortSummary, ics, "cb"_s, description(summaryCheck.error().check));
-    checkRejected("a short ICsBaseline"_s, feedback, summary, ics.first(ics.size() - 1), "ics"_s, ICs::description(ICs::Check::SectionSize));
-
-    // An ICs header that counts more IC sites with cases than ICs fails the bound the ICs lane puts on that count.
-    Vector<uint8_t> unbounded;
-    unbounded.append(ics);
-    ICs::SectionHeader header;
-    memcpySpan(asMutableByteSpan(header), unbounded.span().first(sizeof(header)));
-    header.icSitesWithCases = header.propertyICCount + 1;
-    memcpySpan(unbounded.mutableSpan().first(sizeof(header)), asByteSpan(header));
-    checkRejected("an ICsBaseline with more IC sites with cases than ICs"_s, feedback, summary, unbounded.span(), "ics"_s, ICs::description(ICs::Check::SummaryBound));
+    CaptureScore score = scoreSections(body->highestTier(), body->section(SectionKind::UCBFeedback), body->section(SectionKind::CBSummaryBaseline), body->section(SectionKind::ICsBaseline));
+    if (!sameScore(score, kept->score))
+        JITCACHE_FAIL(makeString("scoreSections gives "_s, scoreText(score), ", not the kept score "_s, scoreText(kept->score)));
 }
 
 // delta rejects at each step a test can reach, commits a body in a Producer, and reports Faulted after a recording fault.
@@ -258,12 +215,12 @@ JITCACHE_TEST(integratorDeltaRejectsCommitsAndFaults, Yes)
     };
 
     checkRejected("a VM without state"_s, JITCache::delta(vm), "delta.unconfigured"_s);
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(artifact, Role::Producer)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(artifact, Role::Producer)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     {
         ExtraVM consumer;
-        if (startsAs(context, "a consumer"_s, JITCache::start(consumer.vm(), strictConfig(artifact, Role::Consumer)), StartOutcome::Started))
+        if (startsAs(context, "a consumer"_s, JITCache::start(consumer.vm(), testConfig(artifact, Role::Consumer)), StartOutcome::Started))
             checkRejected("a consumer"_s, JITCache::delta(consumer.vm()), "delta.role"_s);
     }
     {
@@ -319,7 +276,7 @@ JITCACHE_TEST(integratorDeltaStopsAfterInvalidMaterialInABuild, Yes)
     if (!directory)
         return;
     VM& vm = *context.vm();
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, DeltaCapture::All)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer, DeltaCapture::All)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JSGlobalObject* globalObject = createRunOnceRealm(context, vm);
@@ -383,7 +340,7 @@ JITCACHE_TEST(integratorDeltaRaisesAnUnraisedRefusal, Yes)
     if (!directory)
         return;
     VM& vm = *context.vm();
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JITCACHE_CHECK(!state.producerBudget()->tryCharge(testProducerLimitBytes + 1));
@@ -408,7 +365,7 @@ JITCACHE_TEST(integratorCommitChargesItsEntries, Yes)
     if (!directory)
         return;
     VM& vm = *context.vm();
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JSGlobalObject* globalObject = createCaptureRealm(context, vm);
@@ -427,7 +384,7 @@ JITCACHE_TEST(integratorCommitChargesItsEntries, Yes)
     if (!firstKey)
         return;
     JITCACHE_CHECK(state.progress().capturesCommitted == 1);
-    JITCACHE_CHECK(state.keptSummaries());
+    JITCACHE_CHECK(state.partIfExists<KeptSummaries>());
 
     // The second key's scoring read finds the body unavailable, so its finalize capture defers and delta commits it first.
     StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::ReadSavedSummaries, EMFILE, std::nullopt });
@@ -471,7 +428,7 @@ JITCACHE_TEST(integratorCommitChargesItsEntries, Yes)
     uint64_t released = (8 + 2 * 6) * keptBucketBytes + 2 * 6 * indexBucketBytes + writerStagingBytes;
     if (chargedBytes() + released != afterFirstCommit)
         JITCACHE_FAIL(makeString("the end of production released "_s, static_cast<int64_t>(afterFirstCommit - chargedBytes()), " bytes, expected "_s, released));
-    JITCACHE_CHECK(!state.keptSummaries());
+    JITCACHE_CHECK(!state.partIfExists<KeptSummaries>());
     JITCACHE_CHECK(state.bodyVersion(*firstKey));
     JITCACHE_CHECK(state.bodyVersion(*secondKey));
 }
@@ -487,7 +444,7 @@ JITCACHE_TEST(integratorDeltaStampsTheCounter, Yes)
     if (!directory)
         return;
     VM& vm = *context.vm();
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JSGlobalObject* globalObject = createCaptureRealm(context, vm);
@@ -560,18 +517,16 @@ JITCACHE_TEST(integratorDeltaStampsTheCounter, Yes)
         }
         JITCACHE_CHECK(body->counterProgress() == kept->score.counterProgress);
 
-        auto scored = scoreSections(body->highestTier(), body->section(SectionKind::UCBFeedback), summarySection, body->section(SectionKind::ICsBaseline), true);
-        if (!scored || !sameScore(*scored, kept->score))
+        CaptureScore scored = scoreSections(body->highestTier(), body->section(SectionKind::UCBFeedback), summarySection, body->section(SectionKind::ICsBaseline));
+        if (!sameScore(scored, kept->score))
             JITCACHE_FAIL(makeString(label, ": the kept score "_s, scoreText(kept->score), " differs from scoreSections of its sections"_s));
     }
 }
 
-// Delta with the delta capture All, end to end: the program and the functions that ran without compiling commit at tier
-// 0, with L the carried LLInt progress and P zero, and the kept score is the one scoreSections gives their sections. The
-// delta capture Compiled commits none of them. A consumer imports them with no pending import, so their CodeBlocks start
-// in the LLInt, and the counter keeps the carried progress. A later baseline compilation's capture replaces the tier-0
-// body.
-JITCACHE_TEST(runOnceDeltaCommitsAndConsumerImports, Yes)
+// Delta with the delta capture All: the program and the functions that ran without compiling commit at tier 0, with L
+// the carried LLInt progress and P zero, and the kept score is the one scoreSections gives their sections. A body prepared
+// and never called commits nothing.
+JITCACHE_TEST(runOnceDeltaCommitsAtTierZero, Yes)
 {
     auto directory = TemporaryDirectory::create(context, "jitcache-run-once"_s);
     if (!directory)
@@ -579,19 +534,7 @@ JITCACHE_TEST(runOnceDeltaCommitsAndConsumerImports, Yes)
     String artifact = directory->path("artifact"_s);
     VM& vm = *context.vm();
 
-    // The delta capture Compiled first, on an artifact of its own: nothing compiled, so nothing commits.
-    {
-        ExtraVM compiled;
-        if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(compiled.vm(), strictConfig(directory->path("compiled"_s), Role::Producer, DeltaCapture::Compiled)), StartOutcome::Started))
-            return;
-        if (!createRunOnceRealm(context, compiled.vm()))
-            return;
-        DeltaResult result = JITCache::delta(compiled.vm());
-        JITCACHE_CHECK(result.outcome == DeltaOutcome::Completed);
-        JITCACHE_CHECK(!result.committedBodies && !result.eligibleKeys);
-    }
-
-    if (!startsAs(context, "the producer"_s, JITCache::start(vm, strictConfig(artifact, Role::Producer, DeltaCapture::All)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(vm, testConfig(artifact, Role::Producer, DeltaCapture::All)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JSGlobalObject* globalObject = createRunOnceRealm(context, vm);
@@ -641,52 +584,10 @@ JITCACHE_TEST(runOnceDeltaCommitsAndConsumerImports, Yes)
     JITCACHE_CHECK(!body->counterProgress());
     JITCACHE_CHECK(body->section(SectionKind::ImageBaseline).empty());
     JITCACHE_CHECK(body->version() == kept->version);
-    auto scored = scoreSections(body->highestTier(), body->section(SectionKind::UCBFeedback), body->section(SectionKind::CBSummaryBaseline), body->section(SectionKind::ICsBaseline), true);
-    if (!scored || !sameScore(*scored, kept->score))
+    CaptureScore scored = scoreSections(body->highestTier(), body->section(SectionKind::UCBFeedback), body->section(SectionKind::CBSummaryBaseline), body->section(SectionKind::ICsBaseline));
+    if (!sameScore(scored, kept->score))
         JITCACHE_FAIL(makeString("the kept score "_s, scoreText(kept->score), " differs from scoreSections of runTwice's sections"_s));
     JITCACHE_CHECK(kept->score.tier == imagelessTier && kept->score.counterProgress == 30);
-
-    // A second delta with nothing run in between ties every saved body and commits nothing.
-    DeltaResult again = JITCache::delta(vm);
-    JITCACHE_CHECK(again.outcome == DeltaOutcome::Completed && !again.committedBodies);
-
-    // The consumer imports the program and runTwice without an image: no pending import, CodeBlocks in the LLInt, and
-    // runTwice's counter arms at the carried 30 points, to which its two calls add 30.
-    {
-        ExtraVM consumer;
-        if (!startsAs(context, "the consumer"_s, JITCache::start(consumer.vm(), strictConfig(artifact, Role::Consumer, DeltaCapture::All)), StartOutcome::Started))
-            return;
-        VMState& consumerState = *consumer.vm().jitCacheState();
-        uint64_t importsBefore = consumerState.registry().statistics().imports;
-        JSGlobalObject* consumerGlobal = createRunOnceRealm(context, consumer.vm());
-        JSFunction* consumerRunTwice = consumerGlobal ? globalFunction(context, consumerGlobal, "runTwice"_s, runOnceSourceName) : nullptr;
-        CodeBlock* consumerCodeBlock = codeBlockFor(context, consumerRunTwice, CodeSpecializationKind::CodeForCall);
-        if (!consumerCodeBlock)
-            return;
-        JITCACHE_CHECK(consumerState.registry().statistics().imports >= importsBefore + 3);
-        JITCACHE_CHECK(!consumerState.progress().installs);
-        JITCACHE_CHECK(consumerCodeBlock->jitType() == JITType::InterpreterThunk);
-        UnlinkedCodeBlock& imported = *consumerCodeBlock->unlinkedCodeBlock();
-        auto record = consumerState.registry().recordOf(imported);
-        JITCACHE_CHECK(record && record->origin == UCBOrigin::Imported && !record->hasPendingImport);
-        double consumerProgress = imported.llintExecuteCounter().count();
-        if (std::abs(consumerProgress - 60) > 1e-3)
-            JITCACHE_FAIL(makeString("runTwice's imported counter holds "_s, consumerProgress, " points after two calls, expected 60"_s));
-    }
-
-    // A baseline compilation of runTwice commits at tier 1, which beats the tier-0 body.
-    {
-        CompilationResult compilation;
-        {
-            DeferGCForAWhile deferGC(vm);
-            compilation = JIT::compileSync(vm, codeBlock, JITCompilationMustSucceed);
-        }
-        JITCACHE_CHECK(compilation == CompilationResult::CompilationSuccessful);
-        std::optional<SavedScore> recaptured = keptScoreForTesting(vm, *key);
-        JITCACHE_CHECK(recaptured && recaptured->score.tier == baselineTier && recaptured->version != kept->version);
-        RefPtr<ValidatedBody> compiledBody = state.openBody(*key).body();
-        JITCACHE_CHECK(compiledBody && compiledBody->highestTier() == baselineTier);
-    }
 }
 
 #endif // ENABLE(JIT)

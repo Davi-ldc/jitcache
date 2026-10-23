@@ -1,8 +1,8 @@
 #include "config.h"
-#include "ArtifactAccess.h"
+#include "jitcache/store/ArtifactAccess.h"
 
-#include "JITCacheContainer.h"
-#include "JITCacheFiles.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/JITCacheFiles.h"
 #include <errno.h>
 #include <span>
 #include <wtf/StdLibExtras.h>

@@ -193,11 +193,11 @@ load("./resources/sections.js", "caller relative");
         t.check(feedbackOf(Array.prototype.every).copies === 0, "Array.prototype.every's body carries UCB copies");
         const exit = feedbackOf(realm.frExit);
         t.check(exit.counts.exitSites >= 1, `frExit's body carries ${exit.counts.exitSites} exit sites`);
-        t.check(exit.bytes[37] === 0, `frExit's quick DFG bit is ${exit.bytes[37]}`);
-        t.check(feedbackOf(realm.frLoop).bytes[36] === 1, "frLoop's didOptimize is not True");
+        t.check(exit.bytes[29] === 0, `frExit's quick DFG bit is ${exit.bytes[29]}`);
+        t.check(feedbackOf(realm.frLoop).bytes[28] === 1, "frLoop's didOptimize is not True");
         const tier = feedbackOf(realm.frTier);
-        t.check(tier.bytes[37] === 1 && tier.bytes[38] === 1, `frTier's quick bits are ${tier.bytes[37]} and ${tier.bytes[38]}`);
-        t.check(feedbackOf(realm.frDead).bytes[36] === 0, "frDead's didOptimize is not False");
+        t.check(tier.bytes[29] === 1 && tier.bytes[30] === 1, `frTier's quick bits are ${tier.bytes[29]} and ${tier.bytes[30]}`);
+        t.check(feedbackOf(realm.frDead).bytes[28] === 0, "frDead's didOptimize is not False");
     }
 
     // A closure the producer saw created many times: its UFE's singleton bit and its scope's arrive set.

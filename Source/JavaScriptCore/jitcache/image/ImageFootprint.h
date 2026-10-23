@@ -2,8 +2,8 @@
 
 #if ENABLE(JIT)
 
-#include "ImageSupport.h"
-#include "ImageTypes.h"
+#include "jitcache/image/ImageSupport.h"
+#include "jitcache/image/ImageTypes.h"
 #include <array>
 #include <optional>
 #include <span>
@@ -14,8 +14,8 @@
 // Footprints: the fixed bytes of code each fixup form occupies, and how they are canonicalized, checked and decoded.
 // These functions read and write the instruction bytes of the build's architecture, x86_64 or ARM64; on any other the
 // footprints are undefined and nothing is canonical. They are the only part of the image format that changes with the
-// architecture, and the section codec, the recorder, capture, preparation and the twin check all call them. Pure
-// functions over bytes, safe on any thread.
+// architecture, and the section codec, the recorder, preparation and the twin check all call them. Pure functions over
+// bytes, safe on any thread.
 
 namespace JSC::JITCache {
 
@@ -42,7 +42,7 @@ struct CanonicalFootprint {
 // writes this in place of every footprint.
 CanonicalFootprint canonicalFootprint(FixupForm, std::span<const uint8_t> footprint);
 // Whether the footprint holds exactly its form's canonical encoding, so the form's link writer finds the instruction it
-// expects. The section's structure checks run this on every footprint.
+// expects. The recorder checks every footprint of a finished record this way.
 bool isCanonicalFootprint(FixupForm, std::span<const uint8_t> footprint);
 // What a footprint holds once patched: the pointer of a Pointer, or the branch target of a Call or a Jump given the
 // footprint's own address. Nullopt when the bytes do not hold the form's instruction (its opcodes, and the same Xd across
@@ -54,8 +54,8 @@ std::optional<uintptr_t> decodeFootprint(FixupForm, std::span<const uint8_t> foo
 // FixedVMPoolExecutableAllocator::islandForJumpLocation builds for any pool size.
 bool footprintReaches(FixupForm, std::span<const uint8_t> footprint, uintptr_t footprintAddress, uintptr_t expected);
 // Whether every fixup of the code at start, up to its linked size, decodes as its form to the resolution of its target in
-// the context: at capture, after preparation patches, and on each side of the twin check's decodes. Fixups is a
-// Vector<ImageFixup> or an ImageFixupArray, in footprint order.
+// the context, on each side of the twin check's decodes. Fixups is a Vector<ImageFixup> or an ImageFixupArray, in
+// footprint order.
 template<typename Fixups>
 bool fixupsReachTargets(const void* start, size_t linkedSize, const Fixups&, const ResolutionContext&);
 

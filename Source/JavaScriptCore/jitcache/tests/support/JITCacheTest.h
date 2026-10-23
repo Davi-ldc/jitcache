@@ -13,10 +13,11 @@ namespace JSC {
 class VM;
 } // namespace JSC
 
-// The C++ test framework of testjitcache. A test is a function registered by name, with a flag saying whether it needs a
-// VM and the JSC options its process needs, and it fails through a macro that records a message. The options string is a
-// space-separated list of --name=value JSC options; tests with the same string share a process. tests/testjitcache.cpp
-// defines the members below and the registry the registrations fill.
+// The C++ test framework of testjitcache. A test is a function registered by name, with a flag saying whether it needs
+// a VM, the JSC options its process needs and the file that registers it, and it fails through a macro that records a
+// message. The options string is a space-separated list of --name=value JSC options. The test's part is the directory
+// under jitcache/tests/ that holds its file, and the tests of one part with the same options string share a process.
+// tests/testjitcache.cpp defines the members below and the registry the registrations fill.
 
 namespace JSC::JITCache::Tests {
 
@@ -39,14 +40,14 @@ private:
 using TestFunction = void (*)(TestContext&);
 
 struct TestRegistration {
-    TestRegistration(ASCIILiteral name, NeedsVM, ASCIILiteral options, TestFunction);
+    TestRegistration(ASCIILiteral name, NeedsVM, ASCIILiteral options, ASCIILiteral file, TestFunction);
 };
 
 } // namespace JSC::JITCache::Tests
 
 #define JITCACHE_TEST_WITH_OPTIONS(name, needsVM, options) \
     static void name(JSC::JITCache::Tests::TestContext&); \
-    static JSC::JITCache::Tests::TestRegistration name##Registration { #name ""_s, JSC::JITCache::Tests::NeedsVM::needsVM, options ""_s, name }; \
+    static JSC::JITCache::Tests::TestRegistration name##Registration { #name ""_s, JSC::JITCache::Tests::NeedsVM::needsVM, options ""_s, __FILE__ ""_s, name }; \
     static void name(JSC::JITCache::Tests::TestContext& context)
 #define JITCACHE_TEST(name, needsVM) JITCACHE_TEST_WITH_OPTIONS(name, needsVM, "")
 #define JITCACHE_CHECK(condition) \

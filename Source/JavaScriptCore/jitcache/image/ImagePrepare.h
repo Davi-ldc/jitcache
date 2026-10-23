@@ -2,11 +2,10 @@
 
 #if ENABLE(JIT)
 
-#include "BakedFacts.h"
 #include "ExecutableMemoryHandle.h"
-#include "ImageSection.h"
-#include "ImageTypes.h"
-#include <expected>
+#include "jitcache/image/BakedFacts.h"
+#include "jitcache/image/ImageSection.h"
+#include <optional>
 #include <span>
 #include <stdint.h>
 #include <wtf/Noncopyable.h>
@@ -15,9 +14,8 @@
 
 // The preparation of an imported image at install: the image and its MathIC snippets copied once into executable memory,
 // every fixup patched with its form's link writer, and the BaselineJITCode built around them, all private to a
-// PreparedImage until commit. The install glue calls parseImageSections, under strict validateImageSectionsAgainst, then
-// compareBakedFacts (BakedFacts.h), prepareImage and, once every lane's preparation succeeded, PreparedImage::commit, so
-// that a failure anywhere leaves the CB native.
+// PreparedImage until commit. The install glue calls parseImageSections, compareBakedFacts (BakedFacts.h), prepareImage
+// and, once every lane's preparation succeeded, PreparedImage::commit, so that a failure anywhere leaves the CB native.
 
 namespace JSC {
 
@@ -29,19 +27,10 @@ class VM;
 namespace JITCache {
 
 class ProducerBudget;
+class SupportTargetTable;
 
-enum class PrepareOutcome : uint8_t {
-    InvalidMaterial, // ImageCheck::PatchReadBack failed: the patched code does not reach the consumer's resolution of its targets
-    ExecutableMemoryExhausted, // the image or a snippet got no executable memory
-};
-
-struct PrepareFailure {
-    PrepareOutcome outcome;
-    ImageCheck check; // ImageCheck::PatchReadBack for InvalidMaterial, else None
-};
-
-// The wall time of four stages of prepareImage, read from CLOCK_MONOTONIC for the install event when a bench report is
-// open: the executable allocations, the copies of the linked bytes, the resolution and patching of every fixup, and the
+// The wall time of four stages of prepareImage, read from CLOCK_MONOTONIC for the install event when its caller asks:
+// the executable allocations, the copies of the linked bytes, the resolution and patching of every fixup, and the
 // instruction-cache flush.
 struct PrepareTimings {
     uint64_t allocateNanoseconds { 0 };
@@ -59,16 +48,14 @@ public:
     PreparedImage(PreparedImage&&);
     ~PreparedImage();
 
-    // The code commit will return and setup will install, with the producer's molds in mold order. The other lanes'
-    // preparations read it before commit and write nothing to it. Valid until commit or destruction.
-    const BaselineJITCode& code() const;
     // Infallible, and the only step with effects outside the prepared objects: the code-size sample
     // JIT::finalizeOnMainThread takes, the cross-modifying fence, and the reports to PerfLog and GdbJIT under useJITDump
-    // and useGdbJITInfo, as native finalization does. Consumes the object and returns code().
+    // and useGdbJITInfo, as native finalization does. Consumes the object and returns the code setup will install, with
+    // the producer's molds in mold order.
     Ref<BaselineJITCode> commit(VM&, CodeBlock& installing) &&;
 
 private:
-    friend std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict, PrepareTimings*);
+    friend std::optional<PreparedImage> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, SupportTargetTable&, ProducerBudget*, PrepareTimings*);
     PreparedImage(Ref<BaselineJITCode>&&, Ref<ExecutableMemoryHandle>&& imageMemory);
 
     RefPtr<BaselineJITCode> m_code;
@@ -78,14 +65,14 @@ private:
 // Prepares the image on the VM thread, with the API lock and heap access, inside the install function's GC deferral and
 // with no JSC lock held. It allocates no cell and writes nothing to the CB, the UCB or the VM's statistics, so a failure
 // leaves no trace. The UCB is the import's, with the producer's index spaces; it is not const because the MathICs and
-// the UCB targets take its arithmetic profiles through accessors with no const overload. Under strict the glue has
-// already validated the sections; with strict off, debug builds ASSERT the checks against the UCB here. A non-null budget,
+// the UCB targets take its arithmetic profiles through accessors with no const overload. The table is the VM's: it
+// holds the support targets earlier preparations resolved and keeps the ones this one resolves. A non-null budget,
 // given exactly in a ConsumerProducer VM whose production is active, rebuilds the image's record, in twins builds with
-// the twin data of the twins section; a refused charge leaves the image without one, and the budget raises the recording
-// fault. The borrowed payload need live only until the call returns: the prepared image keeps copies of everything it
-// reads. In twins builds the SkipPatch test hook makes it skip its first patch, so ImageCheck::PatchReadBack fails. A non-null
-// timings receives the stages' times; null costs nothing.
-std::expected<PreparedImage, PrepareFailure> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, ProducerBudget*, bool strict, PrepareTimings* = nullptr);
+// the twin data of the twins section; a refused charge leaves the image without one, and the budget raises the
+// recording fault. The borrowed payload need live only until the call returns: the prepared image keeps copies of
+// everything it reads. A non-null timings receives the stages' times; null costs nothing. Returns nullopt when the
+// image or a snippet got no executable memory.
+std::optional<PreparedImage> prepareImage(VM&, UnlinkedCodeBlock&, const ImageSectionsView&, SupportTargetTable&, ProducerBudget*, PrepareTimings* = nullptr);
 
 } // namespace JITCache
 } // namespace JSC

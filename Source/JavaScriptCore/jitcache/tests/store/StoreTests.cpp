@@ -2,9 +2,9 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
-#include "JITCacheParameters.h"
-#include "TestArtifact.h"
-#include "ValidatedBody.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/tests/support/TestPack.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -22,6 +22,9 @@
 namespace JSC::JITCache::Tests {
 
 namespace StoreTestsInternal {
+
+// The summary sections the capture glue's scoring read names.
+static constexpr std::array<SectionKind, 3> scoredKinds { SectionKind::UCBFeedback, SectionKind::CBSummaryBaseline, SectionKind::ICsBaseline };
 
 static bool isEightByteAligned(std::span<const uint8_t> span)
 {
@@ -51,11 +54,6 @@ JITCACHE_TEST(storeNames, No)
         JITCACHE_CHECK(temporaryKindOfFileName(characters) == kind);
     }
     JITCACHE_CHECK(!temporaryKindOfFileName(std::span { "pack" }.first(4)));
-    BodyKey bodyKey = testKey(7);
-    auto digits = bodyKeyHexDigits(bodyKey);
-    JITCACHE_CHECK(bodyKeyFromHex(digits) == bodyKey);
-    digits[0] = 'G';
-    JITCACHE_CHECK(!bodyKeyFromHex(digits));
 }
 
 JITCACHE_TEST(storePackLayoutsRoundTrip, No)
@@ -101,13 +99,6 @@ JITCACHE_TEST(storePackLayoutsRoundTrip, No)
     std::array<uint8_t, packIndexEntryBytes> entryBytes { };
     encodePackIndexEntry(entry, entryBytes);
     JITCACHE_CHECK(decodePackIndexEntry(entryBytes) == entry);
-    PackIndexEntry tombstone;
-    tombstone.key = testKey(2);
-    encodePackIndexEntry(tombstone, entryBytes);
-    auto decodedTombstone = decodePackIndexEntry(entryBytes);
-    JITCACHE_CHECK(decodedTombstone && decodedTombstone->isTombstone());
-    entryBytes[56] = 1; // a tombstone with a commit identifier
-    JITCACHE_CHECK(!decodePackIndexEntry(entryBytes));
 
     auto blockHeader = encodePackIndexBlockHeader({ PackIndexKind::Delta, 256, 0 }, { });
     auto block = decodePackIndexBlockHeader(blockHeader);
@@ -135,8 +126,8 @@ JITCACHE_TEST(storeEmptyPackListsNothing, No)
     OpenedArtifact& artifact = pack->artifact();
     JITCACHE_CHECK(!artifact.indexedBodies());
     JITCACHE_CHECK(!artifact.token(testKey(1)));
-    JITCACHE_CHECK(artifact.open(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Absent);
-    JITCACHE_CHECK(artifact.readSavedSummaries(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Absent);
+    JITCACHE_CHECK(artifact.open(testKey(1)).outcome == StoreOutcome::Absent);
+    JITCACHE_CHECK(artifact.readSavedSummaries(testKey(1), scoredKinds).outcome == StoreOutcome::Absent);
     JITCACHE_CHECK(!packHoldsBodies(pack->cacheFd()));
     auto statistics = artifact.statistics();
     JITCACHE_CHECK(statistics.packBytes == packPrefixBytes + packIndexBlockBytes(0));
@@ -159,7 +150,7 @@ JITCACHE_TEST(storeOtherViewFollowsTheRoot, No)
     if (!first)
         return;
     JITCACHE_CHECK(other->token(testKey(1)) == first->version);
-    BodyOpen opened = other->open(testKey(1), ValidationMode::Full);
+    BodyOpen opened = other->open(testKey(1));
     JITCACHE_CHECK(opened.outcome == StoreOutcome::Found && opened.body && holdsSections(*opened.body, 11));
     JITCACHE_CHECK(opened.bodyBytes == first->fileSize);
 
@@ -168,7 +159,7 @@ JITCACHE_TEST(storeOtherViewFollowsTheRoot, No)
     JITCACHE_CHECK(second && second->version != first->version);
     JITCACHE_CHECK(other->token(testKey(1)) == second->version);
     JITCACHE_CHECK(opened.body && holdsSections(*opened.body, 11));
-    BodyOpen reopened = other->open(testKey(1), ValidationMode::Integrity);
+    BodyOpen reopened = other->open(testKey(1));
     JITCACHE_CHECK(reopened.body && holdsSections(*reopened.body, 12));
     auto statistics = other->statistics();
     JITCACHE_CHECK(statistics.bodies == 1 && statistics.liveBytes < statistics.packBytes);
@@ -219,7 +210,7 @@ JITCACHE_TEST(storeDamagedTrailerFailsWithoutMisreading, No)
         }
         JITCACHE_CHECK(pack->writePackAt(*validEnd - packIndexTrailerBytes, asByteSpan(trailer)));
         for (uint16_t seed : { 2, 1 }) {
-            BodyOpen opened = other->open(testKey(seed), ValidationMode::Full);
+            BodyOpen opened = other->open(testKey(seed));
             JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::pack);
         }
         StoreTesting::setRegistrySharing(false);
@@ -270,7 +261,7 @@ JITCACHE_TEST(storeDamagedRootFailsWithoutMisreading, No)
     JITCACHE_CHECK(pack->writeValidEnd(*firstEnd));
     RefPtr<OpenedArtifact> earlier = pack->takeAnother(context);
     JITCACHE_CHECK(earlier && earlier->token(testKey(1)) == first->version && !earlier->token(testKey(2)));
-    BodyOpen opened = other->open(testKey(1), ValidationMode::Full);
+    BodyOpen opened = other->open(testKey(1));
     JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::pack);
 }
 
@@ -297,9 +288,9 @@ JITCACHE_TEST(storeRootPastAShrunkFileIsDamage, No)
     if (fd >= 0)
         ::close(fd);
     JITCACHE_CHECK(truncated);
-    BodyOpen opened = other->open(testKey(2), ValidationMode::Full);
+    BodyOpen opened = other->open(testKey(2));
     JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::pack);
-    JITCACHE_CHECK(other->open(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Invalid);
+    JITCACHE_CHECK(other->open(testKey(1)).outcome == StoreOutcome::Invalid);
 }
 
 // Bytes a commit wrote past the valid end before it stopped are invisible, and the next commit overwrites them.
@@ -319,7 +310,7 @@ JITCACHE_TEST(storeBytesPastTheValidEndAreInvisible, No)
     auto committed = commitBody(pack->writer(), testKey(2), 32);
     JITCACHE_CHECK(!!committed);
     // The record lands where the failed one began, so the file holds nothing past the new valid end.
-    BodyOpen opened = pack->artifact().open(testKey(2), ValidationMode::Full);
+    BodyOpen opened = pack->artifact().open(testKey(2));
     JITCACHE_CHECK(opened.body && holdsSections(*opened.body, 32));
     JITCACHE_CHECK(committed && pack->validEnd() == validEndBefore + *packRecordExtent(committed->fileSize) + packIndexBlockBytes(1));
     JITCACHE_CHECK(pack->packFileSize() == pack->validEnd());
@@ -337,14 +328,12 @@ JITCACHE_TEST(storeOpenRejectsDamagedBodies, No)
         JITCACHE_FAIL("the commit failed"_s);
         return;
     }
-    // The body's last byte belongs to its last section, which both modes checksum.
+    // The body's last byte belongs to its last section, which open checksums.
     uint64_t bodyEnd = packPrefixBytes + packIndexBlockBytes(0) + packRecordHeaderBytes + committed->fileSize;
     std::array<uint8_t, 1> damage { 0xEE };
     JITCACHE_CHECK(pack->writePackAt(bodyEnd - 1, damage));
-    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
-        BodyOpen opened = pack->artifact().open(testKey(1), mode);
-        JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::checksum);
-    }
+    BodyOpen opened = pack->artifact().open(testKey(1));
+    JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::checksum);
 }
 
 JITCACHE_TEST(storeDamagedIndexMakesReadsInvalid, No)
@@ -367,9 +356,9 @@ JITCACHE_TEST(storeDamagedIndexMakesReadsInvalid, No)
     }
     std::array<uint8_t, 1> damage { 0x5A };
     JITCACHE_CHECK(pack->writePackAt(*latestBlock + packIndexBlockHeaderBytes + 3, damage));
-    BodyOpen opened = other->open(testKey(2), ValidationMode::Integrity);
+    BodyOpen opened = other->open(testKey(2));
     JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::pack);
-    JITCACHE_CHECK(other->open(testKey(1), ValidationMode::Integrity).outcome == StoreOutcome::Invalid);
+    JITCACHE_CHECK(other->open(testKey(1)).outcome == StoreOutcome::Invalid);
     // A new reader rejects the pack at its start.
     StoreTesting::setRegistrySharing(false);
     auto taken = ArtifactRegistry::take(pack->parentFd(), pack->cacheFd(), headerBytes());
@@ -387,22 +376,22 @@ JITCACHE_TEST(storeScoringReadFollowsTheRoot, No)
     if (!other)
         return;
     auto committed = commitBody(pack->writer(), testKey(1), 61);
-    SavedSummaryRead read = other->readSavedSummaries(testKey(1), ValidationMode::Full);
+    SavedSummaryRead read = other->readSavedSummaries(testKey(1), scoredKinds);
     JITCACHE_CHECK(read.outcome == StoreOutcome::Found && read.summaries && committed);
     if (!read.summaries || !committed)
         return;
     auto expected = bodySections(61);
     JITCACHE_CHECK(read.summaries->version() == committed->version && read.summaries->highestTier() == 1);
-    JITCACHE_CHECK(equalSpans(read.summaries->ucbFeedback(), expected->bytes[static_cast<size_t>(SectionKind::UCBFeedback)].span()));
-    JITCACHE_CHECK(equalSpans(read.summaries->cbSummary(), expected->bytes[static_cast<size_t>(SectionKind::CBSummaryBaseline)].span()));
-    JITCACHE_CHECK(equalSpans(read.summaries->ics(), expected->bytes[static_cast<size_t>(SectionKind::ICsBaseline)].span()));
+    JITCACHE_CHECK(equalSpans(read.summaries->section(SectionKind::UCBFeedback), expected->bytes[static_cast<size_t>(SectionKind::UCBFeedback)].span()));
+    JITCACHE_CHECK(equalSpans(read.summaries->section(SectionKind::CBSummaryBaseline), expected->bytes[static_cast<size_t>(SectionKind::CBSummaryBaseline)].span()));
+    JITCACHE_CHECK(equalSpans(read.summaries->section(SectionKind::ICsBaseline), expected->bytes[static_cast<size_t>(SectionKind::ICsBaseline)].span()));
 
     StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::ReadSavedSummaries, EMFILE, std::nullopt });
-    JITCACHE_CHECK(other->readSavedSummaries(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Unavailable);
+    JITCACHE_CHECK(other->readSavedSummaries(testKey(1), scoredKinds).outcome == StoreOutcome::Unavailable);
     StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::Open, EIO, 1 });
-    BodyOpen opened = other->open(testKey(1), ValidationMode::Full);
+    BodyOpen opened = other->open(testKey(1));
     JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.error == EIO);
-    JITCACHE_CHECK(other->open(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Found);
+    JITCACHE_CHECK(other->open(testKey(1)).outcome == StoreOutcome::Found);
 }
 
 // A compaction retires the old pack and renames a new one over it: another view reopens the path at its next read, each
@@ -429,7 +418,7 @@ JITCACHE_TEST(storeRetiredPackReopensAndBodiesOutliveIt, No)
         auto committed = commitBody(pack->writer(), testKey(seed), static_cast<uint8_t>(seed + 100));
         versions[seed - 1] = committed ? committed->version : 0;
     }
-    BodyOpen held = other->open(testKey(5), ValidationMode::Full);
+    BodyOpen held = other->open(testKey(5));
     JITCACHE_CHECK(held.body && holdsSections(*held.body, 5));
 
     auto compacted = pack->writer().compactIfNeeded(false);
@@ -437,7 +426,7 @@ JITCACHE_TEST(storeRetiredPackReopensAndBodiesOutliveIt, No)
     JITCACHE_CHECK(pack->validEnd() == (compacted && *compacted ? (*compacted)->packBytes : 0));
     for (uint16_t seed = 1; seed <= 6; ++seed) {
         JITCACHE_CHECK(other->token(testKey(seed)) == versions[seed - 1]);
-        BodyOpen opened = other->open(testKey(seed), ValidationMode::Full);
+        BodyOpen opened = other->open(testKey(seed));
         JITCACHE_CHECK(opened.body && holdsSections(*opened.body, static_cast<uint8_t>(seed != 5 ? seed + 100 : seed)));
     }
     JITCACHE_CHECK(held.body && holdsSections(*held.body, 5));
@@ -461,7 +450,7 @@ JITCACHE_TEST(storeDeletedPackMissesEveryKey, No)
     JITCACHE_CHECK(pack->writePackAt(packRetiredOffset, asByteSpan(retired)));
     JITCACHE_CHECK(!unlinkat(pack->cacheFd(), ArtifactNames::pack.characters(), 0));
     JITCACHE_CHECK(!other->token(testKey(1)));
-    JITCACHE_CHECK(other->open(testKey(1), ValidationMode::Full).outcome == StoreOutcome::Absent);
+    JITCACHE_CHECK(other->open(testKey(1)).outcome == StoreOutcome::Absent);
     JITCACHE_CHECK(!other->indexedBodies());
 }
 
@@ -492,7 +481,7 @@ JITCACHE_TEST(storeRetiredPackFollowedByAnotherHeadersPackIsGone, No)
             std::array<uint8_t, 1> flipped { static_cast<uint8_t>(anotherDigest[4] ^ 1) };
             JITCACHE_CHECK(pack->writePackAt(20, flipped)); // the digest's fifth byte, which the CRC covers
         }
-        BodyOpen opened = other->open(testKey(1), ValidationMode::Full);
+        BodyOpen opened = other->open(testKey(1));
         if (damaged) {
             JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::pack);
             continue;
@@ -575,29 +564,25 @@ JITCACHE_TEST(storeReadSectionChecksOneSection, No)
     }
     auto analysis = moduleSections->bytes[static_cast<size_t>(SectionKind::UCBAnalysis)].span();
 
-    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
-        uint64_t opens = pack->artifact().statistics().opens;
-        SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis, mode);
-        JITCACHE_CHECK(read.outcome == StoreOutcome::Found && read.pack && equalSpans(read.section, analysis));
-        JITCACHE_CHECK(isEightByteAligned(read.section));
-        SectionRead without = pack->artifact().readSection(plain, SectionKind::UCBAnalysis, mode);
-        JITCACHE_CHECK(without.outcome == StoreOutcome::Found && without.section.empty());
-        SectionRead core = pack->artifact().readSection(plain, SectionKind::UCBCore, mode);
-        JITCACHE_CHECK(core.outcome == StoreOutcome::Found && equalSpans(core.section, bodySections(82)->bytes[static_cast<size_t>(SectionKind::UCBCore)].span()));
-        JITCACHE_CHECK(pack->artifact().readSection(absent, SectionKind::UCBAnalysis, mode).outcome == StoreOutcome::Absent);
-        JITCACHE_CHECK(pack->artifact().statistics().opens == opens + 3);
-    }
+    uint64_t opens = pack->artifact().statistics().opens;
+    SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis);
+    JITCACHE_CHECK(read.outcome == StoreOutcome::Found && read.pack && equalSpans(read.section, analysis));
+    JITCACHE_CHECK(isEightByteAligned(read.section));
+    SectionRead without = pack->artifact().readSection(plain, SectionKind::UCBAnalysis);
+    JITCACHE_CHECK(without.outcome == StoreOutcome::Found && without.section.empty());
+    SectionRead core = pack->artifact().readSection(plain, SectionKind::UCBCore);
+    JITCACHE_CHECK(core.outcome == StoreOutcome::Found && equalSpans(core.section, bodySections(82)->bytes[static_cast<size_t>(SectionKind::UCBCore)].span()));
+    JITCACHE_CHECK(pack->artifact().readSection(absent, SectionKind::UCBAnalysis).outcome == StoreOutcome::Absent);
+    JITCACHE_CHECK(pack->artifact().statistics().opens == opens + 3);
 
     // The module body's last byte belongs to its last section, ICsBaseline.
     uint64_t bodyStart = packPrefixBytes + packIndexBlockBytes(0) + packRecordHeaderBytes;
     std::array<uint8_t, 1> damage { 0xEE };
     JITCACHE_CHECK(pack->writePackAt(bodyStart + committed->fileSize - 1, damage));
-    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
-        SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis, mode);
-        JITCACHE_CHECK(read.outcome == StoreOutcome::Found && equalSpans(read.section, analysis));
-        BodyOpen opened = pack->artifact().open(module, mode);
-        JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::checksum);
-    }
+    SectionRead withICsDamaged = pack->artifact().readSection(module, SectionKind::UCBAnalysis);
+    JITCACHE_CHECK(withICsDamaged.outcome == StoreOutcome::Found && equalSpans(withICsDamaged.section, analysis));
+    BodyOpen opened = pack->artifact().open(module);
+    JITCACHE_CHECK(opened.outcome == StoreOutcome::Invalid && opened.failure.check == ContainerChecks::checksum);
 
     // Damage in ucb.analysis itself: its offset in the body is where the writer's layout put it.
     Vector<BodyDirectoryEntry> entries;
@@ -610,11 +595,9 @@ JITCACHE_TEST(storeReadSectionChecksOneSection, No)
     if (analysisEntry == entries.end())
         return;
     JITCACHE_CHECK(pack->writePackAt(bodyStart + analysisEntry->offset + 5, damage));
-    for (auto mode : { ValidationMode::Integrity, ValidationMode::Full }) {
-        SectionRead read = pack->artifact().readSection(module, SectionKind::UCBAnalysis, mode);
-        JITCACHE_CHECK(read.outcome == StoreOutcome::Invalid && read.failure.check == ContainerChecks::checksum && !read.pack);
-        JITCACHE_CHECK(pack->artifact().readSection(module, SectionKind::UCBCore, mode).outcome == StoreOutcome::Found);
-    }
+    SectionRead damagedAnalysis = pack->artifact().readSection(module, SectionKind::UCBAnalysis);
+    JITCACHE_CHECK(damagedAnalysis.outcome == StoreOutcome::Invalid && damagedAnalysis.failure.check == ContainerChecks::checksum && !damagedAnalysis.pack);
+    JITCACHE_CHECK(pack->artifact().readSection(module, SectionKind::UCBCore).outcome == StoreOutcome::Found);
 }
 
 // The delta chain a reader walks when it opens the pack: the producer writes a full index once the chain reaches

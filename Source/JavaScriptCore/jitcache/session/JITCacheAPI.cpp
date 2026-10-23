@@ -1,19 +1,20 @@
 #include "config.h"
-#include "JITCacheAPI.h"
+#include "jitcache/session/JITCacheAPI.h"
 
-#include "ArtifactAccess.h"
-#include "ArtifactStore.h"
-#include "JITCacheBench.h"
-#include "JITCacheBodyEvents.h"
-#include "JITCacheFiles.h"
-#include "JITCacheGlue.h"
-#include "JITCacheOptions.h"
-#include "JITCacheParameters.h"
-#include "JITCachePlatform.h"
-#include "JITCacheVMState.h"
-#include "ProducerBudget.h"
-#include "TwinReport.h"
 #include "VM.h"
+#include "jitcache/base/BenchClock.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/session/JITCacheBench.h"
+#include "jitcache/session/JITCacheTeardown.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ArtifactAccess.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/JITCacheFiles.h"
+#include "jitcache/store/JITCacheOptions.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/store/JITCachePlatform.h"
+#include "jitcache/twins/JITCacheBodyEvents.h"
+#include "jitcache/twins/TwinReport.h"
 #include <expected>
 #include <memory>
 #include <optional>
@@ -24,7 +25,7 @@
 #include <errno.h>
 #endif
 
-// The public interface JITCacheAPI.h declares, apart from delta, which JITCacheCapture.cpp defines, and the per-VM state's
+// The public interface JITCacheAPI.h declares, apart from delta, which Delta.cpp defines, and the per-VM state's
 // lifecycle: start checks the call and the process, reaches the artifact through ArtifactAccess.h and creates the one
 // VMState a configured VM has, and the teardown hooks VM::~VM calls end its production and destroy it.
 // JITCacheVMState.cpp defines the state's members, its constructor and destructor included.
@@ -433,7 +434,6 @@ Status status(VM& vm)
         break;
     }
     result.role = state->role();
-    result.strict = state->strict();
     result.activityOn = state->activityOn();
     result.activityFault = state->activityFault();
     result.production = state->productionState();
@@ -505,7 +505,6 @@ String toJSON(const Status& status)
         json.appendQuotedJSONString(String { name(*status.role) });
     else
         json.append("null"_s);
-    appendBoolean(json, "strict"_s, status.strict);
     appendBoolean(json, "activityOn"_s, status.activityOn);
     appendFault(json, "activityFault"_s, status.activityFault);
     appendString(json, "production"_s, productionStateName(status.production));
@@ -522,9 +521,9 @@ void willDestroyVM(VM& vm)
     VMState* state = vm.jitCacheState();
     if (!state)
         return;
-    // GC is deferred for good and no compilation of the VM runs.
+    // GC is deferred for good and no compilation of the VM runs. The parts that live until now go first.
+    state->destroyParts(VMPartLifetime::UntilVMDestruction);
 #if ENABLE(JITCACHE_TWINS)
-    state->m_imageTwinCheckState.reset();
     state->m_twinReport = nullptr;
 #endif
     if (state->m_benchReport)

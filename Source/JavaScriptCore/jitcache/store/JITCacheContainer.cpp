@@ -1,8 +1,8 @@
 #include "config.h"
-#include "JITCacheContainer.h"
+#include "jitcache/store/JITCacheContainer.h"
 
-#include "ByteFields.h"
-#include "JITCacheSHA256.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/base/JITCacheSHA256.h"
 #include <algorithm>
 #include <bit>
 #include <limits>
@@ -204,9 +204,14 @@ static bool equalOutsideAppRecord(std::span<const uint8_t> a, std::span<const ui
 
 static constexpr std::array<uint8_t, 8> bodyTag { 'J', 'I', 'T', 'C', 'B', 'O', 'D', 'Y' };
 static constexpr uint16_t bodyLayoutVersion = 1;
-// The highest tier a body of this version holds: 0 for a body without an image, which holds the UCB lane's sections alone,
-// and 1 for a baseline capture.
-static constexpr uint8_t maximumBodyTier = 1;
+// The highest tier a body of this version holds, the highest tier of any section kind: 0 for a body without an image,
+// which holds the UCB lane's sections alone, and 1 for a baseline capture.
+static constexpr uint8_t maximumBodyTier = [] {
+    uint8_t tier = 0;
+    for (auto& description : sectionKindDescriptions)
+        tier = std::max(tier, description.tier);
+    return tier;
+}();
 static constexpr size_t envelopeVersionOffset = 8;
 static constexpr size_t envelopeSizeOffset = 10;
 static constexpr size_t envelopeSectionCountOffset = 12;
@@ -373,8 +378,8 @@ static std::optional<ContainerCheck> checkDirectory(std::span<const uint8_t> dir
 }
 
 // container.required, over a directory that passed container.directory in Full mode, so its entries name distinct kinds:
-// the kinds the highest tier requires, plus at most ucb.analysis, which only a module's body may hold. The key is the one
-// container.key found in the envelope.
+// the kinds the highest tier requires, plus at most the ModuleOnly ones, which only a module's body may hold. The key is
+// the one container.key found in the envelope.
 static bool holdsRequiredSections(std::span<const uint8_t> directory, uint8_t highestTier, const BodyKey& key)
 {
     std::array<bool, numberOfSectionKinds> present { };
@@ -385,7 +390,7 @@ static bool holdsRequiredSections(std::span<const uint8_t> directory, uint8_t hi
     }
     for (size_t index = 0; index < numberOfSectionKinds; ++index) {
         auto kind = static_cast<SectionKind>(index);
-        if (kind == SectionKind::UCBAnalysis) {
+        if (sectionKindDescription(kind).presence == SectionPresence::ModuleOnly) {
             if (present[index] && key.identityKind() != IdentityKind::Module)
                 return false;
             continue;
@@ -783,19 +788,17 @@ std::expected<BodyLayout, ContainerCheck> BodyValidationStream::finish()
 }
 
 std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
-    std::span<const uint8_t, 16> headerDigest, ValidationMode mode, std::span<const SectionKind> checksummedKinds)
+    std::span<const uint8_t, 16> headerDigest, std::span<const SectionKind> checksummedKinds)
 {
-    auto envelope = ContainerInternal::checkEnvelope(bytes, bytes.size(), expectedKey, headerDigest, mode);
+    auto envelope = ContainerInternal::checkEnvelope(bytes, bytes.size(), expectedKey, headerDigest, ValidationMode::Integrity);
     if (!envelope)
         return std::unexpected(envelope.error());
     uint64_t framingEnd = ContainerInternal::framingBytesFor(envelope->sectionCount);
     if (framingEnd > bytes.size())
         return std::unexpected(ContainerChecks::directory);
     auto directory = bytes.subspan(bodyEnvelopeBytes, static_cast<size_t>(framingEnd - bodyEnvelopeBytes));
-    if (auto failure = ContainerInternal::checkDirectory(directory, *envelope, mode))
+    if (auto failure = ContainerInternal::checkDirectory(directory, *envelope, ValidationMode::Integrity))
         return std::unexpected(*failure);
-    if (mode == ValidationMode::Full && !ContainerInternal::holdsRequiredSections(directory, envelope->highestTier, expectedKey))
-        return std::unexpected(ContainerChecks::required);
     for (SectionKind kind : checksummedKinds) {
         auto index = ContainerInternal::firstRecordOf(directory, kind);
         if (!index)
@@ -995,11 +998,6 @@ std::expected<PackIndexEntry, PackRejection> decodePackIndexEntry(std::span<cons
         return std::unexpected("a reserved byte of an index entry is not zero"_s);
     PackIndexEntry entry { *key, readField<uint64_t>(bytes, 40), readField<uint64_t>(bytes, 48), readField<uint64_t>(bytes, 56),
         readField<uint32_t>(bytes, 64), readField<uint32_t>(bytes, 68), readField<uint8_t>(bytes, 72) };
-    if (entry.isTombstone()) {
-        if (entry.size || entry.version || entry.llintThreshold || entry.counterProgress || entry.highestTier)
-            return std::unexpected("a tombstone carries a body's fields"_s);
-        return entry;
-    }
     if (entry.offset < packPrefixBytes || entry.offset % packAlignment || !entry.version)
         return std::unexpected("an index entry's offset or commit identifier is malformed"_s);
     return entry;

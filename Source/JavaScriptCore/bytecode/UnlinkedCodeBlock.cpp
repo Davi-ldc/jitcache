@@ -35,11 +35,11 @@
 #include "ClassInfo.h"
 #include "ExecutableInfo.h"
 #include "InstructionStream.h"
-#include "JITCacheBodyEvents.h"
 #include "JSCJSValueInlines.h"
-#include "UCBRequests.h"
 #include "UnlinkedMetadataTableInlines.h"
 #include "UnlinkedModuleProgramCodeBlock.h"
+#include "jitcache/twins/JITCacheBodyEvents.h"
+#include "jitcache/ucb/UCBRequests.h"
 #include <wtf/CompilationThread.h>
 #include <wtf/DataLog.h>
 

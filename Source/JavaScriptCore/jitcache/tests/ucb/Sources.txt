@@ -1,0 +1,11 @@
+jitcache/tests/ucb/UCBAnalysisEncodingTests.cpp
+jitcache/tests/ucb/UCBAnalysisImportTests.cpp
+jitcache/tests/ucb/UCBCodecCellTests.cpp
+jitcache/tests/ucb/UCBCodecChainTests.cpp
+jitcache/tests/ucb/UCBCodecInlineMapTests.cpp
+jitcache/tests/ucb/UCBCodecRoundTripTests.cpp
+jitcache/tests/ucb/UCBEngineTests.cpp
+jitcache/tests/ucb/UCBFeedbackTests.cpp
+jitcache/tests/ucb/UCBKeysTests.cpp
+jitcache/tests/ucb/UCBRegistryTests.cpp
+jitcache/tests/ucb/UCBSectionsTests.cpp

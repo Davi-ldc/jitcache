@@ -83,8 +83,8 @@ typedef Vector<PrintRecord> PrintRecordList;
 namespace JITCache {
 
 // True while --jitcache-test-force-blinding is in effect, so that shouldConsiderBlinding blinds every immediate the
-// assembler considers for blinding. JITCache's ShellFunctions.cpp defines it; the shell sets it before JSC::initialize,
-// before any thread emits code, so the threads that emit read it unlocked.
+// assembler considers for blinding. JITCache's shell/ShellTestFlags.cpp defines it; the shell sets it before
+// JSC::initialize, before any thread emits code, so the threads that emit read it unlocked.
 JS_EXPORT_PRIVATE bool forcesBlindingForTesting();
 
 } // namespace JITCache

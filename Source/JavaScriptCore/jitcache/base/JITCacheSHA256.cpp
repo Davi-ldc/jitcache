@@ -1,5 +1,5 @@
 #include "config.h"
-#include "JITCacheSHA256.h"
+#include "jitcache/base/JITCacheSHA256.h"
 
 #include <algorithm>
 #include <bit>

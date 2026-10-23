@@ -1,11 +1,5 @@
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
-// jitcache-runs: Producer
+// jitcache-runs: 8x Producer
+// jitcache-fixture: passes
 
 // Each pair of forms that JavaScript cannot tell apart describes alike, so every sequence passes.
 // Sequence k makes its Producer run and the oracle's Off run differ in one such way, and the oracle compares their

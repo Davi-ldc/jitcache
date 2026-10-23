@@ -3,17 +3,16 @@
 // the same in every role. A test calls ucbTest(role, scratch, artifact, sequence) inside its main function and keeps the
 // context only there. Bun-hosted tests use resources/ucb-bun.js instead.
 //
-// The context reads JITCache's state only in a run that configures JITCache and only through the helpers a twins build
-// registers: $vm.jitCacheUCBStatistics and the jitcache* shell functions, the latter through the wrappers of
-// ../../resources/jitcache.js. In a plain build, and under the Off role, every reader returns null and the assertions
-// about JITCache's state are skipped. The one exception is events(), whose counts describe native behavior and so serve
-// every role of a twins build.
+// The context reads JITCache's state only in a run that configures JITCache and only through the jitcache* shell
+// functions a twins build registers: jitcacheUCBStatistics, jitcacheProgress, jitcacheBodyKey and
+// jitcacheRewriteSection directly, the others through the wrappers of ../../resources/jitcache.js. In a plain build,
+// and under the Off role, every reader returns null and the assertions about JITCache's state are skipped. The one
+// exception is events(), whose counts describe native behavior and so serve every role of a twins build.
 var ucbTest = (function () {
     "use strict";
 
     // The shared wrappers. Their file defines no global, so ucbTest stays the one global this file adds.
     const shared = load("../../resources/jitcache.js", "caller relative");
-    const hasStatistics = typeof $vm === "object" && $vm !== null && typeof $vm.jitCacheUCBStatistics === "function";
     const hasShellFunctions = typeof jitcacheBodyKey === "function";
 
     function valueAt(object, path)
@@ -81,8 +80,8 @@ var ucbTest = (function () {
             this.produces = role === "Producer" || role === "ConsumerProducer";
             this.imports = role === "Consumer" || role === "ConsumerProducer";
             // Reads of JITCache's state: only with JITCache configured and in a twins build.
-            this.observes = this.configured && hasStatistics;
             this.twins = this.configured && hasShellFunctions;
+            this.observes = this.twins;
         }
 
         check(condition, message)
@@ -93,12 +92,12 @@ var ucbTest = (function () {
 
         statistics()
         {
-            return this.observes ? $vm.jitCacheUCBStatistics() : null;
+            return this.observes ? jitcacheUCBStatistics() : null;
         }
 
         verifyRegistry()
         {
-            return this.observes ? $vm.jitCacheUCBStatistics({ verifyRegistry: true }).registryViolations : null;
+            return this.observes ? jitcacheUCBStatistics({ verifyRegistry: true }).registryViolations : null;
         }
 
         // Every test ends here: after a full collection, the registry holds no entry for a dead cell and every child UFE

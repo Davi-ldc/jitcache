@@ -4,7 +4,7 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
-#include "UCBKeys.h"
+#include "jitcache/ucb/UCBKeys.h"
 
 namespace JSC {
 
@@ -29,7 +29,7 @@ using TwinReportSink = TwinReport; // as TwinReport.h names it
 // core and its string constants, the parse fields, the declaration order, the feedback, the children and the constant
 // cells.
 void verifyImport(const RequestState&, UnlinkedCodeBlock& imported, const ValidatedBody&, TwinReportSink&);
-// An attach; holder as coreDigestOf takes it.
+// An attach. holder is the UFE whose slot holds a function UCB, and null for any other.
 void verifyMatched(UnlinkedCodeBlock&, const UnlinkedFunctionExecutable* holder, const ValidatedBody&, TwinReportSink&);
 // A root digest taken from builtin metadata or a provider equals the digest of its text.
 void verifySuppliedDigest(const SourceCode& rootSource, const RootSourceDigest&, TwinReportSink&);

@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 // The runner's self-tests. A fixture case runs Tools/Scripts/run-jitcache-tests on one fixture of this directory and
-// compares the outcome the runner records in its results with the fixture's claim: a fixture that must pass passes, and
-// one that must fail fails with exactly the failures listed, by sequence, attempt, run and check, and with no other.
-// Other cases drive processes of their own: the runner's calibration with heap probes that never move, testjitcache's
-// command line and its twin-report lines, the determinism of the end-of-run description, and the pin comparison of a
-// build with itself, with the crafted output pairs of pin-compare-tests.ts. Every fixture of this directory has a case.
+// compares the outcome the runner records in its results with what the fixture's jitcache-fixture lines declare: a
+// fixture that must pass passes, one that must be skipped is skipped for the reason given, and one that must fail fails
+// with exactly the failures listed, by sequence, attempt, run and check, and with no other. Other cases drive processes
+// of their own: the runner's calibration with heap probes that never move, testjitcache's command line and its
+// twin-report lines, the determinism of the end-of-run description, and the pin comparison of a build with itself, with
+// the crafted output pairs of pin-compare-tests.ts. Every fixture of this directory declares its outcome.
 //
 //   bun JSTests/jitcache/integrator/runner/self-test.ts --build=<twins WebKit build directory>
 //       [--plain-build=<plain WebKit build directory>] [--jobs=<n>] [--timeout=<seconds>] [--qemu-cpu=<model>]
@@ -13,116 +14,37 @@
 // The placement case and the pin cases run on each architecture by naming that architecture's builds, such as those
 // bun build.ts twins --arch=aarch64 and bun build.ts --arch=aarch64 made, whose processes run under QEMU. The pin
 // comparison's plain half needs --plain-build and is skipped without it.
+//
+// The self-tests hold the machine lock (Tools/Scripts/jitcache/lock.ts) for their whole run, and the runners they start
+// skip it. Up to --jobs cases run at once, so a case that runs work of its own in parallel gets the --jobs width only
+// when it is the one case selected, and otherwise runs that work one process at a time.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import {
-  type Build,
-  Launcher,
-  type ProcessEnd,
-  StackSizes,
-  describeEnd,
-  loadBuild,
-  readText,
-  repositoryRoot,
-  runProcess,
-} from "../../../../Tools/Scripts/jitcache/build.ts";
-import { type PinSetup, comparePinOptionSet, oracleOptionSets } from "../../../../Tools/Scripts/jitcache/oracle.ts";
-import { type CommandContext, MalformedScript, type Script, corpusRoot, jscArguments, parseScript } from "../../../../Tools/Scripts/jitcache/scripts.ts";
+import { basename, join } from "node:path";
+import { repositoryRoot } from "../../../../Tools/Scripts/jitcache/env.ts";
+import { type Build, Launcher, type ProcessEnd, StackSizes, describeEnd, loadBuild, readText, runProcess } from "../../../../Tools/Scripts/jitcache/launcher.ts";
+import { holdMachineLock } from "../../../../Tools/Scripts/jitcache/lock.ts";
+import { oracleOptionSets } from "../../../../Tools/Scripts/jitcache/oracle.ts";
+import { type PinSetup, comparePinOptionSet } from "../../../../Tools/Scripts/jitcache/pin.ts";
+import { type CommandContext, type Fixture, MalformedScript, corpusRoot, jscArguments, parseScript, selectScripts } from "../../../../Tools/Scripts/jitcache/scripts.ts";
 import { runCraftedPinTests } from "./pin-compare-tests.ts";
 
 const fixtures = import.meta.dirname;
 const runner = join(repositoryRoot, "Tools/Scripts/run-jitcache-tests");
 
-interface Expected {
-  sequence: number | null; // null for a failure of the script as a whole
-  run: number | null;
-  check: string;
-  attempt?: number; // 2 for a sequence the runner repeated after a heap coincidence
-}
+// The fixtures of this directory, its .js and .mjs files. The runner runs one only when a test path names its file.
+const fixtureFiles = () => readdirSync(fixtures).filter(name => /\.m?js$/.test(name)).sort().map(name => join(fixtures, name));
 
-interface FixtureCase {
-  fixture: string;
-  claim: string;
-  expect: "pass" | Expected[];
-  listed?: RegExp; // a note the runner must list, such as a skip it let pass
-  wide?: boolean; // runs its many sequences with --jobs
-  args?: (context: Context) => string[]; // the runner's options beyond the common ones
-  detail?: RegExp; // what some expected failure's detail says
-}
-
-const fail = (sequence: number, run: number, check: string, attempt = 1): Expected => ({ sequence, run, check, attempt });
-// A failure of a sequence as a whole, which the pin comparison reports.
-const sequenceFail = (sequence: number, check: string): Expected => ({ sequence, run: null, check, attempt: 1 });
 // For the pin cases: this build stands for the pin, and the options given reach this build's side of the comparison
 // alone.
 const againstItself = (...pinOptions: string[]) => (context: Context) => [`--pin=${context.build.directory}`, ...(pinOptions.length ? [`--pin-options=${pinOptions.join(" ")}`] : [])];
-
-const fixtureCases: FixtureCase[] = [
-  { fixture: "oracle-consumer-output.js", claim: "H1: a Consumer that prints differently from its Off run fails", expect: [fail(0, 1, "oracle-output")] },
-  { fixture: "oracle-producer-output.js", claim: "H1: a Producer that prints differently fails", expect: [fail(0, 0, "oracle-output")] },
-  { fixture: "oracle-consumer-producer-output.js", claim: "H1: a ConsumerProducer, followed by a Consumer, that prints differently fails", expect: [fail(0, 1, "oracle-output")] },
-  { fixture: "oracle-heap.js", claim: "H1: a Consumer that leaves a different value reachable from a global binding fails, against oracle0.heap", expect: [fail(0, 1, "oracle-heap")] },
-  { fixture: "oracle-heap-off.js", claim: "H1: the same passes under jitcache-heap: off", expect: "pass" },
-  { fixture: "twin-difference.js", claim: "H1: a twin difference fails the run", expect: [fail(0, 1, "twin-difference")] },
-  { fixture: "twin-skip.js", claim: "H1: a skip fails when concurrent JIT is off in its run and every earlier producing run", expect: [fail(0, 1, "twin-skip")] },
-  { fixture: "twin-skip-concurrent-run.js", claim: "H1: a skip passes when its run has concurrent JIT on", expect: "pass", listed: /skipped integrator test-entry/ },
-  { fixture: "twin-skip-concurrent-producer.js", claim: "H1: a skip passes when an earlier producing run has concurrent JIT on", expect: "pass", listed: /skipped integrator test-entry/ },
-  { fixture: "twin-heap-coincidence.js", claim: "H1: a heap coincidence repeats the sequence once, and fails when it recurs", expect: [fail(0, 1, "twin-coincidence", 2)] },
-  { fixture: "twin-pool-coincidence.js", claim: "H1: an executable-pool coincidence fails at once", expect: [fail(0, 1, "twin-coincidence")] },
-  { fixture: "twin-engine-coincidence.js", claim: "H1: an engine-image coincidence fails at once", expect: [fail(0, 1, "twin-coincidence")] },
-  { fixture: "twin-expected-coincidence.js", claim: "H1: a coincidence jitcache-expect-twin declares passes", expect: "pass" },
-  { fixture: "twin-expected-missing.js", claim: "H1: a declared report that never appears fails the run", expect: [fail(0, 1, "twin-expected")] },
-  { fixture: "sequence-directive.js", claim: "H1: a directive written 1:0 applies to run 0 of the second sequence only, and each run receives its sequence index", expect: "pass" },
-  { fixture: "abort.js", claim: "H1: jitcache-expect-exit accepts an abort; H4: a twin-report line written before an abort() is in the file", expect: "pass" },
-  { fixture: "budget-limit.js", claim: "H1: a Producer whose one-page limit ends production fails without jitcache-expect-fault", expect: [fail(0, 0, "fault")] },
-  { fixture: "budget-limit-declared.js", claim: "H1: it passes with jitcache-expect-fault: 0 budget.limit", expect: "pass" },
-  { fixture: "budget-limit-other-step.js", claim: "H1: it fails when the directive names another step", expect: [fail(0, 0, "fault")] },
-  { fixture: "no-install.js", claim: "H1: a Consumer with no body to install fails", expect: [fail(0, 1, "install")] },
-  { fixture: "no-install-declared.js", claim: "H1: it passes with jitcache-expect-no-install: 1", expect: "pass" },
-  { fixture: "placement.js", claim: "H2: across 50 sequences, placement moves the executable pool, the structure reservation and the heap", expect: "pass", wide: true },
-  {
-    fixture: "describe-differences.js",
-    claim: "H5: each of nine differences JavaScript can reach changes the end-of-run description",
-    expect: Array.from({ length: 9 }, (_, sequence) => fail(sequence, 0, "oracle-heap")),
-  },
-  { fixture: "describe-module-binding.mjs", claim: "H5: one module binding changes the end-of-run description", expect: [fail(0, 0, "oracle-heap")] },
-  { fixture: "describe-alike.js", claim: "H5: pairs alike to JavaScript describe alike", expect: "pass" },
-  { fixture: "describe-explicit-roots.js", claim: "H5: descriptions of explicit roots", expect: "pass" },
-  { fixture: "events-llint.js", claim: "H6: LLInt instruction counts with the baseline JIT off", expect: "pass" },
-  { fixture: "events-baseline.js", claim: "H6: a compiled function adds no LLInt instruction", expect: "pass" },
-  { fixture: "events-optimizing.js", claim: "H6: optimizing compiles, exits, jettisons and reoptimizations match the engine's lines", expect: "pass" },
-  { fixture: "events-dead-body.js", claim: "H6: a dead body's counts stay in the dump's total", expect: "pass" },
-  { fixture: "events-live-bodies.js", claim: "H6: a Producer's dump has a line for each keyed body still alive", expect: "pass" },
-  { fixture: "kill-points.js", claim: "H8: each kill point ends by SIGKILL and leaves its temporaries", expect: "pass" },
-  { fixture: "kill-as-abort.js", claim: "H8: jitcache-expect-exit's abort rejects a kill", expect: [fail(0, 0, "exit")] },
-  { fixture: "kill-not-reached.js", claim: "H8: a kill point the run never reaches leaves exit 0, which kill rejects", expect: [fail(0, 0, "exit")] },
-  {
-    fixture: "pin-allocation.js",
-    claim: "H7: with --pin-options=--forceGCSlowPaths=true the comparison fails at the first block whose inline allocation became a jump to its slow path",
-    expect: [sequenceFail(0, "pin-code")],
-    args: againstItself("--forceGCSlowPaths=true"),
-    detail: /block main:\d+ \((new_object|create_this)\)/,
-  },
-  { fixture: "pin-output.js", claim: "H7: a script whose pin run prints something else fails the sequence", expect: [sequenceFail(0, "pin-output")], args: againstItself("--useDollarVM=false") },
-  { fixture: "pin-output-declared.js", claim: "H7: it passes once it declares jitcache-pin: off", expect: "pass", args: againstItself("--useDollarVM=false") },
-  { fixture: "pin-status.js", claim: "H7: a script whose pin run ends with another status fails the sequence", expect: [sequenceFail(0, "pin-status")], args: againstItself("--useDollarVM=false") },
-  { fixture: "pin-status-declared.js", claim: "H7: it passes once it declares jitcache-pin: off", expect: "pass", args: againstItself("--useDollarVM=false") },
-  {
-    fixture: "pin-crash.js",
-    claim: "H7: a script whose two pin runs both end by a signal fails the sequence as a crash that names both",
-    expect: [sequenceFail(0, "pin-crash")],
-    args: context => [...againstItself()(context), "--extra-options=--useFTLJIT=false"],
-    detail: /this build's run ended by SIG\w+.*; the pin's run ended by SIG\w+/,
-  },
-];
 
 interface Context {
   build: Build;
   plainBuild: Build | null;
   base: string;
-  jobs: number;
+  jobs: number; // the case's width: the processes its own work may run at once
   timeoutSeconds: number;
   qemuCpu: string | null;
   launcher: Launcher;
@@ -177,35 +99,49 @@ function cleanUp(outcome: RunnerOutcome, problems: string[]) {
 const failureKey = (failure: { sequence: number | null; attempt?: number | null; run: number | null; check: string }) =>
   `${failure.sequence === null ? "script" : `sequence ${failure.sequence}, attempt ${failure.attempt ?? 1}`}${failure.run === null ? "" : `, run ${failure.run}`}: ${failure.check}`;
 
-function fixtureCase(spec: FixtureCase): Case {
+// The case of the fixture at path, whose jitcache-fixture lines say what the runner must do with it: the runner runs it
+// alone, with the options those lines add, $BUILD standing for the build under test, and one process at a time unless
+// they ask for the case's width.
+function fixtureCase(path: string, fixture: Fixture): Case {
+  const claim = fixture.outcome === "passes" ? "the runner must pass it"
+    : fixture.outcome === "skipped" ? `the runner must skip it for a reason that matches ${fixture.skipReason}`
+    : `the runner must fail it with exactly ${fixture.failures.map(failureKey).join("; ")}`;
   return {
-    name: spec.fixture.replace(/\.m?js$/, ""),
-    claim: spec.claim,
+    name: basename(path).replace(/\.m?js$/, ""),
+    claim,
     async run(context) {
-      const args = [`--jobs=${spec.wide ? context.jobs : 1}`, ...(spec.args?.(context) ?? []), join(fixtures, spec.fixture)];
-      const outcome = await runRunner(context, spec.fixture, args);
+      const runnerOptions = fixture.runner.map(option => option.replaceAll("$BUILD", context.build.directory));
+      const outcome = await runRunner(context, basename(path), [`--jobs=${fixture.wide ? context.jobs : 1}`, ...runnerOptions, path]);
       const problems: string[] = [];
       const script = outcome.records.find(record => record.kind === "script");
       if (!outcome.resultsPath) problems.push(`the runner wrote no results (${describeEnd(outcome.end)}):\n${outcome.output}`);
       else if (!script) problems.push(`the runner recorded no outcome for the fixture:\n${outcome.output}`);
-      else if (spec.expect === "pass") {
+      else if (fixture.outcome === "passes") {
         if (script.outcome !== "pass") problems.push(`the fixture must pass, and the runner reports ${script.outcome}: ${(script.failures ?? []).map(failureKey).join("; ") || script.reason}`);
+        if (outcome.end.code !== 0) problems.push(`the runner ${describeEnd(outcome.end)}, expected 0`);
+      } else if (fixture.outcome === "skipped") {
+        if (script.outcome !== "skip") problems.push(`the fixture must be skipped, and the runner reports ${script.outcome}: ${(script.failures ?? []).map(failureKey).join("; ")}`);
+        else if (!fixture.skipReason!.test(script.reason)) problems.push(`the runner skipped the fixture because it ${script.reason}, which does not match ${fixture.skipReason}`);
         if (outcome.end.code !== 0) problems.push(`the runner ${describeEnd(outcome.end)}, expected 0`);
       } else {
         const actual = new Set<string>((script.failures ?? []).map(failureKey));
-        const expected = new Set<string>(spec.expect.map(failureKey));
+        const expected = new Set<string>(fixture.failures.map(failureKey));
         for (const key of expected) {
           if (!actual.has(key)) problems.push(`missing the failure ${key}`);
         }
         for (const failure of script.failures ?? []) {
           if (!expected.has(failureKey(failure))) problems.push(`an unexpected failure ${failureKey(failure)}: ${failure.detail}`);
         }
-        if (spec.detail && !(script.failures ?? []).some((failure: { detail: string }) => spec.detail!.test(failure.detail)))
-          problems.push(`no failure's detail matches ${spec.detail}: ${(script.failures ?? []).map((failure: { detail: string }) => failure.detail).join("; ")}`);
+        for (const detail of fixture.details) {
+          if (!(script.failures ?? []).some((failure: { detail: string }) => detail.test(failure.detail)))
+            problems.push(`no failure's detail matches ${detail}: ${(script.failures ?? []).map((failure: { detail: string }) => failure.detail).join("; ")}`);
+        }
         if (outcome.end.code !== 1) problems.push(`the runner ${describeEnd(outcome.end)}, expected 1`);
       }
-      if (spec.listed && !outcome.records.some(record => record.kind === "sequence" && record.notes?.some((note: string) => spec.listed!.test(note)))) {
-        problems.push(`the runner listed no note matching ${spec.listed}`);
+      // A note is listed with a sequence, or in the summary, which holds what the runner skipped.
+      const notes: string[] = outcome.records.flatMap(record => (record.kind === "sequence" ? record.notes ?? [] : record.kind === "summary" ? record.listed ?? [] : []));
+      for (const listed of fixture.lists) {
+        if (!notes.some(note => listed.test(note))) problems.push(`the runner listed no note matching ${listed}`);
       }
       cleanUp(outcome, problems);
       return problems;
@@ -217,7 +153,7 @@ function fixtureCase(spec: FixtureCase): Case {
 // stops before any sequence with an error naming the heap domain.
 const calibrationCase: Case = {
   name: "calibration-fixed-heap-probes",
-  claim: "H1: heap probes that never move stop the runner before any sequence, after a second calibration with WebKitMallocForceEnabled=1",
+  claim: "heap probes that never move stop the runner before any sequence, after a second calibration with WebKitMallocForceEnabled=1",
   async run(context) {
     const outcome = await runRunner(context, "calibration", ["--jobs=1", "--extra-options=--jitcache-test-fixed-heap-probes", join(fixtures, "no-install-declared.js")]);
     const problems: string[] = [];
@@ -239,7 +175,7 @@ const calibrationCase: Case = {
 
 const testjitcacheCase: Case = {
   name: "testjitcache",
-  claim: "H3: --list, group options, a failing check and an unknown option; H4: twin-report lines parse as JSON",
+  claim: "--list, parts, group options, exact test names, a failing check and an unknown option, and twin-report lines that parse as JSON",
   async run(context) {
     const problems: string[] = [];
     const directory = mkdtempSync(join(context.base, "testjitcache-"));
@@ -251,39 +187,52 @@ const testjitcacheCase: Case = {
       const end = await context.launcher.engine(context.build.testjitcache, args, io, null);
       return { end, stdout: readText(io.stdout) ?? "", stderr: readText(io.stderr) ?? "" };
     };
+    const passed = (stdout: string) => [...stdout.matchAll(/^PASS (\S+)$/gm)].map(match => match[1]);
 
-    // --list prints one name<TAB>options line per test, with names unique and options a list of --name=value options.
+    // --list prints one name<TAB>options<TAB>part<TAB>file line per test: each name unique in its part, options a list of
+    // --name=value options, and file the registering file's path from jitcache/, in the part's directory.
     const listing = await testjitcache(["--list"]);
     if (listing.end.code !== 0) problems.push(`testjitcache --list ${describeEnd(listing.end)}`);
-    const listed = new Map<string, string>();
+    const listed = new Map<string, string>(); // the options of each <part>/<name>
     for (const line of listing.stdout.split("\n").filter(Boolean)) {
-      const match = /^([A-Za-z_]\w*)\t(.*)$/.exec(line);
+      const match = /^([A-Za-z_]\w*)\t([^\t]*)\t(\w+)\tjitcache\/tests\/(\w+)\/[^\t]+$/.exec(line);
       if (!match) {
-        problems.push(`--list printed a line that is no name<TAB>options: ${JSON.stringify(line)}`);
+        problems.push(`--list printed a line that is no name<TAB>options<TAB>part<TAB>file: ${JSON.stringify(line)}`);
         continue;
       }
-      if (listed.has(match[1])) problems.push(`--list names ${match[1]} twice`);
-      if (match[2] && !match[2].split(" ").every(option => /^--\w+=\S*$/.test(option))) problems.push(`${match[1]}'s options are no list of --name=value options: ${match[2]}`);
-      listed.set(match[1], match[2]);
+      const [, name, options, part, directoryOfFile] = match;
+      if (part !== directoryOfFile) problems.push(`--list puts ${name} in part ${part}, and its file in ${directoryOfFile}`);
+      if (listed.has(`${part}/${name}`)) problems.push(`--list names ${part}/${name} twice`);
+      if (options && !options.split(" ").every(option => /^--\w+=\S*$/.test(option))) problems.push(`${name}'s options are no list of --name=value options: ${options}`);
+      listed.set(`${part}/${name}`, options);
     }
-    const registered: [string, string][] = [
-      ["integratorHarnessReadsGroupOptions", "--useConcurrentJIT=false --numberOfGCMarkers=1"],
-      ["integratorHarnessDerivesDependentOptions", "--useJIT=false"],
-      ["integratorHarnessReportsAFailingCheck", ""],
-      ["integratorTwinReportLinesParseAsJSON", ""],
+    const registered: [string, string, string][] = [
+      ["harness", "integratorHarnessReadsGroupOptions", "--useConcurrentJIT=false --numberOfGCMarkers=1"],
+      ["harness", "integratorHarnessDerivesDependentOptions", "--useJIT=false"],
+      ["harness", "integratorHarnessReportsAFailingCheck", ""],
+      ["twins", "integratorTwinReportLinesParseAsJSON", ""],
     ];
-    for (const [name, options] of registered) {
-      if (listed.get(name) !== options) problems.push(`--list gives ${name} ${JSON.stringify(listed.get(name))}, expected ${JSON.stringify(options)}`);
+    for (const [part, name, options] of registered) {
+      if (listed.get(`${part}/${name}`) !== options) problems.push(`--list gives ${part}/${name} ${JSON.stringify(listed.get(`${part}/${name}`))}, expected ${JSON.stringify(options)}`);
     }
 
-    // A test registered with options reads them back, and so does the group that turns the JIT off.
-    for (const [name, options] of registered.filter(([name]) => name !== "integratorHarnessReportsAFailingCheck")) {
-      const run = await testjitcache([`--group=${options}`, `--filter=${name}`]);
-      if (run.end.code !== 0 || !run.stdout.includes(`PASS ${name}\n`)) problems.push(`${name} did not pass in its group (${describeEnd(run.end)}):\n${run.stdout}${run.stderr}`);
+    // A test registered with options reads them back, and so does the group that turns the JIT off; --part, --group and
+    // --test select that test alone.
+    for (const [part, name, options] of registered.filter(([, name]) => name !== "integratorHarnessReportsAFailingCheck")) {
+      const run = await testjitcache([`--part=${part}`, `--group=${options}`, `--test=${name}`]);
+      if (run.end.code !== 0 || passed(run.stdout).join() !== name) problems.push(`${part}/${name} did not pass alone in its group (${describeEnd(run.end)}):\n${run.stdout}${run.stderr}`);
     }
+
+    // --test takes a whole name, so a prefix of one selects nothing, and --part selects exactly its part's tests.
+    const prefix = await testjitcache(["--list", "--test=integratorHarness"]);
+    if (prefix.end.code !== 0 || prefix.stdout.trim()) problems.push(`--list --test=integratorHarness ${describeEnd(prefix.end)} and selected ${JSON.stringify(prefix.stdout)}, expected nothing`);
+    const harness = await testjitcache(["--list", "--part=harness"]);
+    const harnessNames = harness.stdout.split("\n").filter(Boolean).map(line => line.split("\t")[0]);
+    const expectedNames = [...listed.keys()].filter(key => key.startsWith("harness/")).map(key => key.slice("harness/".length));
+    if (harness.end.code !== 0 || harnessNames.join() !== expectedNames.join()) problems.push(`--list --part=harness gave ${JSON.stringify(harnessNames)}, expected ${JSON.stringify(expectedNames)}`);
 
     // A failing check prints FAIL, then its file, line and message, and the process exits with 1.
-    const failing = await testjitcache(["--filter=integratorHarnessReportsAFailingCheck"], { ...process.env, JITCACHE_TEST_FAIL_ON_PURPOSE: "integratorHarnessReportsAFailingCheck" });
+    const failing = await testjitcache(["--part=harness", "--test=integratorHarnessReportsAFailingCheck"], { ...process.env, JITCACHE_TEST_FAIL_ON_PURPOSE: "integratorHarnessReportsAFailingCheck" });
     if (failing.end.code !== 1) problems.push(`a failing check left testjitcache ${describeEnd(failing.end)}, expected 1`);
     if (!/^FAIL integratorHarnessReportsAFailingCheck\n {4}\S*HarnessTests\.cpp:\d+: check failed: !failsOnPurpose$/m.test(failing.stdout)) {
       problems.push(`a failing check did not print its file, line and message:\n${failing.stdout}`);
@@ -306,24 +255,17 @@ const testjitcacheCase: Case = {
 
 const determinismCase: Case = {
   name: "describe-determinism",
-  claim: "H5: two Off runs of each integrator JS test write identical end-of-run descriptions",
+  claim: "two Off runs of each integrator JS test write identical end-of-run descriptions",
   async run(context) {
     const problems: string[] = [];
-    const scriptFile = (name: string) => /\.m?js$/.test(name);
-    const paths = [
-      ...readdirSync(join(corpusRoot, "integrator")).filter(scriptFile).map(name => join(corpusRoot, "integrator", name)),
-      ...readdirSync(fixtures).filter(name => scriptFile(name) && name.startsWith("describe-")).map(name => join(fixtures, name)),
-    ];
+    // The integrator's scripts as the runner collects them, without its fixtures, and the description fixtures.
+    const paths = [join(corpusRoot, "integrator"), ...fixtureFiles().filter(path => basename(path).startsWith("describe-"))];
     // The command lines of a twins-mode Off run, without --extra-options and the calibration's environment.
     const commands: CommandContext = { twins: true, extraOptions: [], mallocForceEnabled: false };
     const work: (() => Promise<void>)[] = [];
-    for (const path of paths) {
-      let script: Script;
-      try {
-        script = parseScript(path);
-      } catch (error) {
-        if (!(error instanceof MalformedScript)) throw error;
-        problems.push(`${path} is malformed: ${error.message}`);
+    for (const { path, script } of selectScripts(paths, null)) {
+      if (typeof script === "string") {
+        problems.push(`${path} is malformed: ${script}`);
         continue;
       }
       // A Bun-hosted script's oracle compares its output alone, and it describes roots of its own.
@@ -366,14 +308,10 @@ const determinismCase: Case = {
 // The pin comparison: a build compared with itself finds no difference on the runner's fixtures, the integrator corpus
 // and cb/.
 
-// The directories the pin cases compare. cb/'s Off runs cache ICs, so they print the access stubs' headers, which span
-// lines; no fixture and no integrator script caches one.
-const comparedDirectories = [fixtures, join(corpusRoot, "integrator"), join(corpusRoot, "cb")];
-
-// Their scripts: each directory's own .js and .mjs files, as the runner collects them.
-function comparedScripts(): string[] {
-  return comparedDirectories.flatMap(directory => readdirSync(directory).filter(name => /\.m?js$/.test(name)).map(name => join(directory, name)));
-}
+// The test paths the pin cases compare: each fixture, which a test path names by its file, the integrator corpus and
+// cb/. cb/'s Off runs cache ICs, so they print the access stubs' headers, which span lines; no fixture and no
+// integrator script caches one.
+const comparedPaths = () => [...fixtureFiles(), join(corpusRoot, "integrator"), join(corpusRoot, "cb")];
 
 // Through the runner, in the twins build: --pin names the build itself, and pinOptions reach this build's side alone. The
 // fixtures fail on purpose in other ways; only the comparison's records count here.
@@ -382,7 +320,7 @@ function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
     name,
     claim,
     async run(context) {
-      const outcome = await runRunner(context, name, [`--jobs=${context.jobs}`, ...againstItself(...pinOptions)(context), ...comparedDirectories]);
+      const outcome = await runRunner(context, name, [`--jobs=${context.jobs}`, ...againstItself(...pinOptions)(context), ...comparedPaths()]);
       const problems: string[] = [];
       const comparisons = outcome.records.filter(record => record.kind === "pin");
       if (!comparisons.length) problems.push(`the runner compared no option set with the pin (${describeEnd(outcome.end)}):\n${outcome.output}`);
@@ -398,7 +336,7 @@ function pinSelfCase(name: string, claim: string, pinOptions: string[]): Case {
 // own comparison of each Off option set directly.
 const pinSelfPlainCase: Case = {
   name: "pin-self-plain",
-  claim: "H7: a plain build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference",
+  claim: "a plain build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference",
   skip: context => (context.plainBuild ? null : "no --plain-build names a plain build"),
   async run(context) {
     const build = context.plainBuild!;
@@ -408,13 +346,9 @@ const pinSelfPlainCase: Case = {
     const problems: string[] = [];
     let comparisons = 0;
     const work: (() => Promise<void>)[] = [];
-    for (const path of comparedScripts()) {
-      let script: Script;
-      try {
-        script = parseScript(path);
-      } catch (error) {
-        if (!(error instanceof MalformedScript)) throw error;
-        problems.push(`${path} is malformed: ${error.message}`);
+    for (const { path, script } of selectScripts(comparedPaths(), null)) {
+      if (typeof script === "string") {
+        problems.push(`${path} is malformed: ${script}`);
         continue;
       }
       if (script.host !== "jsc" || script.pinOff !== null) continue;
@@ -439,7 +373,7 @@ const pinSelfPlainCase: Case = {
 
 const pinCraftedCase: Case = {
   name: "pin-compare-crafted",
-  claim: "H7: pin-compare.ts reports the crafted pairs that differ and finds the same code in those that differ only in what canonical code removes",
+  claim: "pin-compare.ts reports the crafted pairs that differ and finds the same code in those that differ only in what canonical code removes",
   run: async () => runCraftedPinTests(),
 };
 
@@ -485,6 +419,7 @@ async function main(argv: string[]): Promise<number> {
     console.error(`self-test.ts: --plain-build names ${plainBuild.directory}, which is no plain ${build.architecture} build`);
     return 2;
   }
+  holdMachineLock();
   const context: Context = {
     build,
     plainBuild,
@@ -495,22 +430,35 @@ async function main(argv: string[]): Promise<number> {
     launcher: new Launcher(build, timeoutSeconds, qemuCpu ?? "max"),
   };
 
+  // Every fixture of this directory declares its outcome, which makes its case, so none sits here untested.
+  const fixtureCases: Case[] = [];
+  const uncovered: string[] = [];
+  for (const path of fixtureFiles()) {
+    try {
+      const { fixture } = parseScript(path);
+      if (fixture) fixtureCases.push(fixtureCase(path, fixture));
+      else uncovered.push(`${basename(path)} declares no jitcache-fixture outcome`);
+    } catch (error) {
+      if (!(error instanceof MalformedScript)) throw error;
+      uncovered.push(`${basename(path)} is malformed: ${error.message}`);
+    }
+  }
+  for (const problem of uncovered) console.log(`FAIL coverage: ${problem}`);
   const cases = [
-    ...fixtureCases.map(fixtureCase),
+    ...fixtureCases,
     calibrationCase,
     testjitcacheCase,
     determinismCase,
-    pinSelfCase("pin-self", "H7: the twins build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference", []),
-    pinSelfCase("pin-self-forced-blinding", "H7: the twins build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference either when this build's side blinds every immediate it considers", ["--jitcache-test-force-blinding"]),
+    pinSelfCase("pin-self", "the twins build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference", []),
+    pinSelfCase("pin-self-forced-blinding", "the twins build compared with itself on the runner's fixtures, the integrator corpus and cb/ finds no difference either when this build's side blinds every immediate it considers", ["--jitcache-test-force-blinding"]),
     pinSelfPlainCase,
     pinCraftedCase,
   ];
-  // Every fixture of this directory belongs to a case, so none sits here untested.
-  const covered = new Set(fixtureCases.map(spec => spec.fixture));
-  const uncovered = readdirSync(fixtures).filter(name => /\.m?js$/.test(name) && !covered.has(name));
-  for (const name of uncovered) console.log(`FAIL coverage: ${name} has no case`);
 
   const selected = cases.filter(test => !filter || filter.test(test.name));
+  // Beside other cases, a case's runner and its pool run one process at a time, so the whole run starts about --jobs
+  // processes at once.
+  if (selected.length > 1) context.jobs = 1;
   let failed = 0;
   await inParallel(selected.map(test => async () => {
     const skip = test.skip?.(context);

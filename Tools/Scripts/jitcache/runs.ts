@@ -1,12 +1,14 @@
 // One invocation of the runner over the corpus and testjitcache. The Session holds what every sequence shares: the
-// mode, the launchers, the twins-mode calibration, the results file and the job pool. Each sequence of a script runs as
-// an attempt in a fresh directory: its runs in order, each checked after it ends (exit, checkers, final statuses, twin
-// reports), then its oracle and, with --pin, the pin comparison. A sequence whose only failure is a heap coincidence
-// runs once more. testjitcache's tests run in groups, one process per options string.
+// mode, the launchers, the twins-mode calibration, the results file, the job pool and the failures counted so far. Each
+// sequence of a script that its cadence lets run runs as an attempt in a fresh directory: its runs in order, each
+// checked after it ends (exit, checkers, final statuses, twin reports), then its oracle and, with --pin, the pin
+// comparison. A sequence whose only failure is a heap coincidence runs once more. cpp.ts runs testjitcache's tests in
+// the same session.
 
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, extname, join, sep } from "node:path";
+import { repositoryPath } from "./env.ts";
 import {
   type Build,
   Launcher,
@@ -21,16 +23,10 @@ import {
   readBytes,
   readText,
   tail,
-} from "./build.ts";
-import {
-  type PinSetup,
-  comparePinOptionSet,
-  describeLeaks,
-  firstDifference,
-  leakedObjects,
-  leaksBeyond,
-  oracleOptionSets,
-} from "./oracle.ts";
+} from "./launcher.ts";
+import { describeLeaks, firstDifference, leakedObjects, leaksBeyond, oracleOptionSets } from "./oracle.ts";
+import { type PinSetup, comparePinOptionSet } from "./pin.ts";
+import { ResultsLog } from "./results.ts";
 import {
   type CommandContext,
   type Role,
@@ -38,27 +34,24 @@ import {
   type Script,
   type SequencePaths,
   type TwinKind,
-  MalformedScript,
   addresses,
   bunInvocation,
   bunOptionProblem,
-  collectScripts,
   concurrentJITOff,
   configuresJITCache,
-  corpusRoot,
   displayPath,
   endsBySignal,
   engineEnvironment,
   expectedExit,
   exitProblem,
-  imports,
   jscArguments,
-  lanes,
-  parseScript,
   produces,
+  selectScripts,
+  selectSequences,
 } from "./scripts.ts";
+import { type Fail, checkStatuses } from "./statuses.ts";
 
-// The runner's command line, which run-jitcache-tests parses; the bench mode reads it too.
+// The runner's command line, which run-jitcache-tests parses; the bench mode and the ladder read it too.
 export interface RunnerOptions {
   build: string;
   bun: string | null;
@@ -73,8 +66,12 @@ export interface RunnerOptions {
   cppOnly: boolean;
   qemuCpu: string | null;
   testPaths: string[];
+  milestone: boolean; // --milestone: the scripts and sequences a milestone cadence marks run too
   bench: boolean; // --bench: measure instead of testing
   benchProcesses: number; // its copies of each sequence
+  benchBreakdowns: boolean; // --bench-breakdowns: every bench process runs with jitCacheBenchBreakdowns
+  ladder: boolean; // --ladder: the whole verification of a twins build
+  plainBuild: string | null; // the plain WebKit build directory of the ladder's plain-mode rung
 }
 
 export class CalibrationError extends Error {}
@@ -91,25 +88,11 @@ export interface Failure {
   detail: string;
 }
 
-// The runner writes each invocation's results as JSON lines under the build root, or in its temporary directory when the
-// build root takes no file. A bench's file names start with "bench-".
-export class ResultsLog {
-  readonly path: string;
-
-  constructor(directory: string, fallback: string, prefix = "") {
-    const name = `${prefix}${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}.jsonl`;
-    try {
-      mkdirSync(directory, { recursive: true });
-      this.path = join(directory, name);
-      appendFileSync(this.path, "");
-    } catch {
-      this.path = join(fallback, name);
-    }
-  }
-
-  write(record: object) {
-    appendFileSync(this.path, `${JSON.stringify(record)}\n`);
-  }
+// A failure the session counted, as the ladder lists it: the file it names, from the repository's root or absolute
+// outside it, or null when it names none, and what failed.
+export interface ReportedFailure {
+  file: string | null;
+  detail: string;
 }
 
 class Pool {
@@ -143,9 +126,11 @@ export class Session implements CommandContext {
   mallocForceEnabled = false;
   private calibrated = false;
   readonly listed: string[] = [];
+  readonly failures: ReportedFailure[] = []; // each failure behind the failed count, with the file it names
   passed = 0;
   failed = 0;
   skipped = 0;
+  awaitingMilestone = 0; // the sequences that did not run for want of --milestone alone
   private keepBase = false;
 
   constructor(readonly options: RunnerOptions, readonly build: Build) {
@@ -236,7 +221,7 @@ export class Session implements CommandContext {
 // ---------------------------------------------------------------------------------------------------------------------
 // One attempt at a sequence
 
-export interface Attempt {
+interface Attempt {
   sequence: number;
   attempt: number;
   directory: string;
@@ -318,57 +303,26 @@ async function runAttempt(session: Session, script: Script, k: number, attempt: 
       const leaked = leakedObjects(readText(join(scratch, `${name}.stderr`)) ?? "");
       if (leaked.length) fail(i, "leak", `the run has no oracle, and it leaked ${describeLeaks(leaked)}`);
     }
-    for (const { checker } of script.checks.filter(c => addresses(c.at, k, i))) {
-      const label = `${name}.${basename(checker, extname(checker))}`;
+    // A run's checks each write <run>.<checker>.stdout and .stderr, with a check's index after the checker's name when
+    // the run has several.
+    const checks = script.checks.filter(c => addresses(c.at, k, i));
+    for (const [j, check] of checks.entries()) {
+      const label = `${name}.${basename(check.checker, extname(check.checker))}${checks.length > 1 ? `.${j}` : ""}`;
       const checkerIO = { env: { ...process.env }, cwd: scratch, stdout: join(scratch, `${label}.stdout`), stderr: join(scratch, `${label}.stderr`) };
-      const checked = await session.launcher.host(process.execPath, [checker, join(scratch, `${name}.stdout`), join(scratch, `${name}.stderr`), scratch], checkerIO);
-      if (checked.error || checked.timedOut || checked.code !== 0) fail(i, "checker", `${displayPath(checker)} ${describeEnd(checked)}: ${tail(readText(checkerIO.stderr) || readText(checkerIO.stdout))}`);
+      const checked = await session.launcher.host(process.execPath, [check.checker, join(scratch, `${name}.stdout`), join(scratch, `${name}.stderr`), scratch, ...check.arguments], checkerIO);
+      if (checked.error || checked.timedOut || checked.code !== 0) fail(i, "checker", `${[displayPath(check.checker), ...check.arguments].join(" ")} ${describeEnd(checked)}: ${tail(readText(checkerIO.stderr) || readText(checkerIO.stdout))}`);
     }
     if (!configuresJITCache(run.role)) continue;
     const layout = join(scratch, `${name}.layout`);
     if (session.twins && existsSync(layout)) paths.layouts.push(layout);
     // Bun writes final statuses only in twins mode, and a run that ends by a signal writes none.
-    if (!endsBySignal(expected) && (script.host === "jsc" || session.twins)) checkStatuses(script, k, i, run, readText(join(scratch, `${name}.stderr`)) ?? "", result, fail);
+    if (!endsBySignal(expected) && (script.host === "jsc" || session.twins)) result.faults.set(i, checkStatuses(script, k, i, run, readText(join(scratch, `${name}.stderr`)) ?? "", fail));
     if (session.twins) checkTwinReports(session, script, k, i, runs, scratch, attempt, result, fail);
   }
 
   await runOracle(session, script, k, runs, paths, stacks, result, fail);
   if (comparesWithPin(session, script)) await runPinComparison(session, script, k, attempt, runs, paths, stacks, result, fail);
   return result;
-}
-
-export type Fail = (run: number | null, check: string, detail: string) => void;
-
-// The final statuses a run with JITCache wrote to standard error: each fault they report must be one a directive
-// declares, and a run that imports must install some body unless jitcache-expect-no-install names it.
-export function checkStatuses(script: Script, k: number, i: number, run: RunSpec, stderr: string, result: Attempt, fail: Fail) {
-  const statuses: any[] = [];
-  for (const line of stderr.split("\n")) {
-    if (!line.startsWith('{"jitcache":"status"')) continue;
-    try {
-      statuses.push(JSON.parse(line));
-    } catch {
-      fail(i, "status", `a status line is no JSON: ${line}`);
-    }
-  }
-  if (!statuses.length) {
-    fail(i, "status", "the run wrote no final status");
-    return;
-  }
-  const allowed = new Set(script.faults.filter(f => addresses(f.at, k, i)).map(f => f.step));
-  const reported = new Set<string>();
-  for (const status of statuses) {
-    for (const fault of [status.activityFault, status.productionFault]) {
-      if (!fault || reported.has(fault.step)) continue;
-      reported.add(fault.step);
-      if (!allowed.has(fault.step)) fail(i, "fault", `the status reports ${fault.class} at ${fault.step}, which no directive declares${fault.detail ? `: ${fault.detail}` : ""}`);
-    }
-  }
-  result.faults.set(i, reported);
-  if (imports(run.role) && !script.expectNoInstall.some(at => addresses(at, k, i))) {
-    const installs = statuses.reduce((sum, status) => sum + Number(status.progress?.installs ?? 0), 0);
-    if (!installs) fail(i, "install", `the ${run.role} installed no body`);
-  }
 }
 
 // A run's twin reports, the main VM's and, for Bun, each worker VM's.
@@ -511,11 +465,14 @@ function attemptRecord(script: Script, attempt: Attempt, outcome: string) {
   };
 }
 
-async function runScript(session: Session, script: Script) {
-  const attempts = await Promise.all(script.sequences.map((_, k) => session.pool.run(() => runSequence(session, script, k))));
+// The sequences given are those the script's cadence lets run in this session.
+async function runScript(session: Session, script: Script, sequences: number[]) {
+  const attempts = await Promise.all(sequences.map(k => session.pool.run(() => runSequence(session, script, k))));
   const failures = attempts.flatMap(attempt => attempt.failures);
-  // After the last sequence, every required fault was reported by some run its directive names.
+  // After the last sequence, every required fault was reported by some run its directive names, among the sequences
+  // that ran; a fault whose runs all sit in sequences that did not run is not checked.
   for (const fault of script.faults.filter(f => f.required)) {
+    if (!sequences.some(k => script.sequences[k].some((_, i) => addresses(fault.at, k, i)))) continue;
     const reported = attempts.some(attempt => [...attempt.faults].some(([i, steps]) => addresses(fault.at, attempt.sequence, i) && steps.has(fault.step)));
     if (!reported) {
       const at = `${fault.at.sequence === null ? "" : `${fault.at.sequence}:`}${fault.at.run}`;
@@ -529,12 +486,13 @@ async function runScript(session: Session, script: Script) {
   session.results.write({ kind: "script", script: script.display, outcome: failures.length ? "fail" : "pass", failures });
   if (failures.length) {
     session.failed++;
+    for (const failure of failures) session.failures.push({ file: repositoryPath(script.path), detail: describeFailure(failure) });
     console.log(`FAIL ${script.display}`);
     for (const failure of failures) console.log(`  ${describeFailure(failure)}`);
     for (const attempt of attempts.filter(a => a.failures.length)) console.log(`  sequence ${attempt.sequence}: ${attempt.directory}`);
   } else {
     session.passed++;
-    console.log(`PASS ${script.display}${script.sequences.length > 1 ? ` (${script.sequences.length} sequences)` : ""}`);
+    console.log(`PASS ${script.display}${sequences.length > 1 ? ` (${sequences.length} sequences)` : ""}`);
   }
   for (const attempt of attempts) for (const note of attempt.notes) console.log(`  listed: sequence ${attempt.sequence}: ${note}`);
 }
@@ -549,108 +507,50 @@ function describeFailure(failure: Failure): string {
 
 export async function runScripts(session: Session) {
   const { options } = session;
-  const paths = options.testPaths.length ? options.testPaths : lanes.map(lane => join(corpusRoot, lane));
-  const runnable: Script[] = [];
+  const runnable: { script: Script; sequences: number[] }[] = [];
   let pinScripts = 0;
-  for (const path of collectScripts(paths)) {
-    const display = displayPath(path);
-    if (options.filter && !options.filter.test(display)) continue;
-    let script: Script;
-    try {
-      script = parseScript(path);
-      const problem = bunOptionProblem(script, options.extraOptions);
-      if (problem) throw new MalformedScript(problem);
-    } catch (error) {
-      if (!(error instanceof MalformedScript)) throw error;
-      session.failed++;
-      const failure: Failure = { sequence: null, attempt: null, run: null, role: null, check: "malformed", detail: error.message };
-      session.results.write({ kind: "script", script: display, outcome: "fail", failures: [failure] });
-      console.log(`FAIL ${display}\n  malformed: ${error.message}`);
+  const malformed = (path: string, display: string, detail: string) => {
+    session.failed++;
+    const failure: Failure = { sequence: null, attempt: null, run: null, role: null, check: "malformed", detail };
+    session.results.write({ kind: "script", script: display, outcome: "fail", failures: [failure] });
+    session.failures.push({ file: repositoryPath(path), detail: `malformed: ${detail}` });
+    console.log(`FAIL ${display}\n  malformed: ${detail}`);
+  };
+  for (const { path, display, script } of selectScripts(options.testPaths, options.filter)) {
+    if (typeof script === "string") {
+      malformed(path, display, script);
       continue;
     }
+    const problem = bunOptionProblem(script, options.extraOptions);
+    if (problem) {
+      malformed(path, display, problem);
+      continue;
+    }
+    const cadence = selectSequences(script, { milestone: options.milestone, build: session.build });
     const skip = script.requiresTwins && !session.twins ? "requires twins"
       : script.host === "bun" && !options.bun ? "Bun-hosted, and no --bun names a Bun executable"
       : script.qemuCpu.length && !session.build.emulated ? "declares jitcache-qemu-cpu, so it runs only under QEMU"
-      : null;
+      : cadence.reason;
     if (skip) {
       session.skipped++;
       session.listed.push(`${display}: ${skip}`);
       session.results.write({ kind: "script", script: display, outcome: "skip", reason: skip });
+      if (skip === cadence.reason) session.awaitingMilestone += cadence.awaitingMilestone;
       continue;
     }
+    for (const note of cadence.skipped) session.listed.push(`${display}: ${note}`);
+    session.awaitingMilestone += cadence.awaitingMilestone;
     if (script.host === "jsc") {
       // A script whose Off run cannot run on the pin says why in jitcache-pin, and the comparison lists it.
       if (session.pinSetup && script.pinOff !== null) session.listed.push(`${display}: the pin comparison skips it: ${script.pinOff}`);
       else pinScripts++;
     }
-    runnable.push(script);
+    runnable.push({ script, sequences: cadence.selected });
   }
   if (!runnable.length) return;
   await session.calibrate();
-  await Promise.all(runnable.map(script => runScript(session, script)));
-  // The comparison of the off path with the pin's runs only with --pin.
-  if (pinScripts && !session.pinSetup) session.listed.push(`the pin comparison of ${pinScripts} jsc-hosted scripts: no --pin names the pin's build`);
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// C++ tests
-
-export async function runCppTests(session: Session) {
-  const { build, options } = session;
-  if (!statSync(build.testjitcache, { throwIfNoEntry: false })?.isFile()) {
-    session.listed.push("the C++ tests: the build has no bin/testjitcache, which only twins builds have");
-    return;
-  }
-  const directory = mkdtempSync(join(session.base, "cpp-"));
-  const io = (name: string): ProcessIO => ({ env: { ...process.env }, cwd: directory, stdout: join(directory, `${name}.stdout`), stderr: join(directory, `${name}.stderr`) });
-  // A testjitcache process belongs to no sequence, and no twin check compares its heap with another's, so under QEMU each
-  // draws its guest stack alone.
-  const listing = io("list");
-  const listed = await session.launcher.engine(build.testjitcache, ["--list"], listing, null);
-  if (listed.error || listed.timedOut || listed.code !== 0) {
-    session.failed++;
-    session.keep();
-    console.log(`FAIL testjitcache --list ${describeEnd(listed)}: ${tail(readText(listing.stderr))}`);
-    session.results.write({ kind: "cpp-list", outcome: "fail", detail: describeEnd(listed) });
-    return;
-  }
-  // One "name<TAB>options" line per test; tests with the same options string share a process.
-  const groups = new Map<string, { all: string[]; selected: string[] }>();
-  for (const line of (readText(listing.stdout) ?? "").split("\n")) {
-    if (!line) continue;
-    const tab = line.indexOf("\t");
-    const [name, group] = tab < 0 ? [line, ""] : [line.slice(0, tab), line.slice(tab + 1)];
-    if (!groups.has(group)) groups.set(group, { all: [], selected: [] });
-    groups.get(group)!.all.push(name);
-    if (!options.filter || options.filter.test(name)) groups.get(group)!.selected.push(name);
-  }
-  let index = 0;
-  const selectedGroups = [...groups].filter(([, { selected }]) => selected.length);
-  await Promise.all(selectedGroups.map(([group, { all, selected: names }]) => session.pool.run(async () => {
-    // testjitcache filters by substring, so a group the filter splits runs one process per selected test, which may
-    // also run the tests whose names contain that name.
-    const runs = names.length === all.length ? [[`--group=${group}`]] : names.map(name => [`--group=${group}`, `--filter=${name}`]);
-    const failedTests: string[] = [];
-    const problems: string[] = [];
-    for (const args of runs) {
-      const files = io(`group${index++}`);
-      const end = await session.launcher.engine(build.testjitcache, args, files, null);
-      const output = readText(files.stdout) ?? "";
-      failedTests.push(...[...output.matchAll(/^FAIL (\S+)$/gm)].map(match => match[1]));
-      if (end.error || end.timedOut || end.code !== 0) {
-        const lines = output.split("\n").filter(line => line.startsWith("FAIL ") || line.startsWith("    "));
-        problems.push(`${args.join(" ")} ${describeEnd(end)}${lines.length ? `\n${lines.join("\n")}` : `: ${tail(readText(files.stderr))}`}`);
-      }
-    }
-    session.results.write({ kind: "cpp-group", options: group, tests: names, outcome: problems.length ? "fail" : "pass", failedTests, problems });
-    if (problems.length) {
-      session.failed++;
-      session.keep();
-      console.log(`FAIL testjitcache group "${group}"`);
-      for (const problem of problems) console.log(problem.replace(/^/gm, "  "));
-    } else {
-      session.passed++;
-      console.log(`PASS testjitcache group "${group}" (${names.length} tests)`);
-    }
-  })));
+  await Promise.all(runnable.map(({ script, sequences }) => runScript(session, script, sequences)));
+  // The comparison of the off path with the pin's runs only with --pin. In the ladder, the twins pass runs it or lists
+  // its absence, and the plain pass, which never compares, would only repeat that or contradict it.
+  if (pinScripts && !session.pinSetup && (session.twins || !options.ladder)) session.listed.push(`the pin comparison of ${pinScripts} jsc-hosted scripts: no --pin names the pin's build`);
 }

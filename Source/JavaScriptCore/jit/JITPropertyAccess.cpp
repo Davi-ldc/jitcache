@@ -32,9 +32,6 @@
 #include "CacheableIdentifierInlines.h"
 #include "CodeBlock.h"
 #include "DirectArguments.h"
-#include "ImageEmission.h"
-#include "ImageRecorder.h"
-#include "ImageTypes.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "JSLexicalEnvironment.h"
@@ -44,6 +41,9 @@
 #include "PropertyInlineCache.h"
 #include "SlowPathCall.h"
 #include "ThunkGenerators.h"
+#include "jitcache/image/ImageEmission.h"
+#include "jitcache/image/ImageRecorder.h"
+#include "jitcache/image/ImageTypes.h"
 #include <wtf/ScopedLambda.h>
 
 namespace JSC {
@@ -177,7 +177,7 @@ void JIT::generateGetByValSlowCase(const OpcodeType&, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITGetByValGenerator& gen = m_getByVals[m_getByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emitSlow_op_get_by_val(const JSInstruction* currentInstruction, Vector<SlowCaseEntry>::iterator& iter)
@@ -224,7 +224,7 @@ void JIT::emitSlow_op_get_private_name(const JSInstruction*, Vector<SlowCaseEntr
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITGetByValGenerator& gen = m_getByVals[m_getByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_set_private_brand(const JSInstruction* currentInstruction)
@@ -264,7 +264,7 @@ void JIT::emitSlow_op_set_private_brand(const JSInstruction* currentInstruction,
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPrivateBrandAccessGenerator& gen = m_privateBrandAccesses[m_privateBrandAccessIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_check_private_brand(const JSInstruction* currentInstruction)
@@ -299,7 +299,7 @@ void JIT::emitSlow_op_check_private_brand(const JSInstruction*, Vector<SlowCaseE
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPrivateBrandAccessGenerator& gen = m_privateBrandAccesses[m_privateBrandAccessIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 template<typename Op>
@@ -364,7 +364,7 @@ void JIT::generatePutByValSlowCase(const OpcodeType&, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPutByValGenerator& gen = m_putByVals[m_putByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emitSlow_op_put_by_val(const JSInstruction* currentInstruction, Vector<SlowCaseEntry>::iterator& iter)
@@ -417,7 +417,7 @@ void JIT::emitSlow_op_put_private_name(const JSInstruction*, Vector<SlowCaseEntr
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITPutByValGenerator& gen = m_putByVals[m_putByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_put_getter_by_id(const JSInstruction* currentInstruction)
@@ -535,7 +535,7 @@ void JIT::emitSlow_op_del_by_id(const JSInstruction*, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITDelByIdGenerator& gen = m_delByIds[m_delByIdIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_del_by_val(const JSInstruction* currentInstruction)
@@ -586,7 +586,7 @@ void JIT::emitSlow_op_del_by_val(const JSInstruction*, Vector<SlowCaseEntry>::it
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITDelByValGenerator& gen = m_delByVals[m_delByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_get_by_id_direct(const JSInstruction* currentInstruction)
@@ -626,7 +626,7 @@ void JIT::emitSlow_op_get_by_id_direct(const JSInstruction*, Vector<SlowCaseEntr
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_get_by_id(const JSInstruction* currentInstruction)
@@ -708,7 +708,7 @@ void JIT::emitSlow_op_get_by_id(const JSInstruction*, Vector<SlowCaseEntry>::ite
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emitSlow_op_get_length(const JSInstruction*, Vector<SlowCaseEntry>::iterator& iter)
@@ -717,7 +717,7 @@ void JIT::emitSlow_op_get_length(const JSInstruction*, Vector<SlowCaseEntry>::it
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_get_by_id_with_this(const JSInstruction* currentInstruction)
@@ -762,7 +762,7 @@ void JIT::emitSlow_op_get_by_id_with_this(const JSInstruction*, Vector<SlowCaseE
     JITGetByIdWithThisGenerator& gen = m_getByIdsWithThis[m_getByIdWithThisIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_put_by_id(const JSInstruction* currentInstruction)
@@ -813,7 +813,7 @@ void JIT::emitSlow_op_put_by_id(const JSInstruction*, Vector<SlowCaseEntry>::ite
     JITPutByIdGenerator& gen = m_putByIds[m_putByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_in_by_id(const JSInstruction* currentInstruction)
@@ -853,7 +853,7 @@ void JIT::emitSlow_op_in_by_id(const JSInstruction*, Vector<SlowCaseEntry>::iter
     JITInByIdGenerator& gen = m_inByIds[m_inByIdIndex++];
     gen.generateDataICSlowPath(*this);
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_in_by_val(const JSInstruction* currentInstruction)
@@ -898,7 +898,7 @@ void JIT::emitSlow_op_in_by_val(const JSInstruction*, Vector<SlowCaseEntry>::ite
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITInByValGenerator& gen = m_inByVals[m_inByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emitHasPrivate(VirtualRegister dst, VirtualRegister base, VirtualRegister propertyOrBrand, AccessType type)
@@ -935,7 +935,7 @@ void JIT::emitHasPrivateSlow(AccessType type, Vector<SlowCaseEntry>::iterator& i
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITInByValGenerator& gen = m_inByVals[m_inByValIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_has_private_name(const JSInstruction* currentInstruction)
@@ -1934,7 +1934,7 @@ void JIT::emitSlow_op_get_by_val_with_this(const JSInstruction*, Vector<SlowCase
     ASSERT(BytecodeIndex(m_bytecodeIndex.offset()) == m_bytecodeIndex);
     JITGetByValWithThisGenerator& gen = m_getByValsWithThis[m_getByValWithThisIndex++];
     linkAllSlowCases(iter);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
 }
 
 void JIT::emit_op_get_property_enumerator(const JSInstruction* currentInstruction)

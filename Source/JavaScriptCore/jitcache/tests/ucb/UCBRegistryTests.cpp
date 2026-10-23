@@ -5,22 +5,22 @@
 #include "CodeBlock.h"
 #include "CodeCache.h"
 #include "FunctionExecutable.h"
-#include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "ParserError.h"
 #include "SourceCode.h"
-#include "SourceProvider.h"
 #include "StrongInlines.h"
-#include "TestArtifact.h"
-#include "TestVM.h"
-#include "UCBRegistry.h"
-#include "UCBTestSupport.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedProgramCodeBlock.h"
-#include "ValidatedBody.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestPack.h"
+#include "jitcache/tests/support/TestVM.h"
+#include "jitcache/tests/ucb/UCBTestFixtures.h"
+#include "jitcache/tests/ucb/UCBTestPart.h"
+#include "jitcache/ucb/UCBRegistry.h"
 #include <optional>
 #include <span>
 #include <wtf/Function.h>
@@ -31,16 +31,16 @@
 // Tests of UCBRegistry.h and UCBRegistry.cpp: the per-VM registry that records each UCB's key and the holder that keeps
 // it, gives the children of one record a shared ParentIdentity and a root its own identity, stamps the index token an
 // import missed and the commit identifier it matched, keeps one pending import per UCB until the install glue resolves
-// it, remembers the providers whose supplied digest an import verified, counts and copies its records, and forgets a UCB,
-// a child or a holder when the engine destroys it. Each test uses a registry of its own, so the VM's registry and
-// statistics stay untouched, and calls the destructor callbacks itself on cells it keeps alive.
+// it, counts and copies its records, and forgets a UCB, a child or a holder when the engine destroys it. Each test uses a
+// registry of its own, so the VM's registry and statistics stay untouched, and calls the destructor callbacks itself on
+// cells it keeps alive.
 
 namespace JSC::JITCache::Tests {
 
 namespace UCBRegistryTestsInternal {
 
 // What a stub's destructor saw: whether it ran, and whether it ran inside a registry's critical section, where the registry
-// must never destroy a pending import or drop a reference to a provider or a ParentIdentity.
+// must never destroy a pending import.
 struct DestructionLog {
     void noteDestruction()
     {
@@ -50,29 +50,6 @@ struct DestructionLog {
 
     bool destroyed { false };
     bool insideRegistryLock { false };
-};
-
-// Stands for the provider whose supplied digest a record, a ParentIdentity or a root's identity keeps.
-class LoggingProvider final : public StringSourceProvider {
-public:
-    static Ref<LoggingProvider> create(DestructionLog& log)
-    {
-        return adoptRef(*new LoggingProvider(log));
-    }
-
-    ~LoggingProvider() final
-    {
-        m_log.noteDestruction();
-    }
-
-private:
-    explicit LoggingProvider(DestructionLog& log)
-        : StringSourceProvider("0"_s, SourceOrigin { }, SourceTaintedOrigin::Untainted, String { }, TextPosition { }, SourceProviderSourceType::Program)
-        , m_log(log)
-    {
-    }
-
-    DestructionLog& m_log;
 };
 
 // A pending import whose body is a test body with no sections; onBodyDestroyed runs first in the body's destructor.
@@ -92,15 +69,15 @@ static Strong<UnlinkedProgramCodeBlock> generateProgram(VM& vm, ASCIILiteral tex
     return Strong<UnlinkedProgramCodeBlock> { vm, codeBlock };
 }
 
-// Whether the registry gives `child` the identity (key, table, index) and the provider through the node every child of one
-// recorded UCB shares, which `sharedParent` keeps from the first child checked.
-static bool hasChildIdentity(const UCBRegistry& registry, const UnlinkedFunctionExecutable& child, ChildTable table, uint32_t index, const BodyKey& key, const SourceProvider* provider, const ParentIdentity*& sharedParent)
+// Whether the registry gives `child` the identity (key, table, index) through the node every child of one recorded UCB
+// shares, which `sharedParent` keeps from the first child checked.
+static bool hasChildIdentity(const UCBRegistry& registry, const UnlinkedFunctionExecutable& child, ChildTable table, uint32_t index, const BodyKey& key, const ParentIdentity*& sharedParent)
 {
     auto identity = registry.identityOf(child);
     auto* childIdentity = identity ? std::get_if<ChildIdentity>(&*identity) : nullptr;
     if (!childIdentity || !childIdentity->parent || childIdentity->table != table || childIdentity->index != index)
         return false;
-    if (childIdentity->parent->key() != key || childIdentity->parent->suppliedDigestProvider() != provider)
+    if (childIdentity->parent->key() != key)
         return false;
     if (!sharedParent)
         sharedParent = childIdentity->parent.get();
@@ -108,14 +85,10 @@ static bool hasChildIdentity(const UCBRegistry& registry, const UnlinkedFunction
 }
 
 // Record, look up and remove in the three maps; a second recordCodeBlock keeps the first record; the children of one
-// record share one ParentIdentity, whose key and provider each child's identityOf returns, and which outlives the record
-// while a child lives and goes with the last child's destructor callback, outside the lock.
+// record share one ParentIdentity, whose key each child's identityOf returns and which outlives the record while a child
+// lives.
 static bool testIdentitiesAndRecords(VM& vm, TestPart& part)
 {
-    // Declared before the registry, which still holds the providers when a check fails and returns.
-    DestructionLog parentProviderLog;
-    DestructionLog rootProviderLog;
-
     auto parent = generateProgram(vm, "function a() { } function b() { } (function c() { }); (function d() { });"_s);
     auto other = generateProgram(vm, "function r() { }"_s);
     if (!part.check(parent && other, "a test program failed to generate"_s))
@@ -128,19 +101,14 @@ static bool testIdentitiesAndRecords(VM& vm, TestPart& part)
 
     UCBRegistry registry;
     BodyKey parentKey = testKey(1);
-    SourceProvider* parentProvider = nullptr;
-    {
-        Ref<LoggingProvider> provider = LoggingProvider::create(parentProviderLog);
-        parentProvider = provider.ptr();
-        if (!part.check(registry.recordCodeBlock(parentCodeBlock, testRecord(parentKey, UCBOrigin::Generated, WTF::move(provider))), "the first recordCodeBlock of a UCB was refused"_s))
-            return false;
-    }
+    if (!part.check(registry.recordCodeBlock(parentCodeBlock, testRecord(parentKey, UCBOrigin::Generated)), "the first recordCodeBlock of a UCB was refused"_s))
+        return false;
     UCBRegistry::Counts counts = registry.counts();
     if (!part.check(counts.children == childCount && !counts.roots && counts.codeBlocks == 1 && !counts.pendingImports, "recordCodeBlock did not record the UCB and one identity per child"_s))
         return false;
     {
         auto view = registry.recordOf(parentCodeBlock);
-        bool isRecorded = view && view->key == parentKey && view->origin == UCBOrigin::Generated && !view->hasPendingImport && view->suppliedDigestProvider == parentProvider;
+        bool isRecorded = view && view->key == parentKey && view->origin == UCBOrigin::Generated && !view->hasPendingImport;
         if (!part.check(isRecorded && !view->missedBodyVersion && !view->matchedBodyVersion, "recordOf does not return the record recordCodeBlock made"_s))
             return false;
     }
@@ -150,10 +118,10 @@ static bool testIdentitiesAndRecords(VM& vm, TestPart& part)
     const ParentIdentity* sharedParent = nullptr;
     auto childrenHaveParentIdentity = [&] {
         return allChildren(parentCodeBlock, [&](const UnlinkedFunctionExecutable& child, ChildTable table, uint32_t index) {
-            return hasChildIdentity(registry, child, table, index, parentKey, parentProvider, sharedParent);
+            return hasChildIdentity(registry, child, table, index, parentKey, sharedParent);
         });
     };
-    if (!part.check(childrenHaveParentIdentity(), "the children of one record do not share one ParentIdentity with its key and provider"_s))
+    if (!part.check(childrenHaveParentIdentity(), "the children of one record do not share one ParentIdentity with its key"_s))
         return false;
 
     // A UCB keeps its first record, and its children the identities that record gave them.
@@ -170,42 +138,33 @@ static bool testIdentitiesAndRecords(VM& vm, TestPart& part)
     registry.unlinkedCodeBlockDestroyed(&parentCodeBlock);
     if (!part.check(!registry.recordOf(parentCodeBlock) && !registry.keyOf(parentCodeBlock) && !registry.counts().codeBlocks, "the UCB destructor callback left its record"_s))
         return false;
-    if (!part.check(registry.counts().children == childCount && childrenHaveParentIdentity() && !parentProviderLog.destroyed, "the ParentIdentity did not outlive its parent's record"_s))
+    if (!part.check(registry.counts().children == childCount && childrenHaveParentIdentity(), "the ParentIdentity did not outlive its parent's record"_s))
         return false;
 
-    // It goes with the last child's destructor callback, after the lock is released.
+    // Each child's destructor callback removes its identity.
     size_t remaining = childCount;
     bool removedOneByOne = allChildren(parentCodeBlock, [&](const UnlinkedFunctionExecutable& child, ChildTable, uint32_t) {
         registry.unlinkedFunctionExecutableDestroyed(&child);
         --remaining;
-        return !registry.identityOf(child) && registry.counts().children == remaining && parentProviderLog.destroyed == !remaining;
+        return !registry.identityOf(child) && registry.counts().children == remaining;
     });
-    if (!part.check(removedOneByOne, "a child destructor callback left its identity, or the ParentIdentity did not go with the last child"_s))
-        return false;
-    if (!part.check(!parentProviderLog.insideRegistryLock, "the last child destructor callback dropped the ParentIdentity under the registry lock"_s))
+    if (!part.check(removedOneByOne, "a child destructor callback left its identity"_s))
         return false;
 
-    // A root: record, look up and remove; its destructor callback drops the provider after the lock is released.
+    // A root: record, look up and remove.
     const UnlinkedFunctionExecutable& root = *other.get()->functionDecl(0);
     Digest256 rootDigest;
     rootDigest.fill(3);
-    SourceProvider* rootProvider = nullptr;
-    {
-        Ref<LoggingProvider> provider = LoggingProvider::create(rootProviderLog);
-        rootProvider = provider.ptr();
-        registry.recordRootExecutable(root, RootIdentity { IdentityKind::FunctionConstructor, rootDigest, WTF::move(provider) });
-    }
+    registry.recordRootExecutable(root, RootIdentity { IdentityKind::FunctionConstructor, rootDigest });
     {
         auto identity = registry.identityOf(root);
         auto* rootIdentity = identity ? std::get_if<RootIdentity>(&*identity) : nullptr;
-        bool isRecorded = rootIdentity && rootIdentity->kind == IdentityKind::FunctionConstructor && rootIdentity->identityDigest == rootDigest && rootIdentity->suppliedDigestProvider == rootProvider;
+        bool isRecorded = rootIdentity && rootIdentity->kind == IdentityKind::FunctionConstructor && rootIdentity->identityDigest == rootDigest;
         if (!part.check(isRecorded && registry.counts().roots == 1, "recordRootExecutable did not record the root's identity"_s))
             return false;
     }
     registry.unlinkedFunctionExecutableDestroyed(&root);
-    if (!part.check(!registry.identityOf(root) && !registry.counts().roots && rootProviderLog.destroyed, "the root destructor callback left its identity or its provider"_s))
-        return false;
-    return part.check(!rootProviderLog.insideRegistryLock, "the root destructor callback dropped its provider under the registry lock"_s);
+    return part.check(!registry.identityOf(root) && !registry.counts().roots, "the root destructor callback left its identity"_s);
 }
 
 // Stamping a missed index token; an attach sets the matched commit identifier; resolvePendingImport with Installed detaches
@@ -297,19 +256,6 @@ static bool testStampsAndPendingImports(VM& vm, TestPart& part)
     return part.check(!bodyLog.insideRegistryLock, "the UCB destructor callback dropped its pending import under the registry lock"_s);
 }
 
-// The verified set holds a provider's SourceID once an import has checked its supplied digest.
-static bool testSuppliedDigests(TestPart& part)
-{
-    UCBRegistry registry;
-    Ref<StringSourceProvider> verified = StringSourceProvider::create("0"_s, SourceOrigin { }, String { }, SourceTaintedOrigin::Untainted);
-    Ref<StringSourceProvider> unverified = StringSourceProvider::create("0"_s, SourceOrigin { }, String { }, SourceTaintedOrigin::Untainted);
-    if (!part.check(!registry.suppliedDigestVerified(verified->asID()), "a provider was verified before markSuppliedDigestVerified"_s))
-        return false;
-    registry.markSuppliedDigestVerified(verified->asID());
-    bool verifiedExactly = registry.suppliedDigestVerified(verified->asID()) && !registry.suppliedDigestVerified(unverified->asID());
-    return part.check(verifiedExactly, "markSuppliedDigestVerified did not verify exactly its provider"_s);
-}
-
 } // namespace UCBRegistryTestsInternal
 
 using namespace UCBRegistryTestsInternal;
@@ -324,12 +270,6 @@ JITCACHE_TEST(ucbRegistryStampsAndPendingImports, Yes)
 {
     TestPart part { context };
     testStampsAndPendingImports(*context.vm(), part);
-}
-
-JITCACHE_TEST(ucbRegistrySuppliedDigestVerification, No)
-{
-    TestPart part { context };
-    testSuppliedDigests(part);
 }
 
 // The registry's walk: the count, a copy of every record with its holder, a copy bounded by its span, and the destructor
@@ -353,8 +293,8 @@ JITCACHE_TEST(runOnceRegistryWalkAndHolders, Yes)
     UCBRegistry registry;
     JITCACHE_CHECK(!registry.recordedCodeBlockCount());
     // Two records naming one holder, as an older UCB a CodeBlock keeps beside the one in the slot would.
-    JITCACHE_CHECK(registry.recordCodeBlock(*calledUCB, testRecord(testKey(1), UCBOrigin::Generated, nullptr, calledHolder)));
-    JITCACHE_CHECK(registry.recordCodeBlock(*constructedUCB, testRecord(testKey(2), UCBOrigin::Generated, nullptr, calledHolder)));
+    JITCACHE_CHECK(registry.recordCodeBlock(*calledUCB, testRecord(testKey(1), UCBOrigin::Generated, calledHolder)));
+    JITCACHE_CHECK(registry.recordCodeBlock(*constructedUCB, testRecord(testKey(2), UCBOrigin::Generated, calledHolder)));
     JITCACHE_CHECK(registry.recordedCodeBlockCount() == 2);
 
     auto copied = [&](size_t capacity) {

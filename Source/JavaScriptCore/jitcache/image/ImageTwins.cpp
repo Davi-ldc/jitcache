@@ -1,5 +1,5 @@
 #include "config.h"
-#include "ImageTwins.h"
+#include "jitcache/image/ImageTwins.h"
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
@@ -7,46 +7,41 @@
 #include "BaselineJITPlan.h"
 #include "BytecodeStructs.h"
 #include "CodeBlock.h"
-#include "CodeSymbolAnchor.h"
 #include "DeferGC.h"
 #include "EvalCodeBlock.h"
 #include "EvalExecutable.h"
 #include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
 #include "GetByIdMetadata.h"
-#include "ImageFootprint.h"
-#include "ImageRecord.h"
-#include "ImageSection.h"
-#include "ImageTwinsSection.h"
 #include "JIT.h"
-#include "JITCacheBench.h"
-#include "JITCacheVMState.h"
 #include "JITCodeMap.h"
 #include "JITMathIC.h"
 #include "JSCInlines.h"
 #include "ModuleProgramCodeBlock.h"
 #include "ModuleProgramExecutable.h"
 #include "Options.h"
-#include "ProducerBudget.h"
 #include "ProgramCodeBlock.h"
 #include "ProgramExecutable.h"
 #include "StrongInlines.h"
 #include "TopExceptionScope.h"
-#include "TwinReport.h"
 #include "UnlinkedCodeBlock.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/base/EngineObject.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/ImageFootprint.h"
+#include "jitcache/image/ImageRecord.h"
+#include "jitcache/image/ImageSection.h"
+#include "jitcache/image/ImageTwinsSection.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/twins/TwinReport.h"
 #include <algorithm>
 #include <array>
-#include <mutex>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/StringPrintStream.h>
 #include <wtf/text/MakeString.h>
-
-#if OS(LINUX)
-#include <link.h>
-#endif
 
 // Besides the declarations of its header, the twin check's steps: creating and compiling the twin from the producer's
 // inputs, replaying its regenerations, and comparing the restored code, tables and MathICs with the twin's, then each
@@ -58,55 +53,12 @@ namespace ImageTwinsInternal {
 
 static constexpr unsigned numberOfRelocationDomains = static_cast<unsigned>(RelocationDomain::Heap) + 1;
 
-// Every object JITCache can tell loaded at its link-time address, and the object holding the engine, read once per
-// process as ImageSupport reads the text segment. Only Linux targets import, so elsewhere both are empty.
-struct LoadedSegment {
-    uintptr_t start { 0 };
-    uintptr_t end { 0 };
-};
-
-struct LoadedObjects {
-    Vector<LoadedSegment> atLinkTimeAddress; // the PT_LOAD segments of every object whose load bias is zero
-    Vector<LoadedSegment> engine; // the PT_LOAD segments of the object holding codeSymbolAnchor
-};
-
-static const LoadedObjects& loadedObjects()
-{
-    static LazyNeverDestroyed<LoadedObjects> objects;
-    static std::once_flag onceFlag;
-    std::call_once(onceFlag, [] {
-        objects.construct();
-#if OS(LINUX)
-        struct Search {
-            uintptr_t anchor;
-            LoadedObjects* objects;
-        } search { reinterpret_cast<uintptr_t>(&codeSymbolAnchor), &objects.get() };
-        dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
-            auto& search = *static_cast<Search*>(data);
-            Vector<LoadedSegment> segments;
-            bool holdsAnchor = false;
-            for (auto& header : unsafeMakeSpan(info->dlpi_phdr, info->dlpi_phnum)) {
-                if (header.p_type != PT_LOAD)
-                    continue;
-                LoadedSegment segment { info->dlpi_addr + header.p_vaddr, info->dlpi_addr + header.p_vaddr + header.p_memsz };
-                holdsAnchor = holdsAnchor || (search.anchor >= segment.start && search.anchor < segment.end);
-                segments.append(segment);
-            }
-            if (!info->dlpi_addr)
-                search.objects->atLinkTimeAddress.appendVector(segments);
-            if (holdsAnchor)
-                search.objects->engine.appendVector(segments);
-            return 0;
-        }, &search);
-#endif
-    });
-    return objects.get();
-}
-
+// Whether the address lies in one of the loaded segments, which loadedObjects lists (EngineObject.h). Only Linux
+// targets import, so elsewhere the lists are empty.
 static bool liesIn(const Vector<LoadedSegment>& segments, uintptr_t address)
 {
     return std::ranges::any_of(segments, [&](const LoadedSegment& segment) {
-        return address >= segment.start && address < segment.end;
+        return segment.contains(address);
     });
 }
 
@@ -130,7 +82,7 @@ static std::optional<RelocationDomain> relocationDomainOf(TargetKind kind, uintp
     case TargetKind::UCBIdentifier:
     case TargetKind::SwitchStringRankAtom:
         // A static StringImpl, such as the empty string's, is data of the engine image.
-        return liesIn(loadedObjects().engine, resolution) ? RelocationDomain::EngineImage : RelocationDomain::Heap;
+        return liesIn(loadedObjects().engineSegments, resolution) ? RelocationDomain::EngineImage : RelocationDomain::Heap;
     case TargetKind::VMAddress:
     case TargetKind::VMCell:
     case TargetKind::UCBConstantCell:
@@ -450,7 +402,7 @@ bool TwinCheck::writeCompileInputs(CodeBlock& twin)
     auto& instructions = twin.instructions();
     for (unsigned index = 0; index < m_twins.header().inputCount; ++index) {
         auto input = m_twins.compileInput(index);
-        // The compile input check put every input at an instruction start of its kind's opcode.
+        // Capture took every input at an instruction start of its kind's opcode.
         if (input.bytecodeOffset >= instructions.size()) {
             difference("compile-inputs"_s, makeString("an input at "_s, input.bytecodeOffset, " lies past the bytecode"_s));
             return false;
@@ -539,8 +491,8 @@ void TwinCheck::checkCodeBlockFacts(CodeBlock& twin)
 bool TwinCheck::replay(CodeBlock& twin, ImageRecord& twinRecord, const TwinData& twinData)
 {
     for (auto& regeneration : twinData.regenerations) {
-        // The structure check made each regeneration name a MathIC with inline code, and the twin lists as many MathICs
-        // as the section.
+        // Recording makes each regeneration name a MathIC with inline code, and the twin lists as many MathICs as the
+        // section.
         if (regeneration.mathICIndex >= twinRecord.mathICs().size() || !twinRecord.mathICs()[regeneration.mathICIndex].slowCallPointerSite) {
             difference("replay"_s, makeString("regeneration of MathIC "_s, regeneration.mathICIndex, " names no MathIC with inline code in the twin"_s));
             return false;
@@ -874,7 +826,7 @@ void TwinCheck::checkRelocation(const ComparedSide& restored)
     bool forcedOperation = false;
     unsigned producerValueIndex = 0;
     auto compare = [&](const ImageFixup& fixup, ASCIILiteral place) {
-        // The structure check gave every fixup a producer value, in the order the fixups are walked here.
+        // Capture writes a producer value for every fixup, in the order the fixups are walked here.
         unsigned valueIndex = producerValueIndex++;
         if (valueIndex >= m_twins.header().producerValueCount)
             return;

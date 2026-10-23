@@ -1,4 +1,5 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
+// jitcache-fixture: fails 0:0 oracle-output
 
 // The Producer prints a line its Off run does not. The oracle compares producers too, so it fails
 // run 0 on its output, and nothing else fails.

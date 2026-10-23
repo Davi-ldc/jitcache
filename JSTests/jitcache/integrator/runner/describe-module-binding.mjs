@@ -1,4 +1,5 @@
 // jitcache-runs: Producer
+// jitcache-fixture: fails 0:0 oracle-heap
 
 // One module binding that differs between the Producer run and the oracle's Off run changes the
 // end-of-run description, which walks the environment of each module record the loader holds. The runner's self-test

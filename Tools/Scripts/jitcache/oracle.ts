@@ -1,23 +1,9 @@
 // What a run is compared with. The oracle is a JITCache-off run of each distinct option set among a sequence's runs that
 // configure JITCache: each of those runs must print what its oracle printed, leak no object its oracle did not, and in
-// twins mode leave the same reachable heap. With --pin, each option set's Off run also runs once on this build and once
-// on the pin's, and pin-compare.ts compares the code the two emitted. runs.ts starts these runs after each attempt's own
-// (runOracle, runPinComparison); the self-tests call comparePinOptionSet directly.
+// twins mode leave the same reachable heap. runs.ts starts these runs after each attempt's own (runOracle), and with
+// --pin the pin comparison of each option set's Off run (pin.ts).
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { type Build, type Launcher, type ProcessIO, type StackSizes, describeEnd, keepingExitStatus, readBytes, readText } from "./build.ts";
-import {
-  type Architecture,
-  type EngineImage,
-  type PinComparison,
-  type RunCapture,
-  compareRuns,
-  loadEngineImage,
-  pinRunOptions,
-  readJITDump,
-} from "./pin-compare.ts";
-import { type CommandContext, type RunSpec, type Script, type SequencePaths, configuresJITCache, engineEnvironment, jscArguments } from "./scripts.ts";
+import { type RunSpec, configuresJITCache } from "./scripts.ts";
 
 // The oracle's option sets, numbered j in this order, each a run's options without the JITCache ones and the runs that
 // configure JITCache with them.
@@ -99,60 +85,3 @@ export function leaksBeyond(leaked: LeakedObject[], oracle: LeakedObject[]): Lea
 
 export const describeLeaks = (leaks: LeakedObject[]) =>
   `${leaks.length} object(s), the first ${leaks[0].bytes} bytes allocated from ${leaks[0].stack.split("\n").slice(0, 8).join(" <- ")}`;
-
-// ---------------------------------------------------------------------------------------------------------------------
-// The pin comparison of one option set
-
-// What the pin comparison starts its two runs with: this build's side and the pin's.
-export interface PinSetup {
-  readonly context: CommandContext;
-  readonly build: Build;
-  readonly launcher: Launcher;
-  readonly pin: Build;
-  readonly pinLauncher: Launcher;
-  readonly pinOptions: string[]; // --pin-options, which this build's side alone takes
-}
-
-// The oracle run's command line without --jitcache-describe-heap, with the comparison's options last, so they override
-// the run's own.
-export function pinArguments(context: CommandContext, script: Script, sequence: number, options: string[], paths: SequencePaths, name: string, comparisonOptions: string[]): string[] {
-  const args = jscArguments(context, script, sequence, "Off", options, paths, name).filter(arg => !arg.startsWith("--jitcache-describe-heap="));
-  // jscArguments ends with <script> -- <role> <scratch> <artifact> <sequence>.
-  args.splice(args.length - 6, 0, ...comparisonOptions);
-  return args;
-}
-
-// Runs option set j of a sequence with this build's jsc and with the pin's, keeping each side's status, output, error and
-// JIT dump as <scratch>/pin<j>.<this|pin>.*, which pin-compare.ts also reads when run alone, and compares them. Each side
-// whose build is a twins build runs with --jitcache-test-no-shell-functions, so its global object has the pin shell's
-// properties; the side's build decides, not the session's mode, because a twins build registers the shell functions in
-// either mode and a plain build rejects the flag. Both sides take the environment of the runs whose leaks the runner
-// judges, where a sanitizer error ends the run by SIGABRT, which compareRuns fails as a crash, and a leak keeps the
-// run's own status.
-export async function comparePinOptionSet(setup: PinSetup, script: Script, sequence: number, options: string[], paths: SequencePaths, j: number, stacks: StackSizes | null): Promise<PinComparison> {
-  const sides = [
-    { side: "this", label: "this build's", build: setup.build, launcher: setup.launcher, extra: setup.pinOptions },
-    { side: "pin", label: "the pin's", build: setup.pin, launcher: setup.pinLauncher, extra: [] as string[] },
-  ];
-  const captures: RunCapture[] = [];
-  for (const { side, label, build, launcher, extra } of sides) {
-    const name = `pin${j}.${side}`;
-    const dumpDirectory = join(paths.scratch, name);
-    mkdirSync(dumpDirectory, { recursive: true }); // PerfLog writes its file there and cannot create the directory
-    const io: ProcessIO = { env: keepingExitStatus(engineEnvironment(setup.context)), cwd: paths.scratch, stdout: join(paths.scratch, `${name}.stdout`), stderr: join(paths.scratch, `${name}.stderr`) };
-    const noShellFunctions = build.twins ? ["--jitcache-test-no-shell-functions"] : [];
-    const args = pinArguments(setup.context, script, sequence, options, paths, name, [...pinRunOptions(dumpDirectory), ...noShellFunctions, ...extra]);
-    const end = await launcher.engine(build.jsc, args, io, stacks);
-    if (end.error || end.timedOut) return { difference: { check: "pin-status", detail: `${label} run ${describeEnd(end)}` }, allocations: 0, bodies: 0 };
-    const status = { code: end.code, signal: end.signal };
-    writeFileSync(join(paths.scratch, `${name}.status`), JSON.stringify(status));
-    captures.push({ status, stdout: readBytes(io.stdout), stderr: readText(io.stderr) ?? "", jitDump: readJITDump(dumpDirectory) });
-  }
-  let engines: [EngineImage, EngineImage];
-  try {
-    engines = [loadEngineImage(setup.build.jsc), loadEngineImage(setup.pin.jsc)];
-  } catch (error) {
-    return { difference: { check: "pin-unreadable", detail: (error as Error).message }, allocations: 0, bodies: 0 };
-  }
-  return compareRuns(setup.build.architecture as Architecture, { capture: captures[0], engine: engines[0] }, { capture: captures[1], engine: engines[1] });
-}

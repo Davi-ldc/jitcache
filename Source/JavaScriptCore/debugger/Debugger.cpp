@@ -26,7 +26,6 @@
 #include "DebuggerCallFrame.h"
 #include "DebuggerScope.h"
 #include "HeapIterationScope.h"
-#include "JITCacheFaults.h"
 #include "JSAsyncFunctionGenerator.h"
 #include "JSCInlines.h"
 #include "JSWebAssemblyModule.h"
@@ -38,6 +37,7 @@
 #include "VMEntryScopeInlines.h"
 #include "VMTrapsInlines.h"
 #include "WasmModuleInformation.h"
+#include "jitcache/session/JITCacheFaults.h"
 #include <atomic>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/ForbidHeapAllocation.h>

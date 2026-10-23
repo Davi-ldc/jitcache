@@ -70,7 +70,6 @@
 #include "Interpreter.h"
 #include "IntlCache.h"
 #include "IntlObject.h"
-#include "JITCacheGlue.h"
 #include "JITCode.h"
 #include "JITOperationList.h"
 #include "JITSizeStatistics.h"
@@ -161,6 +160,7 @@
 #include "Watchdog.h"
 #include "WeakGCMapInlines.h"
 #include "WideningNumberPredictionFuzzerAgent.h"
+#include "jitcache/glue/JITCacheGlue.h"
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/ProcessID.h>
 #include <wtf/ReadWriteLock.h>

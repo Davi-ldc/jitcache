@@ -2,8 +2,8 @@
 
 #if ENABLE(JIT)
 
-#include "ImageSection.h"
-#include "ImageTypes.h"
+#include "jitcache/image/ImageSection.h"
+#include "jitcache/image/ImageTypes.h"
 #include <expected>
 #include <stddef.h>
 #include <stdint.h>
@@ -34,14 +34,6 @@ enum class CaptureOutcome : uint8_t {
     NotEligible,
     // The budget refused a charge and has raised the recording fault itself; the capture stopped.
     ChargeRefused,
-    // A strict check of the capture (ImageCheck::CodeFixupTargets to SideTablePointers) rejected what it read from the
-    // producer's own state.
-    RecordingFault,
-};
-
-struct CaptureFailure {
-    CaptureOutcome outcome;
-    ImageCheck check; // the failed capture check for RecordingFault, else None
 };
 
 // Whether the code carries a record in state Complete, which a record reaches only for shareable code. The glue checks
@@ -70,7 +62,7 @@ public:
 #endif
 
 private:
-    friend std::expected<ImageCapture, CaptureFailure> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&, bool strict);
+    friend std::expected<ImageCapture, CaptureOutcome> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&);
 
     // A mold's identifier as the molds region encodes it: an index into the UCB's identifiers, an ImmortalName, or none.
     struct MoldIdentifier {
@@ -85,9 +77,8 @@ private:
     ImageCapture(BaselineJITCode&, ProducerBudget&, size_t chargedBytes, const ImageSectionHeader&, Vector<MoldIdentifier>&&);
 #endif
 
-    // The offset of a code pointer of the side tables or a MathIC location in the image, which lies inside
-    // [start, start + codeSize]: ImageCheck::SideTablePointers checked it under strict, and JIT::link placed it there
-    // otherwise (debug builds ASSERT).
+    // The offset of a code pointer of the side tables or a MathIC location in the image, which JIT::link placed inside
+    // [start, start + codeSize] (debug builds ASSERT).
     uint32_t imageOffsetOf(const void* location) const;
     // A MathIC's entry in the MathICs region, from its live IC when it has inline code and from the record alone otherwise.
     ImageMathICEntry mathICEntryOf(const MathICRecord&) const;
@@ -106,14 +97,13 @@ private:
 };
 
 // Captures the image, on the VM thread with the API lock and heap access, JS paused and no collector phase, on a
-// BaselineJITCode the caller holds a reference to. It allocates no cell, drains nothing and takes no JSC lock other than
-// JITThunks::m_lock, which the native support lookups of strict's ImageCheck::CodeFixupTargets and SnippetFixupTargets
-// take; every target they resolve already exists. Every byte it allocates is charged to the budget first. When it meets
-// what makes a record Unrecordable (an unknown mold identifier, a MathIC snippet without matching provenance), it marks
-// the record and returns NotEligible; otherwise, under strict, it runs the capture checks, CodeFixupTargets to
-// SideTablePointers. In twins builds it first resolves every fixup for the producer values, and the ChangeRecordedTarget
-// test hook changes the record's first fixup before those checks run.
-std::expected<ImageCapture, CaptureFailure> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&, bool strict);
+// BaselineJITCode the caller holds a reference to. It allocates no cell and drains nothing. Its only JSC lock is
+// JITThunks::m_lock, which twins builds take in the native support lookups that resolve every fixup for the producer
+// values; every target they resolve already exists. Every byte it allocates is charged to the budget first. When it
+// meets what makes a record Unrecordable (an unknown mold identifier, a MathIC snippet without matching provenance), it
+// marks the record and returns NotEligible. It trusts that JIT::link and the MathIC hooks left the side tables and the
+// MathICs as the record says.
+std::expected<ImageCapture, CaptureOutcome> captureImage(VM&, CodeBlock&, BaselineJITCode&, ProducerBudget&);
 
 } // namespace JITCache
 } // namespace JSC

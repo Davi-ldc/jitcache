@@ -1,15 +1,12 @@
 #include "config.h"
-#include "CBState.h"
+#include "jitcache/cb/CBState.h"
 
 #if ENABLE(JIT)
 
 #include "ArrayAllocationProfile.h"
 #include "ArrayProfile.h"
 #include "BaselineJITCode.h"
-#include "ByteFields.h"
 #include "BytecodeIndex.h"
-#include "BytecodeStructs.h"
-#include "CBFormat.h"
 #include "CodeBlock.h"
 #include "DeferGC.h"
 #include "ExecutionCounter.h"
@@ -20,10 +17,10 @@
 #include "Operands.h"
 #include "Options.h"
 #include "SpeculatedType.h"
-#include "StructureID.h"
 #include "ToThisStatus.h"
 #include "VM.h"
 #include "ValueProfile.h"
+#include "jitcache/cb/CBFormat.h"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -31,11 +28,10 @@
 #include <wtf/OptionSet.h>
 #include <wtf/StdLibExtras.h>
 
-// Restoration of a newborn CodeBlock's state from its cb.state section. prepare reads the borrowed section and the CB and
-// writes neither; with strict on it first runs validateState, checks that the CB is newborn and at its link state, and
-// checks the captured counter. seedLinkedState then writes every profile and the tier-up history field by field into the
-// linked CB and runs the realm step, and finishCounter, after native setup, puts the captured counter back and lets the
-// engine's own check re-slice a finite threshold against this process's pool and the VM's startup deferral scale.
+// Restoration of a newborn CodeBlock's state from its cb.state section. prepare lays out the borrowed section and writes
+// nothing. seedLinkedState then writes every profile and the tier-up history field by field into the linked CB and runs
+// the realm step, and finishCounter, after native setup, puts the captured counter back and lets the engine's own check
+// re-slice a finite threshold against this process's pool and the VM's startup deferral scale.
 
 namespace JSC::JITCache {
 
@@ -128,110 +124,14 @@ struct StateArrays {
     const std::span<const uint8_t> branchBits;
 };
 
+#if ASSERT_ENABLED
 // Newborn: no JIT type and no BaselineJITData yet. At both install points the CB was just created, and no cell a marker
 // or compiler thread visits points to it before installCode.
 static bool isNewborn(CodeBlock& codeBlock)
 {
     return codeBlock.jitType() == JITType::None && !codeBlock.baselineJITData();
 }
-
-// An argument profile or a ValueProfileRef, whose prediction reads SpecNone while its table has no predictions.
-template<typename Profile>
-static bool valueProfileIsAtLinkState(const Profile& profile)
-{
-    return profile.prediction() == SpecNone && !profile.numberOfSamples();
-}
-
-// An ArrayProfile is its two StructureID samples, its flags and its modes, with no padding, so comparing its bytes with
-// zero compares exactly those four fields.
-static_assert(sizeof(ArrayProfile) == 2 * sizeof(StructureID) + sizeof(OptionSet<ArrayProfileFlag>) + sizeof(ArrayModes));
-static_assert(!ToThisOK, "the link-state check reads a to_this status at its link state as zero");
-
-// Whether one field of a family is at its link state. An allocation hint's type is checked by the caller, which knows
-// the site.
-template<FamilyKind kind, typename Field>
-static bool familyFieldIsAtLinkState(Field& field)
-{
-    if constexpr (kind == FamilyKind::ArrayProfile)
-        return isAllZero(asByteSpan(field));
-    else if constexpr (kind == FamilyKind::AllocationHint)
-        return !field.vectorLengthHintConcurrently();
-    else if constexpr (kind == FamilyKind::IterationModes)
-        return !CBFormat::iterationModesOf(field);
-    else if constexpr (kind == FamilyKind::EnumeratorModes)
-        return !field;
-    else if constexpr (kind == FamilyKind::ToThisStatus)
-        return field == ToThisOK;
-    else {
-        static_assert(kind == FamilyKind::BranchBit);
-        return !field;
-    }
-}
-
-// The CB is at its link state: every piece is at the value linking gave it, and the tier-up history is zero. It reads the
-// CB in place and allocates nothing. It runs after validateState, which matched each family count with this CB and
-// bounded every op_new_array_buffer's metadata ID by F19's count, so the F19 check below indexes the metadata in range.
-static bool isAtLinkState(CodeBlock& codeBlock)
-{
-    for (const auto& profile : codeBlock.argumentValueProfiles().span()) {
-        if (!valueProfileIsAtLinkState(profile))
-            return false;
-    }
-
-    bool atLinkState = true;
-    CBFormat::forEachMetadataValueProfile(codeBlock, [&](unsigned, const ValueProfileRef& profile) {
-        atLinkState &= valueProfileIsAtLinkState(profile);
-    });
-
-    // A family without a field holds call sites, whose call data the ICs lane checks.
-    unsigned newArrayBufferEntries = 0;
-    CBFormat::forEachFamily([&](auto family) {
-        using FamilyType = decltype(family);
-        if constexpr (FamilyType::hasField) {
-            CBFormat::forEachFamilyField<FamilyType>(codeBlock, [&](auto& field) {
-                atLinkState &= familyFieldIsAtLinkState<FamilyType::kind>(field);
-                if constexpr (FamilyType::index == CBFormat::newArrayBufferFamily)
-                    ++newArrayBufferEntries;
-                else if constexpr (FamilyType::kind == FamilyKind::AllocationHint)
-                    atLinkState &= field.selectIndexingTypeConcurrently() == ArrayWithUndecided;
-            });
-        }
-    });
-
-    // Linking gives each F19 entry its instruction's type. The check reaches the entry through the instruction, as
-    // OpNewArrayBuffer::metadata(CodeBlock*) reaches it.
-    if (newArrayBufferEntries) {
-        CBFormat::forEachNewArrayBufferLiteral(codeBlock, [&](unsigned metadataID, IndexingType recommendedIndexingType) {
-            auto& metadata = codeBlock.metadata<OpNewArrayBuffer::Metadata>(OpNewArrayBuffer::opcodeID, metadataID);
-            atLinkState &= metadata.m_arrayAllocationProfile.selectIndexingTypeConcurrently() == recommendedIndexingType;
-        });
-    }
-
-#if ENABLE(DFG_JIT)
-    codeBlock.lazyValueProfiles().forEachOperandValueProfile([&](const LazyOperandValueProfile&) {
-        atLinkState = false;
-    });
 #endif
-
-    return atLinkState && !codeBlock.optimizationDelayCounter() && !codeBlock.reoptimizationRetryCounter();
-}
-
-// prepare's strict checks, in order: validateState, then that the CB is newborn and at its link state, then the captured
-// counter's invariant.
-static std::optional<CBCheck> strictFailure(std::span<const uint8_t> stateSection, CodeBlock& codeBlock)
-{
-    if (auto check = validateState(stateSection, codeBlock))
-        return check;
-    if (!isNewborn(codeBlock))
-        return CBCheck::StrictNewborn;
-    if (!isAtLinkState(codeBlock))
-        return CBCheck::StrictLinkState;
-    // validateState accepted the header, so the span holds one.
-    auto header = readField<CBFormat::StateHeader>(stateSection, 0);
-    if (!counterObeysNativeInvariant(header))
-        return CBCheck::StrictCounter;
-    return std::nullopt;
-}
 
 // One family field from its record: the array profile and allocation hint through restoreAccumulatedState and
 // restoreHint, which assert that the samples they leave are empty, iterator_close_check's byte narrowed, and every other
@@ -257,27 +157,20 @@ static void seedFamilyField(Field& field, const Record& record)
 
 } // namespace CBImportInternal
 
-std::expected<CBStateImport, CBFault> CBStateImport::prepare(std::span<const uint8_t> stateSection, CodeBlock& codeBlock, bool strict)
+CBStateImport CBStateImport::prepare(std::span<const uint8_t> stateSection)
 {
     using namespace CBImportInternal;
 
-    ASSERT(codeBlock.vm().currentThreadIsHoldingAPILock());
     // The integrator hands every section over 8-byte aligned.
     ASSERT(!(reinterpret_cast<uintptr_t>(stateSection.data()) % CBFormat::sectionAlignment));
     AssertNoGC assertNoGC;
 
-    if (strict) {
-        if (auto check = strictFailure(stateSection, codeBlock))
-            return std::unexpected(CBFault { CBFaultKind::InvalidMaterial, *check });
-    }
-
-    // Normal mode trusts the section. The release assertions keep a span that does not cover the whole section from being
-    // read past its end; with strict on, validateState has already matched the header and the length exactly.
+    // The section is trusted, since the integrator checked its integrity before the lane reads it. The release assertions
+    // keep a span that does not cover the whole section from being read past its end.
     RELEASE_ASSERT(stateSection.size() >= sizeof(CBFormat::StateHeader));
     const auto& header = reinterpretCastSpanStartTo<CBFormat::StateHeader>(stateSection);
     auto layout = CBFormat::stateLayout(header);
     RELEASE_ASSERT(layout && layout->size <= stateSection.size() && layout->size <= std::numeric_limits<uint32_t>::max());
-    ASSERT(layout->size == stateSection.size());
 
     CBStateImport result;
     static_assert(std::is_same_v<decltype(result.m_arrayOffsets), ArrayOffsets>);

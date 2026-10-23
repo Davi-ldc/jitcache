@@ -6,8 +6,8 @@
 // on, every operand the snippet leaves to the slow path (zero, the int32 minimum and every non-number) reaches
 // that operation, which observes it through the IC's profile, and the last phase tiers negate up with what that
 // profile learned. JS can check only the results, so this test also passes when the operation writes its
-// observations into the IC instead; the live-VM check of this path in
-// Source/JavaScriptCore/jitcache/tests/ImageRecordingTests.cpp is the one that reads the profile.
+// observations into the IC instead; the live-VM check of this path, imageNegateProfilesThroughICAfterRegeneration in
+// Source/JavaScriptCore/jitcache/tests/image/ImageNegateTests.cpp, is the one that reads the profile.
 
 function describe(value) {
     if (Object.is(value, -0))

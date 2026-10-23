@@ -1,5 +1,5 @@
 #include "config.h"
-#include "JITCacheTwinsHarness.h"
+#include "jitcache/harness/JITCacheTwinsHarness.h"
 
 #if ENABLE(JITCACHE_TWINS)
 

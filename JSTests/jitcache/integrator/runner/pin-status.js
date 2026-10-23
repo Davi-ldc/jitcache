@@ -1,4 +1,6 @@
 // jitcache-runs: Producer
+// jitcache-fixture: runner --pin=$BUILD --pin-options=--useDollarVM=false
+// jitcache-fixture: fails 0 pin-status
 
 // A script whose pin run ends with another status fails the sequence. Every twins-mode run takes
 // --useDollarVM=true and ends cleanly, except this build's side of the pin comparison when the self-test gives it

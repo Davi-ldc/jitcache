@@ -1,5 +1,6 @@
 // jitcache-runs: Off --useBaselineJIT=false
 // jitcache-check: 0 resources/llint-counts.ts
+// jitcache-fixture: passes
 
 // Body events with the baseline JIT off: a function without branches gains, at each of three calls, as many
 // llintInstructions as its bytecode has instructions, and so does one that calls eval directly; a function whose loop

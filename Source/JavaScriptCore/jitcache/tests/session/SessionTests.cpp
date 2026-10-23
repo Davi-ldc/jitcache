@@ -2,47 +2,48 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
-#include "ArtifactStore.h"
-#include "ArtifactWriter.h"
 #include "CodeBlock.h"
 #include "Completion.h"
 #include "ConcurrentJSLock.h"
 #include "Debugger.h"
 #include "FunctionExecutable.h"
-#include "JITCacheAPI.h"
-#include "JITCacheContainer.h"
-#include "JITCacheFaults.h"
-#include "JITCacheParameters.h"
-#include "JITCachePlatform.h"
-#include "JITCacheTest.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
-#include "ProducerBudget.h"
 #include "ReleaseHeapAccessScope.h"
 #include "SourceCode.h"
-#include "TestArtifact.h"
-#include "TestFiles.h"
-#include "TestVM.h"
 #include "VM.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/VMPart.h"
+#include "jitcache/glue/KeptSummaries.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/session/JITCacheFaults.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/session/ProducerContext.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/ArtifactWriter.h"
+#include "jitcache/store/JITCacheContainer.h"
+#include "jitcache/store/JITCacheParameters.h"
+#include "jitcache/store/JITCachePlatform.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/ModuleSources.h"
+#include "jitcache/tests/support/TestArtifact.h"
+#include "jitcache/tests/support/TestFiles.h"
+#include "jitcache/tests/support/TestVM.h"
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <errno.h>
-#include <limits>
 #include <optional>
-#include <wtf/ASCIICType.h>
 #include <wtf/FileSystem.h>
 #include <wtf/HashSet.h>
-#include <wtf/Threading.h>
+#include <wtf/TZoneMalloc.h>
+#include <wtf/TZoneMallocInlines.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringView.h>
 
-// Tests of the session part: JITCacheAPI's start, status, delta capture setting and JSON lines; the switches, faults and
-// body lookups of JITCacheVMState with the entry points of JITCacheFaults; ProducerBudget; the start event and summary
+// Tests of the session part: JITCacheAPI's start, status, delta capture setting and JSON lines; the switches, faults,
+// body lookups and per-VM parts of JITCacheVMState with the entry points of JITCacheFaults; the start event and summary
 // lines JITCacheBench writes; and that the exported headers Bun compiles against include only exported JITCache
 // headers. A test that needs several VMs, because each fault and each configuration is permanent for a VM, creates them
 // beside the test's own on its thread and destroys each under its API lock, which runs VM::~VM's teardown hooks.
@@ -51,19 +52,17 @@ namespace JSC::JITCache::Tests {
 
 namespace SessionTestsInternal {
 
-constexpr size_t maximumSize = std::numeric_limits<size_t>::max();
-
 // An artifact a Producer created and left: its VM is destroyed, which releases the producer lock.
 static bool createTestArtifact(TestContext& context, const String& path)
 {
     ExtraVM producer;
-    return startsAs(context, "the producer that creates the artifact"_s, JITCache::start(producer.vm(), strictConfig(path, Role::Producer)), StartOutcome::Started);
+    return startsAs(context, "the producer that creates the artifact"_s, JITCache::start(producer.vm(), testConfig(path, Role::Producer)), StartOutcome::Started);
 }
 
 // A ConsumerProducer over an artifact: both switches start on.
 static bool startConsumerProducer(TestContext& context, VM& vm, const String& path)
 {
-    if (!startsAs(context, "a ConsumerProducer"_s, JITCache::start(vm, strictConfig(path, Role::ConsumerProducer)), StartOutcome::Started))
+    if (!startsAs(context, "a ConsumerProducer"_s, JITCache::start(vm, testConfig(path, Role::ConsumerProducer)), StartOutcome::Started))
         return false;
     VMState& state = *vm.jitCacheState();
     if (state.activityOn() && state.importsEnabled() && state.productionActive() && producerContext(vm))
@@ -71,6 +70,44 @@ static bool startConsumerProducer(TestContext& context, VM& vm, const String& pa
     JITCACHE_FAIL(makeString("a ConsumerProducer started with a switch off: "_s, toJSON(JITCache::status(vm))));
     return false;
 }
+
+// Two parts for the test of VMState::part, one of each lifetime, each with a flag its destructor sets.
+struct ProductionTestPart final : VMPart {
+    WTF_MAKE_STRUCT_TZONE_ALLOCATED(ProductionTestPart);
+
+    static constexpr VMPartLifetime vmPartLifetime = VMPartLifetime::UntilProductionEnds;
+
+    explicit ProductionTestPart(bool& flag)
+        : destroyed(flag)
+    {
+    }
+
+    ~ProductionTestPart() final { destroyed = true; }
+
+    bool& destroyed;
+};
+
+struct VMTestPart final : VMPart {
+    WTF_MAKE_STRUCT_TZONE_ALLOCATED(VMTestPart);
+
+    static constexpr VMPartLifetime vmPartLifetime = VMPartLifetime::UntilVMDestruction;
+
+    VMTestPart(bool& flag, VM& owner)
+        : destroyedBeforeTheState(flag)
+        , vm(owner)
+    {
+    }
+
+    // didFinalizeHeap stores null into the VM's pointer before it destroys the state, so the flag is set only by a
+    // destruction that comes earlier, such as willDestroyVM's.
+    ~VMTestPart() final { destroyedBeforeTheState = !!vm.jitCacheState(); }
+
+    bool& destroyedBeforeTheState;
+    VM& vm;
+};
+
+WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(ProductionTestPart);
+WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(VMTestPart);
 
 // The state after a fault that turned activity off: both switches off, so nothing is tracked, imported or recorded, and
 // status names the fault as the activity fault, as the end of production and as the first fault.
@@ -189,75 +226,8 @@ static std::optional<uint64_t> appOfHeaderAt(TestContext& context, const String&
     return parsed->app;
 }
 
-// The module's own exported headers, by the names their copies carry: the only copies that may include a jitcache/
-// header, and only one that is itself a copy.
-static constexpr std::array integratorExportedJITCacheHeaders {
-    "JITCacheAPI.h"_s,
-    "JITCacheBun.h"_s,
-    "JITCacheMaintenance.h"_s,
-    "JITCacheTwinsHost.h"_s,
-};
-
-static std::optional<String> integratorReadText(const String& path)
-{
-    auto bytes = FileSystem::readEntireFile(path);
-    if (!bytes)
-        return std::nullopt;
-    return String(bytes->span());
-}
-
-// The file each #include directive of a header names, without its directories: "X.h" for "X.h", "jitcache/X.h" and
-// <JavaScriptCore/X.h>. Every directive counts, whatever preprocessor condition it sits under, since another build's
-// switches can turn it on.
-static Vector<String> integratorIncludedFileNames(StringView text)
-{
-    Vector<String> names;
-    for (StringView line : text.split('\n')) {
-        unsigned index = 0;
-        auto skipSpaces = [&] {
-            while (index < line.length() && isASCIIWhitespace(line[index]))
-                ++index;
-        };
-        skipSpaces();
-        if (index >= line.length() || line[index] != '#')
-            continue;
-        ++index;
-        skipSpaces();
-        constexpr auto include = "include"_s;
-        if (!line.substring(index).startsWith(include))
-            continue;
-        index += static_cast<unsigned>(include.length());
-        skipSpaces();
-        if (index >= line.length() || (line[index] != '"' && line[index] != '<'))
-            continue;
-        char16_t close = line[index] == '"' ? '"' : '>';
-        unsigned start = index + 1;
-        size_t end = line.find(close, start);
-        if (end == notFound)
-            continue;
-        StringView path = line.substring(start, static_cast<unsigned>(end) - start);
-        size_t slash = path.reverseFind('/');
-        names.append((slash == notFound ? path : path.substring(static_cast<unsigned>(slash) + 1)).toString());
-    }
-    return names;
-}
-
-// The source root CMake configured the build from, which Bun's recipe sets to this repository.
-static String integratorCMakeHomeDirectory(const String& buildDirectory)
-{
-    auto cache = integratorReadText(FileSystem::pathByAppendingComponent(buildDirectory, "CMakeCache.txt"_s));
-    if (!cache)
-        return { };
-    constexpr auto prefix = "CMAKE_HOME_DIRECTORY:INTERNAL="_s;
-    for (StringView line : StringView(*cache).split('\n')) {
-        if (line.startsWith(prefix))
-            return line.substring(static_cast<unsigned>(prefix.length())).toString();
-    }
-    return { };
-}
-
 // The name of every header in directory and in the directories below it: the module's headers sit in one directory per
-// part, and the include path holds each of them, so a header is included by its name alone.
+// part, and the copies Bun includes are flat, so an exported header names another by its name alone.
 static void integratorAddHeaderNamesBelow(const String& directory, HashSet<String>& headers)
 {
     for (auto& name : FileSystem::listDirectory(directory)) {
@@ -272,138 +242,6 @@ static void integratorAddHeaderNamesBelow(const String& directory, HashSet<Strin
 } // namespace SessionTestsInternal
 
 using namespace SessionTestsInternal;
-
-// On one thread: a charge up to the limit succeeds, one past it is refused without changing the total, the refusal is
-// sticky, and the peak is the largest total.
-JITCACHE_TEST(integratorBudgetLimitAndPeak, No)
-{
-    Ref<ProducerBudget> budget = ProducerBudget::create(100);
-    JITCACHE_CHECK(budget->limitBytes() == 100);
-    JITCACHE_CHECK(budget->tryCharge(30));
-    JITCACHE_CHECK(budget->tryCharge(50));
-    JITCACHE_CHECK(budget->chargedBytes() == 80);
-    budget->release(50);
-    JITCACHE_CHECK(budget->chargedBytes() == 30);
-    JITCACHE_CHECK(budget->peakBytes() == 80);
-    JITCACHE_CHECK(budget->tryCharge(70));
-    JITCACHE_CHECK(budget->chargedBytes() == 100);
-    JITCACHE_CHECK(budget->peakBytes() == 100);
-    JITCACHE_CHECK(!budget->hasRefused());
-
-    JITCACHE_CHECK(!budget->tryCharge(1));
-    JITCACHE_CHECK(budget->hasRefused());
-    JITCACHE_CHECK(budget->chargedBytes() == 100);
-
-    budget->release(100);
-    JITCACHE_CHECK(!budget->chargedBytes());
-    JITCACHE_CHECK(!budget->tryCharge(1));
-    JITCACHE_CHECK(budget->hasRefused());
-    JITCACHE_CHECK(budget->peakBytes() == 100);
-}
-
-// A charge whose sum overflows is refused, even under a limit no sum can exceed.
-JITCACHE_TEST(integratorBudgetRefusesOverflow, No)
-{
-    Ref<ProducerBudget> budget = ProducerBudget::create(maximumSize);
-    JITCACHE_CHECK(budget->tryCharge(16));
-    JITCACHE_CHECK(!budget->tryCharge(maximumSize));
-    JITCACHE_CHECK(budget->hasRefused());
-    JITCACHE_CHECK(budget->chargedBytes() == 16);
-    budget->release(16);
-    JITCACHE_CHECK(!budget->chargedBytes());
-
-    Ref<ProducerBudget> ended = ProducerBudget::create(maximumSize);
-    ended->refuseFurtherCharges();
-    JITCACHE_CHECK(ended->hasRefused());
-    JITCACHE_CHECK(!ended->tryCharge(1));
-}
-
-// createUnlimited never refuses, whatever is charged and whether or not production ends.
-JITCACHE_TEST(integratorBudgetUnlimited, No)
-{
-    Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    JITCACHE_CHECK(budget->tryCharge(maximumSize / 2));
-    JITCACHE_CHECK(budget->tryCharge(maximumSize / 2));
-    JITCACHE_CHECK(budget->chargedBytes() == maximumSize / 2 * 2);
-    budget->release(maximumSize / 2);
-    budget->release(maximumSize / 2);
-    JITCACHE_CHECK(!budget->chargedBytes());
-    budget->refuseFurtherCharges();
-    JITCACHE_CHECK(budget->tryCharge(1));
-    JITCACHE_CHECK(!budget->hasRefused());
-    budget->release(1);
-
-    Ref<ProducerBudget> saturated = ProducerBudget::createUnlimited();
-    JITCACHE_CHECK(saturated->tryCharge(maximumSize));
-    JITCACHE_CHECK(saturated->tryCharge(maximumSize));
-    JITCACHE_CHECK(!saturated->hasRefused());
-}
-
-// Eight threads charge and release concurrently, each charging more than it releases, until the limit refuses. The total
-// never exceeds the limit, the refusal is sticky on every thread, the peak is the largest total, and the balance returns
-// to zero once every thread has released what it holds.
-JITCACHE_TEST(integratorBudgetConcurrentCharges, No)
-{
-    constexpr size_t limit = 1 * MB;
-    constexpr size_t largestCharge = 4096;
-    constexpr unsigned numberOfThreads = 8;
-    constexpr unsigned maximumIterations = 1000000;
-    Ref<ProducerBudget> budget = ProducerBudget::create(limit);
-
-    std::atomic<bool> exceededLimit { false };
-    std::atomic<bool> refusalWasNotSticky { false };
-    std::atomic<bool> neverRefused { false };
-    std::atomic<size_t> largestSampledTotal { 0 };
-
-    Vector<Ref<Thread>> threads;
-    for (unsigned t = 0; t < numberOfThreads; ++t) {
-        threads.append(Thread::create("JITCache budget test"_s, [&, t] {
-            Vector<size_t> held;
-            uint32_t random = 0x9e3779b9u * (t + 1);
-            bool refused = false;
-            for (unsigned iteration = 0; iteration < maximumIterations; ++iteration) {
-                random ^= random << 13;
-                random ^= random >> 17;
-                random ^= random << 5;
-                size_t bytes = 1 + random % largestCharge;
-                if (!budget->tryCharge(bytes)) {
-                    refused = true;
-                    if (budget->tryCharge(1)) {
-                        refusalWasNotSticky = true;
-                        budget->release(1);
-                    }
-                    break;
-                }
-                held.append(bytes);
-                size_t total = budget->chargedBytes();
-                if (total > limit)
-                    exceededLimit = true;
-                size_t largest = largestSampledTotal.load();
-                while (largest < total && !largestSampledTotal.compare_exchange_weak(largest, total)) { }
-                // One release per three charges keeps the total climbing toward the limit.
-                if (iteration % 3 == 2)
-                    budget->release(held.takeLast());
-            }
-            if (!refused)
-                neverRefused = true;
-            for (size_t bytes : held)
-                budget->release(bytes);
-        }));
-    }
-    for (auto& thread : threads)
-        thread->waitForCompletion();
-
-    JITCACHE_CHECK(!neverRefused.load());
-    JITCACHE_CHECK(!exceededLimit.load());
-    JITCACHE_CHECK(!refusalWasNotSticky.load());
-    JITCACHE_CHECK(budget->hasRefused());
-    JITCACHE_CHECK(!budget->tryCharge(1));
-    JITCACHE_CHECK(!budget->chargedBytes());
-    JITCACHE_CHECK(budget->peakBytes() <= limit);
-    JITCACHE_CHECK(budget->peakBytes() >= largestSampledTotal.load());
-    // The first refusal met a total within one charge of the limit, and some charge reached that total.
-    JITCACHE_CHECK(budget->peakBytes() > limit - largestCharge);
-}
 
 // Start for each role. A Producer creates a missing parent one level deep and is Started; a second producing VM of the
 // process is Busy while the first VM's state lives and stays unconfigured; a Consumer beside the producer is Started and
@@ -420,16 +258,14 @@ JITCACHE_TEST(integratorStartOutcomesByRole, Yes)
 
     std::optional<ExtraVM> producer;
     producer.emplace();
-    if (!startsAs(context, "the producer"_s, JITCache::start(producer->vm(), strictConfig(artifact, Role::Producer)), StartOutcome::Started))
+    if (!startsAs(context, "the producer"_s, JITCache::start(producer->vm(), testConfig(artifact, Role::Producer)), StartOutcome::Started))
         return;
     JITCACHE_CHECK(pathExists(directory->path("artifact/.cache.producer.lock"_s)));
     JITCACHE_CHECK(pathExists(directory->path("artifact/cache/header"_s)));
     JITCACHE_CHECK(pathExists(directory->path("artifact/cache/pack"_s)));
-    JITCACHE_CHECK(!pathExists(directory->path("artifact/cache/bodies"_s)));
     Status producerStatus = JITCache::status(producer->vm());
     JITCACHE_CHECK(producerStatus.state == SessionState::Started);
     JITCACHE_CHECK(producerStatus.role == Role::Producer);
-    JITCACHE_CHECK(producerStatus.strict);
     JITCACHE_CHECK(producerStatus.activityOn);
     JITCACHE_CHECK(producerStatus.production == ProductionState::Active);
     JITCACHE_CHECK(!producerStatus.activityFault && !producerStatus.productionFault && !producerStatus.firstFault);
@@ -441,14 +277,14 @@ JITCACHE_TEST(integratorStartOutcomesByRole, Yes)
     JITCACHE_CHECK(producerContext(producer->vm()));
 
     for (Role role : { Role::Producer, Role::ConsumerProducer }) {
-        startsAs(context, "a second producing VM"_s, JITCache::start(vm, strictConfig(artifact, role)), StartOutcome::Busy, "start.busy"_s);
+        startsAs(context, "a second producing VM"_s, JITCache::start(vm, testConfig(artifact, role)), StartOutcome::Busy, "start.busy"_s);
         JITCACHE_CHECK(!vm.jitCacheState());
         JITCACHE_CHECK(JITCache::status(vm).state == SessionState::Unconfigured);
     }
 
     {
         ExtraVM consumer;
-        if (startsAs(context, "a consumer beside the producer"_s, JITCache::start(consumer.vm(), strictConfig(artifact, Role::Consumer)), StartOutcome::Started)) {
+        if (startsAs(context, "a consumer beside the producer"_s, JITCache::start(consumer.vm(), testConfig(artifact, Role::Consumer)), StartOutcome::Started)) {
             VMState& state = *consumer.vm().jitCacheState();
             JITCACHE_CHECK(state.artifact() && state.artifact() == producer->vm().jitCacheState()->artifact());
             JITCACHE_CHECK(state.importsEnabled());
@@ -465,7 +301,7 @@ JITCACHE_TEST(integratorStartOutcomesByRole, Yes)
     }
 
     producer.reset();
-    if (!startsAs(context, "the ConsumerProducer once the producer is gone"_s, JITCache::start(vm, strictConfig(artifact, Role::ConsumerProducer)), StartOutcome::Started))
+    if (!startsAs(context, "the ConsumerProducer once the producer is gone"_s, JITCache::start(vm, testConfig(artifact, Role::ConsumerProducer)), StartOutcome::Started))
         return;
     Status consumerProducer = JITCache::status(vm);
     JITCACHE_CHECK(consumerProducer.state == SessionState::Started);
@@ -476,7 +312,7 @@ JITCACHE_TEST(integratorStartOutcomesByRole, Yes)
 }
 
 // Each rejection a test can reach in the default option group leaves the VM unconfigured, and a start on the same VM
-// afterwards succeeds. A Config left at its defaults gives status().strict false.
+// afterwards succeeds.
 JITCACHE_TEST(integratorStartRejections, Yes)
 {
     ProcessHooksScope hooks;
@@ -492,45 +328,45 @@ JITCACHE_TEST(integratorStartRejections, Yes)
 
     {
         ReleaseHeapAccessScope withoutHeapAccess(vm.heap);
-        checkRejected("a call without heap access"_s, strictConfig(artifact, Role::Consumer), "start.locks"_s);
+        checkRejected("a call without heap access"_s, testConfig(artifact, Role::Consumer), "start.locks"_s);
     }
 
-    Config emptyPath = strictConfig(artifact, Role::Consumer);
+    Config emptyPath = testConfig(artifact, Role::Consumer);
     emptyPath.artifactPath = String();
     checkRejected("an empty artifactPath"_s, emptyPath, "start.config"_s);
-    Config badRole = strictConfig(artifact, Role::Consumer);
+    Config badRole = testConfig(artifact, Role::Consumer);
     badRole.role = static_cast<Role>(7);
     checkRejected("a role out of range"_s, badRole, "start.config"_s);
     if (!defaultProducerLimitBytes) {
-        Config noLimit = strictConfig(artifact, Role::Producer);
+        Config noLimit = testConfig(artifact, Role::Producer);
         noLimit.producerLimitBytes = std::nullopt;
         checkRejected("a producer without a limit"_s, noLimit, "start.config"_s);
     }
-    Config badBenchReport = strictConfig(artifact, Role::Consumer);
+    Config badBenchReport = testConfig(artifact, Role::Consumer);
     badBenchReport.benchReportPath = directory->path("missing/bench.jsonl"_s);
     checkRejected("a bench report that does not open"_s, badBenchReport, "start.config"_s);
-    Config badTwinReport = strictConfig(artifact, Role::Consumer);
+    Config badTwinReport = testConfig(artifact, Role::Consumer);
     badTwinReport.twinReportPath = directory->path("missing/twins.jsonl"_s);
     checkRejected("a twin report that does not open"_s, badTwinReport, "start.config"_s);
 
     // The build-ID step precedes every step that touches the artifact.
     removeMainBuildIDForTesting(true);
-    checkRejected("a main executable without a build ID"_s, strictConfig(artifact, Role::Producer), "start.build-id"_s);
+    checkRejected("a main executable without a build ID"_s, testConfig(artifact, Role::Producer), "start.build-id"_s);
     removeMainBuildIDForTesting(false);
     JITCACHE_CHECK(!pathExists(artifact));
 
     // A missing parent, a parent without cache/ and a cache/ without a header, for both roles that open an artifact.
     String bare = directory->path("bare"_s);
     for (Role role : { Role::Consumer, Role::ConsumerProducer })
-        checkRejected("a missing parent"_s, strictConfig(bare, role), "start.artifact-missing"_s);
+        checkRejected("a missing parent"_s, testConfig(bare, role), "start.artifact-missing"_s);
     if (!makeDirectory(context, bare))
         return;
     for (Role role : { Role::Consumer, Role::ConsumerProducer })
-        checkRejected("a parent without cache/"_s, strictConfig(bare, role), "start.artifact-missing"_s);
+        checkRejected("a parent without cache/"_s, testConfig(bare, role), "start.artifact-missing"_s);
     if (!makeDirectory(context, directory->path("bare/cache"_s)))
         return;
     for (Role role : { Role::Consumer, Role::ConsumerProducer })
-        checkRejected("a cache/ without a header"_s, strictConfig(bare, role), "start.artifact-missing"_s);
+        checkRejected("a cache/ without a header"_s, testConfig(bare, role), "start.artifact-missing"_s);
 
     // A debugger attached before start turned the PC-to-origin maps on for good, so that VM is rejected.
     {
@@ -538,7 +374,7 @@ JITCACHE_TEST(integratorStartRejections, Yes)
         JSGlobalObject* globalObject = JSGlobalObject::create(attached.vm(), JSGlobalObject::createStructure(attached.vm(), jsNull()));
         Debugger debugger(attached.vm());
         debugger.attach(globalObject);
-        startsAs(context, "a VM a debugger attached to"_s, JITCache::start(attached.vm(), strictConfig(artifact, Role::Producer)), StartOutcome::Rejected, "start.pc-maps"_s);
+        startsAs(context, "a VM a debugger attached to"_s, JITCache::start(attached.vm(), testConfig(artifact, Role::Producer)), StartOutcome::Rejected, "start.pc-maps"_s);
         JITCACHE_CHECK(!attached.vm().jitCacheState());
         debugger.detach(globalObject, Debugger::TerminatingDebuggingSession);
     }
@@ -546,7 +382,7 @@ JITCACHE_TEST(integratorStartRejections, Yes)
 
     if (!createTestArtifact(context, artifact))
         return;
-    checkRejected("a producer over an artifact"_s, strictConfig(artifact, Role::Producer), "start.artifact-exists"_s);
+    checkRejected("a producer over an artifact"_s, testConfig(artifact, Role::Producer), "start.artifact-exists"_s);
 
     // A header that differs from the process's in one must-match option is incompatible and names the option. A Producer
     // is rejected at start.artifact-exists after taking the lock, which creates the lock file, and a Consumer at
@@ -559,8 +395,8 @@ JITCACHE_TEST(integratorStartRejections, Yes)
         || !writeFile(context, directory->path("incompatible/cache/header"_s), header.span())
         || !writeFile(context, directory->path("incompatible/cache/pack"_s), packBytes.span()))
         return;
-    checkRejected("a Producer over an incompatible artifact"_s, strictConfig(incompatible, Role::Producer), "start.artifact-exists"_s);
-    StartResult rejected = JITCache::start(vm, strictConfig(incompatible, Role::Consumer));
+    checkRejected("a Producer over an incompatible artifact"_s, testConfig(incompatible, Role::Producer), "start.artifact-exists"_s);
+    StartResult rejected = JITCache::start(vm, testConfig(incompatible, Role::Consumer));
     startsAs(context, "a Consumer of an incompatible header"_s, rejected, StartOutcome::Rejected, "start.incompatible"_s);
     JITCACHE_CHECK(rejected.detail.contains("evalMode"_s));
     JITCACHE_CHECK(!vm.jitCacheState());
@@ -571,7 +407,7 @@ JITCACHE_TEST(integratorStartRejections, Yes)
         return;
     {
         ExtraVM replacing;
-        StartResult replaced = JITCache::start(replacing.vm(), strictConfig(incompatible, Role::ConsumerProducer));
+        StartResult replaced = JITCache::start(replacing.vm(), testConfig(incompatible, Role::ConsumerProducer));
         if (startsAs(context, "a ConsumerProducer of an incompatible header"_s, replaced, StartOutcome::Started, "start.replaced"_s)) {
             JITCACHE_CHECK(replaced.detail.contains("evalMode"_s));
             JITCACHE_CHECK(pathExists(directory->path("incompatible/cache/header"_s)) && pathExists(directory->path("incompatible/cache/pack"_s)));
@@ -579,25 +415,14 @@ JITCACHE_TEST(integratorStartRejections, Yes)
             JITCACHE_CHECK(newPack && !equalSpans(newPack->span(), packBytes.span()));
             JITCACHE_CHECK(!pathExists(directory->path("incompatible/.cache.replaced"_s)));
             ExtraVM reader;
-            startsAs(context, "a Consumer of the replaced artifact"_s, JITCache::start(reader.vm(), strictConfig(incompatible, Role::Consumer)), StartOutcome::Started);
+            startsAs(context, "a Consumer of the replaced artifact"_s, JITCache::start(reader.vm(), testConfig(incompatible, Role::Consumer)), StartOutcome::Started);
         }
     }
 
-    // Strict off on purpose, the one start of this test that is: every other start here has strict on, and only a Config
-    // left at its defaults shows that strict is off unless the host turns it on.
-    {
-        ExtraVM defaults;
-        Config config;
-        config.artifactPath = artifact;
-        if (startsAs(context, "a Config left at its defaults"_s, JITCache::start(defaults.vm(), config), StartOutcome::Started))
-            JITCACHE_CHECK(!JITCache::status(defaults.vm()).strict);
-    }
-
     // After every rejection, the VM still configures, and then it is configured for good.
-    if (!startsAs(context, "a consumer after the rejections"_s, JITCache::start(vm, strictConfig(artifact, Role::Consumer)), StartOutcome::Started))
+    if (!startsAs(context, "a consumer after the rejections"_s, JITCache::start(vm, testConfig(artifact, Role::Consumer)), StartOutcome::Started))
         return;
-    JITCACHE_CHECK(JITCache::status(vm).strict);
-    startsAs(context, "a second start"_s, JITCache::start(vm, strictConfig(artifact, Role::Consumer)), StartOutcome::Rejected, "start.already-configured"_s);
+    startsAs(context, "a second start"_s, JITCache::start(vm, testConfig(artifact, Role::Consumer)), StartOutcome::Rejected, "start.already-configured"_s);
     JITCACHE_CHECK(JITCache::status(vm).state == SessionState::Started);
 }
 
@@ -611,7 +436,7 @@ JITCACHE_TEST_WITH_OPTIONS(integratorStartRejectsAFixedOption, Yes, "--threshold
         return;
     String artifact = directory->path("artifact"_s);
     VM& vm = *context.vm();
-    StartResult result = JITCache::start(vm, strictConfig(artifact, Role::Producer));
+    StartResult result = JITCache::start(vm, testConfig(artifact, Role::Producer));
     startsAs(context, "a process with a fixed option changed"_s, result, StartOutcome::Rejected, "start.fixed-option"_s);
     JITCACHE_CHECK(result.detail == "thresholdForJITSoon: required 100, effective 99"_s);
     JITCACHE_CHECK(!vm.jitCacheState());
@@ -645,13 +470,13 @@ JITCACHE_TEST(integratorStartFaults, Yes)
         checkFault(context, "the start fault"_s, reported.activityFault, FaultClass::StartFault, step);
         checkFault(context, "the first fault"_s, reported.firstFault, FaultClass::StartFault, step);
         JITCACHE_CHECK(toJSON(reported).contains(makeString("\"step\":\""_s, step, '"')));
-        startsAs(context, "a second start on a faulted VM"_s, JITCache::start(faultedVM, strictConfig(artifact, Role::Consumer)), StartOutcome::Rejected, "start.already-configured"_s);
+        startsAs(context, "a second start on a faulted VM"_s, JITCache::start(faultedVM, testConfig(artifact, Role::Consumer)), StartOutcome::Rejected, "start.already-configured"_s);
     };
 
     {
         StoreTesting::setFault(StoreTesting::Fault { StoreTesting::Call::PackMap, EIO, std::nullopt });
         ExtraVM faulted;
-        StartResult result = JITCache::start(faulted.vm(), strictConfig(artifact, Role::ConsumerProducer));
+        StartResult result = JITCache::start(faulted.vm(), testConfig(artifact, Role::ConsumerProducer));
         StoreTesting::setFault(std::nullopt);
         if (startsAs(context, "a pack mapping that fails"_s, result, StartOutcome::Fault, "start.io"_s)) {
             checkFaulted(faulted.vm(), "start.io"_s);
@@ -662,7 +487,7 @@ JITCACHE_TEST(integratorStartFaults, Yes)
             JITCACHE_CHECK(reported.budget.limitBytes == testProducerLimitBytes);
 
             ExtraVM next;
-            startsAs(context, "a producing VM beside the faulted one"_s, JITCache::start(next.vm(), strictConfig(artifact, Role::ConsumerProducer)), StartOutcome::Started);
+            startsAs(context, "a producing VM beside the faulted one"_s, JITCache::start(next.vm(), testConfig(artifact, Role::ConsumerProducer)), StartOutcome::Started);
         }
     }
 
@@ -676,7 +501,7 @@ JITCACHE_TEST(integratorStartFaults, Yes)
         if (!writeFile(context, directory->path("damaged-pack/cache/pack"_s), notAPack))
             return;
         ExtraVM faulted;
-        if (startsAs(context, "a damaged pack"_s, JITCache::start(faulted.vm(), strictConfig(damaged, Role::Consumer)), StartOutcome::Fault, "start.pack"_s))
+        if (startsAs(context, "a damaged pack"_s, JITCache::start(faulted.vm(), testConfig(damaged, Role::Consumer)), StartOutcome::Fault, "start.pack"_s))
             checkFaulted(faulted.vm(), "start.pack"_s);
     }
 
@@ -687,7 +512,7 @@ JITCACHE_TEST(integratorStartFaults, Yes)
         || !writeFile(context, directory->path("corrupt/cache/header"_s), notAHeader))
         return;
     VM& vm = *context.vm();
-    if (startsAs(context, "a corrupt header"_s, JITCache::start(vm, strictConfig(corrupt, Role::Consumer)), StartOutcome::Fault, "start.header"_s)) {
+    if (startsAs(context, "a corrupt header"_s, JITCache::start(vm, testConfig(corrupt, Role::Consumer)), StartOutcome::Fault, "start.header"_s)) {
         checkFaulted(vm, "start.header"_s);
         Status reported = JITCache::status(vm);
         JITCACHE_CHECK(reported.production == ProductionState::NotProducing);
@@ -710,7 +535,7 @@ JITCACHE_TEST(integratorStartFaultsOnAFIFO, Yes)
         return;
     {
         ExtraVM faulted;
-        if (startsAs(context, "a FIFO at cache/header"_s, JITCache::start(faulted.vm(), strictConfig(headerFIFO, Role::Consumer)), StartOutcome::Fault, "start.header"_s))
+        if (startsAs(context, "a FIFO at cache/header"_s, JITCache::start(faulted.vm(), testConfig(headerFIFO, Role::Consumer)), StartOutcome::Fault, "start.header"_s))
             JITCACHE_CHECK(JITCache::status(faulted.vm()).state == SessionState::Faulted);
     }
 
@@ -719,7 +544,7 @@ JITCACHE_TEST(integratorStartFaultsOnAFIFO, Yes)
         return;
     for (Role role : { Role::Consumer, Role::ConsumerProducer }) {
         ExtraVM faulted;
-        if (startsAs(context, "a FIFO at cache/pack"_s, JITCache::start(faulted.vm(), strictConfig(packFIFO, role)), StartOutcome::Fault, "start.pack"_s))
+        if (startsAs(context, "a FIFO at cache/pack"_s, JITCache::start(faulted.vm(), testConfig(packFIFO, role)), StartOutcome::Fault, "start.pack"_s))
             JITCACHE_CHECK(JITCache::status(faulted.vm()).state == SessionState::Faulted);
     }
 }
@@ -756,7 +581,7 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     JITCACHE_CHECK(header && equalSpans(header->span(), expectedHeader().span()));
     {
         ExtraVM consumer;
-        startsAs(context, "a consumer of the reused remnant"_s, JITCache::start(consumer.vm(), strictConfig(remnant, Role::Consumer)), StartOutcome::Started);
+        startsAs(context, "a consumer of the reused remnant"_s, JITCache::start(consumer.vm(), testConfig(remnant, Role::Consumer)), StartOutcome::Started);
     }
 
     String withBody = directory->path("with-body"_s);
@@ -765,7 +590,7 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     if (!makeDirectory(context, withBody) || !makeDirectory(context, directory->path("with-body/cache"_s))
         || !writeFile(context, bodyPath, filler.span()) || !writeFile(context, temporaryPath, filler.span()))
         return;
-    startsAs(context, "a remnant holding a body"_s, JITCache::start(vm, strictConfig(withBody, Role::Producer)), StartOutcome::Rejected, "start.not-an-artifact"_s);
+    startsAs(context, "a remnant holding a body"_s, JITCache::start(vm, testConfig(withBody, Role::Producer)), StartOutcome::Rejected, "start.not-an-artifact"_s);
     JITCACHE_CHECK(!vm.jitCacheState());
     JITCACHE_CHECK(pathExists(bodyPath));
     JITCACHE_CHECK(pathExists(temporaryPath));
@@ -775,11 +600,11 @@ JITCACHE_TEST(integratorStartCreatesOverARemnant, Yes)
     if (!makeDirectory(context, withPack) || !makeDirectory(context, directory->path("with-pack/cache"_s))
         || !writeFile(context, directory->path("with-pack/cache/pack"_s), filler.span()))
         return;
-    startsAs(context, "a remnant holding a pack"_s, JITCache::start(vm, strictConfig(withPack, Role::Producer)), StartOutcome::Rejected, "start.not-an-artifact"_s);
+    startsAs(context, "a remnant holding a pack"_s, JITCache::start(vm, testConfig(withPack, Role::Producer)), StartOutcome::Rejected, "start.not-an-artifact"_s);
     JITCACHE_CHECK(!vm.jitCacheState());
     JITCACHE_CHECK(pathExists(directory->path("with-pack/cache/pack"_s)));
 
-    startsAs(context, "a producer over an artifact"_s, JITCache::start(vm, strictConfig(remnant, Role::Producer)), StartOutcome::Rejected, "start.artifact-exists"_s);
+    startsAs(context, "a producer over an artifact"_s, JITCache::start(vm, testConfig(remnant, Role::Producer)), StartOutcome::Rejected, "start.artifact-exists"_s);
     JITCACHE_CHECK(!vm.jitCacheState());
 }
 
@@ -798,7 +623,7 @@ JITCACHE_TEST(integratorStartApps, Yes)
     constexpr uint64_t appX = 0x0123456789abcdef;
     constexpr uint64_t appY = 0xfedcba9876543210;
     auto configNaming = [](const String& path, Role role, std::optional<uint64_t> app) {
-        Config config = strictConfig(path, role);
+        Config config = testConfig(path, role);
         config.appDigest = app;
         return config;
     };
@@ -944,7 +769,9 @@ JITCACHE_TEST(integratorRecordingFaultEndsProduction, Yes)
 
     // The end of production frees what production held, at the next glue entry.
     state.releaseEndedProductionMemory();
-    JITCACHE_CHECK(!state.keptSummaries());
+#if ENABLE(JIT)
+    JITCACHE_CHECK(!state.partIfExists<KeptSummaries>());
+#endif
     JITCACHE_CHECK(!state.producerBudget()->chargedBytes());
 
     state.raiseInvalidMaterial("ucb.feedback"_s, { });
@@ -956,6 +783,42 @@ JITCACHE_TEST(integratorRecordingFaultEndsProduction, Yes)
     checkFault(context, "the first fault"_s, reported.firstFault, FaultClass::RecordingFault, "ucb.capture-budget"_s);
 }
 
+// VMState::part creates a part at its type's first use and returns the same part afterwards, and partIfExists finds it
+// only from then on. The release of ended production memory destroys the production parts alone, and willDestroyVM the
+// others, while the VM still holds its state.
+JITCACHE_TEST(integratorVMPartsEndWithTheirLifetimes, Yes)
+{
+    ProcessHooksScope hooks;
+    auto directory = TemporaryDirectory::create(context, "jitcache-integrator"_s);
+    if (!directory)
+        return;
+    bool productionPartDestroyed = false;
+    bool vmPartDestroyedBeforeTheState = false;
+    {
+        ExtraVM producer;
+        if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), testConfig(directory->path("artifact"_s), Role::Producer)), StartOutcome::Started))
+            return;
+        VMState& state = *producer.vm().jitCacheState();
+        JITCACHE_CHECK(!state.partIfExists<ProductionTestPart>());
+        ProductionTestPart& productionPart = state.part<ProductionTestPart>(productionPartDestroyed);
+        JITCACHE_CHECK(&state.part<ProductionTestPart>(productionPartDestroyed) == &productionPart);
+        JITCACHE_CHECK(state.partIfExists<ProductionTestPart>() == &productionPart);
+        JITCACHE_CHECK(!state.partIfExists<VMTestPart>());
+        VMTestPart& vmPart = state.part<VMTestPart>(vmPartDestroyedBeforeTheState, producer.vm());
+        JITCACHE_CHECK(state.partIfExists<VMTestPart>() == &vmPart);
+
+        // A fault entry point destroys nothing; the release that follows destroys the production part alone.
+        state.raiseRecordingFault("cb"_s, "test-check"_s, { });
+        JITCACHE_CHECK(!productionPartDestroyed);
+        state.releaseEndedProductionMemory();
+        JITCACHE_CHECK(productionPartDestroyed);
+        JITCACHE_CHECK(!state.partIfExists<ProductionTestPart>());
+        JITCACHE_CHECK(!vmPartDestroyedBeforeTheState);
+        JITCACHE_CHECK(state.partIfExists<VMTestPart>() == &vmPart);
+    }
+    JITCACHE_CHECK(vmPartDestroyedBeforeTheState);
+}
+
 // A budget that refused a charge the VM thread has not raised yet reports production Ended at budget.limit, while the
 // switch itself stays on until a capture or delta raises it.
 JITCACHE_TEST(integratorUnraisedRefusalReportsBudgetLimit, Yes)
@@ -965,7 +828,7 @@ JITCACHE_TEST(integratorUnraisedRefusalReportsBudgetLimit, Yes)
     if (!directory)
         return;
     VM& vm = *context.vm();
-    Config config = strictConfig(directory->path("artifact"_s), Role::Producer);
+    Config config = testConfig(directory->path("artifact"_s), Role::Producer);
     config.producerLimitBytes = 16;
     if (!startsAs(context, "a producer with a small limit"_s, JITCache::start(vm, config), StartOutcome::Started))
         return;
@@ -1103,7 +966,7 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     std::optional<CommitResult> committed;
     {
         ExtraVM producer;
-        if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), strictConfig(artifact, Role::Producer)), StartOutcome::Started))
+        if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), testConfig(artifact, Role::Producer)), StartOutcome::Started))
             return;
         committed = commitTestBody(context, *producer.vm().jitCacheState(), committedKey, 21, committedAnalysis.span());
         if (!committed)
@@ -1111,7 +974,7 @@ JITCACHE_TEST(integratorBodyLookups, Yes)
     }
 
     VM& vm = *context.vm();
-    if (!startsAs(context, "the consumer"_s, JITCache::start(vm, strictConfig(artifact, Role::Consumer)), StartOutcome::Started))
+    if (!startsAs(context, "the consumer"_s, JITCache::start(vm, testConfig(artifact, Role::Consumer)), StartOutcome::Started))
         return;
     VMState& state = *vm.jitCacheState();
     JITCACHE_CHECK(JITCache::status(vm).progress.indexedBodies == 1);
@@ -1228,7 +1091,7 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
     String artifact = directory->path("artifact"_s);
     {
         ExtraVM producer;
-        if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), strictConfig(artifact, Role::Producer)), StartOutcome::Started))
+        if (!startsAs(context, "the producer"_s, JITCache::start(producer.vm(), testConfig(artifact, Role::Producer)), StartOutcome::Started))
             return;
         if (!commitTestBody(context, *producer.vm().jitCacheState(), testKey(23), 23))
             return;
@@ -1237,7 +1100,7 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
     String rejectedReport = directory->path("rejected.jsonl"_s);
     {
         ExtraVM rejected;
-        Config config = strictConfig(directory->path("missing"_s), Role::Consumer);
+        Config config = testConfig(directory->path("missing"_s), Role::Consumer);
         config.benchReportPath = rejectedReport;
         startsAs(context, "a rejected start with a bench report"_s, JITCache::start(rejected.vm(), config), StartOutcome::Rejected, "start.artifact-missing"_s);
     }
@@ -1252,7 +1115,7 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
     String consumerReport = directory->path("consumer.jsonl"_s);
     {
         ExtraVM consumer;
-        Config config = strictConfig(artifact, Role::Consumer);
+        Config config = testConfig(artifact, Role::Consumer);
         config.benchReportPath = consumerReport;
         if (!startsAs(context, "a Consumer with a bench report"_s, JITCache::start(consumer.vm(), config), StartOutcome::Started))
             return;
@@ -1264,7 +1127,7 @@ JITCACHE_TEST(integratorStartBenchEvent, Yes)
 
     VM& vm = *context.vm();
     String startedReport = directory->path("started.jsonl"_s);
-    Config config = strictConfig(artifact, Role::ConsumerProducer);
+    Config config = testConfig(artifact, Role::ConsumerProducer);
     config.benchReportPath = startedReport;
     if (!startsAs(context, "a start with a bench report"_s, JITCache::start(vm, config), StartOutcome::Started))
         return;
@@ -1292,7 +1155,7 @@ JITCACHE_TEST(integratorJSONLines, No)
     DeltaResult rejectedDelta { DeltaOutcome::Rejected, "delta.role"_s, std::nullopt };
     JITCACHE_CHECK(toJSON(rejectedDelta) == "{\"jitcache\":\"delta\",\"outcome\":\"rejected\",\"rejection\":\"delta.role\",\"fault\":null,\"eligibleKeys\":0,\"committedBodies\":0,\"committedBytes\":0,\"deferredKeys\":0}"_s);
 
-    JITCACHE_CHECK(toJSON(Status { }) == "{\"jitcache\":\"status\",\"state\":\"unconfigured\",\"role\":null,\"strict\":false,\"activityOn\":false,\"activityFault\":null,\"production\":\"not-producing\",\"productionFault\":null,\"firstFault\":null,\"progress\":{\"indexedBodies\":0,\"bodyOpens\":0,\"transientOpenFailures\":0,\"imports\":0,\"attaches\":0,\"gateDrops\":0,\"misses\":0,\"installs\":0,\"bakedFactMismatches\":0,\"captureCandidates\":0,\"capturesDeferred\":0,\"capturesCommitted\":0,\"bytesCommitted\":0,\"deltaRuns\":0},\"budget\":{\"limitBytes\":0,\"chargedBytes\":0,\"peakBytes\":0,\"refused\":false}}"_s);
+    JITCACHE_CHECK(toJSON(Status { }) == "{\"jitcache\":\"status\",\"state\":\"unconfigured\",\"role\":null,\"activityOn\":false,\"activityFault\":null,\"production\":\"not-producing\",\"productionFault\":null,\"firstFault\":null,\"progress\":{\"indexedBodies\":0,\"bodyOpens\":0,\"transientOpenFailures\":0,\"imports\":0,\"attaches\":0,\"gateDrops\":0,\"misses\":0,\"installs\":0,\"bakedFactMismatches\":0,\"captureCandidates\":0,\"capturesDeferred\":0,\"capturesCommitted\":0,\"bytesCommitted\":0,\"deltaRuns\":0},\"budget\":{\"limitBytes\":0,\"chargedBytes\":0,\"peakBytes\":0,\"refused\":false}}"_s);
     Status faultedStatus;
     faultedStatus.state = SessionState::Started;
     faultedStatus.role = Role::ConsumerProducer;
@@ -1340,26 +1203,26 @@ JITCACHE_TEST(runOnceDeltaCaptureAtStart, Yes)
         return;
     VM& vm = *context.vm();
     for (uint8_t value : { 0, 3, 255 }) {
-        StartResult result = JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, static_cast<DeltaCapture>(value)));
+        StartResult result = JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer, static_cast<DeltaCapture>(value)));
         if (startsAs(context, "a delta capture outside the enumeration"_s, result, StartOutcome::Rejected, "start.config"_s))
             JITCACHE_CHECK(result.detail.contains("deltaCapture"_s));
         JITCACHE_CHECK(!vm.jitCacheState());
     }
 
-    if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(vm, strictConfig(directory->path("artifact"_s), Role::Producer, DeltaCapture::Compiled)), StartOutcome::Started))
+    if (!startsAs(context, "a Producer with Compiled"_s, JITCache::start(vm, testConfig(directory->path("artifact"_s), Role::Producer, DeltaCapture::Compiled)), StartOutcome::Started))
         return;
     JITCACHE_CHECK(vm.jitCacheState()->deltaCapture() == DeltaCapture::Compiled);
     JITCACHE_CHECK(!vm.jitCacheState()->capturesUncompiledBodies());
     {
         ExtraVM producer;
-        if (startsAs(context, "a Producer with All"_s, JITCache::start(producer.vm(), strictConfig(directory->path("other"_s), Role::Producer, DeltaCapture::All)), StartOutcome::Started)) {
+        if (startsAs(context, "a Producer with All"_s, JITCache::start(producer.vm(), testConfig(directory->path("other"_s), Role::Producer, DeltaCapture::All)), StartOutcome::Started)) {
             JITCACHE_CHECK(producer.vm().jitCacheState()->deltaCapture() == DeltaCapture::All);
             JITCACHE_CHECK(producer.vm().jitCacheState()->capturesUncompiledBodies());
         }
     }
     {
         ExtraVM consumer;
-        if (startsAs(context, "a Consumer with All"_s, JITCache::start(consumer.vm(), strictConfig(directory->path("artifact"_s), Role::Consumer, DeltaCapture::All)), StartOutcome::Started))
+        if (startsAs(context, "a Consumer with All"_s, JITCache::start(consumer.vm(), testConfig(directory->path("artifact"_s), Role::Consumer, DeltaCapture::All)), StartOutcome::Started))
             JITCACHE_CHECK(!consumer.vm().jitCacheState()->capturesUncompiledBodies());
     }
 }
@@ -1372,17 +1235,12 @@ JITCACHE_TEST(runOnceDeltaCaptureAtStart, Yes)
 // to include a header added there later fails as well.
 JITCACHE_TEST(integratorExportedHeadersIncludeOnlyExportedHeaders, No)
 {
-    String executable = FileSystem::realPath("/proc/self/exe"_s);
-    String buildDirectory = FileSystem::parentPath(FileSystem::parentPath(executable));
-    String sourceRoot = integratorCMakeHomeDirectory(buildDirectory);
-    if (sourceRoot.isEmpty()) {
-        JITCACHE_FAIL(makeString("no CMAKE_HOME_DIRECTORY in the CMake cache of "_s, buildDirectory, ", the build testjitcache ("_s, executable, ") runs from"_s));
+    auto directories = moduleDirectories(context);
+    if (!directories)
         return;
-    }
-    std::array<StringView, 3> jitcacheComponents { "Source"_s, "JavaScriptCore"_s, "jitcache"_s };
-    String jitcacheDirectory = FileSystem::pathByAppendingComponents(sourceRoot, jitcacheComponents);
+    String jitcacheDirectory = directories->jitcache;
     std::array<StringView, 3> copiesComponents { "JavaScriptCore"_s, "PrivateHeaders"_s, "JavaScriptCore"_s };
-    String copiesDirectory = FileSystem::pathByAppendingComponents(buildDirectory, copiesComponents);
+    String copiesDirectory = FileSystem::pathByAppendingComponents(directories->build, copiesComponents);
 
     HashSet<String> jitcacheHeaders;
     integratorAddHeaderNamesBelow(jitcacheDirectory, jitcacheHeaders);
@@ -1396,7 +1254,7 @@ JITCACHE_TEST(integratorExportedHeadersIncludeOnlyExportedHeaders, No)
         return;
     }
     bool everyOwnHeaderCopied = true;
-    for (auto exported : integratorExportedJITCacheHeaders) {
+    for (auto exported : exportedJITCacheHeaders) {
         if (!copies.contains(exported)) {
             JITCACHE_FAIL(makeString(copiesDirectory, " holds no copy of the exported "_s, exported));
             everyOwnHeaderCopied = false;
@@ -1406,13 +1264,14 @@ JITCACHE_TEST(integratorExportedHeadersIncludeOnlyExportedHeaders, No)
         return;
 
     for (auto& copy : copies) {
-        auto text = integratorReadText(FileSystem::pathByAppendingComponent(copiesDirectory, copy));
+        auto text = readSourceText(FileSystem::pathByAppendingComponent(copiesDirectory, copy));
         if (!text) {
             JITCACHE_FAIL(makeString("the copy "_s, copy, " cannot be read"_s));
             continue;
         }
-        bool ownHeader = std::ranges::any_of(integratorExportedJITCacheHeaders, [&](ASCIILiteral exported) { return copy == exported; });
-        for (auto& included : integratorIncludedFileNames(*text)) {
+        bool ownHeader = std::ranges::any_of(exportedJITCacheHeaders, [&](ASCIILiteral exported) { return copy == exported; });
+        for (auto& path : includedPaths(*text)) {
+            String included = fileNameOfPath(path);
             if (!jitcacheHeaders.contains(included))
                 continue;
             // An engine header reaches the module only through declarations of its own, never through a jitcache/

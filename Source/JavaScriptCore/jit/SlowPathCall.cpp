@@ -29,13 +29,13 @@
 #if ENABLE(JIT)
 
 #include "CCallHelpers.h"
-#include "ImageEmission.h"
-#include "ImageRecorder.h"
-#include "ImageSupport.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "ThunkGenerators.h"
 #include "VM.h"
+#include "jitcache/image/ImageEmission.h"
+#include "jitcache/image/ImageRecorder.h"
+#include "jitcache/image/ImageSupport.h"
 
 namespace JSC {
 

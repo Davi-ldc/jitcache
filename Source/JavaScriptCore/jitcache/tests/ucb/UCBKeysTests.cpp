@@ -6,26 +6,31 @@
 #include "CachedTypes.h"
 #include "CodeCache.h"
 #include "DirectEvalExecutable.h"
-#include "DirectEvalSite.h"
 #include "IndirectEvalExecutable.h"
-#include "JITCacheSHA256.h"
-#include "JITCacheTest.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "ModuleProgramExecutable.h"
 #include "ProgramExecutable.h"
 #include "SourceProvider.h"
 #include "StrongInlines.h"
-#include "TestFiles.h"
-#include "UCBImport.h"
-#include "UCBKeys.h"
-#include "UCBRegistry.h"
-#include "UCBRequests.h"
-#include "UCBTestSupport.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedProgramCodeBlock.h"
 #include "VariableEnvironmentInlines.h"
+#include "jitcache/base/JITCacheSHA256.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestFiles.h"
+#include "jitcache/tests/ucb/UCBTestFixtures.h"
+#include "jitcache/tests/ucb/UCBTestHolders.h"
+#include "jitcache/tests/ucb/UCBTestPart.h"
+#include "jitcache/tests/ucb/UCBTestProviders.h"
+#include "jitcache/tests/ucb/UCBTestSession.h"
+#include "jitcache/ucb/DirectEvalSite.h"
+#include "jitcache/ucb/UCBKeys.h"
+#include "jitcache/ucb/UCBMatch.h"
+#include "jitcache/ucb/UCBRegistry.h"
+#include "jitcache/ucb/UCBRequests.h"
 #include <algorithm>
 #include <array>
 #include <optional>
@@ -40,7 +45,7 @@
 #include <wtf/text/WTFString.h>
 
 // The tests of UCBKeys: sourceDigest and rootSourceDigest; the identity, context, holder and TDZ chain digests, pinned to
-// literal vectors; what each kind of request computes through UCBImport's requestKey and requestContext; and the source
+// literal vectors; what each kind of request computes through UCBMatch's requestKey and requestContext; and the source
 // digests of the builtin metadata BuiltinExecutables holds. BodyKey's bytes are tested with base/.
 
 namespace JSC::JITCache::Tests {
@@ -288,8 +293,8 @@ static bool testPinnedDigests(VM& vm, TestPart& part)
         { directEvalContextDigest(7, StrictModeLexicallyScopedFeature, DerivedContextType::DerivedMethodContext, NeedsClassFieldInitializer::Yes, PrivateBrandRequirement::Needed, true, false, EvalContextType::FunctionEvalContext, tdz, privateNames), "JITCache.dctx.v1"_s,
             "07000000 01 02 01 01 01 00 01 02000000 01 01000000 61 01 01000000 62 02000000 01 02000000 2378 0100 01 02000000 2379 0900"_s,
             "d8ce02a3f2e573c358db10e114a52ca41aae3813a8010a3ddfbfab458e11f995"_s, "a direct eval's context digest"_s },
-        // The environment {alpha, beta}: its name count, then each name's EncodingOrder kind (0, a string) and canonical
-        // string. Its digest is the first field of the link record below.
+        // The environment {alpha, beta}: its name count, then each name's kind (0, a string) and canonical string. Its
+        // digest is the first field of the link record below.
         { std::nullopt, "JITCache.tdze.v1"_s,
             "02000000 00 01 05000000 616c706861 00 01 04000000 62657461"_s,
             "4624b82f66eed95b239b7971debe8b27468359f8e87d2ccf787fb0da04204d5c"_s, "an environment's digest"_s },
@@ -415,8 +420,8 @@ static bool testHolderDigests(VM& vm, JSGlobalObject* globalObject, TestPart& pa
     return true;
 }
 
-// The environment digest written out apart from the codec: the names sorted by their characters, each as u8 kind (0 for a
-// string) and a canonical string; and the digest of a one-link chain over that environment.
+// The environment digest written out apart from UCBKeys.cpp: the names sorted by their characters, each as u8 kind (0 for
+// a string) and a canonical string; and the digest of a one-link chain over that environment.
 static Digest256 referenceOneLinkChainDigest(Vector<String> names)
 {
     std::sort(names.begin(), names.end(), [](const String& a, const String& b) {
@@ -431,7 +436,7 @@ static Digest256 referenceOneLinkChainDigest(Vector<String> names)
     appendU32(environment, static_cast<uint32_t>(names.size()));
     for (const String& name : names) {
         RELEASE_ASSERT(name.is8Bit());
-        environment.append(0); // EncodingOrder::kind of a string
+        environment.append(0); // the kind of a string
         environment.append(1); // Latin-1
         appendU32(environment, name.length());
         environment.append(asBytes(name.span8()));
@@ -695,7 +700,7 @@ static bool testBuiltinMetadata(VM& vm, TestPart& part)
 // requests compute, and checks that it tracks keys.
 static bool startTrackingKeys(TestContext& context, TestPart& part, VM& vm, const TemporaryDirectory& directory)
 {
-    if (!startJITCache(context, vm, directory, Role::Producer, true))
+    if (!startJITCache(context, vm, directory, Role::Producer))
         return false;
     return part.check(vm.jitCacheState() && vm.jitCacheState()->tracksKeys(), "the test's VM does not track keys"_s);
 }

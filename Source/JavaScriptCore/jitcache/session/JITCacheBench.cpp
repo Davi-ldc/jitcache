@@ -1,12 +1,12 @@
 #include "config.h"
-#include "JITCacheBench.h"
+#include "jitcache/session/JITCacheBench.h"
 
-#include "ArtifactStore.h"
-#include "BodyKey.h"
 #include "ExecutableAllocator.h"
-#include "JITCacheVMState.h"
 #include "JITThunks.h"
+#include "Options.h"
 #include "VM.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ArtifactStore.h"
 #include <atomic>
 #include <cmath>
 #include <stdio.h>
@@ -20,11 +20,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/resource.h>
-#include <time.h>
 #include <unistd.h>
 #include <wtf/posix/POSIXExtras.h>
-#else
-#include <wtf/CPUTime.h>
 #endif
 
 // The bench report's file work sits behind OS(LINUX): elsewhere start rejects at start.platform before it opens a report,
@@ -130,6 +127,7 @@ BenchReport::BenchReport(int fd, unsigned vmOrdinal)
     : m_fd(fd)
     , m_pid(getCurrentProcessID())
     , m_vmOrdinal(vmOrdinal)
+    , m_timesBreakdowns(Options::jitCacheBenchBreakdowns())
 {
 }
 
@@ -244,25 +242,6 @@ BenchReport* benchReport(VM& vm)
     return state ? state->benchReport() : nullptr;
 }
 
-uint64_t benchThreadCPUNanoseconds()
-{
-#if OS(LINUX)
-    struct timespec now { };
-    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
-    return static_cast<uint64_t>(now.tv_sec) * 1000000000 + static_cast<uint64_t>(now.tv_nsec);
-#else
-    // Nothing measures here, since no report exists; WTF's thread CPU clock keeps the definition meaningful.
-    return static_cast<uint64_t>(CPUTime::forCurrentThread().nanoseconds());
-#endif
-}
-
-String bodyKeyHex(const BodyKey& key)
-{
-    // One encoding serves the reports and the shell, which reads it back with bodyKeyFromHex.
-    auto digits = bodyKeyHexDigits(key);
-    return String::fromLatin1(std::span<const char> { digits });
-}
-
 RelinkTimer::RelinkTimer(VM& vm)
 {
     // A collection's End phase can relink too, when it reinstalls a jettisoned CB's alternative, on whichever thread drives
@@ -271,13 +250,13 @@ RelinkTimer::RelinkTimer(VM& vm)
     if (!report || vm.heap.currentThreadIsDoingGCWork())
         return;
     m_report = report;
-    m_startNanoseconds = benchThreadCPUNanoseconds();
+    m_startNanoseconds = benchMonotonicNanoseconds();
 }
 
 RelinkTimer::~RelinkTimer()
 {
     if (m_report)
-        m_report->addRelinkNanoseconds(benchThreadCPUNanoseconds() - m_startNanoseconds);
+        m_report->addRelinkNanoseconds(benchMonotonicNanoseconds() - m_startNanoseconds);
 }
 
 #if ENABLE(JIT)
@@ -295,21 +274,19 @@ BaselineSpanTimer::BaselineSpanTimer(VM& vm, BaselineSpan span, bool measures)
     }
     m_measures = true;
     m_supportGenerationsAtStart = vm.jitStubs->supportGenerations();
-    m_startNanoseconds = benchThreadCPUNanoseconds();
+    m_span.start();
 }
 
 auto BaselineSpanTimer::stop() -> std::optional<Measured>
 {
     if (!m_measures)
         return std::nullopt;
-    uint64_t nanoseconds = benchThreadCPUNanoseconds() - m_startNanoseconds;
-    if (m_report) {
-        // installCode's relinks ran inside the span, timed by the same thread's clock.
-        uint64_t relinkNanoseconds = m_report->takeRelinkNanoseconds();
-        ASSERT(relinkNanoseconds <= nanoseconds);
-        nanoseconds -= relinkNanoseconds;
-    }
-    return Measured { nanoseconds, m_vm.jitStubs->supportGenerations() != m_supportGenerationsAtStart };
+    BoundSpanTimer::Times times = m_span.stop();
+    // installCode's relinks ran inside the span, timed on its wall clock. The cap stays the whole span's CPU time, which
+    // holds them, so a relink that lost the CPU cannot take the span below its own time.
+    uint64_t relinkNanoseconds = m_report ? m_report->takeRelinkNanoseconds() : 0;
+    ASSERT(relinkNanoseconds <= times.wall);
+    return Measured { times.nanoseconds(relinkNanoseconds), m_vm.jitStubs->supportGenerations() != m_supportGenerationsAtStart };
 }
 #endif // ENABLE(JIT)
 

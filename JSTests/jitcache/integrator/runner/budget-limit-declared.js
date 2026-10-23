@@ -1,5 +1,6 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit --jitcache-max-memory=4096
 // jitcache-expect-fault: 0 budget.limit
+// jitcache-fixture: passes
 
 // budget-limit.js with its fault declared, which passes.
 load("./resources/warm-up.js", "caller relative");

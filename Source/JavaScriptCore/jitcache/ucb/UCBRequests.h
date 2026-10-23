@@ -1,16 +1,14 @@
 #pragma once
 
-#include "BodyKey.h"
 #include "CodeSpecializationKind.h"
-#include "DirectEvalSite.h"
 #include "ExecutableInfo.h"
 #include "ParserModes.h"
-#include "SourceProvider.h"
 #include "VariableEnvironment.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/ucb/DirectEvalSite.h"
 #include <optional>
 #include <wtf/Noncopyable.h>
 #include <wtf/OptionSet.h>
-#include <wtf/RefPtr.h>
 
 namespace JSC {
 
@@ -69,7 +67,6 @@ struct RequestState {
     std::optional<uint64_t> missedBodyVersion; // the index token tryImport missed at; didGenerate records it
     std::optional<Digest256> sourceDigest; // roots: the root source digest; direct eval: of the evaluated text; taken once
     std::optional<std::optional<BodyKey>> key; // the request's key, computed once: outer empty, not yet; inner empty, no key
-    RefPtr<SourceProvider> suppliedDigestProvider; // set with the key: the provider an import at the key relies on; none for a direct eval
     std::optional<Digest256> context; // computed at most once, only when read
     std::optional<Digest256> holderDigest; // FunctionBody: holderDigest of functionExecutable, computed at most once (the holder check, a root's context)
     std::optional<Digest256> vouchedHolderDigest; // set with a child's key: the digest its imported parent's body lists for it, if any

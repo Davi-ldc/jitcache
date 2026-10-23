@@ -9,37 +9,40 @@
 #include "CodeCache.h"
 #include "DeferGC.h"
 #include "DirectEvalExecutable.h"
-#include "DirectEvalSite.h"
-#include "JITCacheAPI.h"
-#include "JITCacheSHA256.h"
-#include "JITCacheTest.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "JSGlobalObject.h"
 #include "LLIntData.h"
 #include "ModuleProgramExecutable.h"
 #include "ProgramExecutable.h"
 #include "SourceCodeKey.h"
+#include "SourceProvider.h"
 #include "StrongInlines.h"
 #include "SymbolTable.h"
-#include "TestArtifact.h"
-#include "TestFiles.h"
-#include "TwinReport.h"
-#include "UCBCapture.h"
-#include "UCBFeedback.h"
-#include "UCBImport.h"
-#include "UCBKeys.h"
-#include "UCBRegistry.h"
-#include "UCBRequests.h"
-#include "UCBSections.h"
-#include "UCBTestSupport.h"
-#include "UCBTwinGeneration.h"
-#include "UCBTwins.h"
 #include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedModuleProgramCodeBlock.h"
 #include "UnlinkedProgramCodeBlock.h"
-#include "ValidatedBody.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestFiles.h"
+#include "jitcache/tests/support/TestPack.h"
+#include "jitcache/tests/ucb/UCBTestFixtures.h"
+#include "jitcache/tests/ucb/UCBTestPart.h"
+#include "jitcache/tests/ucb/UCBTestProviders.h"
+#include "jitcache/tests/ucb/UCBTestSession.h"
+#include "jitcache/twins/TwinReport.h"
+#include "jitcache/ucb/DirectEvalSite.h"
+#include "jitcache/ucb/UCBCapture.h"
+#include "jitcache/ucb/UCBFeedback.h"
+#include "jitcache/ucb/UCBImport.h"
+#include "jitcache/ucb/UCBKeys.h"
+#include "jitcache/ucb/UCBRegistry.h"
+#include "jitcache/ucb/UCBRequests.h"
+#include "jitcache/ucb/UCBSections.h"
+#include "jitcache/ucb/UCBTwinGeneration.h"
+#include "jitcache/ucb/UCBTwins.h"
 #include <array>
 #include <limits>
 #include <optional>
@@ -54,13 +57,12 @@
 #include <wtf/text/WTFString.h>
 
 // The tests of the UCB engine in UCBImport, with the integrator's body lookup stubbed: attaches and imports with the misses
-// and stamps of each, the copies an attach or an import leaves, an attach with strict off to a UCB whose encoding is not
-// the body's coreDigest, code a native decode makes, which nothing imports or records, a private module's request,
-// supplied digests and the invalid material a wrong one raises. The parts act on the VM's own registry
-// and statistics, as the engine does; their UCBs are unpublished or test-held, so no CodeBlock installs what they attach.
-// Each test starts JITCache on its VM in one configuration, with a twin report in a temporary file, and checks what a run
-// in that configuration must leave: a fault only where the test expects one, a registry verifyRegistry finds sound, and no
-// twin difference but the ones the test expects.
+// and stamps of each, the copies an attach or an import leaves, code a native decode makes, which nothing imports or
+// records, a private module's request, supplied digests and the twin difference a wrong one leaves. The parts act on the
+// VM's own registry and statistics, as the engine does; their UCBs are unpublished or test-held, so no CodeBlock installs
+// what they attach. Each test starts JITCache on its VM in one role, with a twin report in a temporary file, and checks
+// what a run in that role must leave: no fault, a registry verifyRegistry finds sound, and no twin difference but the ones
+// the test expects.
 
 namespace JSC::JITCache::Tests {
 
@@ -199,7 +201,7 @@ static std::optional<TestBody> buildTestBody(VM& vm, UnlinkedCodeBlock& producer
     std::optional<Digest256> holderDigestValue = holder ? holderDigest(vm, *holder) : std::nullopt;
     auto constantCount = static_cast<uint32_t>(producer.constantRegisters().size());
     body.identity = Vector<uint8_t>(identitySectionSize(constantCount));
-    writeIdentitySection(body.identity.mutableSpan(), vm, key, context, SHA256::hash(body.core.span()), holderDigestValue, coreKindFor(key.identityKind()), parseFields, producer);
+    writeIdentitySection(body.identity.mutableSpan(), vm, key, context, holderDigestValue, coreKindFor(key.identityKind()), parseFields, producer);
     return body;
 }
 
@@ -321,13 +323,6 @@ static Vector<uint8_t> identityUnderAnotherKey(const Vector<uint8_t>& identity)
     return bytes;
 }
 
-static Vector<uint8_t> brokenMagic(const Vector<uint8_t>& section)
-{
-    Vector<uint8_t> bytes = section;
-    bytes[0] ^= 0xff;
-    return bytes;
-}
-
 // attachLive on a generated program. With no body, with code parked in its sharing slot, or with a miss stamped at the
 // current token it computes no digest; a request whose snapshot differs from the record's key features misses RequestKey
 // unstamped; a miss is stamped with the index token, never the file's commit identifier, and a match records the commit
@@ -425,10 +420,10 @@ static bool testAttachToGeneratedProgram(VM& vm, VMState& state, JSGlobalObject*
         return false;
 
     // At the matched commit identifier the attach parses nothing: a parse of this identity section would find another key,
-    // and of this feedback section a wrong magic, both invalid material.
+    // which is invalid material.
     RefPtr<PendingImport> attached = registry.pendingImport(*live.get());
     registry.resolvePendingImport(*live.get(), *attached, ImportResolution::Installed);
-    TestBody unparsable { identityUnderAnotherKey(body->identity), body->core, brokenMagic(body->feedback), BodyImage::Present };
+    TestBody unparsable { identityUnderAnotherKey(body->identity), body->core, body->feedback, BodyImage::Present };
     artifact.list(key, 7, unparsable.validated(key, 1000));
     before = statistics;
     attach(*live.get());
@@ -449,10 +444,9 @@ static bool testAttachToGeneratedProgram(VM& vm, VMState& state, JSGlobalObject*
     return part.check(goneOnce && thenNothing, "a listed body whose file is gone did not cost one stamped open and then nothing"_s);
 }
 
-// An attach leaves a live UCB that had no value and array copies with copies allocated and nothing seeded into them, and,
-// with strict off, attaches to a live UCB whose core encoding differs from the body's coreDigest, since only strict holds a
-// reused UCB to it. The body comes from another generation of the same program, which carries a prediction in its copies,
-// so the live UCB has no copies of its own before the attach.
+// An attach leaves a live UCB that had no value and array copies with copies allocated and nothing seeded into them. The
+// body comes from another generation of the same program, which carries a prediction in its copies, so the live UCB has no
+// copies of its own before the attach.
 static bool testAttachCopies(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
@@ -501,25 +495,7 @@ static bool testAttachCopies(VM& vm, VMState& state, JSGlobalObject* globalObjec
     auto view = registry.recordOf(*live.get());
     auto* copies = live.get()->valueAndArrayProfiles();
     bool allocatedUnseeded = statistics.attaches == before.attaches + 1 && view && view->hasPendingImport && copies && copies->valueProfiles()[0].prediction() == SpecNone;
-    if (!part.check(allocatedUnseeded, "an attach did not leave the live UCB's copies allocated with nothing seeded into them"_s))
-        return false;
-    if (state.strict())
-        return true;
-
-    // Strict off: the identity section's coreDigest differs from the core encoding of the live UCB, whose core section is
-    // the body's own, and the attach succeeds.
-    TestBody otherDigest = *body;
-    Digest256 wrongDigest = filledDigest(0x5a);
-    memcpySpan(otherDigest.identity.mutableSpan().subspan(identityCoreDigestOffset, wrongDigest.size()), std::span { wrongDigest });
-    Strong<UnlinkedCodeBlock> unchecked = generateLive();
-    if (!part.check(!!unchecked, "the second live UCB failed to generate"_s))
-        return false;
-    artifact.list(key, 32, otherDigest.validated(key, 3200));
-    before = statistics;
-    attach(*unchecked.get());
-    auto uncheckedView = registry.recordOf(*unchecked.get());
-    return part.check(state.tracksKeys() && statistics.attaches == before.attaches + 1 && uncheckedView && uncheckedView->hasPendingImport,
-        "with strict off, an attach to a live UCB whose core encoding differs from the body's coreDigest did not succeed"_s);
+    return part.check(allocatedUnseeded, "an attach did not leave the live UCB's copies allocated with nothing seeded into them"_s);
 }
 
 // A root body's import computes no context and no holder digest while its key has no body; an import that reaches the
@@ -814,8 +790,8 @@ static bool testPrivateModule(VM& vm, VMState& state, JSGlobalObject* globalObje
     return part.check(sharedCodeBlock && sharedCodeBlock != generatedCodeBlock && sharedCodeBlock != importedCodeBlock, "a private module's block entered the CodeCache"_s);
 }
 
-// A direct eval inside `caller`, whose record has `callerKey`, imported from a body the test serves: it relies on no
-// supplied digest, so it verifies none, and its record keeps no provider.
+// A direct eval inside `caller`, whose record has `callerKey`, imported from a body the test serves: the import returns a
+// UCB the registry records.
 static bool importDirectEval(VM& vm, JSGlobalObject* globalObject, VMState& state, StubbedArtifact& artifact, UnlinkedCodeBlock& caller, const BodyKey& callerKey, uint8_t salt)
 {
     UCBRegistry& registry = state.registry();
@@ -844,27 +820,21 @@ static bool importDirectEval(VM& vm, JSGlobalObject* globalObject, VMState& stat
     request.privateNameEnvironment = &privateNames;
     Strong<UnlinkedCodeBlock> imported { vm, importBody(request) };
     auto view = imported ? registry.recordOf(*imported.get()) : std::nullopt;
-    return view && !view->suppliedDigestProvider && statistics.imports == before.imports + 1 && statistics.suppliedDigestVerifications == before.suppliedDigestVerifications;
+    return view && statistics.imports == before.imports + 1;
 }
 
-// Supplied digests. With strict on, an import of a program whose provider supplies its digest and an import of one of its
-// functions verify the provider once in all, and their records keep it; with strict off they verify nothing and keep
-// none; a direct eval inside the function imports without a verification and keeps no provider. Every digest here is its
-// text's: the case of a digest that differs from its text, which the twin check reports wherever a request takes one, is
-// the invalid-material test's.
+// Supplied digests: a program whose provider supplies its digest imports, and so do one of its functions and a direct
+// eval inside that function, whose keys derive from the program's. Every digest here is its text's: a digest that differs
+// from its text, which the twin check reports wherever a request takes one, has a test of its own.
 static bool testSuppliedDigestImports(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
 {
     UCBRegistry& registry = state.registry();
-    UCBStatistics& statistics = registry.statistics();
-    bool strict = state.strict();
     StubbedArtifact artifact;
     StubbedBodyLookup lookup { state, artifact };
 
     String text = "function jitcacheU8Supplied(a) { return eval('a + 1'); }\n"_s;
     auto importChain = [&] {
-        Ref<SuppliedDigestProvider> provider = SuppliedDigestProvider::create(text, sourceDigest(text));
-        SourceProvider* expectedProvider = strict ? provider.ptr() : nullptr;
-        ProgramRequestFixture fixture = programRequestFixture(globalObject, Ref<SourceProvider> { provider.get() });
+        ProgramRequestFixture fixture = programRequestFixture(globalObject, SuppliedDigestProvider::create(text, sourceDigest(text)));
         BodyKey key = programKey(fixture.source, NoLexicallyScopedFeatures);
         Strong<UnlinkedCodeBlock> producer = generateProgramFor(vm, fixture);
         auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get())) : std::nullopt;
@@ -878,7 +848,7 @@ static bool testSuppliedDigestImports(VM& vm, VMState& state, JSGlobalObject* gl
             program = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
         }
         auto programView = program ? registry.recordOf(*program.get()) : std::nullopt;
-        if (!programView || !programView->hasPendingImport || programView->suppliedDigestProvider != expectedProvider)
+        if (!programView || !programView->hasPendingImport)
             return false;
 
         UnlinkedFunctionExecutable& child = *program.get()->functionDecl(0);
@@ -896,54 +866,21 @@ static bool testSuppliedDigestImports(VM& vm, VMState& state, JSGlobalObject* gl
             function = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
         }
         auto functionView = function ? registry.recordOf(*function.get()) : std::nullopt;
-        if (!functionView || !functionView->hasPendingImport || functionView->suppliedDigestProvider != expectedProvider)
+        if (!functionView || !functionView->hasPendingImport)
             return false;
-        // Verified now exactly with strict on; the direct eval's import leaves that as it is.
-        bool verified = registry.suppliedDigestVerified(provider->asID());
-        if (verified != strict)
-            return false;
-        if (!importDirectEval(vm, globalObject, state, artifact, *function.get(), functionView->key, 2))
-            return false;
-        return registry.suppliedDigestVerified(provider->asID()) == verified;
+        return importDirectEval(vm, globalObject, state, artifact, *function.get(), functionView->key, 2);
     };
 
-    UCBStatistics before = statistics;
-    if (!part.check(importChain(), "the import of a program, of its function and of a direct eval inside it did not succeed with the records the registry gives them, or did not leave the provider verified exactly with strict on"_s))
-        return false;
-    return part.check(statistics.suppliedDigestVerifications == before.suppliedDigestVerifications + (strict ? 1 : 0), "the imports of a program, its function and a direct eval inside it did not verify the provider exactly once with strict on, and never with it off"_s);
+    return part.check(importChain(), "the import of a program, of its function and of a direct eval inside it did not succeed with the records the registry gives them"_s);
 }
 
-// In a Producer no record keeps a provider, since only a VM that imports with strict on keeps one.
-static bool testProducerRecordsKeepNoProvider(VM& vm, VMState& state, JSGlobalObject* globalObject, TestPart& part)
-{
-    UCBRegistry& registry = state.registry();
-    String text = "function jitcacheU8ProducerSupplied() { return 1; }\n"_s;
-    ProgramRequestFixture fixture = programRequestFixture(globalObject, SuppliedDigestProvider::create(text, sourceDigest(text)));
-    Strong<UnlinkedCodeBlock> program = generateProgramFor(vm, fixture);
-    if (!part.check(!!program, "the Producer's program failed to generate"_s))
-        return false;
-    {
-        RequestState request(vm, RequestKind::Program, fixture.source, { }, fixture.executable.get()->lexicallyScopedFeatures());
-        prepareProgramRequest(request, *fixture.executable.get());
-        recordGenerated(request, *program.get());
-    }
-    auto view = registry.recordOf(*program.get());
-    std::optional<ExecutableIdentity> childIdentity = registry.identityOf(*program.get()->functionDecl(0));
-    auto* child = childIdentity ? std::get_if<ChildIdentity>(&*childIdentity) : nullptr;
-    bool keepsNone = view && !view->suppliedDigestProvider && child && child->parent && !child->parent->suppliedDigestProvider();
-    return part.check(keepsNone, "a Producer's record or its children's identities keep a supplied digest's provider"_s);
-}
-
-// The engine's parts the VM's configuration allows: the records of a Producer; and in a role that imports, the attaches
-// and imports with the copies they leave, an attach that strict off does not hold to the body's coreDigest, decoded code,
+// The engine's parts, which need a role that imports: the attaches and imports with the copies they leave, decoded code,
 // a private module's request and supplied digests.
 static bool testEngine(VM& vm, JSGlobalObject* globalObject, TestPart& part)
 {
     VMState* state = vm.jitCacheState();
     if (!part.check(state && state->tracksKeys() && globalObject, "the test's VM does not track keys, or the test has no global object"_s))
         return false;
-    if (state->role() == Role::Producer)
-        return testProducerRecordsKeepNoProvider(vm, *state, globalObject, part);
     if (!part.check(state->importsEnabled(), "a Consumer or ConsumerProducer does not import"_s))
         return false;
     return testAttachToGeneratedProgram(vm, *state, globalObject, part)
@@ -955,15 +892,13 @@ static bool testEngine(VM& vm, JSGlobalObject* globalObject, TestPart& part)
         && testSuppliedDigestImports(vm, *state, globalObject, part);
 }
 
-// The case of a supplied digest that differs from its text, alone in its test: the twin check reports such a digest
-// wherever a request takes it, and the case turns cache activity off for good. In a Consumer with strict on, a program
-// whose import relies on a wrong supplied digest is invalid material at ucb.supplied-digest before anything is decoded:
-// its body's core and feedback sections are broken, so a decode or a feedback parse would raise another step. With a twin
-// report open, the case adds exactly one difference.
-static bool testSuppliedDigestInvalidMaterial(VM& vm, JSGlobalObject* globalObject, TestPart& part)
+// The case of a supplied digest that differs from its text, alone in its test, since the twin check reports such a digest
+// wherever a request takes it. A program request takes it for its key, at which the artifact holds no body, so the request
+// misses NoBody and cache activity stays on. With a twin report open, the case adds exactly one difference.
+static bool testWrongSuppliedDigest(VM& vm, JSGlobalObject* globalObject, TestPart& part)
 {
     VMState* state = vm.jitCacheState();
-    if (!part.check(state && globalObject && state->importsEnabled() && state->strict(), "the invalid-material cases need a VM that imports with strict on"_s))
+    if (!part.check(state && globalObject && state->importsEnabled(), "the wrong-digest case needs a VM that imports"_s))
         return false;
     UCBRegistry& registry = state->registry();
     UCBStatistics& statistics = registry.statistics();
@@ -976,13 +911,6 @@ static bool testSuppliedDigestInvalidMaterial(VM& vm, JSGlobalObject* globalObje
 
     String text = "var jitcacheU8WrongSupplied = 'jitcache-u8-wrong-supplied-digest';\n"_s;
     ProgramRequestFixture fixture = programRequestFixture(globalObject, SuppliedDigestProvider::create(text, filledDigest(0xee)));
-    BodyKey key = programKey(fixture.source, NoLexicallyScopedFeatures);
-    Strong<UnlinkedCodeBlock> producer = generateProgramFor(vm, fixture);
-    auto body = producer ? buildTestBody(vm, *producer.get(), nullptr, key, programContext(fixture.source, *fixture.executable.get())) : std::nullopt;
-    if (!part.check(!!body, "the wrong-digest program's body could not be built"_s))
-        return false;
-    TestBody undecodable { body->identity, Vector<uint8_t>(FillWith { }, body->core.size(), 0), brokenMagic(body->feedback), BodyImage::Present };
-    artifact.list(key, 71, undecodable.validated(key, 8000));
     UCBStatistics before = statistics;
     unsigned differencesBeforeImport = differences();
     Strong<UnlinkedCodeBlock> imported;
@@ -991,14 +919,10 @@ static bool testSuppliedDigestInvalidMaterial(VM& vm, JSGlobalObject* globalObje
         prepareProgramRequest(request, *fixture.executable.get());
         imported = Strong<UnlinkedCodeBlock> { vm, importBody(request) };
     }
-    auto step = [&](InvalidMaterialStep invalidStep) {
-        return statistics.invalidMaterial[static_cast<size_t>(invalidStep)] - before.invalidMaterial[static_cast<size_t>(invalidStep)];
-    };
-    bool raised = !imported && !state->tracksKeys() && step(InvalidMaterialStep::SuppliedDigest) == 1 && !step(InvalidMaterialStep::Decode) && !step(InvalidMaterialStep::Feedback)
-        && statistics.imports == before.imports;
-    if (!part.check(raised, "an import relying on a supplied digest that differs from its text did not raise invalid material at ucb.supplied-digest before decoding"_s))
+    bool missed = !imported && state->tracksKeys() && missesOf(statistics, MissReason::NoBody) == missesOf(before, MissReason::NoBody) + 1 && statistics.imports == before.imports;
+    if (!part.check(missed, "a request under a supplied digest that differs from its text did not miss NoBody with cache activity on"_s))
         return false;
-    return part.check(!sink || differences() == differencesBeforeImport + 1, "the import under a wrong supplied digest did not add exactly one difference to the twin report"_s);
+    return part.check(!sink || differences() == differencesBeforeImport + 1, "the request under a wrong supplied digest did not add exactly one difference to the twin report"_s);
 }
 
 // The difference lines of the twin report at `path`, which the VM's sink writes. TwinReport writes each line with one write
@@ -1028,17 +952,17 @@ static Vector<String> twinDifferenceLines(TestContext& context, VMState& state, 
     return lines;
 }
 
-// Starts JITCache on the test's VM in the configuration, with a twin report in a temporary file, and runs the engine's
-// parts there. The VM starts with no fault, and the parts leave no fault, a registry verifyRegistry finds sound and a twin
-// report with no difference.
-static void runEngineIn(TestContext& context, Role role, bool strict)
+// Starts JITCache on the test's VM in `role`, with a twin report in a temporary file, and runs the engine's parts there.
+// The VM starts with no fault, and the parts leave no fault, a registry verifyRegistry finds sound and a twin report with
+// no difference.
+static void runEngineIn(TestContext& context, Role role)
 {
     VM& vm = *context.vm();
     auto directory = TemporaryDirectory::create(context, "jitcache-ucb-engine"_s);
     if (!directory)
         return;
     String twinReportPath = directory->path("twins.jsonl"_s);
-    if (!startJITCache(context, vm, *directory, role, strict, twinReportPath))
+    if (!startJITCache(context, vm, *directory, role, twinReportPath))
         return;
     if (auto fault = JITCache::status(vm).firstFault) {
         JITCACHE_FAIL(makeString("the VM starts with a fault at "_s, fault->stepName()));
@@ -1059,38 +983,26 @@ static void runEngineIn(TestContext& context, Role role, bool strict)
 
 using namespace UCBEngineTestsInternal;
 
-JITCACHE_TEST(ucbEngineInAProducer, Yes)
+JITCACHE_TEST(ucbEngineInAConsumer, Yes)
 {
-    runEngineIn(context, Role::Producer, true);
-}
-
-JITCACHE_TEST(ucbEngineInAStrictConsumer, Yes)
-{
-    runEngineIn(context, Role::Consumer, true);
-}
-
-// Strict off on purpose, the one engine test that is: every run the test runner starts has strict on, so normal mode's
-// paths, such as an import that verifies no supplied digest, run only here.
-JITCACHE_TEST(ucbEngineInANonStrictConsumer, Yes)
-{
-    runEngineIn(context, Role::Consumer, false);
+    runEngineIn(context, Role::Consumer);
 }
 
 JITCACHE_TEST(ucbEngineInAConsumerProducer, Yes)
 {
-    runEngineIn(context, Role::ConsumerProducer, true);
+    runEngineIn(context, Role::ConsumerProducer);
 }
 
-// A Consumer with strict on runs the case of a wrong supplied digest, and is left with cache activity off at
-// ucb.supplied-digest, a registry verifyRegistry finds sound, and exactly the one difference the case reports.
-JITCACHE_TEST(ucbEngineSuppliedDigestInvalidMaterial, Yes)
+// A Consumer runs the case of a wrong supplied digest, and is left with no fault, a registry verifyRegistry finds sound,
+// and exactly the one difference the case reports.
+JITCACHE_TEST(ucbEngineWrongSuppliedDigestTwin, Yes)
 {
     VM& vm = *context.vm();
     auto directory = TemporaryDirectory::create(context, "jitcache-ucb-engine"_s);
     if (!directory)
         return;
     String twinReportPath = directory->path("twins.jsonl"_s);
-    if (!startJITCache(context, vm, *directory, Role::Consumer, true, twinReportPath))
+    if (!startJITCache(context, vm, *directory, Role::Consumer, twinReportPath))
         return;
     if (auto fault = JITCache::status(vm).firstFault) {
         JITCACHE_FAIL(makeString("the VM starts with a fault at "_s, fault->stepName()));
@@ -1098,11 +1010,10 @@ JITCACHE_TEST(ucbEngineSuppliedDigestInvalidMaterial, Yes)
     }
     EnteredGlobalObject entered { vm };
     TestPart part { context };
-    if (!testSuppliedDigestInvalidMaterial(vm, entered.globalObject(), part))
+    if (!testWrongSuppliedDigest(vm, entered.globalObject(), part))
         return;
-    auto fault = JITCache::status(vm).firstFault;
-    if (!fault || fault->stepName() != "ucb.supplied-digest"_s)
-        JITCACHE_FAIL(makeString("the invalid material left the fault at "_s, fault ? fault->stepName() : String { "none"_s }, ", not at ucb.supplied-digest"_s));
+    if (auto fault = JITCache::status(vm).firstFault)
+        JITCACHE_FAIL(makeString("the wrong supplied digest left a fault at "_s, fault->stepName()));
     checkRegistry(context, vm);
     Vector<String> lines = twinDifferenceLines(context, *vm.jitCacheState(), twinReportPath);
     if (lines.size() != 1)

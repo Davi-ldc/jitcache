@@ -1,8 +1,8 @@
 #pragma once
 
-#include "BodyKey.h"
-#include "JITCachePlatform.h"
-#include "ValidatedBody.h"
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/store/JITCachePlatform.h"
+#include "jitcache/store/ValidatedBody.h"
 #include <array>
 #include <bit>
 #include <expected>
@@ -27,28 +27,27 @@ static_assert(std::endian::native == std::endian::little);
 
 namespace JSC::JITCache {
 
-// The section kinds. The high byte of a type id names the lane (1 UCB, 2 Image, 3 CB, 4 ICs) and the low byte the section
-// family; the directory entry's tier byte separates tiers, 0 for the sections every tier shares. A later tier adds
-// entries such as (0x0201, 2) under the same layout version, which is how the format admits more than one tier per body.
-// The table is in SectionKind's order, which is the directory's order of (type id, tier).
+// When a body holds a section kind, which container.required checks:
+//   Required    every body whose highest tier is at least the kind's tier
+//   TwinsOnly   as Required in ENABLE(JITCACHE_TWINS) builds; every other build forbids it
+//   ModuleOnly  no tier requires it, and only a module's body may hold it
+enum class SectionPresence : uint8_t { Required, TwinsOnly, ModuleOnly };
+
+// The section kinds' table, from the rows of JITCACHE_FOR_EACH_SECTION_KIND (ValidatedBody.h), in SectionKind's order,
+// which is the directory's order of (type id, tier). A later tier adds rows such as (0x0201, 2) under the same layout
+// version, which is how the format admits more than one tier per body.
 struct SectionKindDescription {
     uint16_t typeId;
     uint8_t tier;
     ASCIILiteral name; // the lane's name, which the writer's diagnostics use
+    SectionPresence presence;
 };
 
+#define JITCACHE_SECTION_KIND_DESCRIPTION(kind, typeId, tier, name, presence) { typeId, tier, name, SectionPresence::presence },
 inline constexpr std::array<SectionKindDescription, numberOfSectionKinds> sectionKindDescriptions { {
-    { 0x0101, 0, "ucb.identity"_s },
-    { 0x0102, 0, "ucb.core"_s },
-    { 0x0103, 0, "ucb.feedback"_s },
-    { 0x0104, 0, "ucb.analysis"_s },
-    { 0x0201, 1, "image.baseline"_s },
-    { 0x0202, 1, "baked-facts.baseline"_s },
-    { 0x0203, 1, "image-twins.baseline"_s },
-    { 0x0301, 1, "cb.state"_s },
-    { 0x0302, 1, "cb.summary"_s },
-    { 0x0401, 1, "ICsBaseline"_s },
+    JITCACHE_FOR_EACH_SECTION_KIND(JITCACHE_SECTION_KIND_DESCRIPTION)
 } };
+#undef JITCACHE_SECTION_KIND_DESCRIPTION
 
 constexpr const SectionKindDescription& sectionKindDescription(SectionKind kind)
 {
@@ -66,19 +65,25 @@ constexpr std::optional<SectionKind> sectionKindFor(uint16_t typeId, uint8_t tie
 }
 
 // Whether a body whose highest tier is highestTier must hold the kind, which container.required checks: every kind whose
-// tier is at most its highest tier, except image-twins.baseline, which ENABLE(JITCACHE_TWINS) builds require and every
-// other build forbids, and ucb.analysis, which no tier requires. A body holds exactly the kinds this returns true for,
-// plus at most ucb.analysis, which only a module's body may hold. The writer writes every required kind, and strict
-// validation checks it.
+// tier is at most its highest tier, by its presence. A body holds exactly the kinds this returns true for, plus at most
+// the ModuleOnly ones, which only a module's body may hold. The writer writes every required kind, and Full validation
+// checks it.
 constexpr bool isSectionRequired(SectionKind kind, uint8_t highestTier)
 {
-    if (kind == SectionKind::UCBAnalysis)
-        return false;
-#if !ENABLE(JITCACHE_TWINS)
-    if (kind == SectionKind::ImageTwinsBaseline)
+    auto& description = sectionKindDescription(kind);
+    switch (description.presence) {
+    case SectionPresence::Required:
+        return description.tier <= highestTier;
+    case SectionPresence::TwinsOnly:
+#if ENABLE(JITCACHE_TWINS)
+        return description.tier <= highestTier;
+#else
         return false;
 #endif
-    return sectionKindDescription(kind).tier <= highestTier;
+    case SectionPresence::ModuleOnly:
+        return false;
+    }
+    return false;
 }
 
 // The header, cache/header, with B build IDs and M = 3 must-match options:
@@ -265,9 +270,11 @@ uint32_t encodeBodyDirectory(std::span<const BodyDirectoryEntry>, std::span<uint
 //                            plus at most ucb.analysis, which only a body whose key's identity kind is Module may hold
 //   container.checksum       integrity: each section's CRC
 //
-// Integrity is what a session that is not strict checks: the header digest ties the body to the header start checked,
-// the key check ties it to its key, and the envelope, directory and section checksums cover its bytes, with the sizes and
-// bounds that keep those checksums inside the body.
+// Integrity is what OpenedArtifact::open checks: the header digest ties the body to the header start checked, the key
+// check ties it to its key, and the envelope, directory and section checksums cover its bytes, with the sizes and bounds
+// that keep those checksums inside the body. A read that needs only some sections checks less (validateBodyFraming).
+// Full adds the structure parts, which the writer's reread of each body it commits and compaction run, so the pack
+// holds only bodies laid out as the writer lays them out.
 enum class ValidationMode : uint8_t { Integrity, Full };
 
 using ContainerCheck = ASCIILiteral; // the failing check's name in the table above, such as "container.key"
@@ -298,8 +305,8 @@ struct BodyLayout {
 };
 
 // With Integrity, the layout records the first directory entry of each section kind and ignores an entry whose
-// (type id, tier) names no kind; the writer produces neither case, and a session that is not strict trusts it not to.
-// container.checksum checks every entry's CRC in both modes. bytes is the whole body.
+// (type id, tier) names no kind; the writer produces neither case, which its Full reread checks, so a reader trusts the
+// pack to hold neither. container.checksum checks every entry's CRC in both modes. bytes is the whole body.
 std::expected<BodyLayout, ContainerCheck> validateBody(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
     std::span<const uint8_t, 16> headerDigest, ValidationMode);
 
@@ -339,12 +346,12 @@ private:
     std::array<uint32_t, maximumBodySections> m_sectionCRCStates { }; // each directory entry's running crc32cExtend state
 };
 
-// The scoring read's checks: those from container.size to container.required on the envelope and the directory, and
+// The checks of the reads that need only some of a body's sections, the scoring read and readSection: the integrity
+// parts of the checks from container.size to container.directory on the envelope and the directory, and
 // container.checksum on the sections of checksummedKinds alone. It reads the envelope, the directory and those sections
-// of bytes, the whole body, and nothing else, so the padding, which lies outside them, is left to the full validation an
-// import runs.
+// of bytes, the whole body, and nothing else.
 std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const uint8_t> bytes, const BodyKey& expectedKey,
-    std::span<const uint8_t, 16> headerDigest, ValidationMode, std::span<const SectionKind> checksummedKinds);
+    std::span<const uint8_t, 16> headerDigest, std::span<const SectionKind> checksummedKinds);
 
 // The pack, cache/pack: one log-structured file holding every body. It is only ever appended to, except for its root
 // and its retired word, and a reader sees exactly the bytes below the valid end it loaded from the root.
@@ -383,12 +390,12 @@ std::expected<BodyLayout, ContainerCheck> validateBodyFraming(std::span<const ui
 // An index entry; a full index lists live keys in strictly increasing byte order, and a delta lists changes in the order
 // they apply, the last entry for a key winning:
 //   0    40  the body key
-//   40   8   the record's offset, or 0 for a tombstone: the key has no body from this entry on
-//   48   8   S, 0 for a tombstone
-//   56   8   the commit identifier, 0 for a tombstone
+//   40   8   the record's offset
+//   48   8   S
+//   56   8   the commit identifier
 //   64   4   L
 //   68   4   P
-//   72   1   the body's highest tier, 0 for a tombstone
+//   72   1   the body's highest tier
 //   73   7   0
 constexpr size_t packPrefixBytes = 64;
 constexpr size_t packRetiredOffset = 48;
@@ -447,13 +454,12 @@ struct PackIndexBlock {
 
 struct PackIndexEntry {
     BodyKey key { };
-    uint64_t offset { 0 }; // 0 for a tombstone
+    uint64_t offset { 0 };
     uint64_t size { 0 };
     uint64_t version { 0 };
     uint32_t llintThreshold { 0 };
     uint32_t counterProgress { 0 };
     uint8_t highestTier { 0 };
-    bool isTombstone() const { return !offset; }
     friend bool operator==(const PackIndexEntry&, const PackIndexEntry&) = default;
 };
 
@@ -468,10 +474,12 @@ std::expected<PackIndexBlock, PackRejection> decodePackIndexBlockHeader(std::spa
 std::optional<PackRejection> checkPackIndexBlockCRC(std::span<const uint8_t, packIndexBlockHeaderBytes>, std::span<const uint8_t> entries);
 uint64_t decodePackIndexTrailer(std::span<const uint8_t, packIndexTrailerBytes>); // the offset the trailer gives
 void encodePackIndexEntry(const PackIndexEntry&, std::span<uint8_t> entry); // entry holds exactly 80 bytes
-// An entry's own checks: its key, its zero bytes, and for a tombstone zero size, version and tier.
+// An entry's own checks: its key, its zero bytes, an offset that is a multiple of 8 outside the prefix, and a commit
+// identifier that is not zero.
 std::expected<PackIndexEntry, PackRejection> decodePackIndexEntry(std::span<const uint8_t> entry);
 
-// Strict reads require an index entry to repeat its body's envelope: commit identifier, tier, L and P.
+// Whether an index entry repeats its body's envelope: commit identifier, tier, L and P. Compaction requires it of every
+// body it keeps.
 bool packEntryRepeatsEnvelope(const PackIndexEntry&, const BodyLayout&);
 
 #if ENABLE(JITCACHE_TWINS)

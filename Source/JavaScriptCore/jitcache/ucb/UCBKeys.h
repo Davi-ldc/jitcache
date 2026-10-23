@@ -1,10 +1,10 @@
 #pragma once
 
-#include "BodyKey.h"
 #include "BytecodeIndex.h"
 #include "ExecutableInfo.h"
 #include "ParserModes.h"
 #include "VariableEnvironment.h"
+#include "jitcache/base/BodyKey.h"
 #include <optional>
 #include <wtf/Variant.h>
 #include <wtf/text/StringView.h>
@@ -36,6 +36,12 @@ Digest256 executableBodyContextDigest(IdentityKind, unsigned providerOffset, con
 // first; requests pass none. `environmentsDigested`, when given, gains the number of environments this call digested
 // first.
 std::optional<Digest256> holderDigest(VM&, const UnlinkedFunctionExecutable&, CoreEncodingBudget* = nullptr, unsigned* environmentsDigested = nullptr);
+// The digest of a TDZ chain, which a holder digest ends with: 32 zero bytes for a null chain. Each environment on the
+// chain is digested at most once while it lives and keeps its digest; `environmentsDigested` gains one for each
+// environment this call digested first. A budget, when given, is charged for each such environment's sort buffer while
+// the buffer lives, and for the list of the chain's links while it lives when the chain has more links than the 32 the
+// list keeps inline, charged before the list moves to the heap. Empty on a refusal; digests already kept stay.
+std::optional<Digest256> tdzChainDigest(const TDZEnvironmentLink*, CoreEncodingBudget*, unsigned& environmentsDigested);
 Digest256 directEvalContextDigest(unsigned providerOffset, LexicallyScopedFeatures, DerivedContextType, NeedsClassFieldInitializer, PrivateBrandRequirement,
     bool isArrowFunctionContext, bool isInsideOrdinaryFunction, EvalContextType, const TDZEnvironment&, const PrivateNameEnvironment&);
 
@@ -73,9 +79,9 @@ struct RootSourceDigest {
 // provider supplies one, else sourceDigest(rootSource.view()).
 RootSourceDigest rootSourceDigest(const SourceCode& rootSource, const Digest256* builtinMetadataDigest = nullptr);
 
-// All but holderDigest are pure, take no lock, allocate no cell and run on any thread; rootSourceDigest calls only the
-// provider's const accessors. holderDigest hashes the codec's descriptor encoding page by page and then the chain digest
-// tdzChainDigest returns, on the VM thread; it allocates no cell, and the only state it writes is the digests it keeps in
-// environments.
+// All but holderDigest and tdzChainDigest are pure, take no lock, allocate no cell and run on any thread; rootSourceDigest
+// calls only the provider's const accessors. holderDigest hashes the codec's descriptor encoding page by page and then the
+// chain digest tdzChainDigest returns. Both run on the VM thread and allocate no cell, and the only state they write is
+// the digests they keep in environments.
 
 } // namespace JSC::JITCache

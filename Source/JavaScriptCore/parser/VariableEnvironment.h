@@ -344,11 +344,16 @@ private:
 
 using TDZEnvironment = UncheckedKeyHashSet<RefPtr<UniquedStringImpl>, IdentifierRepHash>;
 
+namespace JITCache {
+struct TDZDigests;
+}
+
 class CompactTDZEnvironment {
     WTF_MAKE_TZONE_ALLOCATED(CompactTDZEnvironment);
     WTF_MAKE_NONCOPYABLE(CompactTDZEnvironment);
 
     friend class CachedCompactTDZEnvironment;
+    friend struct JITCache::TDZDigests; // JITCache: digests the names
 
     using Compact = Vector<PackedRefPtr<UniquedStringImpl>>;
     using Inflated = TDZEnvironment;
@@ -503,6 +508,7 @@ public:
 
 private:
     friend class CachedTDZEnvironmentLink;
+    friend struct JITCache::TDZDigests; // JITCache: digests the chain
 
     CompactTDZEnvironmentMap::Handle m_handle;
     RefPtr<TDZEnvironmentLink> m_parent;

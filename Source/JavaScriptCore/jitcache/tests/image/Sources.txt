@@ -1,0 +1,8 @@
+jitcache/tests/image/ImageBudgetTests.cpp
+jitcache/tests/image/ImageCensusTests.cpp
+jitcache/tests/image/ImageEncodingTests.cpp
+jitcache/tests/image/ImageInstallTests.cpp
+jitcache/tests/image/ImageNegateTests.cpp
+jitcache/tests/image/ImageRecorderTests.cpp
+jitcache/tests/image/ImageSectionTests.cpp
+jitcache/tests/image/ImageTwinsSectionTests.cpp

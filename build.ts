@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { availableParallelism, constants, homedir, totalmem } from "node:os";
 import { join, resolve } from "node:path";
+import { holdMachineLock } from "./Tools/Scripts/jitcache/lock.ts";
 
 const BUN_PIN = "c6da4a4d3010e5553438c60f6bd76d981976867c";
 // The webkitbun revision the Bun pin declares (skills/SKILL.md), which the pin comparison builds.
@@ -122,6 +123,13 @@ if (target.pin) {
   webkitSource = realpathSync(pinSource);
 }
 const buildDir = join(buildRoot, `linux-${architecture}-${target.dir ?? target.profile}${target.pin ? "-pin" : ""}`);
+// The build holds the machine lock from here until it exits, waiting while another build, test or bench holds it.
+let lock: number | null = null;
+try {
+  lock = holdMachineLock();
+} catch (error) {
+  fail((error as Error).message);
+}
 const env = { ...process.env };
 env.PATH = `${join(home, "collo-local/tools/bin")}:${env.PATH || ""}`;
 
@@ -146,14 +154,11 @@ delete env.GITHUB_ACTIONS;
 env.CMAKE_BUILD_PARALLEL_LEVEL = String(JOBS);
 env.CARGO_BUILD_JOBS = String(JOBS);
 env.BUN_WEBKIT_PATH = webkitSource;
-const lockDir = resolve(process.env.XDG_CACHE_HOME || join(home, ".cache"), "jitcache");
-mkdirSync(lockDir, { recursive: true });
-const lock = ["--exclusive", "--no-fork", join(lockDir, "build.lock")];
 const exitCode = (run: ReturnType<typeof spawnSync>) =>
   run.status ?? (run.signal ? 128 + constants.signals[run.signal] : 1);
 
 const builderArgs = [
-  process.execPath, builder,
+  builder,
   `--profile=${target.profile}`,
   ...(target.flags ?? []),
   ...(cross ? [`--arch=${architecture}`, `--linux-sysroot=${sysroot}`] : []),
@@ -164,8 +169,10 @@ const builderArgs = [
   `--build-dir=${buildDir}`,
 ];
 
-// flock waits for any other build and retains the lock while the builder runs.
-const result = spawnSync("flock", [...lock, ...builderArgs], { cwd: bunSource, env, stdio: "inherit" });
+// The builder and the Ninja rerun receive the locked descriptor as their descriptor 3, so each holds the machine lock
+// while it runs, as the builder did when flock started it, and a build that outlives this process still holds it.
+const stdio: "inherit" | ("inherit" | number)[] = lock === null ? "inherit" : ["inherit", "inherit", "inherit", lock];
+const result = spawnSync(process.execPath, builderArgs, { cwd: bunSource, env, stdio });
 if (result.error) fail(`Cannot launch Bun builder: ${result.error.message}`);
 let status = exitCode(result);
 
@@ -175,8 +182,7 @@ let status = exitCode(result);
 const nested = join(buildDir, "deps/WebKit");
 if (status !== 0 && keepGoing && statSync(join(nested, "build.ninja"), { throwIfNoEntry: false })?.isFile()) {
   const nestedTargets = target.profile.endsWith("-twins") ? ["jsc", "testjitcache"] : ["jsc"];
-  const rerun = spawnSync("flock", [...lock, "ninja", "-C", nested, "-k", "0", `-j${JOBS}`, ...nestedTargets],
-    { env, stdio: "inherit" });
+  const rerun = spawnSync("ninja", ["-C", nested, "-k", "0", `-j${JOBS}`, ...nestedTargets], { env, stdio });
   if (rerun.error) fail(`Cannot launch Ninja: ${rerun.error.message}`);
   status = exitCode(rerun) || status;
 }

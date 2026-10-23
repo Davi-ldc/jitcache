@@ -1,538 +1,41 @@
 #include "config.h"
-#include "UCBImport.h"
+#include "jitcache/ucb/UCBImport.h"
 
 #include "CachedBytecode.h"
 #include "CachedTypes.h"
 #include "CodeCache.h"
-#include "EvalExecutable.h"
 #include "GlobalExecutable.h"
-#include "JITCacheBench.h"
-#include "JITCacheVMState.h"
 #include "JSCInlines.h"
 #include "JSModuleRecord.h"
-#include "LinkTimeConstant.h"
 #include "ModuleProgramExecutable.h"
-#include "RegExp.h"
 #include "SourceCode.h"
 #include "SourceProvider.h"
-#include "UCBFeedback.h"
-#include "UCBRegistry.h"
-#include "UCBSections.h"
-#include "UCBTwins.h"
 #include "UnlinkedCodeBlock.h"
-#include "UnlinkedEvalCodeBlock.h"
-#include "UnlinkedFunctionCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
 #include "UnlinkedGlobalCodeBlock.h"
-#include "UnlinkedModuleProgramCodeBlock.h"
-#include "UnlinkedProgramCodeBlock.h"
 #include "VM.h"
-#include "ValidatedBody.h"
 #include "WeakInlines.h"
-#include <array>
-#include <utility>
-#include <wtf/MonotonicTime.h>
-#include <wtf/Noncopyable.h>
+#include "jitcache/base/BodyKey.h"
+#include "jitcache/session/JITCacheVMState.h"
+#include "jitcache/store/ValidatedBody.h"
+#include "jitcache/ucb/UCBFeedback.h"
+#include "jitcache/ucb/UCBMatch.h"
+#include "jitcache/ucb/UCBRegistry.h"
+#include "jitcache/ucb/UCBRequestCost.h"
+#include "jitcache/ucb/UCBSections.h"
+#include "jitcache/ucb/UCBTwins.h"
 #include <wtf/StdLibExtras.h>
-#include <wtf/text/MakeString.h>
 
 // The UCB lane's engine. Where the native path would generate, it imports a matching body; where the holder already has
 // a UCB that a request recorded, it attaches a pending import; and it records what every request generated or imported
 // and every root's identity. What a native decode makes has no record, so nothing here acts on it. Each entry point runs
 // on the VM thread holding the API lock and heap access, re-reads the VM's JITCache state first, and counts each outcome
-// in the registry's statistics.
+// in the registry's statistics. UCBMatch.cpp decides whether a body fits a request, and UCBRequestCost.h measures each
+// request for the bench report.
 
 namespace JSC::JITCache {
 
 namespace UCBImportInternal {
-
-// The request event of the bench report. While a bench report is open, each part of a request point records its wall
-// time from CLOCK_MONOTONIC, and the thread CPU time from the first measured part to the close of the counted span is
-// split into two totals: what counts toward the installation bound, and what is measured apart from it. The thread CPU
-// clock is read only where the time passes from one account to another, so every read sits where a counted span begins or
-// ends. Strict's checks go to neither total, since the bound is measured with strict off. With no report open, each part
-// costs one test.
-//
-// Counted holds what the bound's accounting puts inside it: the section parses, matching, the butterfly rebuild, seeding,
-// parse fields and records. Apart holds the key and context digests, the holder digest a root's context covers, each TDZ
-// environment's first digest, reading the artifact, the decode and the extra-memory report that stands in for
-// generation's. Excluded holds strict's checks.
-enum class CostAccount : uint8_t { Counted, Apart, Excluded };
-constexpr unsigned numberOfCostAccounts = 3;
-
-enum class RequestPart : uint8_t {
-    KeyDigest,
-    Lookup, // bodyVersion and openBody; an attach, whose bodyVersion runs before anything is measured, only openBody
-    IdentityParse,
-    ContextDigest,
-    RootHolderDigest,
-    EnvironmentDigests,
-    HolderDigest,
-    SuppliedDigest,
-    FeedbackParse,
-    Decode,
-    ClosureChecks,
-    StrictCore,
-    ButterflyRebuild,
-    Seeding,
-    ParseFields,
-    ExtraMemory,
-    Records,
-};
-constexpr unsigned numberOfRequestParts = static_cast<unsigned>(RequestPart::Records) + 1;
-
-using BenchValue = decltype(BenchField::value);
-
-class RequestTimer {
-    WTF_MAKE_NONCOPYABLE(RequestTimer);
-
-public:
-    explicit RequestTimer(VMState& vmState)
-    {
-        if (BenchReport* report = vmState.benchReport())
-            m_measurements.emplace(*report);
-    }
-
-    bool isMeasuring() const { return !!m_measurements; }
-
-    // A part begins. The first one opens the CPU window in its own account; every later one moves the window to its
-    // account. Returns the account the window goes back to when the part ends.
-    CostAccount enter(CostAccount account)
-    {
-        Measurements& measurements = *m_measurements;
-        if (!measurements.started) {
-            measurements.started = true;
-            measurements.account = account;
-            measurements.cpuMark = benchThreadCPUNanoseconds();
-            return CostAccount::Counted;
-        }
-        return switchTo(account);
-    }
-
-    void leave(CostAccount previous, RequestPart part, Seconds wallTime)
-    {
-        Measurements& measurements = *m_measurements;
-        auto index = static_cast<unsigned>(part);
-        measurements.partNanoseconds[index] += wallTime.nanosecondsAs<uint64_t>();
-        measurements.partRan[index] = true;
-        switchTo(previous);
-    }
-
-    // The size of the core the decode reads, which the request event reports beside the request's source.
-    void noteCoreBytes(size_t bytes)
-    {
-        if (m_measurements)
-            m_measurements->coreBytes = bytes;
-    }
-
-    // Closes the counted span, then writes the request event; nothing it does after that clock read is measured.
-    void record(ASCIILiteral action, const BodyKey&, bool strict, uint64_t sourceCharacters);
-
-private:
-    struct Measurements {
-        explicit Measurements(BenchReport& report)
-            : report(report)
-        {
-        }
-
-        BenchReport& report;
-        bool started { false };
-        CostAccount account { CostAccount::Counted };
-        uint64_t cpuMark { 0 };
-        std::array<uint64_t, numberOfCostAccounts> accountNanoseconds { };
-        std::array<uint64_t, numberOfRequestParts> partNanoseconds { };
-        std::array<bool, numberOfRequestParts> partRan { };
-        std::optional<uint64_t> coreBytes; // set when the request decodes a core
-    };
-
-    CostAccount switchTo(CostAccount account)
-    {
-        Measurements& measurements = *m_measurements;
-        if (account == measurements.account)
-            return account;
-        uint64_t now = benchThreadCPUNanoseconds();
-        measurements.accountNanoseconds[static_cast<unsigned>(measurements.account)] += now - measurements.cpuMark;
-        measurements.cpuMark = now;
-        return std::exchange(measurements.account, account);
-    }
-
-    uint64_t partNanoseconds(RequestPart part) const { return m_measurements->partNanoseconds[static_cast<unsigned>(part)]; }
-    bool partRan(RequestPart part) const { return m_measurements->partRan[static_cast<unsigned>(part)]; }
-
-    BenchValue partValue(RequestPart part) const
-    {
-        if (!partRan(part))
-            return nullptr;
-        return partNanoseconds(part);
-    }
-
-    std::optional<Measurements> m_measurements;
-};
-
-void RequestTimer::record(ASCIILiteral action, const BodyKey& key, bool strict, uint64_t sourceCharacters)
-{
-    if (!m_measurements)
-        return;
-    Measurements& measurements = *m_measurements;
-    if (measurements.started) {
-        uint64_t now = benchThreadCPUNanoseconds();
-        measurements.accountNanoseconds[static_cast<unsigned>(measurements.account)] += now - measurements.cpuMark;
-        measurements.started = false;
-    }
-
-    // The event's matching: a child's holder digest beyond its environments' first digests, and, with strict on, the core
-    // digest a live UCB's encoding is held to. The section parses have their own fields.
-    BenchValue matching = nullptr;
-    if (partRan(RequestPart::HolderDigest) || partRan(RequestPart::StrictCore))
-        matching = partNanoseconds(RequestPart::HolderDigest) + partNanoseconds(RequestPart::StrictCore);
-
-    measurements.report.record("request"_s, {
-        { "key"_s, bodyKeyHex(key) },
-        { "action"_s, String { action } },
-        { "strict"_s, strict },
-        { "counted"_s, measurements.accountNanoseconds[static_cast<unsigned>(CostAccount::Counted)] },
-        { "apart"_s, measurements.accountNanoseconds[static_cast<unsigned>(CostAccount::Apart)] },
-        { "matching"_s, matching },
-        { "keyDigest"_s, partValue(RequestPart::KeyDigest) },
-        { "lookup"_s, partValue(RequestPart::Lookup) },
-        { "identityParse"_s, partValue(RequestPart::IdentityParse) },
-        { "contextDigest"_s, partValue(RequestPart::ContextDigest) },
-        { "rootHolderDigest"_s, partValue(RequestPart::RootHolderDigest) },
-        { "environmentDigests"_s, partValue(RequestPart::EnvironmentDigests) },
-        { "holderDigest"_s, partValue(RequestPart::HolderDigest) },
-        { "suppliedDigest"_s, partValue(RequestPart::SuppliedDigest) },
-        { "feedbackParse"_s, partValue(RequestPart::FeedbackParse) },
-        { "decode"_s, partValue(RequestPart::Decode) },
-        { "closureChecks"_s, partValue(RequestPart::ClosureChecks) },
-        { "strictCore"_s, partValue(RequestPart::StrictCore) },
-        { "butterflyRebuild"_s, partValue(RequestPart::ButterflyRebuild) },
-        { "seeding"_s, partValue(RequestPart::Seeding) },
-        { "parseFields"_s, partValue(RequestPart::ParseFields) },
-        { "extraMemory"_s, partValue(RequestPart::ExtraMemory) },
-        { "records"_s, partValue(RequestPart::Records) },
-        { "sourceCharacters"_s, sourceCharacters },
-        { "coreBytes"_s, measurements.coreBytes ? BenchValue { *measurements.coreBytes } : BenchValue { nullptr } },
-    });
-}
-
-// One measured part. A null timer, or one with no report open, measures nothing.
-class PartScope {
-    WTF_MAKE_NONCOPYABLE(PartScope);
-
-public:
-    PartScope(RequestTimer* timer, RequestPart part, CostAccount account)
-        : m_timer(timer && timer->isMeasuring() ? timer : nullptr)
-        , m_part(part)
-    {
-        if (!m_timer)
-            return;
-        m_previous = m_timer->enter(account);
-        m_start = MonotonicTime::now();
-    }
-
-    ~PartScope()
-    {
-        if (m_timer)
-            m_timer->leave(m_previous, m_part, MonotonicTime::now() - m_start);
-    }
-
-private:
-    RequestTimer* const m_timer;
-    const RequestPart m_part;
-    CostAccount m_previous { CostAccount::Counted };
-    MonotonicTime m_start;
-};
-
-static UCBStatistics& statisticsOf(VMState& vmState)
-{
-    return vmState.registry().statistics();
-}
-
-static void countMiss(VMState& vmState, MissReason reason)
-{
-    ++statisticsOf(vmState).misses[static_cast<size_t>(reason)];
-}
-
-static ASCIILiteral stepName(InvalidMaterialStep step)
-{
-    switch (step) {
-    case InvalidMaterialStep::Identity:
-        return "ucb.identity"_s;
-    case InvalidMaterialStep::Feedback:
-        return "ucb.feedback"_s;
-    case InvalidMaterialStep::Decode:
-        return "ucb.decode"_s;
-    case InvalidMaterialStep::Closure:
-        return "ucb.closure"_s;
-    case InvalidMaterialStep::StrictCore:
-        return "ucb.strict-core"_s;
-    case InvalidMaterialStep::SuppliedDigest:
-        return "ucb.supplied-digest"_s;
-    case InvalidMaterialStep::Analysis:
-        return "ucb.analysis"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return "ucb.identity"_s;
-}
-
-// Turns cache activity off for good and names the step in status. The caller then returns, and the native path
-// goes on as if JITCache were off; a UCB the import decoded is unreachable and the collector frees it.
-static void reportInvalidMaterial(VMState& vmState, InvalidMaterialStep step, ASCIILiteral what, const BodyKey& key)
-{
-    ++statisticsOf(vmState).invalidMaterial[static_cast<size_t>(step)];
-    vmState.raiseInvalidMaterial(stepName(step), makeString(what, "; body "_s, bodyKeyHex(key)));
-}
-
-static bool isGlobalRequest(const RequestState& state)
-{
-    return state.kind == RequestKind::Program || state.kind == RequestKind::Module || state.kind == RequestKind::IndirectEval;
-}
-
-static IdentityKind globalIdentityKind(RequestKind kind)
-{
-    switch (kind) {
-    case RequestKind::Program:
-        return IdentityKind::Program;
-    case RequestKind::Module:
-        return IdentityKind::Module;
-    case RequestKind::IndirectEval:
-        return IdentityKind::IndirectEval;
-    case RequestKind::FunctionBody:
-    case RequestKind::DirectEval:
-        break;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return IdentityKind::Program;
-}
-
-static bool isRootFunctionKind(IdentityKind kind)
-{
-    return kind == IdentityKind::FunctionConstructor || kind == IdentityKind::Builtin;
-}
-
-// The strict and with-scope bits a global root's key carries, which its record keeps.
-static LexicallyScopedFeatures keyFeaturesOf(const RequestState& state)
-{
-    if (!isGlobalRequest(state))
-        return NoLexicallyScopedFeatures;
-    return static_cast<LexicallyScopedFeatures>(state.requestFeatures & (StrictModeLexicallyScopedFeature | TaintedByWithScopeLexicallyScopedFeature));
-}
-
-// A root's source digest, counted in the statistics. In twins builds with a report open, the twin check holds a supplied
-// one to its text, which leaves the registry's verified set alone.
-static RootSourceDigest takeRootSourceDigest(VMState& vmState, const SourceCode& rootSource, const Digest256* builtinMetadataDigest)
-{
-    RootSourceDigest digest = rootSourceDigest(rootSource, builtinMetadataDigest);
-    UCBStatistics& statistics = statisticsOf(vmState);
-    if (digest.origin == SourceDigestOrigin::Computed) {
-        ++statistics.sourceDigests;
-        return digest;
-    }
-    ++statistics.suppliedSourceDigests;
-#if ENABLE(JITCACHE_TWINS)
-    if (TwinReportSink* sink = vmState.twinReportSink())
-        verifySuppliedDigest(rootSource, digest, *sink);
-#endif
-    return digest;
-}
-
-// The provider a key rests on when its root's digest came from it, kept only in a VM that imports with strict on, where
-// an import verifies it.
-static RefPtr<SourceProvider> suppliedDigestProviderFor(VMState& vmState, const SourceCode& rootSource, const RootSourceDigest& digest)
-{
-    if (digest.origin != SourceDigestOrigin::Provider || !vmState.importsEnabled() || !vmState.strict())
-        return nullptr;
-    return rootSource.provider();
-}
-
-// The key the request's inputs give with `keyMode`, or none, with the source digest and the supplied-digest provider it
-// rests on.
-static std::optional<BodyKey> computeRequestKey(VMState& vmState, RequestState& state, OptionSet<CodeGenerationMode> keyMode)
-{
-    switch (state.kind) {
-    case RequestKind::Program:
-    case RequestKind::Module:
-    case RequestKind::IndirectEval: {
-        RootSourceDigest digest = takeRootSourceDigest(vmState, state.source, nullptr);
-        state.sourceDigest = digest.digest;
-        state.suppliedDigestProvider = suppliedDigestProviderFor(vmState, state.source, digest);
-        IdentityKind kind = globalIdentityKind(state.kind);
-        return BodyKey::make(kind, CodeSpecializationKind::CodeForCall, keyMode, rootIdentityDigest(kind, digest.digest, state.requestFeatures, std::nullopt));
-    }
-    case RequestKind::FunctionBody: {
-        // A UFE without an identity misses forever.
-        std::optional<ExecutableIdentity> identity = vmState.registry().identityOf(*state.functionExecutable);
-        if (!identity)
-            return std::nullopt;
-        return WTF::switchOn(*identity,
-            [&](const ChildIdentity& child) {
-                state.suppliedDigestProvider = child.parent->suppliedDigestProvider();
-                state.vouchedHolderDigest = child.parent->childHolderDigest(child.table, child.index);
-                // Computed at the body's request rather than when its parent was recorded, since most children never run.
-                return BodyKey::make(IdentityKind::Child, state.specialization, keyMode, childIdentityDigest(child.parent->key(), child.table, child.index));
-            },
-            [&](const RootIdentity& root) {
-                state.suppliedDigestProvider = root.suppliedDigestProvider;
-                return BodyKey::make(root.kind, state.specialization, keyMode, root.identityDigest);
-            });
-    }
-    case RequestKind::DirectEval: {
-        // A direct eval without a site, or whose caller UCB has no record, has no key. Its key ends in its own text's
-        // digest, which rests on no provider and counts in neither digest statistic.
-        const DirectEvalSite* site = state.site;
-        if (!site || !site->callerUnlinkedCodeBlock)
-            return std::nullopt;
-        std::optional<BodyKey> callerKey = vmState.registry().keyOf(*site->callerUnlinkedCodeBlock);
-        if (!callerKey)
-            return std::nullopt;
-        Digest256 textDigest = sourceDigest(state.source.view());
-        state.sourceDigest = textDigest;
-        return BodyKey::make(IdentityKind::DirectEval, CodeSpecializationKind::CodeForCall, keyMode, directEvalIdentityDigest(*callerKey, site->bytecodeIndex, textDigest));
-    }
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return std::nullopt;
-}
-
-static std::optional<BodyKey> requestKeyMeasured(RequestState& state, OptionSet<CodeGenerationMode> keyMode, RequestTimer* timer)
-{
-    if (state.key) {
-        // The UCB a request acts on fixes its key mode, so a request asks for one mode only.
-        ASSERT(!*state.key || (*state.key)->codeGenerationMode() == keyMode);
-        return *state.key;
-    }
-    VMState* vmState = state.vm.jitCacheState();
-    RELEASE_ASSERT(vmState);
-    std::optional<BodyKey> key;
-    {
-        PartScope scope(timer, RequestPart::KeyDigest, CostAccount::Apart);
-        key = computeRequestKey(*vmState, state, keyMode);
-    }
-    state.key.emplace(key);
-    return key;
-}
-
-// The holder check and a root UFE body's context read the requesting UFE's holder digest, computed once per request.
-// `account` is the caller's: a child's holder check counts toward the bound and a root's context does not, and the first
-// caller is the one that computes.
-static const Digest256& requestHolderDigestMeasured(RequestState& state, RequestTimer* timer, CostAccount account)
-{
-    if (state.holderDigest)
-        return *state.holderDigest;
-    RELEASE_ASSERT(state.kind == RequestKind::FunctionBody && state.functionExecutable);
-    VMState* vmState = state.vm.jitCacheState();
-    RELEASE_ASSERT(vmState);
-    UnlinkedFunctionExecutable& executable = *state.functionExecutable;
-    unsigned environmentsDigested = 0;
-    // A child's holder check counts beyond its environments' first digests, which count apart. While a report is open,
-    // the chain digest therefore runs alone first, so each environment's first digest lands in the apart total and the
-    // holder digest below finds them all kept. Without a report this costs nothing.
-    if (account == CostAccount::Counted && timer && timer->isMeasuring()) {
-        if (RefPtr chain = executable.parentScopeTDZVariables()) {
-            PartScope scope(timer, RequestPart::EnvironmentDigests, CostAccount::Apart);
-            std::optional<std::array<uint8_t, 32>> chainDigest = tdzChainDigest(chain.get(), nullptr, environmentsDigested);
-            ASSERT_UNUSED(chainDigest, chainDigest);
-        }
-    }
-    std::optional<Digest256> digest;
-    {
-        PartScope scope(timer, account == CostAccount::Counted ? RequestPart::HolderDigest : RequestPart::RootHolderDigest, account);
-        digest = holderDigest(state.vm, executable, nullptr, &environmentsDigested);
-    }
-    // Requests pass no budget, so nothing refuses.
-    RELEASE_ASSERT(digest);
-    UCBStatistics& statistics = statisticsOf(*vmState);
-    ++statistics.holderDigests;
-    statistics.tdzEnvironmentDigests += environmentsDigested;
-    state.holderDigest = *digest;
-    return *state.holderDigest;
-}
-
-// The inputs a global's or a UFE body's context digest is computed from, which its record keeps. No context holds a line
-// or column: a UCB holds none, and deriving one would build the provider's line-start table from its whole text.
-static RecordedContext contextInputsOf(const RequestState& state)
-{
-    auto providerOffset = static_cast<unsigned>(state.source.startOffset());
-    if (state.kind == RequestKind::FunctionBody)
-        return BodyContextInputs { .providerOffset = providerOffset };
-    ASSERT(isGlobalRequest(state));
-    return GlobalContextInputs {
-        .providerOffset = providerOffset,
-        .scriptMode = state.scriptMode,
-        .derivedContextType = state.globalExecutable->derivedContextType(),
-        .evalContextType = state.evalContextType,
-        .isArrowFunctionContext = state.globalExecutable->isArrowFunctionContext(),
-    };
-}
-
-// A direct eval's context: the snapshot is the call site's features, and the TDZ and private-name sets are the ones
-// JSC::eval passed, which live until DirectEvalExecutable::create returns.
-static Digest256 directEvalContextOf(const RequestState& state)
-{
-    auto* executable = uncheckedDowncast<EvalExecutable>(state.globalExecutable);
-    TDZEnvironment noVariables;
-    PrivateNameEnvironment noPrivateNames;
-    return directEvalContextDigest(static_cast<unsigned>(state.source.startOffset()), state.requestFeatures, executable->derivedContextType(),
-        executable->needsClassFieldInitializer(), executable->privateBrandRequirement(), executable->isArrowFunctionContext(), executable->isInsideOrdinaryFunction(),
-        state.evalContextType, state.variablesUnderTDZ ? *state.variablesUnderTDZ : noVariables, state.privateNameEnvironment ? *state.privateNameEnvironment : noPrivateNames);
-}
-
-// The request's context, computed at most once and only once a body at its key has passed the key comparison.
-static const Digest256& requestContextMeasured(RequestState& state, RequestTimer* timer)
-{
-    if (state.context)
-        return *state.context;
-    RELEASE_ASSERT(state.key && *state.key);
-    VMState* vmState = state.vm.jitCacheState();
-    RELEASE_ASSERT(vmState);
-    IdentityKind kind = (*state.key)->identityKind();
-    if (kind == IdentityKind::DirectEval) {
-        PartScope scope(timer, RequestPart::ContextDigest, CostAccount::Apart);
-        state.context = directEvalContextOf(state);
-    } else {
-        // A root UFE body's context covers its UFE's holder digest, which the holder check then reuses.
-        std::optional<Digest256> rootHolderDigest;
-        if (isRootFunctionKind(kind))
-            rootHolderDigest = requestHolderDigestMeasured(state, timer, CostAccount::Apart);
-        PartScope scope(timer, RequestPart::ContextDigest, CostAccount::Apart);
-        state.context = contextDigestOf(kind, contextInputsOf(state), rootHolderDigest);
-    }
-    RELEASE_ASSERT(state.context);
-    ++statisticsOf(*vmState).contextDigests;
-    return *state.context;
-}
-
-// What a record keeps of the request's context. A direct eval's sets exist only while its request runs, so
-// its record keeps the digest: the one an import computed or, in a VM whose production is active, one computed now.
-static RecordedContext recordedContextMeasured(RequestState& state, RequestTimer* timer)
-{
-    if (state.kind != RequestKind::DirectEval)
-        return contextInputsOf(state);
-    if (!state.context) {
-        VMState* vmState = state.vm.jitCacheState();
-        if (vmState && vmState->productionActive())
-            requestContextMeasured(state, timer);
-    }
-    return DirectEvalContext { .digest = state.context };
-}
-
-// A live UCB's context, from the inputs its record keeps; the request's own context does not enter.
-static std::optional<Digest256> recordContextDigest(VMState& vmState, RequestState& state, const BodyKey& key, const RecordedContext& context, RequestTimer& timer)
-{
-    IdentityKind kind = key.identityKind();
-    std::optional<Digest256> rootHolderDigest;
-    if (isRootFunctionKind(kind))
-        rootHolderDigest = requestHolderDigestMeasured(state, &timer, CostAccount::Apart);
-    std::optional<Digest256> digest;
-    {
-        PartScope scope(&timer, RequestPart::ContextDigest, CostAccount::Apart);
-        digest = contextDigestOf(kind, context, rootHolderDigest);
-    }
-    // A direct eval's record keeps its digest, so only the other kinds compute one here.
-    if (kind != IdentityKind::DirectEval)
-        ++statisticsOf(vmState).contextDigests;
-    return digest;
-}
 
 // The holder a record of the request's UCB keeps: the requesting UFE, for a function body in a VM that
 // captures bodies without a CodeBlock (VMState::capturesUncompiledBodies), and none otherwise.
@@ -543,8 +46,7 @@ static UnlinkedFunctionExecutable* recordedHolder(VMState& vmState, const Reques
     return state.functionExecutable;
 }
 
-// Whether the body holds an image. With strict on, the container's checks have matched its sections to the envelope's
-// highest tier; with strict off the envelope is trusted.
+// Whether the body holds an image, as its envelope's highest tier says.
 static BodyImage imageOf(const ValidatedBody& body)
 {
     return body.highestTier() ? BodyImage::Present : BodyImage::Absent;
@@ -563,36 +65,10 @@ static bool addRecord(VMState& vmState, UnlinkedCodeBlock& codeBlock, UCBRecord&
     return true;
 }
 
-// With strict on, an identity section that breaks a rule of its layout is invalid material.
-static std::optional<IdentitySection> parseIdentity(VMState& vmState, const ValidatedBody& body, RequestTimer& timer)
+static FeedbackSection parseFeedback(const ValidatedBody& body, RequestTimer& timer)
 {
-    std::optional<IdentitySection> identity;
-    {
-        PartScope scope(&timer, RequestPart::IdentityParse, CostAccount::Counted);
-        identity = parseIdentitySection(body.section(SectionKind::UCBIdentity), vmState.strict());
-    }
-    if (!identity)
-        reportInvalidMaterial(vmState, InvalidMaterialStep::Identity, "ucb.identity breaks a rule of its layout"_s, body.key());
-    return identity;
-}
-
-// With strict on, a feedback section must keep the rules of its layout and the identity section's constant count.
-static std::optional<FeedbackSection> parseFeedback(VMState& vmState, const ValidatedBody& body, const IdentitySection& identity, RequestTimer& timer)
-{
-    std::optional<FeedbackSection> feedback;
-    {
-        PartScope scope(&timer, RequestPart::FeedbackParse, CostAccount::Counted);
-        feedback = FeedbackSection::parse(body.section(SectionKind::UCBFeedback), vmState.strict());
-    }
-    if (!feedback) {
-        reportInvalidMaterial(vmState, InvalidMaterialStep::Feedback, "ucb.feedback breaks a rule of its layout"_s, body.key());
-        return std::nullopt;
-    }
-    if (vmState.strict() && feedback->counts().constants != identity.constantCount) {
-        reportInvalidMaterial(vmState, InvalidMaterialStep::Feedback, "ucb.feedback and ucb.identity disagree on the constant count"_s, body.key());
-        return std::nullopt;
-    }
-    return feedback;
+    PartScope scope(&timer, RequestPart::FeedbackParse, CostAccount::Counted);
+    return FeedbackSection::parse(body.section(SectionKind::UCBFeedback));
 }
 
 static ASCIILiteral decodeFailureDescription(CoreDecodeFailure failure)
@@ -614,9 +90,8 @@ static ASCIILiteral decodeFailureDescription(CoreDecodeFailure failure)
 }
 
 // The decode checks the kind the key implies, takes the requesting UFE as the holder of a function core and the request's
-// source, which its children's sources are cut from, validates the core's structure with strict on and runs under its own
-// DeferGC. The payload pins the body while the decoder reads it, and the decoder lets the payload go when the decode
-// returns, since no decoded UFE keeps it.
+// source, whose provider the UCB is bound to, and runs under its own DeferGC. The payload pins the body while the decoder
+// reads it, and the decoder lets the payload go when the decode returns, since no decoded UFE keeps it.
 static UnlinkedCodeBlock* decodeCore(VMState& vmState, RequestState& state, ValidatedBody& body, const BodyKey& key, RequestTimer& timer)
 {
     std::span<const uint8_t> core = body.section(SectionKind::UCBCore);
@@ -629,152 +104,13 @@ static UnlinkedCodeBlock* decodeCore(VMState& vmState, RequestState& state, Vali
     UnlinkedCodeBlock* codeBlock = nullptr;
     {
         PartScope scope(&timer, RequestPart::Decode, CostAccount::Apart);
-        codeBlock = decodeUnlinkedCodeBlockCore(state.vm, WTF::move(payload), state.source, coreKindFor(key.identityKind()), state.functionExecutable, vmState.strict(), failure);
+        codeBlock = decodeUnlinkedCodeBlockCore(state.vm, WTF::move(payload), state.source, coreKindFor(key.identityKind()), state.functionExecutable, failure);
     }
     if (!codeBlock || failure != CoreDecodeFailure::None) {
         reportInvalidMaterial(vmState, InvalidMaterialStep::Decode, decodeFailureDescription(failure), key);
         return nullptr;
     }
     return codeBlock;
-}
-
-static CodeType codeTypeFor(UnlinkedCodeBlockCoreKind kind)
-{
-    switch (kind) {
-    case UnlinkedCodeBlockCoreKind::Program:
-        return GlobalCode;
-    case UnlinkedCodeBlockCoreKind::Module:
-        return ModuleCode;
-    case UnlinkedCodeBlockCoreKind::Eval:
-        return EvalCode;
-    case UnlinkedCodeBlockCoreKind::Function:
-        return FunctionCode;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return GlobalCode;
-}
-
-// The decoded UCB's class is the core kind's.
-static bool classFits(const UnlinkedCodeBlock& codeBlock, UnlinkedCodeBlockCoreKind kind)
-{
-    switch (kind) {
-    case UnlinkedCodeBlockCoreKind::Program:
-        return codeBlock.inherits<UnlinkedProgramCodeBlock>();
-    case UnlinkedCodeBlockCoreKind::Module:
-        return codeBlock.inherits<UnlinkedModuleProgramCodeBlock>();
-    case UnlinkedCodeBlockCoreKind::Eval:
-        return codeBlock.inherits<UnlinkedEvalCodeBlock>();
-    case UnlinkedCodeBlockCoreKind::Function:
-        return codeBlock.inherits<UnlinkedFunctionCodeBlock>();
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return false;
-}
-
-// The decoded UCB's mode, constructor bit and code type are the key's.
-static bool shapeFits(const UnlinkedCodeBlock& codeBlock, const BodyKey& key, UnlinkedCodeBlockCoreKind kind)
-{
-    return codeBlock.codeGenerationMode() == key.codeGenerationMode()
-        && codeBlock.isConstructor() == (key.specialization() == CodeSpecializationKind::CodeForConstruct)
-        && codeBlock.codeType() == codeTypeFor(kind);
-}
-
-// A function UCB's builtin bit, parse mode, constructor kind and default-constructor bit are its UFE's.
-static bool functionKindFits(const UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable& executable)
-{
-    return codeBlock.isBuiltinFunction() == executable.isBuiltinFunction()
-        && codeBlock.parseMode() == executable.parseMode()
-        && codeBlock.constructorKind() == executable.constructorKind()
-        && codeBlock.isBuiltinDefaultClassConstructor() == executable.isBuiltinDefaultClassConstructor();
-}
-
-// Every link-time constant indexes JSGlobalObject::linkTimeConstant's array, which casts it to unsigned, so a negative
-// one would wrap; and every RegExp constant is valid, as generation emits only valid ones.
-static bool constantsResolve(UnlinkedCodeBlock& codeBlock)
-{
-    const auto& constants = codeBlock.constantRegisters();
-    for (size_t index = 0; index < constants.size(); ++index) {
-        JSValue value = constants[index].get();
-        if (codeBlock.constantSourceCodeRepresentation(static_cast<unsigned>(index)) == SourceCodeRepresentation::LinkTimeConstant) {
-            if (!value.isInt32() || value.asInt32() < 0 || static_cast<unsigned>(value.asInt32()) >= numberOfLinkTimeConstants)
-                return false;
-            continue;
-        }
-        // An empty constant, which generation emits for TDZ checks, is no cell.
-        if (!value)
-            continue;
-        if (auto* regExp = dynamicDowncast<RegExp>(value); regExp && !regExp->isValid())
-            return false;
-    }
-    return true;
-}
-
-// With strict on, the closure checks of a UCB decoded from the body's core: its class, its shape, the feedback's counts,
-// copies and exit sites, its function kind, its constants, the butterfly map, the singleton bits and the child holder
-// digests. What the first check that fails found, or null.
-static ASCIILiteral importedClosureFailure(const RequestState& state, UnlinkedCodeBlock& codeBlock, const BodyKey& key, const IdentitySection& identity, const FeedbackSection& feedback, BodyImage image)
-{
-    UnlinkedCodeBlockCoreKind kind = coreKindFor(key.identityKind());
-    if (!classFits(codeBlock, kind))
-        return "the decoded UCB's class is not its core kind's"_s;
-    if (!shapeFits(codeBlock, key, kind))
-        return "the decoded UCB's mode, constructor bit or code type is not its key's"_s;
-    if (!feedbackFits(codeBlock, feedback, image))
-        return "ucb.feedback's counts, copies or exit sites do not fit the decoded UCB"_s;
-    if (state.functionExecutable && !functionKindFits(codeBlock, *state.functionExecutable))
-        return "the decoded UCB's function kind is not its UFE's"_s;
-    if (!constantsResolve(codeBlock))
-        return "the decoded UCB holds a link-time constant out of range or an invalid RegExp"_s;
-    if (!constantMapsFit(codeBlock, identity))
-        return "the butterfly map does not fit the decoded UCB's constants"_s;
-    if (!constantBitsFit(codeBlock, feedback))
-        return "ucb.feedback marks a constant that is no SymbolTable"_s;
-    if (!childHolderDigestsFit(codeBlock, identity))
-        return "the child holder digests do not fit the child UFEs"_s;
-    return { };
-}
-
-// With strict on, the closure checks that apply to a live UCB: the feedback's counts, copies and exit sites, its function
-// kind and the butterfly map. Only a body with an image is matched to a live UCB.
-static ASCIILiteral matchedClosureFailure(UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder, const IdentitySection& identity, const FeedbackSection& feedback)
-{
-    if (!feedbackFits(codeBlock, feedback, BodyImage::Present))
-        return "ucb.feedback's counts, copies or exit sites do not fit the UCB"_s;
-    if (holder && !functionKindFits(codeBlock, *holder))
-        return "the UCB's function kind is not its UFE's"_s;
-    if (!constantMapsFit(codeBlock, identity))
-        return "the butterfly map does not fit the UCB's constants"_s;
-    return { };
-}
-
-enum class HolderFit : uint8_t { Fits, Differs, Invalid };
-
-// The holder check: the requesting UFE's holder digest equals the identity section's. A section with none, whose core kind is not a
-// function's, differs as well.
-//
-// A UFE that an imported parent's decode made has the digest the parent's body lists for it, when the body lists one: the
-// parent's capture computed it from the producer's UFE that the core encodes, the decode reproduces that UFE's descriptor,
-// and its TDZ chain extends a start chain whose content the parent's own holder check or context matched. Normal mode
-// compares that listed digest and encodes nothing. Strict computes the UFE's own digest, decides by it, and holds the
-// listed one to it, so that every strict import checks the reasoning above; a listed digest that differs is invalid
-// material.
-static HolderFit holderFits(VMState& vmState, RequestState& state, const IdentitySection& identity, RequestTimer& timer, const BodyKey& key)
-{
-    if (!identity.holderDigest)
-        return HolderFit::Differs;
-    std::optional<Digest256> vouched = Options::jitCacheVouchedHolderDigests() ? state.vouchedHolderDigest : std::nullopt;
-    if (vouched)
-        ++statisticsOf(vmState).vouchedHolderChecks;
-    if (vouched && !vmState.strict()) {
-        PartScope scope(&timer, RequestPart::HolderDigest, CostAccount::Counted);
-        return *identity.holderDigest == *vouched ? HolderFit::Fits : HolderFit::Differs;
-    }
-    const Digest256& own = requestHolderDigestMeasured(state, &timer, CostAccount::Counted);
-    if (vouched && *vouched != own) {
-        reportInvalidMaterial(vmState, InvalidMaterialStep::Identity, "a parent's body lists a holder digest that differs from its child UFE's own"_s, key);
-        return HolderFit::Invalid;
-    }
-    return *identity.holderDigest == own ? HolderFit::Fits : HolderFit::Differs;
 }
 
 static BodyLookup openBodyMeasured(VMState& vmState, const BodyKey& key, RequestTimer& timer)
@@ -800,126 +136,7 @@ static void restoreParseFields(RequestState& state, UnlinkedCodeBlock& codeBlock
     recordParseFromUnlinkedCodeBlock(state.globalExecutable, state.source, uncheckedDowncast<UnlinkedGlobalCodeBlock>(&codeBlock));
 }
 
-// With strict on, the supplied digest the key rests on equals its text's, verified once per provider in the VM and
-// before anything is decoded. The hash runs outside the registry's lock.
-static bool suppliedDigestHolds(VMState& vmState, RequestState& state, const BodyKey& key, RequestTimer& timer)
-{
-    RefPtr<SourceProvider> provider = state.suppliedDigestProvider;
-    if (!provider)
-        return true;
-    UCBRegistry& registry = vmState.registry();
-    SourceID sourceID = provider->asID();
-    if (registry.suppliedDigestVerified(sourceID))
-        return true;
-    bool holds = [&] {
-        PartScope scope(&timer, RequestPart::SuppliedDigest, CostAccount::Excluded);
-        std::optional<Digest256> supplied = provider->jitCacheSourceDigest();
-        return supplied && *supplied == sourceDigest(provider->source());
-    }();
-    if (!holds) {
-        reportInvalidMaterial(vmState, InvalidMaterialStep::SuppliedDigest, "a provider's supplied digest is not the digest of its text"_s, key);
-        return false;
-    }
-    registry.markSuppliedDigestVerified(sourceID);
-    ++statisticsOf(vmState).suppliedDigestVerifications;
-    return true;
-}
-
-enum class MatchResult : uint8_t {
-    Matched,
-    Missed, // stamped with the index token
-    Stopped, // invalid material
-};
-
-// Whether a live UCB, which the native path generated or the lane imported, is the UCB the body opened at its record's
-// key describes. It matches by its generation inputs: the key, the context its record's inputs give and, for a function
-// body, its holder UFE; from equal inputs the engine's generation makes the producer's UCB, which strict checks on the
-// content. holder is the UFE whose slot holds a function UCB, and null for any other. Counts each miss; the caller stamps
-// a Missed result.
-static MatchResult matchLive(VMState& vmState, RequestState& state, RequestTimer& timer, UnlinkedCodeBlock& codeBlock, const UnlinkedFunctionExecutable* holder,
-    const UCBRegistry::RecordView& record, ValidatedBody& body)
-{
-    bool strict = vmState.strict();
-    const BodyKey& key = record.key;
-
-    // The identity section: its key, then the context.
-    std::optional<IdentitySection> identity = parseIdentity(vmState, body, timer);
-    if (!identity)
-        return MatchResult::Stopped;
-    if (identity->key != body.key()) {
-        reportInvalidMaterial(vmState, InvalidMaterialStep::Identity, "ucb.identity holds another body's key"_s, body.key());
-        return MatchResult::Stopped;
-    }
-    std::optional<Digest256> context = recordContextDigest(vmState, state, key, record.context, timer);
-    if (!context || *context != identity->contextDigest) {
-        countMiss(vmState, MissReason::Context);
-        return MatchResult::Missed;
-    }
-
-    // The feedback section.
-    std::optional<FeedbackSection> feedback = parseFeedback(vmState, body, *identity, timer);
-    if (!feedback)
-        return MatchResult::Stopped;
-
-    // The holder check.
-    if (holder) {
-        HolderFit fit = holderFits(vmState, state, *identity, timer, key);
-        if (fit == HolderFit::Invalid)
-            return MatchResult::Stopped;
-        if (fit == HolderFit::Differs) {
-            countMiss(vmState, MissReason::Holder);
-            return MatchResult::Missed;
-        }
-    }
-
-    // With strict on, the closure checks.
-    if (strict) {
-        ASCIILiteral failure = [&] {
-            PartScope scope(&timer, RequestPart::ClosureChecks, CostAccount::Excluded);
-            return matchedClosureFailure(codeBlock, holder, *identity, *feedback);
-        }();
-        if (!failure.isNull()) {
-            reportInvalidMaterial(vmState, InvalidMaterialStep::Closure, failure, key);
-            return MatchResult::Stopped;
-        }
-    }
-
-    // With strict on, the content: the UCB's core encoding is the body's.
-    if (strict) {
-        Digest256 digest = [&] {
-            PartScope scope(&timer, RequestPart::StrictCore, CostAccount::Excluded);
-            return coreDigestOf(state.vm, codeBlock, holder);
-        }();
-        if (digest != identity->coreDigest) {
-            reportInvalidMaterial(vmState, InvalidMaterialStep::StrictCore, "a reused UCB's core encoding is not the body's"_s, key);
-            return MatchResult::Stopped;
-        }
-    }
-
-    return MatchResult::Matched;
-}
-
 } // namespace UCBImportInternal
-
-std::optional<BodyKey> requestKey(RequestState& state, OptionSet<CodeGenerationMode> keyMode)
-{
-    return UCBImportInternal::requestKeyMeasured(state, keyMode, nullptr);
-}
-
-const Digest256& requestContext(RequestState& state)
-{
-    return UCBImportInternal::requestContextMeasured(state, nullptr);
-}
-
-const Digest256& requestHolderDigest(RequestState& state)
-{
-    return UCBImportInternal::requestHolderDigestMeasured(state, nullptr, UCBImportInternal::CostAccount::Counted);
-}
-
-RecordedContext recordedContext(RequestState& state)
-{
-    return UCBImportInternal::recordedContextMeasured(state, nullptr);
-}
 
 UnlinkedCodeBlock* importBody(RequestState& state)
 {
@@ -936,7 +153,6 @@ UnlinkedCodeBlock* importBody(RequestState& state)
         state.missReason = MissReason::Stack;
         return nullptr;
     }
-    bool strict = vmState->strict();
     RequestTimer timer(*vmState);
 
     // The key. The context waits for the context check, the first step that reads it.
@@ -984,35 +200,22 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     };
 
     // The identity section.
-    std::optional<IdentitySection> identity = parseIdentity(*vmState, body.get(), timer);
-    if (!identity)
-        return nullptr;
+    IdentitySection identity = parseIdentity(body.get(), timer);
 
-    // Its key, in both modes: a body file is named by its whole key, so a stored key other than its own contradicts the
-    // body's envelope, and keys are among what strict off checks too.
-    if (identity->key != body->key()) {
+    // Its key: a body file is named by its whole key, so a stored key other than its own contradicts the body's envelope.
+    if (identity.key != body->key()) {
         reportInvalidMaterial(*vmState, InvalidMaterialStep::Identity, "ucb.identity holds another body's key"_s, body->key());
         return nullptr;
     }
     // Its context.
-    if (identity->contextDigest != requestContextMeasured(state, &timer))
+    if (identity.contextDigest != requestContextMeasured(state, &timer))
         return miss(MissReason::Context);
     // The holder check. A root body's context has already computed the holder digest.
-    if (state.kind == RequestKind::FunctionBody) {
-        HolderFit fit = holderFits(*vmState, state, *identity, timer, *key);
-        if (fit == HolderFit::Invalid)
-            return nullptr;
-        if (fit == HolderFit::Differs)
-            return miss(MissReason::Holder);
-    }
-    // With strict on, the supplied digest the key rests on.
-    if (strict && !suppliedDigestHolds(*vmState, state, *key, timer))
-        return nullptr;
+    if (state.kind == RequestKind::FunctionBody && !holderFits(*vmState, state, identity, timer))
+        return miss(MissReason::Holder);
 
     // The feedback section.
-    std::optional<FeedbackSection> feedback = parseFeedback(*vmState, body.get(), *identity, timer);
-    if (!feedback)
-        return nullptr;
+    FeedbackSection feedback = parseFeedback(body.get(), timer);
 
     // The core.
     UnlinkedCodeBlock* codeBlock = decodeCore(*vmState, state, body.get(), *key, timer);
@@ -1022,26 +225,13 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     // Whether the body holds an image, which decides whether its feedback carries the UCB's value and array copies.
     BodyImage image = imageOf(body.get());
 
-    // With strict on, the closure checks. With strict off the lane trusts the decoded core, and in neither mode does it
-    // re-encode it.
-    if (strict) {
-        ASCIILiteral failure = [&] {
-            PartScope scope(&timer, RequestPart::ClosureChecks, CostAccount::Excluded);
-            return importedClosureFailure(state, *codeBlock, *key, *identity, *feedback, image);
-        }();
-        if (!failure.isNull()) {
-            reportInvalidMaterial(*vmState, InvalidMaterialStep::Closure, failure, *key);
-            return nullptr;
-        }
-    }
-
     // The decode gives every butterfly the plain structure and long string elements as plain strings, so each butterfly
     // generation built from atom strings is built again in that form. The part encloses its own DeferGC, so a collection
     // that the deferral's end runs for these allocations is measured with them.
     {
         PartScope scope(&timer, RequestPart::ButterflyRebuild, CostAccount::Counted);
         DeferGC deferGC(vm);
-        rebuildAtomStringButterflies(vm, *codeBlock, *identity);
+        rebuildAtomStringButterflies(vm, *codeBlock, identity);
     }
 
     // The feedback. A body with an image allocates the UCB's value and array copies, which its install would otherwise
@@ -1049,13 +239,13 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     // invocation short of crossing.
     {
         PartScope scope(&timer, RequestPart::Seeding, CostAccount::Counted);
-        seedFeedback(vm, *codeBlock, *feedback, image);
+        seedFeedback(vm, *codeBlock, feedback, image);
     }
 
     // The parse fields.
     {
         PartScope scope(&timer, RequestPart::ParseFields, CostAccount::Counted);
-        restoreParseFields(state, *codeBlock, *identity);
+        restoreParseFields(state, *codeBlock, identity);
     }
 
     // The amount UnlinkedCodeBlockGenerator::finalize reports for a generated UCB. It stands in for generation, so it
@@ -1079,15 +269,13 @@ UnlinkedCodeBlock* importBody(RequestState& state)
             .missedBodyVersion = hasImage ? std::nullopt : std::optional<uint64_t> { indexToken },
             .matchedBodyVersion = body->version(),
             .pendingImport = hasImage ? RefPtr<PendingImport> { PendingImport::create(body.copyRef(), *key, indexToken, PendingImport::Origin::Imported) } : nullptr,
-            .suppliedDigestProvider = state.suppliedDigestProvider,
             .holder = recordedHolder(*vmState, state),
         };
         // The children's holder digests the body lists, which the holder check then compares for the child UFEs this decode
-        // made. Strict's closure checks have matched the list to the UCB's children; normal mode keeps it only when it has
-        // one digest per child.
+        // made. The list is kept only when it has one digest per child.
         std::span<const uint8_t> childHolderDigests;
-        if (Options::jitCacheVouchedHolderDigests() && identity->childHolderDigestCount() == codeBlock->numberOfFunctionDecls() + codeBlock->numberOfFunctionExprs())
-            childHolderDigests = identity->childHolderDigests;
+        if (Options::jitCacheVouchedHolderDigests() && identity.childHolderDigestCount() == codeBlock->numberOfFunctionDecls() + codeBlock->numberOfFunctionExprs())
+            childHolderDigests = identity.childHolderDigests;
         bool recorded = addRecord(*vmState, *codeBlock, WTF::move(record), childHolderDigests);
         // The UCB was just decoded, so nothing has recorded it, and nothing since the key has turned cache activity off.
         ASSERT_UNUSED(recorded, recorded);
@@ -1096,7 +284,7 @@ UnlinkedCodeBlock* importBody(RequestState& state)
     keepModuleAnalysisSource(state, *codeBlock);
     ++statisticsOf(*vmState).imports;
     state.settled = true;
-    timer.record("import"_s, *key, strict, state.source.length());
+    timer.record("import"_s, *key, state.source.length());
 
 #if ENABLE(JITCACHE_TWINS)
     if (TwinReportSink* sink = vmState->twinReportSink())
@@ -1173,16 +361,16 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
     const UnlinkedFunctionExecutable* holder = state.functionExecutable;
 
     // At the commit identifier the UCB was matched at, it passed every check of the match against this very body, and
-    // nothing the match read can have changed since: the UCB's core encoding and its holder UFE are immutable, and the
-    // body's bytes never change.
+    // nothing the match read can have changed since: the record's context and the holder UFE are immutable, and the body's
+    // bytes never change.
     if (record->matchedBodyVersion != body->version()) {
-        switch (matchLive(*vmState, state, timer, codeBlock, holder, *record, body.get())) {
-        case MatchResult::Matched:
+        switch (matchLive(*vmState, state, timer, holder, *record, body.get())) {
+        case LiveMatch::Matched:
             break;
-        case MatchResult::Missed:
+        case LiveMatch::Missed:
             registry.setMissedBodyVersion(codeBlock, indexToken);
             return;
-        case MatchResult::Stopped:
+        case LiveMatch::Stopped:
             return;
         }
     }
@@ -1205,7 +393,7 @@ void attachLive(RequestState& state, UnlinkedCodeBlock& codeBlock)
         return;
     ++statisticsOf(*vmState).attaches;
     state.settled = true;
-    timer.record("attach"_s, record->key, vmState->strict(), state.source.length());
+    timer.record("attach"_s, record->key, state.source.length());
 
 #if ENABLE(JITCACHE_TWINS)
     if (TwinReportSink* sink = vmState->twinReportSink())
@@ -1234,7 +422,6 @@ void recordGenerated(RequestState& state, UnlinkedCodeBlock& codeBlock)
         .missedBodyVersion = state.missedBodyVersion,
         .matchedBodyVersion = std::nullopt,
         .pendingImport = nullptr,
-        .suppliedDigestProvider = state.suppliedDigestProvider,
         .holder = recordedHolder(*vmState, state),
     };
     if (addRecord(*vmState, codeBlock, WTF::move(record)))
@@ -1274,19 +461,16 @@ void keepModuleAnalysisSource(RequestState& state, UnlinkedCodeBlock& codeBlock)
 void recordRoot(VM& vm, UnlinkedFunctionExecutable& executable, IdentityKind kind, const SourceCode& rootSource, LexicallyScopedFeatures lexicallyScopedFeatures,
     std::optional<int32_t> parameterEnd, const Digest256* builtinMetadataDigest)
 {
-    using namespace UCBImportInternal;
-
     VMState* vmState = vm.jitCacheState();
     if (!vmState || !vmState->tracksKeys())
         return;
-    ASSERT(isRootFunctionKind(kind));
+    ASSERT(kind == IdentityKind::FunctionConstructor || kind == IdentityKind::Builtin);
     RootSourceDigest digest = takeRootSourceDigest(*vmState, rootSource, builtinMetadataDigest);
     // The generator's digest belongs to the build, which debug builds check here.
     ASSERT(!builtinMetadataDigest || *builtinMetadataDigest == sourceDigest(rootSource.view()));
     RootIdentity identity {
         .kind = kind,
         .identityDigest = rootIdentityDigest(kind, digest.digest, lexicallyScopedFeatures, parameterEnd),
-        .suppliedDigestProvider = suppliedDigestProviderFor(*vmState, rootSource, digest),
     };
     vmState->registry().recordRootExecutable(executable, identity);
 }

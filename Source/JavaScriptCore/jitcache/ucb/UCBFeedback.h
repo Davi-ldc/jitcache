@@ -1,11 +1,10 @@
 #pragma once
 
 #include "ArrayProfile.h"
-#include "BodyKey.h"
 #include "DFGExitProfile.h"
 #include "ExecutionCounter.h"
 #include "SpeculatedType.h"
-#include <optional>
+#include "jitcache/base/BodyKey.h"
 #include <span>
 #include <wtf/OptionSet.h>
 #include <wtf/TriState.h>
@@ -19,7 +18,7 @@ class VM;
 
 namespace JSC::JITCache {
 
-// The ucb.feedback section, its checks, seeding, richness and the LLInt counter.
+// The ucb.feedback section, seeding, richness and the LLInt counter.
 
 // Whether the body holds an image: highest tier 1 or 0. A body without one holds the lane's sections alone: its import
 // leaves the CodeBlocks in the LLInt, its LLInt counter keeps the captured progress only up to one invocation short of
@@ -50,9 +49,8 @@ struct FeedbackCounts {
 
 class FeedbackSection { // a parsed ucb.feedback section; borrows its bytes
 public:
-    // With strict, empty when the section breaks a layout rule. Without, never empty: the counts and arrays are read where
-    // the layout puts them and trusted.
-    static std::optional<FeedbackSection> parse(std::span<const uint8_t>, bool strict);
+    // The counts and arrays are read where the layout puts them and trusted.
+    static FeedbackSection parse(std::span<const uint8_t>);
     const FeedbackCounts& counts() const;
     SpeculatedType prediction(unsigned) const; // these three only when counts().copies
     ArrayModes observedArrayModes(unsigned) const;
@@ -75,11 +73,6 @@ private:
 
 // VM thread; exit sites under UnlinkedCodeBlock::m_lock. copies: Present and valueAndArrayProfiles() non-null.
 FeedbackCounts liveFeedbackCounts(UnlinkedCodeBlock&, BodyImage);
-// The section's counts equal the UCB's, its copies are there exactly when the body has an image and the UCB is no
-// builtin's, and every exit site lies inside the UCB's instructions.
-bool feedbackFits(UnlinkedCodeBlock&, const FeedbackSection&, BodyImage);
-// Every constant whose singleton bit the section sets is a SymbolTable.
-bool constantBitsFit(UnlinkedCodeBlock&, const FeedbackSection&);
 // Allocates the copies for Present, seeds them when the section carries them, and arms the LLInt counter with
 // importedLLIntProgress. The UCB is one no holder has published, whose counts the section fits.
 void seedFeedback(VM&, UnlinkedCodeBlock&, const FeedbackSection&, BodyImage);

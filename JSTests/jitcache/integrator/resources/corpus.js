@@ -1,10 +1,9 @@
-// The corpus finalize-capture.js and default-mode.js share: bodies of the shapes
-// baseline code takes, arithmetic with its MathICs, property and call sites, a closure and the arrow it returns, a string
-// switch, a constructor and a handler that catches. integratorCorpus drives each body 60 times in one loop, so each
-// compiles at its 34th call, as the LLInt's warm-up threshold of 500 points at 15 points a call gives, and stays far
-// below the baseline counter's threshold for the DFG; the loop's 60 iterations keep integratorCorpus itself, and with
-// it every caller, in the LLInt. Every body is a local function, so nothing the corpus builds outlives the call, and the
-// total does not depend on the run's role.
+// The corpus of finalize-capture.js: bodies of the shapes baseline code takes, arithmetic with its MathICs, property
+// and call sites, a closure and the arrow it returns, a string switch, a constructor and a handler that catches.
+// integratorCorpus drives each body 60 times in one loop, so each compiles at its 34th call, as the LLInt's warm-up
+// threshold of 500 points at 15 points a call gives, and stays far below the baseline counter's threshold for the DFG;
+// the loop's 60 iterations keep integratorCorpus itself, and with it every caller, in the LLInt. Every body is a local
+// function, so nothing the corpus builds outlives the call, and the total does not depend on the run's role.
 
 function integratorCorpus() {
     function corpusArithmetic(a, b) {

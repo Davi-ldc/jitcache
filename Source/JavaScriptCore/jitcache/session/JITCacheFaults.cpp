@@ -1,8 +1,8 @@
 #include "config.h"
-#include "JITCacheFaults.h"
+#include "jitcache/session/JITCacheFaults.h"
 
-#include "JITCacheVMState.h"
 #include "VM.h"
+#include "jitcache/session/JITCacheVMState.h"
 
 namespace JSC::JITCache {
 

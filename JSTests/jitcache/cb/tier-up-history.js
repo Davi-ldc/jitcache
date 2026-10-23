@@ -10,8 +10,9 @@
 // delta captures both after a full collection whose finalization drains the doubles into the predictions, so its
 // captures are richer than the ones the baseline compilations made and replace them. In twins builds the Producer checks
 // the committed counts. The Consumer checks in every build that stormy's newborn CB carries the reoptimization count,
-// which setup then folds into its threshold (adjustedCounterValue).
-(function main(role) {
+// which setup then folds into its threshold (adjustedCounterValue), except in the bench's native copy, which imports
+// nothing.
+(function main(role, scratch, artifact, sequence, copy) {
     function lowCoverage(x, rare) {
         if (rare)
             return rare.a.b + rare.c.d + rare.e(rare.f) + rare.g[rare.h] + rare.i.j.k + rare.l.m;
@@ -63,7 +64,7 @@
         total += lowCoverage(i, 0) + stormy(i & 1 ? i : i + 0.25);
     print(total);
 
-    if (role === "Consumer" && reoptimizationRetryCount(stormy) < 1)
+    if (role === "Consumer" && copy !== "native" && reoptimizationRetryCount(stormy) < 1)
         throw new Error("stormy's CB carries no reoptimization count");
     if (role === "Consumer" && typeof jitcacheBodyEvents === "function") {
         const sections = load("./resources/cb-sections.js", "caller relative");

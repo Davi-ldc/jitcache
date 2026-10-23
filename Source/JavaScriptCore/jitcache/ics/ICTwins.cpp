@@ -1,5 +1,5 @@
 #include "config.h"
-#include "ICTwins.h"
+#include "jitcache/ics/ICTwins.h"
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
@@ -11,15 +11,15 @@
 #include "DeferGC.h"
 #include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
-#include "ICCapture.h"
-#include "ICSection.h"
-#include "ICSites.h"
 #include "JITCode.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "MetadataTable.h"
 #include "ObjectConstructor.h"
 #include "PropertyInlineCache.h"
+#include "jitcache/ics/ICCapture.h"
+#include "jitcache/ics/ICSection.h"
+#include "jitcache/ics/ICSites.h"
 #include <algorithm>
 #include <array>
 #include <span>
@@ -226,59 +226,48 @@ static void checkAttachedPropertyICs(const PreparedBaselineICs& prepared, CodeBl
     }
 }
 
-// The round trip: a strict capture of the CB, taken before any of its sites runs, writes for every IC and call-link site
-// the recapture of the record it was restored from. A record that differs is reported at its own site and index, so a
-// field that seeding or attach got wrong is reported twice at one index, once by checkSeededCallLinks or
-// checkAttachedPropertyICs and once here; a capture that fails, or that holds another number of records, is reported as
-// Capture.
+// The round trip: a capture of the CB, taken before any of its sites runs, writes for every IC and call-link site the
+// recapture of the record it was restored from. A record that differs is reported at its own site and index, so a field
+// that seeding or attach got wrong is reported twice at one index, once by checkSeededCallLinks or
+// checkAttachedPropertyICs and once here; a capture that holds another number of records is reported as Capture.
 static void checkRecapture(const PreparedBaselineICs& prepared, CodeBlock& codeBlock, Vector<TwinMismatch>& mismatches)
 {
     constexpr auto captureSite = TwinMismatch::Site::Capture;
-    // baselineICsSectionSize requires BaselineJITData; without it the strict capture reports NoBaselineJITData before it
-    // reads the empty output.
-    Vector<uint8_t> bytes(codeBlock.baselineJITData() ? baselineICsSectionSize(codeBlock) : 0);
-    auto captured = captureBaselineICs(codeBlock, bytes.mutableSpan(), StrictChecks::Yes);
-    if (!captured) {
-        expectField(mismatches, captureSite, captured.error().siteIndex, description(captured.error().check), false, true);
-        return;
-    }
-    auto view = parseSection(bytes.span(), StrictChecks::Yes);
-    if (!view) {
-        expectField(mismatches, captureSite, view.error().siteIndex, description(view.error().check), false, true);
-        return;
-    }
+    Vector<uint8_t> bytes(baselineICsSectionSize(codeBlock));
+    captureBaselineICs(codeBlock, bytes.mutableSpan());
+    SectionView view = parseSection(bytes.span());
 
     std::span<const PropertyICRecord> propertyICs = prepared.propertyICs();
-    expectCount(mismatches, captureSite, "capture.propertyICCount"_s, propertyICs.size(), view->propertyICs.size());
-    for (size_t index = 0, count = std::min(propertyICs.size(), view->propertyICs.size()); index < count; ++index) {
+    expectCount(mismatches, captureSite, "capture.propertyICCount"_s, propertyICs.size(), view.propertyICs.size());
+    for (size_t index = 0, count = std::min(propertyICs.size(), view.propertyICs.size()); index < count; ++index) {
         constexpr auto site = TwinMismatch::Site::PropertyIC;
         PropertyICRecord expected = recapturedPropertyIC(propertyICs[index]);
-        const PropertyICRecord& actual = view->propertyICs[index];
+        const PropertyICRecord& actual = view.propertyICs[index];
         expectField(mismatches, site, index, "recaptured.accessType"_s, expected.accessType, actual.accessType);
         expectField(mismatches, site, index, "recaptured.learningBits"_s, expected.learningBits, actual.learningBits);
         expectField(mismatches, site, index, "recaptured.repatchCount"_s, expected.repatchCount, actual.repatchCount);
         expectField(mismatches, site, index, "recaptured.numberOfCoolDowns"_s, expected.numberOfCoolDowns, actual.numberOfCoolDowns);
         expectField(mismatches, site, index, "recaptured.caseCount"_s, expected.caseCount, actual.caseCount);
         expectField(mismatches, site, index, "recaptured.stateBits"_s, expected.stateBits, actual.stateBits);
-        expectField(mismatches, site, index, "recaptured.reserved"_s, expected.reserved[0] | (expected.reserved[1] << 8), actual.reserved[0] | (actual.reserved[1] << 8));
     }
 
-    // The captured groups give each captured record the opcode of its site; the strict parse checked them.
+    // The captured groups give each captured record the opcode of its site; capture takes each group's opcode from
+    // callLinkOpcodes.
     Vector<const CallLinkOpcode*> opcodes;
-    opcodes.reserveInitialCapacity(view->callLinks.size());
-    for (unsigned groupIndex = 0; groupIndex < view->header.callLinkGroupCount; ++groupIndex) {
-        CallLinkGroup group = view->group(groupIndex);
+    opcodes.reserveInitialCapacity(view.callLinks.size());
+    for (unsigned groupIndex = 0; groupIndex < view.header.callLinkGroupCount; ++groupIndex) {
+        CallLinkGroup group = view.group(groupIndex);
         const CallLinkOpcode& opcode = callLinkOpcodes[*canonicalCallLinkPosition(static_cast<OpcodeID>(group.opcodeID))];
         for (uint32_t siteInGroup = 0; siteInGroup < group.siteCount; ++siteInGroup)
             opcodes.append(&opcode);
     }
 
     std::span<const CallLinkRecord> callLinks = prepared.callLinks();
-    expectCount(mismatches, captureSite, "capture.callLinkSiteCount"_s, callLinks.size(), view->callLinks.size());
-    for (size_t index = 0, count = std::min({ callLinks.size(), view->callLinks.size(), opcodes.size() }); index < count; ++index) {
+    expectCount(mismatches, captureSite, "capture.callLinkSiteCount"_s, callLinks.size(), view.callLinks.size());
+    for (size_t index = 0, count = std::min({ callLinks.size(), view.callLinks.size(), opcodes.size() }); index < count; ++index) {
         constexpr auto site = TwinMismatch::Site::CallLink;
         CallLinkRecord expected = recapturedCallLink(*opcodes[index], callLinks[index]);
-        const CallLinkRecord& actual = view->callLinks[index];
+        const CallLinkRecord& actual = view.callLinks[index];
         expectField(mismatches, site, index, "recaptured.bits"_s, expected.bits, actual.bits);
         expectField(mismatches, site, index, "recaptured.maxArgumentCountIncludingThisForVarargs"_s, expected.maxArgumentCountIncludingThisForVarargs, actual.maxArgumentCountIncludingThisForVarargs);
         expectField(mismatches, site, index, "recaptured.thisArrayModes"_s, readThisArrayModes(expected), readThisArrayModes(actual));

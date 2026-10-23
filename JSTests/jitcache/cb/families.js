@@ -46,7 +46,7 @@
 
     // A14 iterator_open, A15 iterator_next, F20 and F21. A site keeps at most two fast modes
     // (maxNumberOfFastIterationModes), so six copies of one loop take two kinds of iterable each, and the first two also a
-    // user-defined iterable, which records Generic. Together they record every bit validation allows at both opcodes; a
+    // user-defined iterable, which records Generic. Together they set every bit the engine records at both opcodes; a
     // plain array records FastArray at both.
     function iterateArraysAndMaps(iterable) {
         let total = 0;
@@ -302,7 +302,7 @@
         throw new Error(`the six sites record 0x${openModes.toString(16)} at iterator_open and 0x${nextModes.toString(16)} at iterator_next, not every native bit`);
 
     // The loops a return or a break leaves: their iterator_close_check entries record FastArray and FastString, every bit
-    // validation allows there.
+    // the engine records there.
     for (const fn of [firstHeavy, countBefore]) {
         const records = sections.entries(stateOf(fn, fn.name), 24);
         const closeModes = records.reduce((modes, record) => modes | record.modes, 0);
@@ -310,7 +310,7 @@
             throw new Error(`${fn.name}: iterator_close_check records ${sections.describe(records)}, expected FastArray and FastString`);
     }
 
-    // The for await's entries, in asyncTotal's body: every bit validation allows at each opcode.
+    // The for await's entries, in asyncTotal's body: every bit the engine records at each opcode.
     const asyncBody = sections.asyncGeneratorBody(asyncTotal([]));
     if (asyncBody) {
         const asyncOpen = Mode.FastAsyncGenerator | Mode.AsyncFromSync | Mode.Generic;

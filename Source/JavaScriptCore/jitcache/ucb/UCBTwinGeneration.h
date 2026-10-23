@@ -2,6 +2,14 @@
 
 #include <wtf/Platform.h>
 
+namespace JSC::JITCache {
+
+// What a twin generation records in place of the executable's parse fields. The engine's generators take a pointer to it
+// in every build; only test builds define it and pass one.
+struct TwinParseResults;
+
+} // namespace JSC::JITCache
+
 #if ENABLE(JITCACHE_TWINS)
 
 #include "ParserModes.h"
@@ -18,10 +26,12 @@ class VM;
 
 namespace JSC::JITCache {
 
-// The UCB lane's twins-only functions that engine files define beside the private code they reach: the twin generation
-// helpers verifyImport uses, generateGlobalTwin in runtime/CodeCache.cpp on generateUnlinkedCodeBlockImpl and
-// generateFunctionBodyTwin in bytecode/UnlinkedFunctionExecutable.cpp on generateUnlinkedFunctionCodeBlock; and the core
-// codec's test of altered records in runtime/CachedTypes.cpp.
+// The UCB lane's twins-only functions that reach private engine code, each defined in a file that one engine file includes
+// at its end: the twin generation helpers verifyImport uses, generateGlobalTwin in generation/UCBGlobalTwin.cpp, which
+// runtime/CodeCache.cpp includes and which calls generateUnlinkedCodeBlockImpl, and generateFunctionBodyTwin in
+// generation/UCBFunctionBodyTwin.cpp, which bytecode/UnlinkedFunctionExecutable.cpp includes and which calls
+// generateUnlinkedFunctionCodeBlock; and the core codec's test of altered records in codec/UCBCoreCodecSelfTest.cpp, which
+// runtime/CachedTypes.cpp includes.
 
 struct RequestState;
 

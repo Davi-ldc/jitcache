@@ -1,20 +1,23 @@
 #include "config.h"
-#include "UCBKeys.h"
+#include "jitcache/ucb/UCBKeys.h"
 
 #include "CachedTypes.h"
-#include "JITCacheSHA256.h"
 #include "SourceCode.h"
 #include "SourceProvider.h"
 #include "UnlinkedFunctionExecutable.h"
+#include "jitcache/base/JITCacheSHA256.h"
+#include "jitcache/session/JITCacheBun.h"
 #include <algorithm>
 #include <bit>
 #include <compare>
 #include <utility>
 #include <wtf/Noncopyable.h>
+#include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/ASCIIFastPath.h>
 #include <wtf/text/StringView.h>
+#include <wtf/text/SymbolImpl.h>
 #include <wtf/text/UniquedStringImpl.h>
 
 namespace JSC::JITCache {
@@ -129,7 +132,117 @@ private:
     SHA256 m_hasher;
 };
 
+// A TDZ environment's names in a fixed order: by their characters, then by the kind of StringImpl each one is. Two names
+// equal in both write the same bytes, so their order is moot.
+static unsigned tdzNameKind(const UniquedStringImpl* name)
+{
+    if (!name->isSymbol())
+        return 0;
+    auto& symbol = *static_cast<const SymbolImpl*>(name);
+    return 1 + symbol.isRegistered() * 2 + symbol.isPrivate();
+}
+
+static bool tdzNameLess(const UniquedStringImpl* a, const UniquedStringImpl* b)
+{
+    auto order = codePointCompare(StringView { a }, StringView { b });
+    if (std::is_neq(order))
+        return std::is_lt(order);
+    return tdzNameKind(a) < tdzNameKind(b);
+}
+
 } // namespace UCBKeysInternal
+
+// The TDZ digests a holder digest ends with. They read the names and links that CompactTDZEnvironment and
+// TDZEnvironmentLink keep private, so each of those classes befriends this struct.
+struct TDZDigests {
+    // An environment's digest, computed on the VM thread when a holder digest first reaches the environment and kept in it
+    // until it frees its names. The budget is charged for the sort buffer while it lives; on a refusal the digest is empty
+    // and the environment keeps none.
+    static std::optional<Digest256> ofEnvironment(const CompactTDZEnvironment& environment, CoreEncodingBudget* budget, unsigned& environmentsDigested)
+    {
+        using namespace UCBKeysInternal;
+
+        if (environment.m_contentDigest)
+            return *environment.m_contentDigest;
+
+        size_t count = WTF::switchOn(environment.m_variables,
+            [](const CompactTDZEnvironment::Compact& compact) -> size_t { return compact.size(); },
+            [](const CompactTDZEnvironment::Inflated& inflated) -> size_t { return inflated.size(); });
+        size_t sortBufferBytes = count * sizeof(const UniquedStringImpl*);
+        if (budget && sortBufferBytes && !budget->charge(sortBufferBytes))
+            return std::nullopt;
+        Digest256 digest;
+        {
+            auto releaseSortBuffer = makeScopeExit([&] {
+                if (budget && sortBufferBytes)
+                    budget->release(sortBufferBytes);
+            });
+            Vector<const UniquedStringImpl*> names;
+            names.reserveInitialCapacity(count);
+            WTF::switchOn(environment.m_variables,
+                [&](const CompactTDZEnvironment::Compact& compact) {
+                    for (auto& name : compact)
+                        names.append(name.get());
+                },
+                [&](const CompactTDZEnvironment::Inflated& inflated) {
+                    for (auto& name : inflated)
+                        names.append(name.get());
+                });
+            std::ranges::sort(names, tdzNameLess);
+
+            // The name count, then each name's kind and canonical string.
+            RecordHasher hasher("JITCache.tdze.v1");
+            hasher.u32(static_cast<uint32_t>(names.size()));
+            for (const UniquedStringImpl* name : names) {
+                hasher.u8(static_cast<uint8_t>(tdzNameKind(name)));
+                hasher.canonicalString(name);
+            }
+            digest = hasher.finalize();
+        }
+        const_cast<CompactTDZEnvironment&>(environment).m_contentDigest = makeUniqueWithoutFastMallocCheck<Digest256>(digest);
+        ++environmentsDigested;
+        return digest;
+    }
+
+    // A chain's digest. A link's digest hashes its environment's digest and its parent's digest, 32 zero bytes after the
+    // last link, so the links are listed and digested from the chain's end. A chain longer than the links the list keeps
+    // inline moves the list to the heap, which the budget is charged for before the list is allocated and while it lives.
+    static std::optional<Digest256> ofChain(const TDZEnvironmentLink* chain, CoreEncodingBudget* budget, unsigned& environmentsDigested)
+    {
+        Digest256 digest { };
+        if (!chain)
+            return digest;
+        constexpr size_t inlineLinks = 32;
+        size_t count = 0;
+        for (const TDZEnvironmentLink* link = chain; link; link = link->m_parent.get())
+            ++count;
+        size_t linksBytes = count > inlineLinks ? count * sizeof(const TDZEnvironmentLink*) : 0;
+        if (budget && linksBytes && !budget->charge(linksBytes))
+            return std::nullopt;
+        auto releaseLinks = makeScopeExit([&] {
+            if (budget && linksBytes)
+                budget->release(linksBytes);
+        });
+        Vector<const TDZEnvironmentLink*, inlineLinks> links;
+        links.reserveInitialCapacity(count);
+        ASSERT((links.capacity() > inlineLinks ? links.capacity() * sizeof(const TDZEnvironmentLink*) : 0) == linksBytes);
+        for (const TDZEnvironmentLink* link = chain; link; link = link->m_parent.get())
+            links.append(link);
+        for (size_t i = links.size(); i--;) {
+            // Every live link holds an environment the VM interned: a handle has its map and its environment, or neither.
+            const CompactTDZEnvironmentMap::Handle& handle = links[i]->m_handle;
+            RELEASE_ASSERT(handle);
+            std::optional<Digest256> environmentDigest = ofEnvironment(handle.environment(), budget, environmentsDigested);
+            if (!environmentDigest)
+                return std::nullopt;
+            UCBKeysInternal::RecordHasher hasher("JITCache.tdzl.v1");
+            hasher.bytes(*environmentDigest);
+            hasher.bytes(digest);
+            digest = hasher.finalize();
+        }
+        return digest;
+    }
+};
 
 Digest256 rootIdentityDigest(IdentityKind kind, const Digest256& sourceDigest, LexicallyScopedFeatures features, std::optional<int32_t> parameterEnd)
 {
@@ -196,6 +309,11 @@ Digest256 executableBodyContextDigest(IdentityKind kind, unsigned providerOffset
     hasher.flag(isRoot);
     hasher.bytes(isRoot && rootHolderDigest ? *rootHolderDigest : Digest256 { });
     return hasher.finalize();
+}
+
+std::optional<Digest256> tdzChainDigest(const TDZEnvironmentLink* chain, CoreEncodingBudget* budget, unsigned& environmentsDigested)
+{
+    return TDZDigests::ofChain(chain, budget, environmentsDigested);
 }
 
 std::optional<Digest256> holderDigest(VM& vm, const UnlinkedFunctionExecutable& executable, CoreEncodingBudget* budget, unsigned* environmentsDigested)
@@ -296,6 +414,12 @@ Digest256 sourceDigest(StringView text)
     hasher.update(encodingByte);
     hashCodeUnits(hasher, text, encoding);
     return hasher.finalize();
+}
+
+// JITCacheBun.h exports it for the digest Bun's providers supply, which must equal sourceDigest's.
+Digest256 providerSourceDigest(StringView source)
+{
+    return sourceDigest(source);
 }
 
 RootSourceDigest rootSourceDigest(const SourceCode& rootSource, const Digest256* builtinMetadataDigest)

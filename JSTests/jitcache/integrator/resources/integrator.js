@@ -37,16 +37,6 @@ function checkSameBytes(actual, expected, what) {
     }
 }
 
-// Runs body and returns the message of the Error it throws; fails when it returns.
-function thrownMessage(what, body) {
-    try {
-        body();
-    } catch (error) {
-        return error.message;
-    }
-    fail(`${what} returned instead of throwing`);
-}
-
 function hasTwins() {
     return typeof jitcacheBodyEvents === "function";
 }

@@ -1,0 +1,12 @@
+jitcache/image/BakedFacts.cpp
+jitcache/image/ImageCapture.cpp
+jitcache/image/ImageEmission.cpp
+jitcache/image/ImageFootprint.cpp
+jitcache/image/ImagePrepare.cpp
+jitcache/image/ImageRecord.cpp
+jitcache/image/ImageRecorder.cpp
+jitcache/image/ImageSection.cpp
+jitcache/image/ImageSupport.cpp
+jitcache/image/ImageTwins.cpp
+jitcache/image/ImageTwinsHost.cpp
+jitcache/image/ImageTwinsSection.cpp

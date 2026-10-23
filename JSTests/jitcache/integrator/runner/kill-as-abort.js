@@ -1,5 +1,6 @@
 // jitcache-runs: Producer --jitcache-test-kill=after-root@1
 // jitcache-expect-exit: 0 abort
+// jitcache-fixture: fails 0:0 exit
 
 // A run that ends by SIGKILL fails a directive that expects SIGABRT.
 (function main() {

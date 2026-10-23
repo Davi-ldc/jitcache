@@ -1,14 +1,14 @@
 #include "config.h"
-#include "ImageEmission.h"
+#include "jitcache/image/ImageEmission.h"
 
 #if ENABLE(JIT)
 
-#include "ImageRecorder.h"
-#include "ImageSupport.h"
 #include "JSCJSValueInlines.h"
 #include "LLIntEntrypoint.h"
 #include "UnlinkedCodeBlock.h"
 #include "VM.h"
+#include "jitcache/image/ImageRecorder.h"
+#include "jitcache/image/ImageSupport.h"
 
 // Besides the declarations of its header, the scratch registers the recorded forms use on each architecture and the
 // lookup of the recorder that records a reference.
@@ -427,6 +427,20 @@ void orStructureIDBase(MacroAssembler& masm, GPRReg source, GPRReg dest)
     ImageEmissionInternal::Recording recording { *recorder, ImageEmissionInternal::makeTarget(TargetKind::StructureIDBase) };
     recording.emitPointer(masm, reinterpret_cast<const void*>(structureIDBase()), scratch);
     masm.or64(scratch, source, dest);
+}
+
+std::optional<ImageReference> recordedArithProfile(MacroAssembler& masm, const void* profile, const void* bits)
+{
+    auto* recorder = masm.jitCacheRecorder();
+    if (!recorder) [[likely]]
+        return std::nullopt;
+    auto target = recorder->arithProfileTarget(profile);
+    if (!target) {
+        ASSERT_NOT_REACHED();
+        recorder->markUnrecordable(Unrecordable::InconsistentRecord);
+        return std::nullopt;
+    }
+    return ImageReference(*target, bits);
 }
 
 void nearCallSupport(MacroAssembler& masm, VM& vm, const ImageTarget& supportKey)

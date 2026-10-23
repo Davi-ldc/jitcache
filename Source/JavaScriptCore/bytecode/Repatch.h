@@ -35,8 +35,6 @@ class DirectCallLinkInfo;
 class OptimizingCallLinkInfo;
 class PropertyInlineCache;
 
-enum class AccessType : int8_t;
-
 enum class GetByKind {
     ById,
     ByVal,
@@ -104,11 +102,10 @@ void repatchGetBySlowPathCall(CodeBlock*, PropertyInlineCache&, GetByKind);
 void repatchPutBySlowPathCall(CodeBlock*, PropertyInlineCache&, PutByKind);
 void repatchInBySlowPathCall(CodeBlock*, PropertyInlineCache&, InByKind);
 
-#if ENABLE(JIT)
-// The *GaveUp operation a property IC of this access type holds once it gives up, tagged as
-// repatchSlowPathCall stores it into HandlerPropertyInlineCache::m_slowOperation.
-CodePtr<OperationPtrTag> NODELETE gaveUpOperationFor(AccessType);
-#endif
+// JITCache: IC capture recognizes the *GaveUp operation a given-up property IC holds, and IC restore installs it.
+CodePtr<CFunctionPtrTag> NODELETE appropriateGetByGaveUpFunction(GetByKind);
+CodePtr<CFunctionPtrTag> NODELETE appropriatePutByGaveUpFunction(PutByKind);
+CodePtr<CFunctionPtrTag> NODELETE appropriateInByGaveUpFunction(InByKind);
 
 void ftlThunkAwareRepatchCall(CodeBlock*, CodeLocationCall<JSInternalPtrTag>, CodePtr<CFunctionPtrTag> newCalleeFunction);
 CodePtr<JSEntryPtrTag> jsToWasmICCodePtr(CodeSpecializationKind, JSObject* callee);

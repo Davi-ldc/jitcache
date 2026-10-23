@@ -2,17 +2,26 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
-#include "CBFormat.h"
-#include "CBState.h"
-#include "CBTestSupport.h"
+#include "BytecodeIndex.h"
 #include "CodeBlock.h"
+#include "CollectionScope.h"
 #include "FunctionExecutable.h"
-#include "JITCacheTest.h"
+#include "Heap.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
-#include "ProducerBudget.h"
-#include "TestVM.h"
+#include "LazyOperandValueProfile.h"
+#include "LazyValueProfile.h"
+#include "Operands.h"
+#include "SpeculatedType.h"
+#include "VirtualRegister.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/cb/CBState.h"
+#include "jitcache/tests/cb/CBTestSupport.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestCodeBlocks.h"
+#include "jitcache/tests/support/TestVM.h"
 #include <algorithm>
 #include <cmath>
 #include <optional>
@@ -22,11 +31,12 @@
 #include <wtf/text/MakeString.h>
 
 // Tests of the CB lane's capture (cb/CBCapture.cpp, CBStateCapture in cb/CBState.h): how the polymorphic bit decides
-// whether the counter travels, in both sections and in the scores, and the ownership a CBStateCapture has of its two
-// sections and their budget charge. Each test runs on a fresh VM with default options and builds its CB as the ICs
-// lane's live tests do: it evaluates its source in its own global object, and one call through JSC::call installs an
-// LLInt CB that JIT::compileSync then compiles to baseline. The source keeps every value the test passes in its
-// globals, and the global object stays reachable from the test's stack.
+// whether the counter travels, in both sections and in the scores, the ownership a CBStateCapture has of its two
+// sections and their budget charge, and that capture leaves a pending lazy-operand sample where it found it. Each test
+// runs on a fresh VM with default options and builds its CB as the ICs lane's live tests do: it evaluates its source in
+// its own global object, and one call through JSC::call installs an LLInt CB that JIT::compileSync then compiles to
+// baseline. The source keeps every value the test passes in its globals, and the global object stays reachable from
+// the test's stack.
 
 namespace JSC::JITCache::Tests {
 
@@ -88,8 +98,8 @@ static constexpr uint8_t carried = static_cast<uint8_t>(CBFormat::CounterMode::C
 
 using namespace CBCaptureTestsInternal;
 
-// On one baseline CB whose counter has made progress, a strict capture with the polymorphic bit set writes NotCarried
-// in both sections, zeros in the three counter fields and no progress, and its score and scoreLive's withhold the
+// On one baseline CB whose counter has made progress, a capture with the polymorphic bit set writes NotCarried in both
+// sections, zeros in the three counter fields and no progress, and its score and scoreLive's withhold the
 // counter; without the bit, the capture writes Carried in both sections with the live triple, and both scores carry
 // that triple's progress, at least one point. Neither call changes the counter.
 JITCACHE_TEST(cbCapturePolymorphicBitDecidesTheCounter, Yes)
@@ -111,14 +121,10 @@ JITCACHE_TEST(cbCapturePolymorphicBitDecidesTheCounter, Yes)
 
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
     for (bool hasPolymorphicSite : { true, false }) {
-        auto liveScore = CBStateCapture::scoreLive(*codeBlock, true, hasPolymorphicSite);
-        if (!liveScore) {
-            failWith(context, "scoreLive"_s, liveScore.error());
-            continue;
-        }
-        auto captured = CBStateCapture::capture(*codeBlock, budget.get(), true, hasPolymorphicSite);
+        CBScore liveScore = CBStateCapture::scoreLive(*codeBlock, hasPolymorphicSite);
+        auto captured = CBStateCapture::capture(*codeBlock, budget.get(), hasPolymorphicSite);
         if (!captured) {
-            failWith(context, "capture"_s, captured.error());
+            JITCACHE_FAIL("capture refused its charge"_s);
             continue;
         }
         auto stateHeader = sectionHeader<CBFormat::StateHeader>(context, captured->stateSection(), "cb.state"_s);
@@ -136,8 +142,8 @@ JITCACHE_TEST(cbCapturePolymorphicBitDecidesTheCounter, Yes)
             JITCACHE_CHECK(!summaryHeader->counterProgress);
             JITCACHE_CHECK(score.counterWithheld);
             JITCACHE_CHECK(!score.counterProgress);
-            JITCACHE_CHECK(liveScore->counterWithheld);
-            JITCACHE_CHECK(!liveScore->counterProgress);
+            JITCACHE_CHECK(liveScore.counterWithheld);
+            JITCACHE_CHECK(!liveScore.counterProgress);
         } else {
             JITCACHE_CHECK(stateHeader->counterMode == carried);
             JITCACHE_CHECK(summaryHeader->counterMode == carried);
@@ -147,8 +153,8 @@ JITCACHE_TEST(cbCapturePolymorphicBitDecidesTheCounter, Yes)
             JITCACHE_CHECK(summaryHeader->counterProgress == progress);
             JITCACHE_CHECK(!score.counterWithheld);
             JITCACHE_CHECK(score.counterProgress == progress);
-            JITCACHE_CHECK(!liveScore->counterWithheld);
-            JITCACHE_CHECK(liveScore->counterProgress == progress);
+            JITCACHE_CHECK(!liveScore.counterWithheld);
+            JITCACHE_CHECK(liveScore.counterProgress == progress);
         }
     }
 
@@ -157,8 +163,8 @@ JITCACHE_TEST(cbCapturePolymorphicBitDecidesTheCounter, Yes)
 
 // While a capture lives, the budget holds exactly its two section sizes, which are the sizes the format computes from
 // their headers; a move hands the sections and the charge to the new object, leaving the old one empty and releasing
-// nothing; the last owner's destruction releases the charge. A budget too small for the two
-// sections refuses the charge, and capture returns a CaptureCharge recording fault with nothing charged.
+// nothing; the last owner's destruction releases the charge. A budget too small for the two sections refuses the charge,
+// and capture returns nothing, with nothing charged.
 JITCACHE_TEST(cbCaptureOwnsItsSectionsAndCharge, Yes)
 {
     VM& vm = *context.vm();
@@ -174,9 +180,9 @@ JITCACHE_TEST(cbCaptureOwnsItsSectionsAndCharge, Yes)
     size_t stateSize = 0;
     size_t summarySize = 0;
     {
-        auto captured = CBStateCapture::capture(*codeBlock, budget.get(), true, false);
+        auto captured = CBStateCapture::capture(*codeBlock, budget.get(), false);
         if (!captured) {
-            failWith(context, "capture"_s, captured.error());
+            JITCACHE_FAIL("capture refused its charge"_s);
             return;
         }
         std::span<const uint8_t> state = captured->stateSection();
@@ -206,15 +212,66 @@ JITCACHE_TEST(cbCaptureOwnsItsSectionsAndCharge, Yes)
     JITCACHE_CHECK(!budget->chargedBytes());
 
     Ref<ProducerBudget> smallBudget = ProducerBudget::create(sizeof(CBFormat::StateHeader));
-    auto refused = CBStateCapture::capture(*codeBlock, smallBudget.get(), true, false);
+    auto refused = CBStateCapture::capture(*codeBlock, smallBudget.get(), false);
     JITCACHE_CHECK(!refused);
-    if (!refused) {
-        JITCACHE_CHECK(refused.error().kind == CBFaultKind::RecordingFault);
-        JITCACHE_CHECK(refused.error().check == CBCheck::CaptureCharge);
-    }
     JITCACHE_CHECK(!smallBudget->chargedBytes());
     JITCACHE_CHECK(smallBudget->hasRefused());
 }
+
+#if ENABLE(DFG_JIT)
+
+// Scoring and capture read each lazy-operand profile's key and prediction and leave its pending sample alone, since
+// the sample may name a cell that has died. The test adds a lazy-operand profile to the warm baseline CB, with a
+// prediction that lacks int32 and an int32 sample in its bucket, then scores the CB with scoreLive, as production
+// scores every capture candidate, and captures it. Afterwards the sample is still pending, the live prediction is
+// unchanged, and the captured record holds that prediction without int32. With no JS running and no compile plan
+// holding the CB, only a collection could drain the sample besides scoring and capture, as early as a marker's first
+// visit to the CB (CodeBlock::visitChildren). So the test runs a synchronous full collection, which ends any collection
+// in progress, before it writes the sample, and allocates no cell until its checks, so no other collection starts.
+JITCACHE_TEST(cbCaptureLeavesAPendingLazyOperandSample, Yes)
+{
+    VM& vm = *context.vm();
+    JSGlobalObject* globalObject = createRealm(context, vm, elementSource);
+    if (!globalObject)
+        return;
+    CodeBlock* codeBlock = warmBaselineElement(context, globalObject);
+    if (!codeBlock)
+        return;
+    JSFunction* element = globalFunction(context, globalObject, "element"_s);
+    if (!element)
+        return;
+
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+    if (codeBlock->jitType() != JITType::BaselineJIT || element->jsExecutable()->codeBlockForCall() != codeBlock) {
+        JITCACHE_FAIL("the collection replaced element's baseline CB"_s);
+        return;
+    }
+
+    const LazyOperandValueProfileKey key(BytecodeIndex(0), Operand(virtualRegisterForArgumentIncludingThis(1)));
+    constexpr SpeculatedType prediction = SpecString;
+    const EncodedJSValue pendingSample = JSValue::encode(jsNumber(42));
+    LazyOperandValueProfile* profile = codeBlock->lazyValueProfiles().addOperandValueProfile(key);
+    profile->m_prediction = prediction;
+    *profile->specFailBucket(0) = pendingSample;
+
+    CBStateCapture::scoreLive(*codeBlock, false);
+    auto image = captureState(context, *codeBlock);
+    JITCACHE_CHECK(*profile->specFailBucket(0) == pendingSample);
+    JITCACHE_CHECK(profile->m_prediction == prediction);
+    if (!image)
+        return;
+    if (image->lazyOperandProfiles.size() != 1) {
+        JITCACHE_FAIL(makeString("the capture holds "_s, image->lazyOperandProfiles.size(), " lazy-operand records, not the one the test added"_s));
+        return;
+    }
+    const CBFormat::LazyOperandRecord& record = image->lazyOperandProfiles[0];
+    JITCACHE_CHECK(record.bytecodeIndexBits == key.bytecodeIndex().asBits());
+    JITCACHE_CHECK(record.operandKind == static_cast<uint32_t>(key.operand().kind()));
+    JITCACHE_CHECK(record.operandValue == key.operand().value());
+    JITCACHE_CHECK(record.prediction == prediction);
+}
+
+#endif // ENABLE(DFG_JIT)
 
 } // namespace JSC::JITCache::Tests
 

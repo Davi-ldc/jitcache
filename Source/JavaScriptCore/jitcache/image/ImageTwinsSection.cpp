@@ -1,32 +1,28 @@
 #include "config.h"
-#include "ImageTwinsSection.h"
+#include "jitcache/image/ImageTwinsSection.h"
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
-#include "ByteFields.h"
 #include "BytecodeStructs.h"
 #include "CodeBlock.h"
 #include "GetByIdMetadata.h"
-#include "ImageSection.h"
 #include "JSCInlines.h"
-#include "JSPropertyNameEnumerator.h"
 #include "UnlinkedCodeBlock.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/image/ImageSection.h"
 #include <array>
 #include <mutex>
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/StdLibExtras.h>
 
-// Besides the declarations of its header, the codec's field offsets and the rules the structure checks and the compile
-// input check apply.
+// Besides the declarations of its header, the codec's field offsets.
 
 namespace JSC::JITCache {
 
 namespace ImageTwinsSectionInternal {
 
-// Header fields.
+// Header fields; the three bytes after the flags are reserved.
 static constexpr size_t flagsOffset = 0;
-static constexpr size_t reservedOffset = 1;
-static constexpr size_t reservedSize = 3;
 static constexpr size_t assemblerSeedOffset = 4;
 static constexpr size_t binarySwitchSeedCountOffset = 8;
 static constexpr size_t inputCountOffset = 12;
@@ -42,7 +38,6 @@ static_assert(tokenOffset + captureProcessTokenSize == imageTwinsHeaderSize);
 static constexpr size_t inputBytecodeOffsetOffset = 0;
 static constexpr size_t inputKindOffset = 4;
 static constexpr size_t inputValueOffset = 5;
-static constexpr size_t inputReservedOffset = 6;
 static constexpr size_t inputDepthOffset = 8;
 static constexpr size_t inputImportSlotOffset = 12;
 static_assert(inputImportSlotOffset + sizeof(uint32_t) == imageTwinsCompileInputEntrySize);
@@ -59,9 +54,6 @@ static_assert(regenerationSeedsOffset == imageTwinsRegenerationFixedSize);
 
 // A regeneration attaches the fast-path snippet's assembler, the full snippet's, or both (JITMathIC::generateOutOfLine).
 static constexpr unsigned maximumAttachCount = 2;
-
-static constexpr uint8_t enumeratorFlagBits = JSPropertyNameEnumerator::IndexedMode | JSPropertyNameEnumerator::OwnStructureMode
-    | JSPropertyNameEnumerator::GenericMode | JSPropertyNameEnumerator::HasSeenOwnStructureModeStructureMismatch;
 
 static ImageTwinsHeader decodeHeader(std::span<const uint8_t> bytes)
 {
@@ -113,37 +105,6 @@ static std::array<uint8_t, sizeof(Value)> encodeValue(Value value)
     return bytes;
 }
 
-static bool isValidInputValue(CompileInputKind kind, uint8_t value)
-{
-    switch (kind) {
-    case CompileInputKind::ResolveScopeType:
-    case CompileInputKind::GetFromScopeType:
-        return value <= static_cast<uint8_t>(Dynamic);
-    case CompileInputKind::PutToScopeType:
-        // Linking never gives a put_to_scope a lazy closure type, and the baseline JIT aborts on one.
-        return value <= static_cast<uint8_t>(Dynamic) && value != static_cast<uint8_t>(LazyClosureVar) && value != static_cast<uint8_t>(ResolvedLazyClosureVar);
-    case CompileInputKind::GetByIdMode:
-    case CompileInputKind::IteratorOpenMode:
-    case CompileInputKind::AsyncIteratorOpenMode:
-        return value <= static_cast<uint8_t>(GetByIdMode::ArrayLength);
-    case CompileInputKind::EnumeratorMetadata:
-        return !(value & ~enumeratorFlagBits);
-    }
-    return false;
-}
-
-// The resolve_scope types whose code bakes a depth or an import slot: one of a closure variable walks its depth, and one
-// of a module variable walks its depth and then loads its import slot.
-static bool mayHaveDepth(const CompileInput& input)
-{
-    return input.kind == CompileInputKind::ResolveScopeType && (input.value == static_cast<uint8_t>(ClosureVar) || input.value == static_cast<uint8_t>(ModuleVar));
-}
-
-static bool mayHaveImportSlot(const CompileInput& input)
-{
-    return input.kind == CompileInputKind::ResolveScopeType && input.value == static_cast<uint8_t>(ModuleVar);
-}
-
 } // namespace ImageTwinsSectionInternal
 
 std::span<const uint8_t, captureProcessTokenSize> captureProcessToken()
@@ -151,10 +112,7 @@ std::span<const uint8_t, captureProcessTokenSize> captureProcessToken()
     static std::array<uint8_t, captureProcessTokenSize> token { };
     static std::once_flag onceFlag;
     std::call_once(onceFlag, [] {
-        // The structure check rejects an all-zero token, so no process writes one.
-        do
-            cryptographicallyRandomValues(std::span { token });
-        while (isAllZero(token));
+        cryptographicallyRandomValues(std::span { token });
     });
     return token;
 }
@@ -289,31 +247,19 @@ std::optional<ImageTwinsView> ImageTwinsView::locate(std::span<const uint8_t> by
     auto& header = view.m_header;
     auto& layout = view.m_layout;
     layout.binarySwitchSeeds = offset;
-    if (!advance(static_cast<uint64_t>(header.binarySwitchSeedCount) * sizeof(uint32_t)))
-        return std::nullopt;
-    layout.binarySwitchSeedsEnd = offset;
-    if (!pad())
+    if (!advance(static_cast<uint64_t>(header.binarySwitchSeedCount) * sizeof(uint32_t)) || !pad())
         return std::nullopt;
     layout.inputs = offset;
-    if (!advance(static_cast<uint64_t>(header.inputCount) * imageTwinsCompileInputEntrySize))
-        return std::nullopt;
-    layout.inputsEnd = offset;
-    if (!pad())
+    if (!advance(static_cast<uint64_t>(header.inputCount) * imageTwinsCompileInputEntrySize) || !pad())
         return std::nullopt;
     layout.binaryArithBits = offset;
-    if (!advance(static_cast<uint64_t>(header.binaryArithProfileCount) * sizeof(uint16_t)))
-        return std::nullopt;
-    layout.binaryArithBitsEnd = offset;
-    if (!pad())
+    if (!advance(static_cast<uint64_t>(header.binaryArithProfileCount) * sizeof(uint16_t)) || !pad())
         return std::nullopt;
     layout.unaryArithBits = offset;
-    if (!advance(static_cast<uint64_t>(header.unaryArithProfileCount) * sizeof(uint16_t)))
-        return std::nullopt;
-    layout.unaryArithBitsEnd = offset;
-    if (!pad())
+    if (!advance(static_cast<uint64_t>(header.unaryArithProfileCount) * sizeof(uint16_t)) || !pad())
         return std::nullopt;
 
-    // Each regeneration entry's size follows from its attach count, which ImageCheck::TwinRegenerations bounds.
+    // Each regeneration entry's size follows from its attach count.
     layout.regenerations = offset;
     for (uint32_t index = 0; index < header.regenerationCount; ++index) {
         if (offset + imageTwinsRegenerationFixedSize > size)
@@ -325,7 +271,6 @@ std::optional<ImageTwinsView> ImageTwinsView::locate(std::span<const uint8_t> by
     layout.producerValues = offset;
     if (!advance(static_cast<uint64_t>(header.producerValueCount) * sizeof(uint64_t)))
         return std::nullopt;
-    layout.end = offset;
     return view;
 }
 
@@ -434,150 +379,6 @@ TwinData ImageTwinsView::twinData() const
     });
     ASSERT(JITCache::twinDataStorageBytes(data) == twinDataStorageBytes());
     return data;
-}
-
-bool operator==(const ImageTwinsView& a, const ImageTwinsView& b)
-{
-    return a.m_bytes.data() == b.m_bytes.data() && a.m_bytes.size() == b.m_bytes.size() && a.m_header == b.m_header && a.m_layout == b.m_layout;
-}
-
-// Known flags, zero reserved bytes and padding, a token that is not all zero, and a section that ends where the
-// header's counts say.
-bool ImageTwinsView::passesTwinsHeader() const
-{
-    using namespace ImageTwinsSectionInternal;
-    if (m_header.flags & ~ImageTwinsFlags::compiledHoldingAPILock)
-        return false;
-    if (!isAllZero(m_bytes.subspan(reservedOffset, reservedSize)))
-        return false;
-    if (isAllZero(m_header.captureProcessToken))
-        return false;
-    if (m_layout.end != m_bytes.size())
-        return false;
-
-    auto isZeroBetween = [&](size_t begin, size_t end) {
-        return isAllZero(m_bytes.subspan(begin, end - begin));
-    };
-    if (!isZeroBetween(m_layout.binarySwitchSeedsEnd, m_layout.inputs)
-        || !isZeroBetween(m_layout.inputsEnd, m_layout.binaryArithBits)
-        || !isZeroBetween(m_layout.binaryArithBitsEnd, m_layout.unaryArithBits)
-        || !isZeroBetween(m_layout.unaryArithBitsEnd, m_layout.regenerations))
-        return false;
-    for (unsigned index = 0; index < m_header.inputCount; ++index) {
-        size_t entry = m_layout.inputs + static_cast<size_t>(index) * imageTwinsCompileInputEntrySize;
-        if (readField<uint16_t>(m_bytes, entry + inputReservedOffset))
-            return false;
-    }
-    // Each regeneration entry pads its seeds to 8.
-    size_t offset = m_layout.regenerations;
-    for (unsigned index = 0; index < m_header.regenerationCount; ++index) {
-        auto entry = regenerationEntry(offset);
-        size_t seedsEnd = regenerationSeedsOffset + static_cast<size_t>(entry[regenerationAttachCountOffset]) * sizeof(uint32_t);
-        if (!isAllZero(entry.subspan(seedsEnd)))
-            return false;
-        offset += entry.size();
-    }
-    return true;
-}
-
-// Compile inputs of known kinds and values, in strictly increasing bytecode order, with a scope depth only on a
-// ClosureVar or ModuleVar resolve_scope and an import slot only on a ModuleVar one.
-bool ImageTwinsView::passesTwinInputs() const
-{
-    using namespace ImageTwinsSectionInternal;
-    for (unsigned index = 0; index < m_header.inputCount; ++index) {
-        auto input = compileInput(index);
-        auto kindByte = static_cast<uint8_t>(input.kind);
-        if (kindByte < static_cast<uint8_t>(CompileInputKind::ResolveScopeType) || kindByte > static_cast<uint8_t>(CompileInputKind::EnumeratorMetadata))
-            return false;
-        if (index && input.bytecodeOffset <= compileInput(index - 1).bytecodeOffset)
-            return false;
-        if (!isValidInputValue(input.kind, input.value))
-            return false;
-        if (input.localScopeDepth && !mayHaveDepth(input))
-            return false;
-        if (input.moduleImportSlot && !mayHaveImportSlot(input))
-            return false;
-    }
-    return true;
-}
-
-// Agreement with the image section: one producer value per fixup, and each regeneration naming a MathIC with inline
-// code, with one or two attaches, seeds only where its mask says the assembler drew, and a valid replacement.
-bool ImageTwinsView::passesTwinRegenerations(const ImageSectionsView& view) const
-{
-    using namespace ImageTwinsSectionInternal;
-    auto& image = view.header();
-    // One producer value per fixup, the image's and every snippet's; the image's own checks left the snippet fields of a
-    // MathIC without a snippet zero.
-    uint64_t fixupCount = image.fixupCount;
-    for (unsigned index = 0; index < image.mathICCount; ++index)
-        fixupCount += view.mathIC(index).snippetFixupCount;
-    if (m_header.producerValueCount != fixupCount)
-        return false;
-
-    size_t offset = m_layout.regenerations;
-    for (unsigned index = 0; index < m_header.regenerationCount; ++index) {
-        auto entry = regenerationEntry(offset);
-        offset += entry.size();
-        uint32_t mathICIndex = readField<uint32_t>(entry, regenerationIndexOffset);
-        if (mathICIndex >= image.mathICCount || !view.mathIC(mathICIndex).hasInlineCode())
-            return false;
-        uint8_t attachCount = entry[regenerationAttachCountOffset];
-        if (attachCount < 1 || attachCount > maximumAttachCount)
-            return false;
-        uint8_t mask = entry[regenerationMaskOffset];
-        if (mask & ~((1u << attachCount) - 1))
-            return false;
-        for (unsigned slot = 0; slot < attachCount; ++slot) {
-            if (!(mask & (1u << slot)) && readField<uint32_t>(entry, regenerationSeedsOffset + slot * sizeof(uint32_t)))
-                return false;
-        }
-        if (!CodeSymbol::isValid(readField<int64_t>(entry, regenerationReplacementOffset)))
-            return false;
-    }
-    return true;
-}
-
-std::optional<ImageCheck> firstTwinsStructureFailure(const ImageSectionsView& view)
-{
-    auto& twins = view.twins();
-    if (!twins.passesTwinsHeader())
-        return ImageCheck::TwinsHeader;
-    if (!twins.passesTwinInputs())
-        return ImageCheck::TwinInputs;
-    if (!twins.passesTwinRegenerations(view))
-        return ImageCheck::TwinRegenerations;
-    return std::nullopt;
-}
-
-std::optional<ImageCheck> firstTwinsFailureAgainst(const ImageSectionsView& view, const UnlinkedCodeBlock& unlinkedCodeBlock)
-{
-    auto& twins = view.twins();
-    if (twins.header().binaryArithProfileCount != unlinkedCodeBlock.numberOfBinaryArithProfiles() || twins.header().unaryArithProfileCount != unlinkedCodeBlock.numberOfUnaryArithProfiles())
-        return ImageCheck::TwinInputSites;
-
-    // Inputs and instructions are both in bytecode order, which ImageCheck::TwinInputs checked, so one walk pairs them:
-    // every instruction the snapshot reads has exactly one input of its kind, and every input sits at such an
-    // instruction's start.
-    unsigned next = 0;
-    unsigned inputCount = twins.header().inputCount;
-    for (const auto& instruction : unlinkedCodeBlock.instructions()) {
-        uint32_t offset = instruction.offset();
-        if (next < inputCount && twins.compileInput(next).bytecodeOffset < offset)
-            return ImageCheck::TwinInputSites;
-        bool hasInput = next < inputCount && twins.compileInput(next).bytecodeOffset == offset;
-        auto expected = snapshotKindOf(instruction->opcodeID());
-        if (expected.has_value() != hasInput)
-            return ImageCheck::TwinInputSites;
-        if (!hasInput)
-            continue;
-        if (twins.compileInput(next++).kind != *expected)
-            return ImageCheck::TwinInputSites;
-    }
-    if (next != inputCount)
-        return ImageCheck::TwinInputSites;
-    return std::nullopt;
 }
 
 // The writer.

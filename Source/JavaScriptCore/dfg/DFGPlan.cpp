@@ -77,13 +77,13 @@
 #include "DFGValueRepReductionPhase.h"
 #include "DFGVarargsForwardingPhase.h"
 #include "DFGVirtualRegisterAllocationPhase.h"
-#include "JITCacheFaults.h"
 #include "JSCJSValueInlines.h"
 #include "OperandsInlines.h"
 #include "ProfilerDatabase.h"
 #include "StructureID.h"
 #include "TrackedReferences.h"
 #include "VMInlines.h"
+#include "jitcache/session/JITCacheFaults.h"
 
 #if ENABLE(FTL_JIT)
 #include "FTLCapabilities.h"

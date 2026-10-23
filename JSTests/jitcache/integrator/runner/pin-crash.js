@@ -1,5 +1,8 @@
 // jitcache-runs: Producer
 // jitcache-expect-exit: 0 abort
+// jitcache-fixture: runner --pin=$BUILD --extra-options=--useFTLJIT=false
+// jitcache-fixture: fails 0 pin-crash
+// jitcache-fixture: detail this build's run ended by SIG\w+.*; the pin's run ended by SIG\w+
 
 // A script whose two pin runs both end by a signal fails the sequence as a crash, although their statuses and outputs
 // are equal. The self-test runs it with --extra-options=--useFTLJIT=false, which every run takes, the oracle's and both

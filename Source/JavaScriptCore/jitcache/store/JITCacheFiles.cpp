@@ -1,7 +1,7 @@
 #include "config.h"
-#include "JITCacheFiles.h"
+#include "jitcache/store/JITCacheFiles.h"
 
-#include "ArtifactStore.h"
+#include "jitcache/store/ArtifactStore.h"
 #include <wtf/SafeStrerror.h>
 
 #if OS(LINUX)

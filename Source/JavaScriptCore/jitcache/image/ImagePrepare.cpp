@@ -1,5 +1,5 @@
 #include "config.h"
-#include "ImagePrepare.h"
+#include "jitcache/image/ImagePrepare.h"
 
 #if ENABLE(JIT)
 
@@ -9,10 +9,6 @@
 #include "CodeBlock.h"
 #include "ExecutableAllocator.h"
 #include "GdbJIT.h"
-#include "ImageFootprint.h"
-#include "ImageRecord.h"
-#include "ImageSupport.h"
-#include "ImageTwins.h"
 #include "JIT.h"
 #include "JITCodeMap.h"
 #include "JITInlines.h"
@@ -22,12 +18,14 @@
 #include "MacroAssembler.h"
 #include "Options.h"
 #include "PerfLog.h"
-#include "ProducerBudget.h"
 #include "UnlinkedCodeBlock.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/ImageFootprint.h"
+#include "jitcache/image/ImageRecord.h"
+#include "jitcache/image/ImageSupport.h"
 #include <wtf/Atomics.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/SimpleStats.h>
-#include <utility>
 #include <wtf/StdLibExtras.h>
 #include <wtf/StringPrintStream.h>
 
@@ -59,8 +57,7 @@ static CodeLocationLabel<tag> locationAt(const void* start, uint32_t offset)
 }
 
 // Writes the fixup's resolved value with its form's link writer. Each footprint holds its form's canonical encoding,
-// which capture wrote and the structure checks verify under strict, so the writer writes only inside it, apart from the
-// jump islands the ARM64 writers place.
+// which capture wrote, so the writer writes only inside it, apart from the jump islands the ARM64 writers place.
 static void writeFixup(void* code, const ImageFixup& fixup, const void* value)
 {
     if constexpr (!hasFixupWriters) {
@@ -88,13 +85,10 @@ static void writeFixup(void* code, const ImageFixup& fixup, const void* value)
 }
 
 // The patching of one allocation: each fixup's target resolved in the consumer's context and written at its site.
-// skipsNextPatch is the SkipPatch test hook's, which leaves the first footprint of the import canonical.
-static void patchFixups(void* code, const ImageFixupArray& fixups, const ResolutionContext& context, bool& skipsNextPatch)
+static void patchFixups(void* code, const ImageFixupArray& fixups, const ResolutionContext& context)
 {
     for (size_t index = 0; index < fixups.size(); ++index) {
         ImageFixup fixup = fixups[index];
-        if (std::exchange(skipsNextPatch, false)) [[unlikely]]
-            continue;
         writeFixup(code, fixup, resolveTarget(context, fixup.target));
     }
 }
@@ -249,12 +243,6 @@ PreparedImage::PreparedImage(PreparedImage&&) = default;
 
 PreparedImage::~PreparedImage() = default;
 
-const BaselineJITCode& PreparedImage::code() const
-{
-    RELEASE_ASSERT(m_code);
-    return *m_code;
-}
-
 Ref<BaselineJITCode> PreparedImage::commit(VM& vm, CodeBlock& installing) &&
 {
     RELEASE_ASSERT(m_code && m_imageMemory);
@@ -281,7 +269,7 @@ Ref<BaselineJITCode> PreparedImage::commit(VM& vm, CodeBlock& installing) &&
     return code;
 }
 
-std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, const ImageSectionsView& view, ProducerBudget* budget, bool strict, PrepareTimings* timings)
+std::optional<PreparedImage> prepareImage(VM& vm, UnlinkedCodeBlock& unlinkedCodeBlock, const ImageSectionsView& view, SupportTargetTable& supportTargets, ProducerBudget* budget, PrepareTimings* timings)
 {
     using namespace ImagePrepareInternal;
     const auto& header = view.header();
@@ -296,11 +284,6 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         if (timings)
             timings->*field += (MonotonicTime::now() - stageStart).nanosecondsAs<uint64_t>();
     };
-
-    // Validation is the glue's, under strict only; every footprint holds its form's canonical encoding in either mode,
-    // which the link writers rely on.
-    if (!strict)
-        assertImageSectionsAgainst(view, unlinkedCodeBlock);
 
     // Every MathIC, in MathIC index order, in a holder the code adopts once it is built.
     MathICHolder mathICHolder;
@@ -330,7 +313,7 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
     startStage();
     RefPtr<ExecutableMemoryHandle> image = ExecutableAllocator::singleton().allocate(header.codeSize, JITCompilationCanFail);
     if (!image)
-        return std::unexpected(PrepareFailure { PrepareOutcome::ExecutableMemoryExhausted, ImageCheck::None });
+        return std::nullopt;
     Vector<RefPtr<ExecutableMemoryHandle>> snippets(header.mathICCount); // by MathIC index, null without a snippet
     bool allocatedSnippets = true;
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
@@ -340,7 +323,7 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         }
     });
     if (!allocatedSnippets)
-        return std::unexpected(PrepareFailure { PrepareOutcome::ExecutableMemoryExhausted, ImageCheck::None });
+        return std::nullopt;
     endStage(&PrepareTimings::allocateNanoseconds);
     void* imageStart = image->start().untaggedPtr();
     Vector<const void*> snippetStarts(header.mathICCount, [&](size_t index) -> const void* {
@@ -384,30 +367,14 @@ std::expected<PreparedImage, PrepareFailure> prepareImage(VM& vm, UnlinkedCodeBl
         .stringSwitchTables = stringSwitchTables.span(),
         .snippetStarts = snippetStarts.span(),
         .ranks = &ranks,
-        .supportTargets = supportTargetTableFor(vm),
+        .supportTargets = &supportTargets,
     };
-    bool skipsNextPatch = false;
-#if ENABLE(JITCACHE_TWINS)
-    skipsNextPatch = imageTestHook() == ImageTestHook::SkipPatch;
-#endif
     startStage();
     view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
-        patchFixups(const_cast<void*>(snippetStarts[index]), snippet.fixups, context, skipsNextPatch);
+        patchFixups(const_cast<void*>(snippetStarts[index]), snippet.fixups, context);
     });
-    patchFixups(imageStart, view.fixups(), context, skipsNextPatch);
+    patchFixups(imageStart, view.fixups(), context);
     endStage(&PrepareTimings::patchNanoseconds);
-
-    // ImageCheck::PatchReadBack: each patched footprint decodes, islands followed, to the consumer's resolution of its
-    // target. It guards an installation, so a failure is invalid material.
-    if (strict) {
-        bool readsBack = true;
-        view.forEachSnippet([&](unsigned index, const ImageSnippet& snippet) {
-            readsBack = readsBack && fixupsReachTargets(snippetStarts[index], snippet.code.size(), snippet.fixups, context);
-        });
-        readsBack = readsBack && fixupsReachTargets(imageStart, header.codeSize, view.fixups(), context);
-        if (!readsBack)
-            return std::unexpected(PrepareFailure { PrepareOutcome::InvalidMaterial, ImageCheck::PatchReadBack });
-    }
 
     // The instruction-cache flush, over the linked bytes, as LinkBuffer::performFinalization flushes.
     startStage();

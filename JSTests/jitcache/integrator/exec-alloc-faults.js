@@ -101,7 +101,7 @@ load("./resources/integrator.js", "caller relative");
             const feedback = sectionOf(fn, "call", "ucb.feedback");
             if (feedback === null)
                 continue;
-            check(byteReader(feedback).i32(40) !== INT32_MAX, `${fn.name}'s committed ucb.feedback holds a deferred LLInt counter`);
+            check(byteReader(feedback).i32(32) !== INT32_MAX, `${fn.name}'s committed ucb.feedback holds a deferred LLInt counter`);
             const state = sectionOf(fn, "call", "cb.state");
             // A body that ran without compiling, such as main, is captured without an image under the default capture
             // scope, and holds the UCB lane's sections alone.
@@ -111,7 +111,7 @@ load("./resources/integrator.js", "caller relative");
             }
             check(state !== null, `${fn.name}'s committed body has no cb.state`);
             const read = byteReader(state);
-            checkSame(read.u8(3), 1, `the counter mode of ${fn.name}'s cb.state, which has no polymorphic site`);
+            checkSame(read.u8(1), 1, `the counter mode of ${fn.name}'s cb.state, which has no polymorphic site`);
             check(read.i32(28) !== INT32_MAX, `${fn.name}'s committed cb.state carries a deferred baseline counter`);
         }
     }

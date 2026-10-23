@@ -7,7 +7,7 @@
 // adds; elsewhere every reader returns null.
 //
 // Some tests run a `bun build --compile` executable, the "app", in a child process. The app is a JITCache VM of its
-// own: it gets the run's role, strictness, delta capture and twin-report path through BUN_OPTIONS, which standalone
+// own: it gets the run's role, delta capture and twin-report path through BUN_OPTIONS, which standalone
 // executables read, with an artifact of its own beside the run's, since the test's own VM holds the producer lock of the
 // run's artifact. It calls no delta at exit, so a producing app commits only what its baseline compilations captured.
 // A test can also start it as a Consumer of the run's artifact, which needs no lock (runApp, overRunArtifact). Its twin
@@ -203,7 +203,6 @@ class Context {
             case "--jitcache-mode":
                 flags.push(overRunArtifact ? `${name}=c` : argument);
                 break;
-            case "--jitcache-strict":
             case "--jitcache-delta-capture":
             case "--jitcache-twins-report":
                 flags.push(argument);

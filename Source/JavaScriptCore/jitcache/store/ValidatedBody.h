@@ -1,6 +1,6 @@
 #pragma once
 
-#include "BodyKey.h"
+#include "jitcache/base/BodyKey.h"
 #include <array>
 #include <span>
 #include <stdint.h>
@@ -16,38 +16,41 @@
 
 namespace JSC::JITCache {
 
-// The section kinds the lanes name when they ask a body for a section:
-//
-//   kind                 the lane's name           type id  tier  in a body of highest tier 1
-//   UCBIdentity          ucb.identity              0x0101   0     required
-//   UCBCore              ucb.core                  0x0102   0     required
-//   UCBFeedback          ucb.feedback              0x0103   0     required
-//   UCBAnalysis          ucb.analysis              0x0104   0     optional at every tier, and only in a module's body
-//   ImageBaseline        image.baseline            0x0201   1     required
-//   BakedFactsBaseline   baked-facts.baseline      0x0202   1     required
-//   ImageTwinsBaseline   image-twins.baseline      0x0203   1     required in ENABLE(JITCACHE_TWINS) builds, forbidden elsewhere
-//   CBStateBaseline      cb.state                  0x0301   1     required
-//   CBSummaryBaseline    cb.summary                0x0302   1     required
-//   ICsBaseline          ICsBaseline               0x0401   1     required
-//
-// The high byte of a type id names the lane and the low byte the section family; the directory entry's tier byte
-// separates tiers, 0 for the sections every tier shares. The order of the enumerators is the directory's order.
+// The section kinds, one row each, in the directory's order of (type id, tier): v(kind, type id, tier, name, presence).
+// The high byte of a type id names the lane (1 UCB, 2 Image, 3 CB, 4 ICs) and the low byte the section family; the
+// directory entry's tier byte separates tiers, 0 for the sections every tier shares. The name is the lane's, which the
+// writer's diagnostics, the shell functions and the capture event use. The presence says when a body holds the kind
+// (SectionPresence in JITCacheContainer.h). SectionKind, its count, the container's description of each kind and the
+// capture event's fields for each section all come from these rows.
+#define JITCACHE_FOR_EACH_SECTION_KIND(v) \
+    v(UCBIdentity, 0x0101, 0, "ucb.identity"_s, Required) \
+    v(UCBCore, 0x0102, 0, "ucb.core"_s, Required) \
+    v(UCBFeedback, 0x0103, 0, "ucb.feedback"_s, Required) \
+    v(UCBAnalysis, 0x0104, 0, "ucb.analysis"_s, ModuleOnly) \
+    v(ImageBaseline, 0x0201, 1, "image.baseline"_s, Required) \
+    v(BakedFactsBaseline, 0x0202, 1, "baked-facts.baseline"_s, Required) \
+    v(ImageTwinsBaseline, 0x0203, 1, "image-twins.baseline"_s, TwinsOnly) \
+    v(CBStateBaseline, 0x0301, 1, "cb.state"_s, Required) \
+    v(CBSummaryBaseline, 0x0302, 1, "cb.summary"_s, Required) \
+    v(ICsBaseline, 0x0401, 1, "ICsBaseline"_s, Required)
+
+// The kinds the lanes name when they ask a body for a section.
+#define JITCACHE_SECTION_KIND_ENUMERATOR(kind, typeId, tier, name, presence) kind,
 enum class SectionKind : uint8_t {
-    UCBIdentity, UCBCore, UCBFeedback, UCBAnalysis,
-    ImageBaseline, BakedFactsBaseline, ImageTwinsBaseline,
-    CBStateBaseline, CBSummaryBaseline,
-    ICsBaseline,
+    JITCACHE_FOR_EACH_SECTION_KIND(JITCACHE_SECTION_KIND_ENUMERATOR)
 };
-constexpr unsigned numberOfSectionKinds = 10;
-static_assert(static_cast<unsigned>(SectionKind::ICsBaseline) + 1 == numberOfSectionKinds);
+#undef JITCACHE_SECTION_KIND_ENUMERATOR
+
+#define JITCACHE_COUNT_SECTION_KIND(kind, typeId, tier, name, presence) +1
+constexpr unsigned numberOfSectionKinds = 0 JITCACHE_FOR_EACH_SECTION_KIND(JITCACHE_COUNT_SECTION_KIND);
+#undef JITCACHE_COUNT_SECTION_KIND
 
 class MappedPack;
 class OpenedArtifact;
 
-// One body that passed the container checks its VM runs: the integrity checks always and the structure checks under
-// strict. Its bytes are borrowed from the pack's read-only mapping, which the body keeps alive, so they stay readable and
-// unchanged while it lives, whatever happens to the file: nothing in a pack is overwritten in place. A pending import
-// pins it.
+// One body that passed the container's integrity checks. Its bytes are borrowed from the pack's read-only mapping, which
+// the body keeps alive, so they stay readable and unchanged while it lives, whatever happens to the file: nothing in a
+// pack is overwritten in place. A pending import pins it.
 class ValidatedBody final : public ThreadSafeRefCounted<ValidatedBody> {
     WTF_MAKE_TZONE_ALLOCATED(ValidatedBody);
 public:
@@ -63,7 +66,7 @@ public:
 #if ENABLE(JITCACHE_TWINS)
     // A body no container check has seen, for the parts' own tests: the sections are copied into one buffer, in the
     // order given (kinds strictly increasing), each at an 8-byte-aligned address; highestTier() is the highest tier of
-    // the given kinds, by the table above. onDestroy runs first in the destructor, on the destroying thread. version is
+    // the given kinds, by the rows above. onDestroy runs first in the destructor, on the destroying thread. version is
     // not 0.
     struct TestSection {
         SectionKind kind;

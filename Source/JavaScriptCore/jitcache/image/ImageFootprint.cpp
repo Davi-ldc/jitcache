@@ -1,11 +1,11 @@
 #include "config.h"
-#include "ImageFootprint.h"
+#include "jitcache/image/ImageFootprint.h"
 
 #if ENABLE(JIT)
 
-#include "ByteFields.h"
 #include "ExecutableAllocator.h"
 #include "MacroAssembler.h"
+#include "jitcache/base/ByteFields.h"
 #include <algorithm>
 #include <limits>
 

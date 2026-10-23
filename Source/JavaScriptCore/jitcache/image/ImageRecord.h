@@ -2,10 +2,10 @@
 
 #if ENABLE(JIT)
 
-#include "BakedFacts.h"
-#include "ImageTypes.h"
 #include "JSCPtrTag.h"
-#include "ProducerBudget.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/BakedFacts.h"
+#include "jitcache/image/ImageTypes.h"
 #include <memory>
 #include <optional>
 #include <span>
@@ -18,7 +18,7 @@
 #include <wtf/Vector.h>
 
 #if ENABLE(JITCACHE_TWINS)
-#include "ImageTwinsSection.h"
+#include "jitcache/image/ImageTwinsSection.h"
 #endif
 
 // The image record: the provenance a recording compilation leaves on its BaselineJITCode, and the hooks through which a
@@ -146,8 +146,6 @@ public:
     // is gone, if it drew. Both do nothing on a record that stopped.
     void addTwinRegenerationSlot(size_t entry);
     void setTwinRegenerationSeed(size_t entry, std::optional<uint32_t> seed);
-    // The ChangeRecordedTarget test hook: capture changes a fixup's target before its reach check runs.
-    void setFixupTargetForTesting(size_t index, const ImageTarget&);
 #endif
 
 private:

@@ -1,13 +1,10 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; ConsumerProducer --jitcache-delta-at-exit; Consumer
 
-// Every cb.state a producer commits passes the lane's validation rules and its counter rule against the CB it came from.
-// The strict check of each capture tests that, since every corpus run has strict on, and a failure would end production
-// with a fault the runner does not allow; this script makes captures at every point that commits: the baseline
-// compilations' captures, deltas after more types, after a full collection's drain and after a jettison, and in a
-// ConsumerProducer the recaptures of imported CBs. In twins builds, after each delta and in the Consumer, it also reads
-// back every watched body's committed sections and checks the rules no CodeBlock is needed for, and the summary against
-// its cb.state: every slot covers the cb.state's, every length matches the size its counts give with zero padding, and a
-// body with a polymorphic site carries no counter. resources/cb-sections.js holds those checks.
+// The producer commits the CB lane's sections at every point that commits: the baseline compilations' captures, deltas
+// after more types, after a full collection's drain and after a jettison, and in a ConsumerProducer the recaptures of
+// imported CBs. In twins builds, after each delta and in the Consumer, the script reads back every watched body's
+// committed sections and checks that both parse and that the summary agrees with its cb.state, every slot covering the
+// cb.state's; resources/cb-sections.js holds those checks.
 (function main(role) {
     function arithmetic(a, b) {
         return a * b + a / (b + 1);

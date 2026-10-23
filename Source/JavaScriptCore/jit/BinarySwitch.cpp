@@ -32,7 +32,7 @@
 #include <wtf/ListDump.h>
 
 #if ENABLE(JITCACHE_TWINS)
-#include "ImageRecorder.h"
+#include "jitcache/image/ImageRecorder.h"
 #endif
 
 namespace JSC {

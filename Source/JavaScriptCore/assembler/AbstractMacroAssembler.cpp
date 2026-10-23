@@ -32,7 +32,7 @@
 #include <wtf/PrintStream.h>
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
-#include "ImageRecorder.h"
+#include "jitcache/image/ImageRecorder.h"
 #endif
 
 namespace JSC {

@@ -1,11 +1,14 @@
 #include "config.h"
-#include "BodyKey.h"
+#include "jitcache/base/BodyKey.h"
 
 #include "ParserModes.h"
 #include <algorithm>
+#include <wtf/ASCIICType.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/text/WTFString.h>
 
-// Builds, checks and reads the 40 bytes of a body key. The identity digest a key carries comes from UCBKeys.cpp.
+// Builds, checks and reads the 40 bytes of a body key, and spells them in hex. The identity digest a key carries comes
+// from UCBKeys.cpp.
 
 namespace JSC::JITCache {
 
@@ -39,6 +42,16 @@ static constexpr bool isCallOnlyKind(IdentityKind kind)
 static constexpr bool isDefinedIdentityKind(uint8_t value)
 {
     return value >= static_cast<uint8_t>(IdentityKind::Program) && value <= static_cast<uint8_t>(IdentityKind::DirectEval);
+}
+
+// The value of a digit bodyKeyHexDigits writes; nothing for any other character, an uppercase digit included.
+static std::optional<uint8_t> lowercaseHexDigitValue(char character)
+{
+    if (isASCIIDigit(character))
+        return static_cast<uint8_t>(character - '0');
+    if (character >= 'a' && character <= 'f')
+        return static_cast<uint8_t>(character - 'a' + 10);
+    return std::nullopt;
 }
 
 } // namespace BodyKeyInternal
@@ -105,6 +118,40 @@ OptionSet<CodeGenerationMode> BodyKey::codeGenerationMode() const
 const Digest256& BodyKey::identityDigest() const
 {
     return reinterpretCastSpanStartTo<Digest256>(std::span { m_bytes }.subspan<BodyKeyInternal::identityDigestOffset>());
+}
+
+std::array<char, bodyKeyHexLength> bodyKeyHexDigits(const BodyKey& key)
+{
+    std::array<char, bodyKeyHexLength> digits { };
+    auto bytes = key.bytes();
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        digits[2 * index] = upperNibbleToLowercaseASCIIHexDigit(bytes[index]);
+        digits[2 * index + 1] = lowerNibbleToLowercaseASCIIHexDigit(bytes[index]);
+    }
+    return digits;
+}
+
+String bodyKeyHex(const BodyKey& key)
+{
+    // One encoding serves the reports and the shell, which reads it back with bodyKeyFromHex.
+    auto digits = bodyKeyHexDigits(key);
+    return String::fromLatin1(std::span<const char> { digits });
+}
+
+std::optional<BodyKey> bodyKeyFromHex(std::span<const char> digits)
+{
+    using namespace BodyKeyInternal;
+    if (digits.size() != bodyKeyHexLength)
+        return std::nullopt;
+    std::array<uint8_t, BodyKey::byteSize> bytes { };
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        auto high = lowercaseHexDigitValue(digits[2 * index]);
+        auto low = lowercaseHexDigitValue(digits[2 * index + 1]);
+        if (!high || !low)
+            return std::nullopt;
+        bytes[index] = static_cast<uint8_t>(*high << 4 | *low);
+    }
+    return BodyKey::fromBytes(bytes);
 }
 
 } // namespace JSC::JITCache

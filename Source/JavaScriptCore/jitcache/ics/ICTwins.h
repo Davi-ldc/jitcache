@@ -5,13 +5,13 @@
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "CallLinkInfo.h"
-#include "ICRestore.h"
 #include "InlineCacheHandler.h"
 #include "JITCode.h"
 #include "JSCJSValue.h"
 #include "Opcode.h"
 #include "PropertyInlineCache.h"
 #include "PropertyInlineCacheSummary.h"
+#include "jitcache/ics/ICRestore.h"
 #include <cstdint>
 #include <wtf/Vector.h>
 #include <wtf/text/ASCIILiteral.h>
@@ -25,9 +25,9 @@
 // readCallLinkRecord in ICCapture.h), under the CB's m_lock, so a snapshot and a capture of the same state agree field
 // for field; a call-link snapshot also says which CallSiteData its site points at. checkRestoredBaselineICs runs right
 // after attachPropertyICState, before any JS: it compares the snapshot with the state seeding and attach must leave, the
-// count of the CB's own CallSiteDatas included, then captures the CB with strict on and compares each record with the
-// recapture of the record it was restored from. It reads only the section and a CB no other thread reaches before
-// installCode, so it never skips itself, in either JIT mode.
+// count of the CB's own CallSiteDatas included, then captures the CB and compares the fields of each record with those
+// of the recapture of the record it was restored from. It reads only the section and a CB no other thread reaches
+// before installCode, so it never skips itself, in either JIT mode.
 
 namespace JSC {
 class CallFrame;
@@ -93,9 +93,8 @@ struct BaselineICsSnapshot {
 };
 
 // One difference between the restored state and its twin. index is the IC index for PropertyIC, the call-link site
-// index in canonical order for CallLink (0 for the CB's count of own CallSiteDatas), and the site the failed check names,
-// or 0, for Capture. field names what differs, a failed check by description(check); expected and actual are its
-// values, with booleans as 0 and 1 and enumerations by their numeric value.
+// index in canonical order for CallLink (0 for the CB's count of own CallSiteDatas), and 0 for Capture. field names
+// what differs; expected and actual are its values, with booleans as 0 and 1 and enumerations by their numeric value.
 struct TwinMismatch {
     enum class Site : uint8_t { PropertyIC, CallLink, Capture } site;
     uint32_t index;
@@ -107,11 +106,11 @@ struct TwinMismatch {
 // Takes CodeBlock::m_lock, which the caller must not hold, and releases it before returning. Allocates no cell.
 BaselineICsSnapshot snapshotBaselineICs(CodeBlock&);
 
-// Right after attachPropertyICState returns, on the CB prepareBaselineICs prepared, before any JS. Takes CodeBlock::m_lock
-// through snapshotBaselineICs and then captureBaselineICs, never both at once. Allocates no cell.
+// Right after attachPropertyICState returns, on the CB it received, before any JS. Takes CodeBlock::m_lock through
+// snapshotBaselineICs and then captureBaselineICs, never both at once. Allocates no cell.
 Vector<TwinMismatch> checkRestoredBaselineICs(const PreparedBaselineICs&, CodeBlock&);
 
-// The jsc shell's jitcacheICsSnapshot(fn, kind), which the shell registers through a forwarding function.
+// The jsc shell's jitcacheICsSnapshot(fn, kind), which the shell's function list registers directly.
 JSC_DECLARE_HOST_FUNCTION(functionSnapshotBaselineICs);
 
 } // namespace JSC::JITCache::ICs

@@ -1,5 +1,5 @@
 #include "config.h"
-#include "ImageSupport.h"
+#include "jitcache/image/ImageSupport.h"
 
 #if ENABLE(JIT)
 
@@ -7,7 +7,6 @@
 #include "CallMode.h"
 #include "InlineCacheCompiler.h"
 #include "JIT.h"
-#include "JITCacheVMState.h"
 #include "JITThunks.h"
 #include "JSCConfig.h"
 #include "JSCInlines.h"
@@ -22,26 +21,13 @@
 #include <algorithm>
 #include <bit>
 #include <limits>
-#include <mutex>
 #include <wtf/HashMap.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 
-#if OS(LINUX)
-#include <link.h>
-#endif
-
-// Besides the declarations of its header, codeSymbolAnchor, which CodeSymbolAnchor.h declares, the search for the
-// engine's text segment, and the VM's table of resolved support targets.
-
 namespace JSC::JITCache {
 
 namespace ImageSupportInternal {
-
-struct TextSegment {
-    uintptr_t start { 0 };
-    uintptr_t end { 0 };
-};
 
 // x86_64 instructions start at any byte; ARM64 instructions are four-byte words.
 static constexpr uintptr_t instructionAlignment = isARM64() ? 4 : 1;
@@ -51,43 +37,18 @@ static uintptr_t anchorAddress()
     return reinterpret_cast<uintptr_t>(&codeSymbolAnchor);
 }
 
-// The executable PT_LOAD segment of the object whose loaded segments hold the anchor. Only Linux targets carry code
-// symbols; elsewhere the segment is empty, so no symbol is valid and a recording compilation that makes a far call is
+// The engine's text segment (EngineObject.h), copied at the first use. Only Linux targets carry code symbols; elsewhere
+// the segment is empty, so no symbol is valid and a recording compilation that makes a far call is
 // Unrecordable(ForeignCodeSymbol).
-static TextSegment findEngineTextSegment()
+static const LoadedSegment& engineTextSegment()
 {
-    TextSegment segment;
+    static const LoadedSegment segment = [] {
+        LoadedSegment engineText = loadedObjects().engineText;
 #if OS(LINUX)
-    struct Search {
-        uintptr_t anchor;
-        TextSegment* segment;
-    } search { anchorAddress(), &segment };
-    dl_iterate_phdr([](struct dl_phdr_info* info, size_t, void* data) -> int {
-        auto& search = *static_cast<Search*>(data);
-        for (auto& header : unsafeMakeSpan(info->dlpi_phdr, info->dlpi_phnum)) {
-            if (header.p_type != PT_LOAD || !(header.p_flags & PF_X))
-                continue;
-            uintptr_t start = info->dlpi_addr + header.p_vaddr;
-            uintptr_t end = start + header.p_memsz;
-            if (search.anchor < start || search.anchor >= end)
-                continue;
-            *search.segment = TextSegment { start, end };
-            return 1;
-        }
-        return 0;
-    }, &search);
-    RELEASE_ASSERT(segment.start < segment.end);
+        RELEASE_ASSERT(engineText.start < engineText.end);
 #endif
-    return segment;
-}
-
-static const TextSegment& engineTextSegment()
-{
-    static TextSegment segment;
-    static std::once_flag onceFlag;
-    std::call_once(onceFlag, [] {
-        segment = findEngineTextSegment();
-    });
+        return engineText;
+    }();
     return segment;
 }
 
@@ -116,11 +77,6 @@ static JSValue constantOf(UnlinkedCodeBlock& unlinkedCodeBlock, uint32_t index)
 
 } // namespace ImageSupportInternal
 
-NEVER_INLINE void codeSymbolAnchor()
-{
-    // Never called: only its address matters.
-}
-
 std::optional<CodeSymbol> CodeSymbol::of(const void* function)
 {
     auto offset = static_cast<int64_t>(reinterpret_cast<uintptr_t>(function) - ImageSupportInternal::anchorAddress());
@@ -139,7 +95,7 @@ bool CodeSymbol::isValid(int64_t offset)
 {
     auto& segment = ImageSupportInternal::engineTextSegment();
     uintptr_t address = ImageSupportInternal::anchorAddress() + static_cast<uintptr_t>(offset);
-    return address >= segment.start && address < segment.end && !(address % ImageSupportInternal::instructionAlignment);
+    return segment.contains(address) && !(address % ImageSupportInternal::instructionAlignment);
 }
 
 const void* vmAddress(VM& vm, VMAddress entry)
@@ -231,11 +187,6 @@ bool isValidCallMode(uint32_t value)
     return false;
 }
 
-bool isValidProcessThunk(uint32_t value)
-{
-    return value == static_cast<uint32_t>(ProcessThunk::DefaultCall) || value == static_cast<uint32_t>(ProcessThunk::ArityFixup);
-}
-
 bool isValidVMAddress(uint32_t value)
 {
     return value >= 1 && value <= numberOfVMAddresses;
@@ -275,59 +226,30 @@ StringSwitchRanks rankStringSwitches(const UnlinkedCodeBlock& unlinkedCodeBlock)
     return ranks;
 }
 
-// The support targets a VM's preparations resolved: the baseline thunks, the property ICs' slow-path thunks by access
-// type and the slow-path function thunks, whose native lookups each take JITThunks' lock, a hash lookup and a reference.
-// JITThunks keeps every thunk it hands out for the VM's life, so a kept address stays valid. The other kinds resolve
-// without a lock: a process address, an array element or a lazily created entry.
-class SupportTargetTable {
-    WTF_MAKE_NONCOPYABLE(SupportTargetTable);
-    WTF_MAKE_TZONE_ALLOCATED(SupportTargetTable);
-public:
-    SupportTargetTable() = default;
-
-    // As resolveSupport; the first resolution of a kept kind fills its slot.
-    CodePtr<NoPtrTag> resolve(VM& vm, const ImageTarget& target)
-    {
-        CodePtr<NoPtrTag>* slot = nullptr;
-        switch (target.kind) {
-        case TargetKind::BaselineThunk:
-            ASSERT(isValidBaselineThunk(target.a));
-            slot = &m_baselineThunks[target.a];
-            break;
-        case TargetKind::InlineCacheSlowPathThunk:
-            ASSERT(isValidAccessType(target.a));
-            slot = &m_inlineCacheSlowPathThunks[target.a];
-            break;
-        case TargetKind::SlowPathThunk:
-            slot = &m_slowPathThunks.add(reinterpret_cast<uintptr_t>(CodeSymbol { target.payload }.address()), CodePtr<NoPtrTag> { }).iterator->value;
-            break;
-        default:
-            return resolveSupport(vm, target);
-        }
-        if (!*slot)
-            *slot = resolveSupport(vm, target);
-        return *slot;
-    }
-
-private:
-    std::array<CodePtr<NoPtrTag>, static_cast<size_t>(BaselineThunk::ConsistencyCheck) + 1> m_baselineThunks { };
-    std::array<CodePtr<NoPtrTag>, numberOfAccessTypes> m_inlineCacheSlowPathThunks { };
-    HashMap<uintptr_t, CodePtr<NoPtrTag>> m_slowPathThunks; // by the slow-path function's address
-};
-
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SupportTargetTable);
 
-SupportTargetTable* supportTargetTableFor(VM& vm)
+CodePtr<NoPtrTag> SupportTargetTable::resolve(VM& vm, const ImageTarget& target)
 {
-    VMState* state = vm.jitCacheState();
-    if (!state)
-        return nullptr;
-    if (!state->supportTargetTable()) {
-        state->setSupportTargetTable(VMState::SupportTargetTableHolder(new SupportTargetTable, [](SupportTargetTable* table) {
-            delete table;
-        }));
+    static_assert(numberOfAccessTypeSlots == numberOfAccessTypes);
+    CodePtr<NoPtrTag>* slot = nullptr;
+    switch (target.kind) {
+    case TargetKind::BaselineThunk:
+        ASSERT(isValidBaselineThunk(target.a));
+        slot = &m_baselineThunks[target.a];
+        break;
+    case TargetKind::InlineCacheSlowPathThunk:
+        ASSERT(isValidAccessType(target.a));
+        slot = &m_inlineCacheSlowPathThunks[target.a];
+        break;
+    case TargetKind::SlowPathThunk:
+        slot = &m_slowPathThunks.add(reinterpret_cast<uintptr_t>(CodeSymbol { target.payload }.address()), CodePtr<NoPtrTag> { }).iterator->value;
+        break;
+    default:
+        return resolveSupport(vm, target);
     }
-    return state->supportTargetTable();
+    if (!*slot)
+        *slot = resolveSupport(vm, target);
+    return *slot;
 }
 
 const void* resolveTarget(const ResolutionContext& context, const ImageTarget& target)
@@ -392,13 +314,11 @@ const void* resolveTarget(const ResolutionContext& context, const ImageTarget& t
         return offsets[rank.indexInTable].untaggedPtr();
     }
     case TargetKind::MathIC:
-        // Only MathICs with inline code are named, which ImageCheck::MathICAndSwitchTargets checks; the span holds every
-        // MathIC of the image.
+        // Recording names only MathICs with inline code; the span holds every MathIC of the image.
         ASSERT(target.a < context.mathICs.size() && context.mathICs[target.a]);
         return context.mathICs[target.a];
     case TargetKind::SwitchTableBase:
-        // A dense table's storage, which exists once the table is sized; ImageCheck::MathICAndSwitchTargets checks that
-        // the target names a dense table.
+        // A dense table's storage, which exists once the table is sized; recording names only a dense table.
         ASSERT(target.a < context.switchTableBases.size() && context.switchTableBases[target.a]);
         return context.switchTableBases[target.a];
     case TargetKind::ImageOffset:

@@ -1,14 +1,18 @@
-// What this directory's checkers share. The runner calls a checker as bun <checker> <stdout file> <stderr file> <scratch>
-// after the run a jitcache-check directive names, and fails that run when the checker exits nonzero. A jsc run with
-// JITCache writes, with --jitcache-log, its start result and its final status to standard error as toJSON lines; a
-// Maintenance run writes its summary line to standard output. Each sequence's directory holds artifact/ beside
-// scratch/.
+// The checker of this directory's scripts. After the run a jitcache-check directive names, the runner calls it as
+//   bun checker.ts <stdout file> <stderr file> <scratch> <check> <argument>...
+// and fails that run when it exits nonzero. The directive's words after the checker give the check and its arguments:
+//   start <outcome> <step> [<detail name>...]   the run's start result (checkStartResult)
+//   past-the-valid-end some|none                after a killed commit, the bytes past the pack's valid end
+//   compact-cleanup                             the compact at ratio 0 after that kill
+// A jsc run with JITCache writes, with --jitcache-log, its start result and its final status to standard error as
+// toJSON lines; a Maintenance run writes its summary line to standard output. Each sequence's directory holds artifact/
+// beside scratch/.
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const [stdoutPath, stderrPath, scratchPath] = process.argv.slice(2);
+const [stdoutPath, stderrPath, scratchPath, check, ...checkArguments] = process.argv.slice(2);
 
-export function failCheck(message: string): never {
+function failCheck(message: string): never {
   console.error(message);
   process.exit(1);
 }
@@ -22,14 +26,14 @@ function jitcacheLines(kind: "start" | "delta" | "status"): Record<string, any>[
     .map(line => JSON.parse(line));
 }
 
-function onlyLine(kind: "start" | "status"): Record<string, any> {
+function onlyLine(kind: "start"): Record<string, any> {
   const lines = jitcacheLines(kind);
   if (lines.length !== 1) failCheck(`the run wrote ${lines.length} ${kind} lines, expected one`);
   return lines[0];
 }
 
 // The start result's outcome and step, and a detail that names one of detailNames when any are given.
-export function checkStartResult(outcome: string, step: string, detailNames: string[] = []) {
+function checkStartResult(outcome: string, step: string, detailNames: string[]) {
   const start = onlyLine("start");
   if (start.outcome !== outcome || start.step !== step) {
     const found = `${start.outcome} at ${JSON.stringify(start.step)}`;
@@ -37,16 +41,6 @@ export function checkStartResult(outcome: string, step: string, detailNames: str
   }
   if (detailNames.length && !detailNames.some(name => String(start.detail).includes(name)))
     failCheck(`the start detail ${JSON.stringify(start.detail)} names none of ${detailNames.join(", ")}`);
-}
-
-// The final status's fields, each compared with ===.
-export function checkFinalStatus(expected: Record<string, unknown>) {
-  const status = onlyLine("status");
-  for (const [field, value] of Object.entries(expected)) {
-    if (status[field] === value) continue;
-    const found = JSON.stringify(status[field]);
-    failCheck(`the final status's ${field} is ${found}, expected ${JSON.stringify(value)}: ${JSON.stringify(status)}`);
-  }
 }
 
 // cache/pack's size and its valid end, the root: 8 bytes little-endian at 56.
@@ -60,8 +54,9 @@ function packEnds(): { fileSize: number; validEnd: number } {
 const packSizeAfterKill = () => join(scratchPath, "pack-size-after-kill");
 
 // After a killed commit: cache/pack holds bytes past its valid end exactly when the kill came after the commit appended
-// some and before it stored them in the root.
-export function checkBytesPastValidEnd(expected: boolean) {
+// some and before it stored them in the root, from mid-stream to after-index, and none after a kill before-append, when
+// the commit wrote nothing, or after-root, when its bytes are committed.
+function checkBytesPastValidEnd(expected: boolean) {
   const { fileSize, validEnd } = packEnds();
   if ((fileSize > validEnd) !== expected)
     failCheck(`cache/pack holds ${fileSize - validEnd} bytes past its valid end of ${validEnd}, expected ${expected ? "some" : "none"}`);
@@ -70,7 +65,7 @@ export function checkBytesPastValidEnd(expected: boolean) {
 
 // The compact at ratio 0 after a killed commit: it removed no temporary, since commits create none, and evicted no body;
 // it reclaimed exactly the bytes cache/pack lost since the kill, and the pack now ends at its valid end.
-export function checkCompactCleanup() {
+function checkCompactCleanup() {
   const lines = readFileSync(stdoutPath, "utf8")
     .split("\n")
     .filter(line => line.startsWith("compact: "));
@@ -84,4 +79,23 @@ export function checkCompactCleanup() {
   if (fileSize !== validEnd) failCheck(`cache/pack holds ${fileSize - validEnd} bytes past its valid end of ${validEnd}`);
   if (Number(summary[3]) !== sizeAfterKill - fileSize)
     failCheck(`the compact reclaimed ${summary[3]} bytes, but cache/pack went from ${sizeAfterKill} to ${fileSize} bytes`);
+}
+
+switch (check) {
+  case "start": {
+    const [outcome, step, ...detailNames] = checkArguments;
+    if (!outcome || !step) failCheck("checker.ts start takes an outcome, a step and the names the detail may hold");
+    checkStartResult(outcome, step, detailNames);
+    break;
+  }
+  case "past-the-valid-end":
+    if (checkArguments.length !== 1 || (checkArguments[0] !== "some" && checkArguments[0] !== "none")) failCheck("checker.ts past-the-valid-end takes some or none");
+    checkBytesPastValidEnd(checkArguments[0] === "some");
+    break;
+  case "compact-cleanup":
+    if (checkArguments.length) failCheck("checker.ts compact-cleanup takes no argument");
+    checkCompactCleanup();
+    break;
+  default:
+    failCheck(`checker.ts has no check ${JSON.stringify(check ?? "")}: start, past-the-valid-end or compact-cleanup`);
 }

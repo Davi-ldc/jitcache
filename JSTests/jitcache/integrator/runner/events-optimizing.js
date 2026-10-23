@@ -1,5 +1,6 @@
 // jitcache-runs: Off --printEachOSRExit=true --dumpDisassembly=true --verboseOSR=true
 // jitcache-check: 0 resources/optimizing-counts.ts
+// jitcache-fixture: passes
 
 // A function driven through optimizing compiles, speculation exits, a jettison and a reoptimization prints counts
 // that the checker finds equal to what the engine printed for its body, each line printed where the engine counts the

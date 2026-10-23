@@ -1,0 +1,8 @@
+jitcache/store/ArtifactAccess.cpp
+jitcache/store/ArtifactStore.cpp
+jitcache/store/ArtifactWriter.cpp
+jitcache/store/JITCacheContainer.cpp
+jitcache/store/JITCacheFiles.cpp
+jitcache/store/JITCacheOptions.cpp
+jitcache/store/JITCachePlatform.cpp
+jitcache/store/ValidatedBody.cpp

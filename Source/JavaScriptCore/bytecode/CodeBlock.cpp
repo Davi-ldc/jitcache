@@ -102,7 +102,7 @@
 #endif
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
-#include "ImageTwins.h"
+#include "jitcache/image/ImageTwins.h"
 #endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN

@@ -5,63 +5,26 @@
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
 #include "BaselineJITCode.h"
-#include "CBFormat.h"
-#include "CBState.h"
 #include "CodeBlock.h"
-#include "DeferGC.h"
 #include "ExecutionCounter.h"
-#include "FunctionExecutable.h"
-#include "JITCacheTest.h"
 #include "JSCInlines.h"
-#include "JSFunction.h"
 #include "Operands.h"
-#include "ProducerBudget.h"
 #include "SpeculatedType.h"
-#include "TopExceptionScope.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/cb/CBFormat.h"
+#include "jitcache/cb/CBState.h"
+#include "jitcache/tests/support/JITCacheTest.h"
 #include <optional>
 #include <span>
 #include <type_traits>
 #include <wtf/Ref.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
-#include <wtf/text/MakeString.h>
-#include <wtf/text/StringView.h>
 
-// What the CB lane's tests share: the newborn CB an import starts from, cb.state decoded into an image that a test changes
-// and lays out again, the strict capture of a real CB that every such image starts as, and the baseline counter's three
-// fields as a cb.state header records them.
+// What the CB lane's tests share: cb.state decoded into an image that a test changes and lays out again, the capture of a
+// real CB that every such image starts as, and the baseline counter's three fields as a cb.state header records them.
 
 namespace JSC::JITCache::Tests {
-
-// The newborn CB of a function never called: linked by finishCreation inside a DeferGCForAWhile, as newCodeBlockFor
-// requires, and never installed or run. The function yields a new one at each call.
-inline CodeBlock* createNewbornCodeBlock(TestContext& context, JSFunction* function)
-{
-    VM& vm = function->vm();
-    DeferGCForAWhile deferGC(vm);
-    auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
-    if (function->jsExecutable()->codeBlockForCall()) {
-        JITCACHE_FAIL("the function for a newborn CB was already called"_s);
-        return nullptr;
-    }
-    CodeBlock* codeBlock = function->jsExecutable()->newCodeBlockFor(CodeSpecializationKind::CodeForCall, function, function->scope());
-    if (scope.exception()) {
-        scope.clearException();
-        JITCACHE_FAIL("newCodeBlockFor threw"_s);
-        return nullptr;
-    }
-    if (!codeBlock || codeBlock->jitType() != JITType::None) {
-        JITCACHE_FAIL("newCodeBlockFor gave no newborn CB"_s);
-        return nullptr;
-    }
-    return codeBlock;
-}
-
-// Fails the test with the step and the fault the lane returned.
-inline void failWith(TestContext& context, StringView step, const CBFault& fault)
-{
-    JITCACHE_FAIL(makeString(step, " failed with "_s, fault.kind == CBFaultKind::RecordingFault ? "a recording fault"_s : "invalid material"_s, ": "_s, description(fault.check)));
-}
 
 // cb.state decoded into its header and its nine arrays, so a test can change a field or a count and lay the section out
 // again.
@@ -151,14 +114,14 @@ inline std::span<const uint8_t> bytesOf(const Vector<uint64_t>& words)
     return asByteSpan(words.span());
 }
 
-// A strict capture of the CB with its counter carried, decoded. The test's codec must lay the image out again exactly as
+// A capture of the CB with its counter carried, decoded. The test's codec must lay the image out again exactly as
 // capture did, so every section a test builds from it differs from a real one only where the test changed it.
 inline std::optional<StateImage> captureState(TestContext& context, CodeBlock& codeBlock)
 {
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    auto captured = CBStateCapture::capture(codeBlock, budget.get(), true, false);
+    auto captured = CBStateCapture::capture(codeBlock, budget.get(), false);
     if (!captured) {
-        failWith(context, "capture"_s, captured.error());
+        JITCACHE_FAIL("capture refused its charge"_s);
         return std::nullopt;
     }
     auto image = decodeState(context, captured->stateSection());

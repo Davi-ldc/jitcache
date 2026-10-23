@@ -5,9 +5,9 @@
 #include "BytecodeStructs.h"
 #include "CallLinkInfo.h"
 #include "CodeBlock.h"
-#include "ICSection.h"
 #include "Instruction.h"
 #include "MetadataTable.h"
+#include "jitcache/ics/ICSection.h"
 #include <type_traits>
 
 // The site walkers. A CB whose bytecode adds no metadata entry and no value profile has no metadata table, and

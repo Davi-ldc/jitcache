@@ -1,3 +1,6 @@
+// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer
+// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer --jitCacheVouchedHolderDigests=false
+
 // What a body costs does not grow with the names its enclosing scopes declare, since the VM interns each TDZ
 // environment by content and a holder digest covers an environment once. The test writes two modules into the
 // sequence's scratch directory and imports them: one with 5,000 top-level bindings, 4,000 consts and 1,000 imports,
@@ -5,12 +8,14 @@
 // followed by a function that wraps the same bindings as consts around the same 200 declarations, as Bun wraps a
 // CommonJS module, so that the module's TDZ link and the wrapper's name every binding. Both start at the same offsets
 // in both modules, so their bodies differ only in their enclosing scopes.
-// - In the Consumer every function and closure imports (statistics, imports), and tdzEnvironmentDigests grows by the few
-//   distinct environments the holder digests reach, not by the number of functions.
+// - In the Consumer every function and closure imports (statistics, imports). Each is a child that an imported parent's
+//   decode made, so by default its holder check compares the digest the parent's body lists and computes none.
+// - Sequence 1's Consumer runs with --jitCacheVouchedHolderDigests=false and computes every child's holder digest.
+//   tdzEnvironmentDigests then grows by the few distinct environments those digests reach, at least one per module and
+//   never one per function. In sequence 0 it stays within the same upper bound.
 // - In twins runs each small function's and closure's ucb.core, read with jitcacheReadSection, has the size it has in
 //   the module of ten bindings; at every import the twin check finds the core encoding and the child UFEs' fields
 //   equal to the twin's.
-// The runs use the lane's default sequence.
 load("./resources/ucb.js", "caller relative");
 
 await (async function main(role, scratch, artifact, sequence) {
@@ -73,7 +78,8 @@ await (async function main(role, scratch, artifact, sequence) {
             imports: imported,
             tdzEnvironmentDigests: ["<=", 16],
         });
-        t.expect("the environments the holder digests reach", t.delta(before, after), { tdzEnvironmentDigests: [">=", 2] });
+        if (t.sequence === 1)
+            t.expect("the environments the holder digests reach", t.delta(before, after), { tdzEnvironmentDigests: [">=", 2] });
     }
 
     let total = 0;

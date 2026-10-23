@@ -107,44 +107,7 @@ endif ()
 # JITCache's C++ unit tests, built only with ENABLE_JITCACHE_TWINS:
 #     ninja testjitcache && ./bin/testjitcache --list
 if (ENABLE_JITCACHE_TWINS)
-    set(testjitcache_SOURCES
-        ../jitcache/tests/testjitcache.cpp
-        ../jitcache/tests/base/BaseTests.cpp
-        ../jitcache/tests/store/ContainerTests.cpp
-        ../jitcache/tests/store/StoreTests.cpp
-        ../jitcache/tests/store/WriterTests.cpp
-        ../jitcache/tests/store/PlatformTests.cpp
-        ../jitcache/tests/session/SessionTests.cpp
-        ../jitcache/tests/glue/CaptureTests.cpp
-        ../jitcache/tests/maintenance/MaintenanceTests.cpp
-        ../jitcache/tests/harness/HarnessTests.cpp
-        ../jitcache/tests/ucb/UCBKeysTests.cpp
-        ../jitcache/tests/ucb/UCBRegistryTests.cpp
-        ../jitcache/tests/ucb/UCBSectionsTests.cpp
-        ../jitcache/tests/ucb/UCBFeedbackTests.cpp
-        ../jitcache/tests/ucb/UCBCodecTests.cpp
-        ../jitcache/tests/ucb/UCBEngineTests.cpp
-        ../jitcache/tests/ucb/UCBAnalysisTests.cpp
-        ../jitcache/tests/image/ImageSectionTests.cpp
-        ../jitcache/tests/image/ImageRecorderTests.cpp
-        ../jitcache/tests/image/ImageBudgetTests.cpp
-        ../jitcache/tests/image/ImageInstallTests.cpp
-        ../jitcache/tests/cb/CBAccessorTests.cpp
-        ../jitcache/tests/cb/CBFormatTests.cpp
-        ../jitcache/tests/cb/CBCaptureTests.cpp
-        ../jitcache/tests/cb/CBSummaryTests.cpp
-        ../jitcache/tests/cb/CBImportTests.cpp
-        ../jitcache/tests/cb/CBTwinsTests.cpp
-        ../jitcache/tests/ics/ICSectionTests.cpp
-        ../jitcache/tests/ics/ICLiveTests.cpp
-    )
-    set(testjitcache_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
-    set(testjitcache_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES} "${JAVASCRIPTCORE_DIR}/jitcache/tests/support")
-    set(testjitcache_FRAMEWORKS ${jsc_FRAMEWORKS})
-    set(testjitcache_LIBRARIES ${CMAKE_DL_LIBS})
-    if (USE_EXTERNAL_MIMALLOC)
-        list(APPEND testjitcache_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
-    endif ()
+    include(../jitcache/tests/testjitcache.cmake)
     WEBKIT_EXECUTABLE_DECLARE(testjitcache)
 endif ()
 

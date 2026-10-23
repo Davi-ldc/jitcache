@@ -1,6 +1,6 @@
 #pragma once
 
-#include "BodyKey.h"
+#include "jitcache/base/BodyKey.h"
 #include <array>
 #include <span>
 #include <wtf/Forward.h>

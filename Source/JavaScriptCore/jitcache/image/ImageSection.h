@@ -2,10 +2,10 @@
 
 #if ENABLE(JIT)
 
-#include "BakedFacts.h"
-#include "ByteFields.h"
 #include "BytecodeIndex.h"
-#include "ImageTypes.h"
+#include "jitcache/base/ByteFields.h"
+#include "jitcache/image/BakedFacts.h"
+#include "jitcache/image/ImageTypes.h"
 #include <array>
 #include <bit>
 #include <expected>
@@ -16,19 +16,16 @@
 #include <wtf/text/UniquedStringImpl.h>
 
 #if ENABLE(JITCACHE_TWINS)
-#include "ImageTwinsSection.h"
+#include "jitcache/image/ImageTwinsSection.h"
 #endif
 
 // The image.baseline section: its entry codecs, the writer capture streams it through with every footprint canonical,
-// the view an import reads it through, and the checks an import runs on it, structural (ImageCheck::Header to
-// MathICAndSwitchTargets) and against its UCB (SimpleSwitchTables to ConstantTargets). The baked-facts.baseline codec
-// and its check, ImageCheck::BakedFacts, live in BakedFacts.h, the image-twins.baseline codec and its checks
-// (TwinsHeader to TwinInputSites) in ImageTwinsSection.h, and the per-architecture footprints in ImageFootprint.h. The
-// Image lane, its glue and its tests include this header.
+// and the view an import reads it through. The baked-facts.baseline codec lives in BakedFacts.h, the image-twins.baseline
+// codec in ImageTwinsSection.h, and the per-architecture footprints in ImageFootprint.h. The Image lane, its glue and its
+// tests include this header.
 
 namespace JSC {
 
-class UnlinkedCodeBlock;
 class VM;
 enum class AccessType : int8_t;
 enum class CacheType : int8_t;
@@ -105,7 +102,6 @@ inline constexpr uint8_t propertyIsString = 1 << 1;
 inline constexpr uint8_t propertyIsSymbol = 1 << 2;
 inline constexpr uint8_t prototypeIsKnownObject = 1 << 3;
 inline constexpr uint8_t canBeMegamorphic = 1 << 4;
-inline constexpr uint8_t all = (1 << 5) - 1;
 } // namespace ImageMoldFlags
 
 struct ImageMoldEntry {
@@ -137,7 +133,6 @@ namespace ImageMathICFlags {
 inline constexpr uint8_t generateFastPathOnRepatch = 1 << 0;
 inline constexpr uint8_t hasSnippet = 1 << 1;
 inline constexpr uint8_t noInlineCode = 1 << 2;
-inline constexpr uint8_t all = (1 << 3) - 1;
 } // namespace ImageMathICFlags
 
 struct ImageMathICEntry {
@@ -263,8 +258,7 @@ struct ImageSectionSpans {
 #endif
 };
 
-// Spans into the borrowed payload, valid while it lives. Under strict, a view passed the structural checks of the image
-// and baked-facts sections, and in twins builds those of the twins section.
+// Spans into the borrowed payload, valid while it lives.
 class ImageSectionsView {
 public:
     const ImageSectionHeader& header() const { return m_header; }
@@ -288,9 +282,6 @@ public:
     const ImageTwinsView& twins() const LIFETIME_BOUND { return m_twins; }
 #endif
 
-    // Two views of the same regions of the same bytes.
-    friend bool operator==(const ImageSectionsView&, const ImageSectionsView&);
-
 private:
     // Offsets into the image section, each region's start, and the end of the regions with padding after them.
     struct Layout {
@@ -307,22 +298,13 @@ private:
         size_t mathICs { 0 };
         size_t snippets { 0 };
         size_t end { 0 };
-
-        friend bool operator==(const Layout&, const Layout&) = default;
     };
 
-    friend std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&, bool strict);
-    // parseImageSections locates the baked facts once the image passed its checks.
+    friend std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&);
+    // parseImageSections locates the baked facts once it located the image.
     ImageSectionsView(std::span<const uint8_t> image, const ImageSectionHeader&, const Layout&);
 
     static std::optional<Layout> locate(std::span<const uint8_t> image, const ImageSectionHeader&);
-    std::optional<ImageCheck> firstStructureFailure() const; // ImageCheck::Header to MathICAndSwitchTargets
-    bool passesHeader() const;
-    bool passesCodeBounds() const;
-    bool passesFixups() const;
-    bool passesSideTables() const;
-    bool passesMathICEntries() const;
-    bool passesMathICAndSwitchTargets() const;
 
     std::span<const uint8_t> m_image;
     ImageSectionHeader m_header;
@@ -333,18 +315,10 @@ private:
 #endif
 };
 
-// Locates the regions of image.baseline and baked-facts.baseline, and in twins builds image-twins.baseline. A section
-// whose regions do not fit inside its span cannot be located and fails ImageCheck::Header, BakedFacts or TwinsHeader in
-// either mode. Under strict it then runs every structural check of the three sections; with strict off it trusts what
-// capture wrote, and debug builds ASSERT what those checks verify.
-std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&, bool strict);
-
-// The checks against the import's UCB, which exists once the import's request point produced it: ImageCheck's
-// SimpleSwitchTables to ConstantTargets, and in twins builds TwinInputSites. The glue calls it only under strict.
-std::expected<void, ImageCheck> validateImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
-// With strict off, debug builds ASSERT what validateImageSectionsAgainst checks; preparation calls this once the
-// import's UCB exists. Nothing in other builds.
-void assertImageSectionsAgainst(const ImageSectionsView&, const UnlinkedCodeBlock&);
+// Locates the regions of image.baseline and baked-facts.baseline, and in twins builds image-twins.baseline, and trusts
+// what capture wrote in them. A section whose regions do not fit inside its span cannot be located and fails
+// ImageCheck::Header, BakedFacts or TwinsHeader.
+std::expected<ImageSectionsView, ImageCheck> parseImageSections(const ImageSectionSpans&);
 
 template<typename Functor>
 void ImageSectionsView::forEachSimpleSwitchTable(const Functor& functor) const

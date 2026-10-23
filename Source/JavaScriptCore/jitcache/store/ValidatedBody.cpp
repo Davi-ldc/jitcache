@@ -1,7 +1,8 @@
 #include "config.h"
-#include "ValidatedBody.h"
+#include "jitcache/store/ValidatedBody.h"
 
-#include "ArtifactStore.h"
+#include "jitcache/store/ArtifactStore.h"
+#include "jitcache/store/JITCacheContainer.h"
 #include <wtf/Assertions.h>
 #include <wtf/TZoneMallocInlines.h>
 
@@ -86,31 +87,6 @@ size_t ValidatedBody::fileSize() const
 
 #if ENABLE(JITCACHE_TWINS)
 
-namespace ValidatedBodyInternal {
-
-// The tier byte of each kind's directory entry: 0 for the UCB sections every tier shares, 1 for the baseline's.
-static uint8_t tierOf(SectionKind kind)
-{
-    switch (kind) {
-    case SectionKind::UCBIdentity:
-    case SectionKind::UCBCore:
-    case SectionKind::UCBFeedback:
-    case SectionKind::UCBAnalysis:
-        return 0;
-    case SectionKind::ImageBaseline:
-    case SectionKind::BakedFactsBaseline:
-    case SectionKind::ImageTwinsBaseline:
-    case SectionKind::CBStateBaseline:
-    case SectionKind::CBSummaryBaseline:
-    case SectionKind::ICsBaseline:
-        return 1;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
-    return 0;
-}
-
-} // namespace ValidatedBodyInternal
-
 Ref<ValidatedBody> ValidatedBody::createForTesting(const BodyKey& key, uint64_t version, std::span<const TestSection> sections, Function<void()>&& onDestroy)
 {
     // A test's own preconditions, checked in every build: a misbuilt body would test nothing.
@@ -134,7 +110,7 @@ Ref<ValidatedBody> ValidatedBody::createForTesting(const BodyKey& key, uint64_t 
         end += sections[i].bytes.size();
         RELEASE_ASSERT(!end.hasOverflowed());
         bufferSize = end.value();
-        highestTier = std::max(highestTier, ValidatedBodyInternal::tierOf(sections[i].kind));
+        highestTier = std::max(highestTier, sectionKindDescription(sections[i].kind).tier);
     }
 
     // fastMalloc returns memory aligned to at least 8 bytes, which keeps every offset above 8-byte aligned in memory.

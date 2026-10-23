@@ -8,8 +8,10 @@
 // constant on the left write it as a template literal without substitutions, which is no StringNode. Equalities against
 // null and a boolean compare bitwise and never reach the atom test, and one between two variables compares generically.
 // The inputs are those constants, equal strings built at run time, which are no atoms, other strings and other types.
-// The consumer checks that the image of each function with a string constant compares by that constant's atom at its
-// one site, and that the other images do not.
+// The right constant is also a property name: keyed reads it with get_by_id, and the loop writes it as a computed key,
+// both from the constant and from the equal string built at run time, so keyed finds the property only when its
+// imported identifier is the atom the key interns. The consumer checks that the image of each function with a string
+// constant compares by that constant's atom at its one site, and that the other images do not.
 (function main(role, scratch, artifact, sequence) {
     function valueRight(x) {
         return x === "jitcache-right-constant";
@@ -52,6 +54,9 @@
     function betweenVariables(x, y) {
         return x === y;
     }
+    function keyed(o) {
+        return o["jitcache-right-constant"];
+    }
 
     const side = ["left", "right"];
     const inputs = [
@@ -66,7 +71,7 @@
         undefined,
         { },
     ];
-    const counts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const counts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     for (let i = 0; i < 60; ++i) {
         const x = inputs[i % inputs.length];
         const y = inputs[(i * 3) % inputs.length];
@@ -81,6 +86,7 @@
         counts[8] += againstNull(x);
         counts[9] += againstTrue(x);
         counts[10] += betweenVariables(x, y);
+        counts[11] += keyed({ [x]: 1 }) === 1;
     }
     print(counts.join(" "));
 
@@ -92,7 +98,7 @@
             valueRight, valueLeft, notValueRight, notValueLeft, branchRight, branchLeft, notBranchRight, notBranchLeft,
         };
         const generic = { againstNull, againstTrue, betweenVariables };
-        sections.expectImports(role, { ...byAtom, ...generic });
+        sections.expectImports(role, { ...byAtom, ...generic, keyed });
         sections.expectTargets(role, { call: byAtom }, [
             { site: "the strict-equality templates' atom comparison", kind: "UCBConstantAtom", form: "Pointer" },
         ]);

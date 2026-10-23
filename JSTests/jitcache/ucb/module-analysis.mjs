@@ -3,15 +3,15 @@
 // jitcache-runs: Producer --jitcache-delta-at-exit; ConsumerProducer
 // jitcache-runs: Producer --jitcache-delta-at-exit; Consumer --jitCacheImportModuleAnalysis=0
 
-// A module's analysis travels with its body. The graph under module-analysis/, whose root is ma-root.mjs, holds one
-// form of an analysis per module, with json and the host-defined types text and toml as its attributes. The Producer
-// evaluates every module of the graph, the deferred ones when this script reads their namespaces, so its delta at exit
-// captures each with its analysis. In an importing run every module's provider takes the analysis from its body:
-// analysisImports grows by the graph's module count across the import, nothing misses, and Bun builds each record from
-// the analysis, which the twin compares with the record the analysis parse builds. With jitCacheImportModuleAnalysis
-// off the Consumer imports no analysis and parses every module, while its UCBs still import. Every run prints each
-// namespace's keys and values, import.meta.url relative to the scratch directory, the order in which the top-level
-// awaits settled and the attribute imports, and equals the JITCache-off run.
+// A module's analysis travels with its body. The graph under resources/module-analysis/, whose root is ma-root.mjs,
+// holds one form of an analysis per module, with json and the host-defined types text and toml as its attributes. The
+// Producer evaluates every module of the graph, the deferred ones when this script reads their namespaces, so its delta
+// at exit captures each with its analysis. In an importing run every module's provider takes the analysis from its
+// body: analysisImports grows by the graph's module count across the import, nothing misses, and Bun builds each record
+// from the analysis, which the twin compares with the record the analysis parse builds. With
+// jitCacheImportModuleAnalysis off the Consumer imports no analysis and parses every module, while its UCBs still
+// import. Every run prints each namespace's keys and values, import.meta.url relative to the scratch directory, the
+// order in which the top-level awaits settled and the attribute imports, and equals the JITCache-off run.
 //
 // After the graph, the script imports three modules it writes into the scratch directory, the same texts in every run,
 // at the widths the graph lacks: 254 and 255 names, whose ids take one byte and two, since the largest id is the
@@ -21,7 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ucbBun from "./resources/ucb-bun.js";
-import { maDescribeRoot } from "./module-analysis/ma-describe.mjs";
+import { maDescribeRoot } from "./resources/module-analysis/ma-describe.mjs";
 
 // The 19 JavaScript modules and the text attribute's file, which Bun loads as a JavaScript module of its own that
 // exports the text; json and toml give modules with no source text.
@@ -30,7 +30,7 @@ const t = ucbBun.context();
 const analysisOff = t.sequence === 2;
 
 const before = t.statistics();
-const root = await import("./module-analysis/ma-root.mjs");
+const root = await import("./resources/module-analysis/ma-root.mjs");
 const after = t.statistics();
 if (t.imports && !analysisOff)
     t.expect("the graph's import", t.delta(before, after), { analysisImports: graphModules, analysisMisses: 0, analysisAbsent: 0 });

@@ -33,7 +33,6 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "AccessCase.h"
 #include "AssemblyHelpersSpoolers.h"
 #include "BaselineJITCode.h"
-#include "ImageEmission.h"
 #include "JITOperations.h"
 #include "JSArrayBufferView.h"
 #include "JSCJSValueInlines.h"
@@ -44,6 +43,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "SuperSampler.h"
 #include "ThunkGenerators.h"
 #include "UnlinkedCodeBlock.h"
+#include "jitcache/image/ImageEmission.h"
 
 #if ENABLE(WEBASSEMBLY)
 #include "JSWebAssemblyInstance.h"

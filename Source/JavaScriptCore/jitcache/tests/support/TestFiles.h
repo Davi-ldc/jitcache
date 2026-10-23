@@ -4,7 +4,7 @@
 
 #if ENABLE(JITCACHE_TWINS)
 
-#include "JITCacheTest.h"
+#include "jitcache/tests/support/JITCacheTest.h"
 #include <array>
 #include <errno.h>
 #include <fcntl.h>

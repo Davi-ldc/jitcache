@@ -182,6 +182,9 @@ inline bool NODELETE canUseMegamorphicPutFastPath(Structure* structure)
     }
 }
 
+// JITCache: IC capture records whether a property IC lists a megamorphic case.
+bool NODELETE isMegamorphic(AccessCase::AccessType);
+
 bool NODELETE canBeViaGlobalProxy(AccessCase::AccessType);
 
 inline AccessGenerationResult::AccessGenerationResult(Kind kind, Ref<InlineCacheHandler>&& handler)

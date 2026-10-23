@@ -2,6 +2,7 @@
 // jitcache-expect-exit: 0 abort
 // jitcache-expect-twin: 0 coincidence executable-pool
 // jitcache-pin: off its Off run aborts on purpose, and the pin comparison fails a run that ends by a signal
+// jitcache-fixture: passes
 
 // The expect-exit directive accepts a run that ends by SIGABRT, which writes no final status and no heap description.
 // The shell writes the declared coincidence to the twin report right after start, and the run then aborts, so the

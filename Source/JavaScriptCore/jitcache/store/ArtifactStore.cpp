@@ -1,8 +1,8 @@
 #include "config.h"
-#include "ArtifactStore.h"
+#include "jitcache/store/ArtifactStore.h"
 
-#include "JITCacheFiles.h"
-#include "JITCacheParameters.h"
+#include "jitcache/store/JITCacheFiles.h"
+#include "jitcache/store/JITCacheParameters.h"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -159,9 +159,6 @@ static constexpr uint32_t lockFileLayoutVersion = 1;
 static constexpr size_t lockFileVersionOffset = 8;
 static constexpr size_t lockFileHeaderBytes = 12;
 
-// The summary sections a score reads, which the scoring read checksums.
-static constexpr std::array<SectionKind, 3> summarySectionKinds { SectionKind::UCBFeedback, SectionKind::CBSummaryBaseline, SectionKind::ICsBaseline };
-
 static constexpr int directoryFlags = O_RDONLY | O_DIRECTORY;
 static constexpr int pinnedParentFlags = O_PATH | O_DIRECTORY;
 
@@ -210,13 +207,13 @@ static uint64_t pageRounded(uint64_t bytes)
 #endif // OS(LINUX)
 
 // A body's record in a mapped pack, checked against the entry that names it: the record header repeats the entry's key,
-// size and commit identifier, then the body's own checks run in the read's mode with the entry's key as the expected key.
+// size and commit identifier, then the body's integrity checks run with the entry's key as the expected key.
 struct ReadBody {
     std::span<const uint8_t> bytes;
     BodyLayout layout;
 };
 static std::expected<ReadBody, StoreFailure> readBody(const MappedPack& pack, const PackIndexEntry& entry, std::span<const uint8_t, 16> headerDigest,
-    ValidationMode mode, std::optional<std::span<const SectionKind>> checksummedKinds)
+    std::optional<std::span<const SectionKind>> checksummedKinds)
 {
     auto header = decodePackRecordHeader(pack.bytes(entry.offset, packRecordHeaderBytes).first<packRecordHeaderBytes>());
     if (!header)
@@ -224,11 +221,9 @@ static std::expected<ReadBody, StoreFailure> readBody(const MappedPack& pack, co
     if (header->key != entry.key || header->size != entry.size || header->version != entry.version)
         return std::unexpected(StoreFailure { ContainerChecks::pack, 0, "a record differs from the index entry that names it"_s });
     auto bytes = pack.bytes(entry.offset + packRecordHeaderBytes, entry.size);
-    auto layout = checksummedKinds ? validateBodyFraming(bytes, entry.key, headerDigest, mode, *checksummedKinds) : validateBody(bytes, entry.key, headerDigest, mode);
+    auto layout = checksummedKinds ? validateBodyFraming(bytes, entry.key, headerDigest, *checksummedKinds) : validateBody(bytes, entry.key, headerDigest, ValidationMode::Integrity);
     if (!layout)
         return std::unexpected(StoreFailure { layout.error(), 0, { } });
-    if (mode == ValidationMode::Full && !packEntryRepeatsEnvelope(entry, *layout))
-        return std::unexpected(StoreFailure { ContainerChecks::pack, 0, "an index entry does not repeat its body's envelope"_s });
     return ReadBody { bytes, *layout };
 }
 
@@ -243,29 +238,6 @@ static std::span<const uint8_t> sectionIn(std::span<const uint8_t> body, const B
 } // namespace ArtifactStoreInternal
 
 // Names.
-
-std::array<char, bodyKeyHexLength> bodyKeyHexDigits(const BodyKey& key)
-{
-    std::array<char, bodyKeyHexLength> digits { };
-    ArtifactStoreInternal::writeLowercaseHex(std::span { digits }, key.bytes());
-    return digits;
-}
-
-std::optional<BodyKey> bodyKeyFromHex(std::span<const char> digits)
-{
-    using namespace ArtifactStoreInternal;
-    if (digits.size() != bodyKeyHexLength)
-        return std::nullopt;
-    std::array<uint8_t, BodyKey::byteSize> bytes { };
-    for (size_t index = 0; index < bytes.size(); ++index) {
-        auto high = lowercaseHexDigitValue(digits[2 * index]);
-        auto low = lowercaseHexDigitValue(digits[2 * index + 1]);
-        if (!high || !low)
-            return std::nullopt;
-        bytes[index] = static_cast<uint8_t>(*high << 4 | *low);
-    }
-    return BodyKey::fromBytes(bytes);
-}
 
 TemporaryFileName temporaryFileName(TemporaryKind kind)
 {
@@ -603,8 +575,6 @@ std::expected<PackIndexRead, PackRejection> readPackIndex(uint64_t validEnd, std
             if (!entry)
                 return std::unexpected(entry.error());
             if (block.kind == PackIndexKind::Full) {
-                if (entry->isTombstone())
-                    return std::unexpected("a full index lists a tombstone"_s);
                 if (previousKey && !std::ranges::lexicographical_compare(previousKey->bytes(), entry->key.bytes()))
                     return std::unexpected("a full index's keys do not strictly increase"_s);
                 previousKey = entry->key;
@@ -614,8 +584,6 @@ std::expected<PackIndexRead, PackRejection> readPackIndex(uint64_t validEnd, std
                 liveBytes -= recordExtentOf(replaced->value);
                 index.remove(replaced);
             }
-            if (entry->isTombstone())
-                continue;
             auto extent = packRecordExtent(entry->size);
             if (!extent || entry->offset >= offset || *extent > offset - entry->offset)
                 return std::unexpected("an index entry's record does not precede its block"_s);
@@ -746,14 +714,11 @@ bool MappedPack::isRetired() const
 
 // Saved summaries.
 
-SavedSummaries::SavedSummaries(Ref<MappedPack>&& pack, uint64_t version, uint8_t highestTier, std::span<const uint8_t> ucbFeedback,
-    std::span<const uint8_t> cbSummary, std::span<const uint8_t> ics)
+SavedSummaries::SavedSummaries(Ref<MappedPack>&& pack, uint64_t version, uint8_t highestTier, const SectionSpans& sections)
     : m_pack(WTF::move(pack))
     , m_version(version)
     , m_highestTier(highestTier)
-    , m_ucbFeedback(ucbFeedback)
-    , m_cbSummary(cbSummary)
-    , m_ics(ics)
+    , m_sections(sections)
 {
 }
 
@@ -1011,7 +976,7 @@ bool OpenedArtifact::isGone()
     return m_gone;
 }
 
-BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
+BodyOpen OpenedArtifact::open(const BodyKey& key)
 {
     using namespace ArtifactStoreInternal;
     if (int error = injectedError(StoreCall::Open))
@@ -1031,7 +996,7 @@ BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
         ++m_statistics.opens;
     }
 
-    auto read = readBody(*pack, entry, headerDigest(), mode, std::nullopt);
+    auto read = readBody(*pack, entry, headerDigest(), std::nullopt);
     if (!read)
         return { StoreOutcome::Invalid, nullptr, read.error(), entry.size };
     ValidatedBody::SectionSpans spans;
@@ -1042,11 +1007,11 @@ BodyOpen OpenedArtifact::open(const BodyKey& key, ValidationMode mode)
     return { StoreOutcome::Found, WTF::move(body), { }, entry.size };
 }
 
-SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, ValidationMode mode)
+SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, std::span<const SectionKind> kinds)
 {
 #if !OS(LINUX)
     UNUSED_PARAM(key);
-    UNUSED_PARAM(mode);
+    UNUSED_PARAM(kinds);
     return { StoreOutcome::Invalid, nullptr, ArtifactStoreInternal::failureOfError(ENOSYS) };
 #else
     using namespace ArtifactStoreInternal;
@@ -1067,18 +1032,19 @@ SavedSummaryRead OpenedArtifact::readSavedSummaries(const BodyKey& key, Validati
         ++m_statistics.opens;
     }
 
-    auto read = readBody(*pack, entry, headerDigest(), mode, std::span<const SectionKind> { summarySectionKinds });
+    auto read = readBody(*pack, entry, headerDigest(), kinds);
     if (!read)
         return { StoreOutcome::Invalid, nullptr, read.error() };
     auto& layout = read->layout;
-    auto summaries = std::unique_ptr<SavedSummaries>(new SavedSummaries(pack.releaseNonNull(), layout.version, layout.highestTier,
-        sectionIn(read->bytes, layout, SectionKind::UCBFeedback), sectionIn(read->bytes, layout, SectionKind::CBSummaryBaseline),
-        sectionIn(read->bytes, layout, SectionKind::ICsBaseline)));
+    SavedSummaries::SectionSpans sections { };
+    for (SectionKind kind : kinds)
+        sections[static_cast<size_t>(kind)] = sectionIn(read->bytes, layout, kind);
+    auto summaries = std::unique_ptr<SavedSummaries>(new SavedSummaries(pack.releaseNonNull(), layout.version, layout.highestTier, sections));
     return { StoreOutcome::Found, WTF::move(summaries), { } };
 #endif
 }
 
-SectionRead OpenedArtifact::readSection(const BodyKey& key, SectionKind kind, ValidationMode mode)
+SectionRead OpenedArtifact::readSection(const BodyKey& key, SectionKind kind)
 {
     using namespace ArtifactStoreInternal;
     // No fault hook reaches this read, so it never answers Unavailable.
@@ -1097,7 +1063,7 @@ SectionRead OpenedArtifact::readSection(const BodyKey& key, SectionKind kind, Va
     }
 
     std::array<SectionKind, 1> checksummedKinds { kind };
-    auto read = readBody(*pack, entry, headerDigest(), mode, std::span<const SectionKind> { checksummedKinds });
+    auto read = readBody(*pack, entry, headerDigest(), std::span<const SectionKind> { checksummedKinds });
     if (!read)
         return { StoreOutcome::Invalid, nullptr, { }, read.error() };
     std::span<const uint8_t> section = sectionIn(read->bytes, read->layout, kind);

@@ -36,12 +36,6 @@ bun --jitcache[=<dir>] --jitcache-mode=c|p-c run server.ts
 
 `c` (default) just uses the cache. `p-c` also writes, updating when it learns more [^1]. Every write is atomic, so N processes can read a cache while one is writing. A second process that asks to write (`p` or `p-c`) while another is writing runs with JITCache off and prints one warning line, `warn: JITCache is off: another process is writing <path>`; a worker whose main thread is writing just uses the cache.
 
-To avoid crashes `--jitcache-strict` adds validation for the full structure of everything we read and the assumptions we make about the current process.
-
-```sh
-bun --jitcache --jitcache-strict run server.ts
-```
-
 to maintain the artifact, you can:
 
 - `bun jitcache compact [<dir>]`: drop old versions that got rewritten[^2]
@@ -67,7 +61,6 @@ JSC::JSLockHolder lock(vm);
 JSC::JITCache::Config config;
 config.artifactPath = "/var/cache/my-app"_s;         // --jitcache=<dir>
 config.role = JSC::JITCache::Role::ConsumerProducer; // --jitcache-mode: Consumer, Producer or ConsumerProducer
-config.strict = false;                               // --jitcache-strict
 config.deltaCapture = JSC::JITCache::DeltaCapture::All; // --jitcache-delta-capture: All or Compiled
 auto started = JSC::JITCache::start(vm, config);     // Started, Busy, Rejected or Fault
 ```
@@ -154,7 +147,7 @@ To be serializable, we take a note of every absolute address, saving what it poi
 ## Limitations
 - currently only baseline, the first tier, can be cached (DFG and FTL are coming soon :)
 - Only for linux
-- producer and consumer need to have the same cpu features, architecture and run the same binary (Bun 1.4.2).
+- producer and consumer need to have the same cpu features, architecture and run the same binary (Bun 1.4.2 or 1.4.3).
 - a bug in JITCache can easily become an RCE
 - not every jsc option is supported. Check [options.md](./docs/JitCache/options.md)
 

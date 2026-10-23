@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// The pin comparison's own tests (Tools/Scripts/jitcache/pin-compare.ts), on crafted output pairs for both
+// The pin comparison's own tests (Tools/Scripts/jitcache/pin-compare/), on crafted output pairs for both
 // architectures. Each case writes two runs as the engine prints them (logJIT headers, baseline dumps, listings, JIT dump
 // records) and checks that compareRuns reports pairs that differ in an operation's symbol, an allocation's identity, an
 // h number, an immediate, a displacement, a register, a mnemonic, the order of finalized allocations or a breakpoint
@@ -14,16 +14,10 @@
 //   bun JSTests/jitcache/integrator/runner/pin-compare-tests.ts
 // self-test.ts runs them too, as its pin-compare-crafted case.
 
-import {
-  type Architecture,
-  type EngineImage,
-  type JITDumpRecord,
-  type PinCheck,
-  type PinSide,
-  type RunStatus,
-  compareRuns,
-  makeEngineImage,
-} from "../../../../Tools/Scripts/jitcache/pin-compare.ts";
+import type { JITDumpRecord, RunStatus } from "../../../../Tools/Scripts/jitcache/pin-compare/capture.ts";
+import { type PinCheck, type PinSide, compareRuns } from "../../../../Tools/Scripts/jitcache/pin-compare/compare.ts";
+import { type EngineImage, makeEngineImage } from "../../../../Tools/Scripts/jitcache/pin-compare/engine.ts";
+import type { Architecture } from "../../../../Tools/Scripts/jitcache/pin-compare/instructions.ts";
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Crafting a run

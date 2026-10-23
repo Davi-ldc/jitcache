@@ -5,9 +5,9 @@
 // functions' bodies are generated, or imported in the Consumer, only afterwards, in a timer: so in the Producer
 // generation takes cells whose code was cleared and the capture encodes them, and in the Consumer the import's decode
 // returns those cells in the same state.
-// With strict on no import is invalid material, since a cleared cell passes the check on constants; at every import
-// the twin check finds the core encoding and the constant cells' forms equal to the twin's; and the results equal the
-// JITCache-off run. The Bun variant, which clears the cells with Bun.shrink(), is regexp-constants-bun.js.
+// At every import the twin check finds the core encoding and the constant cells' forms equal to the twin's, and the
+// results equal the JITCache-off run. The Bun variant, which clears the cells with Bun.shrink(), is
+// regexp-constants-bun.js.
 //
 // The runs use the lane's default sequence. A plain build has no $vm, so there nothing is deleted and every run still
 // behaves alike.

@@ -3,9 +3,9 @@
 // The capture at the end of each baseline compilation. The Producer runs no delta, so every body it commits is the
 // capture at the end of its baseline compilation. It drives the corpus of resources/corpus.js, whose bodies each compile
 // once, and then finds a committed body at every body's key, with no delta run. The Consumer imports each body and
-// installs it at the body's first call, so its event counts show no LLInt
-// instruction and no baseline compile, where the JITCache-off run, like the Producer, shows both. The runner compares
-// every output with the JITCache-off run's.
+// installs exactly those bodies, each at its first call, so their event counts show no LLInt instruction and no
+// baseline compile, where the JITCache-off run, like the Producer, shows both. The runner compares every output with
+// the JITCache-off run's.
 load("./resources/integrator.js", "caller relative");
 load("./resources/corpus.js", "caller relative");
 
@@ -25,8 +25,7 @@ load("./resources/corpus.js", "caller relative");
     }
 
     if (role === "Consumer") {
-        const progress = jitcacheProgress();
-        check(progress.installs >= corpus.bodies.length, `the Consumer installed ${progress.installs} bodies of the ${corpus.bodies.length} the Producer compiled`);
+        checkSame(jitcacheProgress().installs, corpus.bodies.length, "the bodies the Consumer installed");
         for (const [fn, kind] of corpus.bodies)
             expectInstalled(fn, kind);
         return;

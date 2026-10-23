@@ -44,7 +44,6 @@
 #include "DirectEvalCodeCache.h"
 #include "DirectEvalCodeCacheInlines.h"
 #include "DirectEvalExecutable.h"
-#include "DirectEvalSite.h"
 #include "EvalCodeBlock.h"
 #include "ExecutableBaseInlines.h"
 #include "FrameTracers.h"
@@ -91,6 +90,7 @@
 #include "VMTrapsInlines.h"
 #include "VirtualRegister.h"
 #include "WasmThunks.h"
+#include "jitcache/ucb/DirectEvalSite.h"
 #include "parser/ParserModes.h"
 #include <stdio.h>
 #include <wtf/NeverDestroyed.h>

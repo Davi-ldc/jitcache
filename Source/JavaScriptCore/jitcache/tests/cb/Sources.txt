@@ -1,0 +1,5 @@
+jitcache/tests/cb/CBCaptureTests.cpp
+jitcache/tests/cb/CBFormatTests.cpp
+jitcache/tests/cb/CBImportTests.cpp
+jitcache/tests/cb/CBSummaryTests.cpp
+jitcache/tests/cb/CBTwinsTests.cpp

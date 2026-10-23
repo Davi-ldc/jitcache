@@ -31,8 +31,6 @@
 #include "ArithProfile.h"
 #include "BytecodeGenerator.h"
 #include "CodeBlock.h"
-#include "ImageEmission.h"
-#include "ImageRecorder.h"
 #include "JITBitAndGenerator.h"
 #include "JITBitOrGenerator.h"
 #include "JITBitXorGenerator.h"
@@ -43,6 +41,8 @@
 #include "JITOperations.h"
 #include "ResultType.h"
 #include "SlowPathCall.h"
+#include "jitcache/image/ImageEmission.h"
+#include "jitcache/image/ImageRecorder.h"
 
 namespace JSC {
 

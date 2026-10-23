@@ -1,0 +1,3 @@
+// The defaults of the scripts in ucb/ and below it. A script that declares no jitcache-runs runs a Producer that calls
+// delta once the script is done, then a Consumer.
+// jitcache-runs: Producer --jitcache-delta-at-exit; Consumer

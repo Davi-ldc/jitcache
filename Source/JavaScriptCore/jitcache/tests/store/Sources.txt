@@ -1,0 +1,5 @@
+jitcache/tests/store/ContainerBodyTests.cpp
+jitcache/tests/store/ContainerHeaderTests.cpp
+jitcache/tests/store/PlatformTests.cpp
+jitcache/tests/store/StoreTests.cpp
+jitcache/tests/store/WriterTests.cpp

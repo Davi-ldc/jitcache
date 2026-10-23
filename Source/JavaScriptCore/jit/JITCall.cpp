@@ -35,7 +35,6 @@
 #include "CacheableIdentifierInlines.h"
 #include "CallFrameShuffler.h"
 #include "CodeBlock.h"
-#include "ImageEmission.h"
 #include "JITInlines.h"
 #include "JITThunks.h"
 #include "JSSentinel.h"
@@ -44,6 +43,7 @@
 #include "SlowPathCall.h"
 #include "StackAlignment.h"
 #include "ThunkGenerators.h"
+#include "jitcache/image/ImageEmission.h"
 
 namespace JSC {
 
@@ -262,9 +262,11 @@ void JIT::compileOpCall(const JSInstruction* instruction)
         compileCallDirectEval(bytecode);
         return;
     } else if constexpr (Op::opcodeID == op_super_construct || Op::opcodeID == op_super_construct_varargs) {
-        // Cache new.target as the LLInt's op_super_construct and op_super_construct_varargs do: an empty cache
-        // takes it, a cache holding another cell becomes SeenMultipleCalleeObjects, and the varargs form skips a
-        // new.target that is not a cell. Like the LLInt, the store issues no write barrier.
+        // JITCache: store new.target into the cache as the LLInt's op_super_construct and op_super_construct_varargs
+        // do, so that a CodeBlock born in baseline, which never runs those handlers, fills this cache too. The
+        // CodeBlock that installs an imported body is born that way, so only this store fills its cache. An empty
+        // cache takes new.target, a cache holding another cell becomes SeenMultipleCalleeObjects, and the varargs form
+        // skips a new.target that is not a cell. Like the LLInt, the store issues no write barrier.
         constexpr GPRReg newTargetGPR = BaselineJITRegisters::Call::callTargetGPR;
         constexpr GPRReg cachedCalleeGPR = BaselineJITRegisters::Call::callLinkInfoGPR;
         static_assert(noOverlap(BaselineJITRegisters::Call::calleeGPR, newTargetGPR, cachedCalleeGPR));
@@ -455,7 +457,7 @@ void JIT::emitSlowIteratorOpenGeneric(const JSInstruction*, Vector<SlowCaseEntry
 
     JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
     gen.generateDataICSlowPath(*this);
-    JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+    nearCallInlineCacheSlowPathThunk(gen.accessType());
     static_assert(BaselineJITRegisters::GetById::resultGPR == returnValueGPR);
     jump().linkTo(fastPathResumePoint(), this);
 
@@ -683,7 +685,7 @@ void JIT::emitSlow_op_iterator_next(const JSInstruction*, Vector<SlowCaseEntry>:
     {
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+        nearCallInlineCacheSlowPathThunk(gen.accessType());
         static_assert(BaselineJITRegisters::GetById::resultGPR == returnValueGPR);
         emitJumpSlowToHotForCheckpoint(jump());
     }
@@ -692,7 +694,7 @@ void JIT::emitSlow_op_iterator_next(const JSInstruction*, Vector<SlowCaseEntry>:
         linkAllSlowCases(iter);
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+        nearCallInlineCacheSlowPathThunk(gen.accessType());
         static_assert(BaselineJITRegisters::GetById::resultGPR == returnValueGPR);
     }
 }
@@ -874,7 +876,7 @@ void JIT::emitSlow_op_instanceof(const JSInstruction* instruction, Vector<SlowCa
     {
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+        nearCallInlineCacheSlowPathThunk(gen.accessType());
         static_assert(GetById::resultGPR == returnValueGPR);
         emitJumpSlowToHotForCheckpoint(jump());
     }
@@ -898,7 +900,7 @@ void JIT::emitSlow_op_instanceof(const JSInstruction* instruction, Vector<SlowCa
     {
         JITGetByIdGenerator& gen = m_getByIds[m_getByIdIndex++];
         gen.generateDataICSlowPath(*this);
-        JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+        nearCallInlineCacheSlowPathThunk(gen.accessType());
         static_assert(GetById::resultGPR == returnValueGPR);
         emitJumpSlowToHotForCheckpoint(jump());
     }
@@ -907,7 +909,7 @@ void JIT::emitSlow_op_instanceof(const JSInstruction* instruction, Vector<SlowCa
     linkAllSlowCases(iter);
     {
         JITInstanceOfGenerator& gen = m_instanceOfs[m_instanceOfIndex++];
-        JITCache::nearCallSupport(*this, vm(), JITCache::SupportKey::inlineCacheSlowPathThunk(gen.accessType()));
+        nearCallInlineCacheSlowPathThunk(gen.accessType());
     }
 
     done.link(this);

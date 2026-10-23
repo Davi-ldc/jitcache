@@ -2,7 +2,6 @@
 
 #if ENABLE(JITCACHE_TWINS) && ENABLE(JIT)
 
-#include "BakedFacts.h"
 #include "BaselineJITCode.h"
 #include "BaselineJITPlan.h"
 #include "BuiltinExecutableCreator.h"
@@ -13,33 +12,34 @@
 #include "ExecutableAllocator.h"
 #include "FunctionCodeBlock.h"
 #include "FunctionExecutable.h"
-#include "ImageCapture.h"
-#include "ImagePrepare.h"
-#include "ImageRecord.h"
-#include "ImageSection.h"
-#include "ImageSupport.h"
-#include "ImageTestSupport.h"
-#include "ImageTwins.h"
-#include "ImageTwinsSection.h"
-#include "ImageTypes.h"
 #include "JIT.h"
-#include "JITCacheAPI.h"
-#include "JITCacheTest.h"
 #include "JSCInlines.h"
 #include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "JSModuleLoader.h"
 #include "JSPromise.h"
-#include "ProducerBudget.h"
 #include "ScriptFetchParameters.h"
 #include "SourceCode.h"
 #include "SourceProvider.h"
-#include "TestFiles.h"
-#include "TestVM.h"
 #include "TopExceptionScope.h"
-#include "TwinReport.h"
 #include "UnlinkedCodeBlock.h"
 #include "UnlinkedFunctionExecutable.h"
+#include "jitcache/base/ProducerBudget.h"
+#include "jitcache/image/BakedFacts.h"
+#include "jitcache/image/ImageCapture.h"
+#include "jitcache/image/ImagePrepare.h"
+#include "jitcache/image/ImageRecord.h"
+#include "jitcache/image/ImageSection.h"
+#include "jitcache/image/ImageSupport.h"
+#include "jitcache/image/ImageTwins.h"
+#include "jitcache/image/ImageTwinsSection.h"
+#include "jitcache/image/ImageTypes.h"
+#include "jitcache/session/JITCacheAPI.h"
+#include "jitcache/tests/image/ImageTestSupport.h"
+#include "jitcache/tests/support/JITCacheTest.h"
+#include "jitcache/tests/support/TestFiles.h"
+#include "jitcache/tests/support/TestVM.h"
+#include "jitcache/twins/TwinReport.h"
 #include <algorithm>
 #include <array>
 #include <optional>
@@ -83,14 +83,13 @@ struct CapturedImage {
     Vector<uint8_t> twins;
 };
 
-// Captures captured.code, the baseline code codeBlock runs, with strict on, so every check of the capture runs, into
-// captured's three sections.
+// Captures captured.code, the baseline code codeBlock runs, into captured's three sections.
 static bool imageCaptureInto(TestContext& context, VM& vm, CodeBlock& codeBlock, CapturedImage& captured)
 {
     Ref<ProducerBudget> budget = ProducerBudget::createUnlimited();
-    auto capture = captureImage(vm, codeBlock, *captured.code, budget.get(), true);
+    auto capture = captureImage(vm, codeBlock, *captured.code, budget.get());
     if (!capture) {
-        JITCACHE_FAIL(makeString("the capture failed with outcome "_s, static_cast<unsigned>(capture.error().outcome), " at "_s, description(capture.error().check)));
+        JITCACHE_FAIL(makeString("the capture failed with outcome "_s, static_cast<unsigned>(capture.error())));
         return false;
     }
     bool written = collectSection(captured.image, [&](const ImageSectionSink& sink) { return capture->writeImageSection(sink); })
@@ -107,7 +106,7 @@ static bool imageCaptureInto(TestContext& context, VM& vm, CodeBlock& codeBlock,
 }
 
 // producerFunction's CodeBlock, still in the LLInt, compiles under a twin recorder, the one recorder a compilation outside
-// production can have, is installed and is captured with strict on.
+// production can have, is installed and is captured.
 static NEVER_INLINE std::optional<CapturedImage> imageCompileAndCapture(TestContext& context, VM& vm, JSFunction& producerFunction)
 {
     CodeBlock* producer = producerFunction.jsExecutable()->codeBlockForCall();
@@ -138,9 +137,9 @@ static NEVER_INLINE std::optional<CapturedImage> imageCompileAndCapture(TestCont
 
 // importFunction, the producer's text in the producer's scope, so that its UCB has the producer's index spaces and its
 // scope accesses resolve alike, gets a newborn CodeBlock. The newborn takes the image prepareImage restores from the
-// captured sections with strict on, as the install glue gives it, through native setup and installCode, and
-// Twins::checkImage then checks it. inspect sees the restored code and the parsed sections before setup, and aroundCheck
-// receives a function that runs the check, which it calls once. Returns whether the import installed.
+// captured sections, as the install glue gives it, through native setup and installCode, and Twins::checkImage then
+// checks it. inspect sees the restored code and the parsed sections before setup, and aroundCheck receives a function
+// that runs the check, which it calls once. Returns whether the import installed.
 template<typename Inspect, typename AroundCheck>
 static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, JSFunction& importFunction, const CapturedImage& captured, const Inspect& inspect, const AroundCheck& aroundCheck)
 {
@@ -156,22 +155,19 @@ static NEVER_INLINE bool imageImportAndCheckTwin(TestContext& context, VM& vm, J
     }
     UnlinkedCodeBlock& unlinkedCodeBlock = *newborn->unlinkedCodeBlock();
 
-    auto view = parseImageSections(ImageSectionSpans { .image = captured.image.span(), .bakedFacts = captured.bakedFacts.span(), .twins = captured.twins.span() }, true);
+    auto view = parseImageSections(ImageSectionSpans { .image = captured.image.span(), .bakedFacts = captured.bakedFacts.span(), .twins = captured.twins.span() });
     if (!view) {
         JITCACHE_FAIL(makeString("the captured sections fail "_s, description(view.error())));
-        return false;
-    }
-    if (auto valid = validateImageSectionsAgainst(*view, unlinkedCodeBlock); !valid) {
-        JITCACHE_FAIL(makeString("the captured sections fail "_s, description(valid.error()), " against the importing function's UCB"_s));
         return false;
     }
     if (compareBakedFacts(*view, *newborn) != BakedFactsResult::Match) {
         JITCACHE_FAIL("the newborn's baked facts differ from the capture's"_s);
         return false;
     }
-    auto prepared = prepareImage(vm, unlinkedCodeBlock, *view, nullptr, true);
+    SupportTargetTable supportTargets;
+    auto prepared = prepareImage(vm, unlinkedCodeBlock, *view, supportTargets, nullptr);
     if (!prepared) {
-        JITCACHE_FAIL(makeString("preparing the image failed at "_s, description(prepared.error().check)));
+        JITCACHE_FAIL("preparing the image got no executable memory"_s);
         return false;
     }
     Ref<BaselineJITCode> restored = WTF::move(*prepared).commit(vm, *newborn);
@@ -509,10 +505,10 @@ struct ImageSlackOfBody {
 };
 
 // The slack test for one body. producerFunction's code, whose record must be complete with its one MathIC regenerated,
-// gets the producer's fill past its linked sizes and is captured with strict on, and the sections must hold exactly the
-// linked bytes. importFunction's newborn CodeBlock then imports them: the restored image and snippet get the restored fill
-// before setup, and the twin's get the twin fill as the check links them. Returns what each side holds past its linked
-// sizes once the check reported nothing.
+// gets the producer's fill past its linked sizes and is captured, and the sections must hold exactly the linked bytes.
+// importFunction's newborn CodeBlock then imports them: the restored image and snippet get the restored fill before
+// setup, and the twin's get the twin fill as the check links them. Returns what each side holds past its linked sizes
+// once the check reported nothing.
 static NEVER_INLINE std::optional<ImageSlackOfBody> imageCheckSlackOfBody(TestContext& context, VM& vm, JSFunction& producerFunction, JSFunction& importFunction, ImageTwinSlackLog& log)
 {
     CodeBlock* codeBlock = producerFunction.jsExecutable()->codeBlockForCall();
@@ -542,7 +538,7 @@ static NEVER_INLINE std::optional<ImageSlackOfBody> imageCheckSlackOfBody(TestCo
     if (!imageCaptureInto(context, vm, *codeBlock, captured))
         return std::nullopt;
 
-    auto view = parseImageSections(ImageSectionSpans { .image = captured.image.span(), .bakedFacts = captured.bakedFacts.span(), .twins = captured.twins.span() }, true);
+    auto view = parseImageSections(ImageSectionSpans { .image = captured.image.span(), .bakedFacts = captured.bakedFacts.span(), .twins = captured.twins.span() });
     if (!view) {
         JITCACHE_FAIL(makeString("the captured sections fail "_s, description(view.error())));
         return std::nullopt;
@@ -597,9 +593,9 @@ static NEVER_INLINE std::optional<ImageSlackOfBody> imageCheckSlackOfBody(TestCo
 }
 
 // The sections an import reads, from a twin recorder's compilation of codeBlock: the baked facts its record holds,
-// beside the smallest image.baseline that passes the image section's checks (four zero bytes of code and no fixup,
-// call, mold, table, code-map entry or MathIC) and the record's twin data with no producer value, since that image holds
-// no fixup. The view borrows the buffers, which live in sections.
+// beside a minimal image.baseline (four zero bytes of code and no fixup, call, mold, table, code-map entry or MathIC)
+// and the record's twin data with no producer value, since that image holds no fixup. The view borrows the buffers,
+// which live in sections.
 struct ImageBakedFactsSections {
     Vector<uint8_t> image;
     Vector<uint8_t> bakedFacts;
@@ -628,7 +624,7 @@ static std::optional<ImageSectionsView> imageBakedFactsSectionsOf(TestContext& c
     auto encodedHeader = encodeImageSectionHeader(header);
     memcpySpan(sections.image.mutableSpan(), std::span<const uint8_t> { encodedHeader });
 
-    auto view = parseImageSections(ImageSectionSpans { .image = sections.image.span(), .bakedFacts = sections.bakedFacts.span(), .twins = sections.twins.span() }, true);
+    auto view = parseImageSections(ImageSectionSpans { .image = sections.image.span(), .bakedFacts = sections.bakedFacts.span(), .twins = sections.twins.span() });
     if (!view) {
         JITCACHE_FAIL(makeString(name, "'s sections do not parse: "_s, description(view.error())));
         return std::nullopt;
@@ -951,11 +947,11 @@ JITCACHE_TEST(imageUnrecordableBodiesAreNeverCaptured, Yes)
 // puts an image out of a bl's reach of its thunks, and the test makes the distance itself. A first compilation of
 // jitcacheFarProducer generates every thunk its image calls or jumps to. Blocks of the image's size then fill the pool
 // until one starts more than islandDistance past the farthest of those thunks, and stay allocated until the test ends, so
-// every image allocated after them lies out of reach too: the producer's, captured with strict on, whose checks follow
-// its islands; the one prepareImage restores for jitcacheFarImport with strict on, which the writers patch through
-// islands and whose check follows them; and the twin that Twins::checkImage compiles and compares with it, through the
-// islands of both. Every support branch of the producer's and the restored image must reach its thunk through an island
-// on ARM64, and directly on x86_64, whose rel32 reaches the whole pool.
+// every image allocated after them lies out of reach too: the producer's, which is captured; the one prepareImage
+// restores for jitcacheFarImport, which the writers patch through islands; and the twin that Twins::checkImage compiles
+// and compares with it, decoding the footprints of both through their islands. Every support branch of the producer's
+// and the restored image must reach its thunk through an island on ARM64, and directly on x86_64, whose rel32 reaches
+// the whole pool.
 JITCACHE_TEST_WITH_OPTIONS(imageImportPatchesThroughIslandsToFarSupport, Yes, "--useConcurrentJIT=false")
 {
     VM& vm = *context.vm();
@@ -1033,11 +1029,11 @@ JITCACHE_TEST_WITH_OPTIONS(imageImportPatchesThroughIslandsToFarSupport, Yes, "-
 // An allocation's handle (JITCodeWithCodeRef::size, a MathIC's m_code.size()) can end past what its LinkBuffer wrote, the
 // linked size the record keeps, and those bytes hold whatever the pool held. In a Producer, every body of
 // slackBodiesSource compiles with a complete record and regenerates its one MathIC. For each, the producer's image and
-// snippet are filled past their linked sizes and captured with strict on, and the sections must hold exactly the linked
-// bytes; the import then fills the restored image and snippet past theirs, and the twin's are filled as
-// Twins::checkImage links them, so wherever two sides have slack it differs while the check compares, and the check must
-// report nothing. Afterwards each side's slack must still hold its own fill, at least one body's image must have slack on
-// all three sides, and on ARM64 at least one body's snippet must too.
+// snippet are filled past their linked sizes and captured, and the sections must hold exactly the linked bytes; the
+// import then fills the restored image and snippet past theirs, and the twin's are filled as Twins::checkImage links
+// them, so wherever two sides have slack it differs while the check compares, and the check must report nothing.
+// Afterwards each side's slack must still hold its own fill, at least one body's image must have slack on all three
+// sides, and on ARM64 at least one body's snippet must too.
 JITCACHE_TEST_WITH_OPTIONS(imageSlackStaysOutsideCaptureAndTwinCheck, No, "--useConcurrentJIT=false --logJIT=true")
 {
     ImageTwinSlackLog log;
@@ -1051,7 +1047,6 @@ JITCACHE_TEST_WITH_OPTIONS(imageSlackStaysOutsideCaptureAndTwinCheck, No, "--use
     config.artifactPath = directory->path("artifact"_s);
     config.role = Role::Producer;
     config.producerLimitBytes = 64 * MB;
-    config.strict = true;
     StartResult started = JITCache::start(vm, config);
     if (started.outcome != StartOutcome::Started) {
         JITCACHE_FAIL(makeString("the producer did not start: "_s, toJSON(started)));
